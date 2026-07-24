@@ -11,6 +11,7 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import { useSession } from "@/auth/session-context";
 import { Button, Card, Field, Screen, textStyles } from "@/components/ui";
+import { CollapsibleAction, Markdown } from "@/components/markdown";
 import { clientActionId, messageText } from "@/lib/ids";
 import {
   cacheTimeline,
@@ -20,6 +21,35 @@ import {
 } from "@/storage/database";
 import type { TimelineMessage } from "@/types";
 import { colors } from "@/theme";
+
+function valueText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function actionFor(item: TimelineMessage) {
+  const raw = item as Record<string, unknown>;
+  const role = String(raw.role ?? raw.kind ?? "");
+  const name = raw.toolName ?? raw.tool_name ?? raw.capability_name ?? raw.capability_id;
+  const preview = raw.capability_display_preview ?? raw.tool_result_preview ?? raw.toolResultPreview;
+  const isAction = role === "tool_activity" || role === "tool" || role === "capability" || name != null || raw.capability_display_preview != null;
+  if (!isAction) return null;
+  const rawStatus = String(raw.toolStatus ?? raw.tool_status ?? raw.status ?? (raw.error ? "error" : "success"));
+  const status = rawStatus === "completed" || rawStatus === "ok" ? "success" : rawStatus;
+  return {
+    name: valueText(name || "Agent action"),
+    status,
+    detail: valueText(raw.toolDetail ?? raw.tool_detail),
+    parameters: valueText(raw.toolParameters ?? raw.tool_parameters ?? raw.capability_parameters),
+    result: valueText(preview),
+    error: valueText(raw.toolError ?? raw.tool_error ?? raw.error)
+  };
+}
 
 export default function ThreadScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -53,7 +83,7 @@ export default function ThreadScreen() {
   React.useEffect(() => {
     const interval = setInterval(() => {
       if (AppState.currentState === "active") void refresh();
-    }, 3000);
+    }, 1000);
     return () => clearInterval(interval);
   }, [refresh]);
 
@@ -98,10 +128,19 @@ export default function ThreadScreen() {
         refreshing={false}
         renderItem={({ item }) => {
           const role = item.role ?? item.kind ?? "message";
+          const action = actionFor(item);
+          if (action) {
+            return <CollapsibleAction {...action} />;
+          }
+          const content = messageText(item);
           return (
             <Card style={role === "user" ? styles.userCard : undefined}>
               <Text style={styles.role}>{role}</Text>
-              <Text selectable style={textStyles.body}>{messageText(item) || JSON.stringify(item)}</Text>
+              {role === "assistant" || role === "system" || role === "error" ? (
+                <Markdown content={content} />
+              ) : (
+                <Text selectable style={textStyles.body}>{content}</Text>
+              )}
             </Card>
           );
         }}
