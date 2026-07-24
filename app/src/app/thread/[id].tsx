@@ -15,7 +15,7 @@ import * as Haptics from "expo-haptics";
 import * as Clipboard from "expo-clipboard";
 import { readAsStringAsync, EncodingType } from "expo-file-system/legacy";
 import { useSession } from "@/auth/session-context";
-import { Button, Card, Field, Screen, textStyles } from "@/components/ui";
+import { Button, Field, Screen, textStyles } from "@/components/ui";
 import { CollapsibleAction, Markdown } from "@/components/markdown";
 import { clientActionId, messageText } from "@/lib/ids";
 import {
@@ -214,8 +214,7 @@ export default function ThreadScreen() {
           }
           const content = messageText(item);
           return (
-            <Card style={role === "user" ? styles.userCard : undefined}>
-              <Text style={styles.role}>{role}</Text>
+            <View style={role === "user" ? styles.userCard : styles.assistantMessage}>
               {role === "assistant" || role === "system" || role === "error" ? (
                 <Markdown content={content} />
               ) : (
@@ -226,7 +225,7 @@ export default function ThreadScreen() {
                   <Text style={styles.copyText}>{copiedId === (item.message_id ?? item.id ?? "") ? "Copied" : "Copy"}</Text>
                 </Pressable>
               ) : null}
-            </Card>
+            </View>
           );
         }}
       />
@@ -273,8 +272,8 @@ const styles = StyleSheet.create({
   attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
   copy: { alignSelf: "flex-start", paddingVertical: 3, paddingHorizontal: 2 },
   copyText: { color: colors.muted, fontSize: 12 },
+  assistantMessage: { width: "100%", paddingHorizontal: 4, paddingVertical: 8 },
   userCard: { marginLeft: 32, backgroundColor: colors.surfaceRaised },
-  role: { color: colors.primary, fontWeight: "700", textTransform: "capitalize" },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },
   offlineText: { color: colors.background, fontWeight: "700" }
 });
