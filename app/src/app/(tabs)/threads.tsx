@@ -9,7 +9,7 @@ import type { ThreadRecord } from "@/types";
 import { colors } from "@/theme";
 
 function title(thread: ThreadRecord): string {
-  return thread.title ?? thread.name ?? threadId(thread) ?? "Untitled thread";
+  return thread.title?.trim() || thread.name?.trim() || "New chat";
 }
 
 export default function ThreadsScreen() {

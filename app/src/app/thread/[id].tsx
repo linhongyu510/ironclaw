@@ -90,6 +90,7 @@ export default function ThreadScreen() {
   const { api, deployment, session } = useSession();
   const scope = `${deployment.origin}|${session?.user_id ?? "cached"}`;
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
+  const pendingRef = React.useRef<TimelineMessage[]>([]);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -116,11 +117,13 @@ export default function ThreadScreen() {
   const refresh = React.useCallback(async () => {
     setRefreshing(true);
     const local = visibleTimeline(await cachedTimeline(scope, id));
-    if (local.length) setMessages(local);
+    if (local.length) setMessages([...local, ...pendingRef.current]);
     try {
       const response = await api.timeline(id);
       const visible = visibleTimeline(response.messages);
-      setMessages(visible);
+      const remaining = pendingRef.current.filter((pending) => !visible.some((message) => message.role === "user" && messageText(message) === messageText(pending)));
+      pendingRef.current = remaining;
+      setMessages([...visible, ...remaining]);
       await cacheTimeline(scope, id, visible);
       setOffline(false);
     } catch (reason) {
@@ -152,6 +155,9 @@ export default function ThreadScreen() {
     if (!content) return;
     setBusy(true);
     setError("");
+    const pending: TimelineMessage = { id: `pending-${Date.now()}`, role: "user", content };
+    pendingRef.current = [...pendingRef.current, pending];
+    setMessages((current) => [...current, pending]);
     try {
       const wireAttachments = await Promise.all(
         attachments.map(async (attachment) => ({
@@ -167,6 +173,8 @@ export default function ThreadScreen() {
       await saveDraft(scope, id, "");
       await refresh();
     } catch (reason) {
+      pendingRef.current = pendingRef.current.filter((item) => item.id !== pending.id);
+      setMessages((current) => current.filter((item) => item.id !== pending.id));
       setError(reason instanceof Error ? reason.message : "Could not send");
     } finally {
       setBusy(false);

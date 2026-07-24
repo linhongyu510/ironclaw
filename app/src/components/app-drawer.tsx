@@ -1,7 +1,7 @@
 import React from "react";
 import { DrawerContentScrollView, type DrawerContentComponentProps } from "expo-router/drawer";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
-import { router } from "expo-router";
+import { router, usePathname } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSession } from "@/auth/session-context";
 import { Button, Field, textStyles } from "@/components/ui";
@@ -11,12 +11,13 @@ import type { ThreadRecord } from "@/types";
 import { colors } from "@/theme";
 
 function title(thread: ThreadRecord): string {
-  return thread.title ?? thread.name ?? threadId(thread) ?? "Untitled thread";
+  return thread.title?.trim() || thread.name?.trim() || "New chat";
 }
 
 export function AppDrawer(props: DrawerContentComponentProps) {
   const { api, deployment, session } = useSession();
   const scope = `${deployment.origin}|${session?.user_id ?? "cached"}`;
+  const pathname = usePathname();
   const [threads, setThreads] = React.useState<ThreadRecord[]>([]);
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(false);
@@ -33,7 +34,7 @@ export function AppDrawer(props: DrawerContentComponentProps) {
     }
   }, [api, scope]);
 
-  React.useEffect(() => { void refresh(); }, [refresh]);
+  React.useEffect(() => { void refresh(); }, [pathname, refresh]);
 
   function close() { props.navigation.closeDrawer(); }
   function go(path: "/(tabs)/automations" | "/(tabs)/settings") {
