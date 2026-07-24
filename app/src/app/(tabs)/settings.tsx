@@ -10,12 +10,13 @@ export default function SettingsScreen() {
   const [tools, setTools] = React.useState<ToolSetting[]>([]);
   const [autoApprove, setAutoApprove] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [updatingTool, setUpdatingTool] = React.useState("");
 
   const refresh = React.useCallback(async () => {
     try {
       const entries = await api.toolSettings();
       setTools(entries);
-      const global = entries.find((entry) => entry.key === "tools.auto_approve");
+      const global = entries.find((entry) => entry.key === "agent.auto_approve_tools");
       setAutoApprove(Boolean(global?.value));
       setError("");
     } catch (reason) {
@@ -35,6 +36,25 @@ export default function SettingsScreen() {
       setError(reason instanceof Error ? reason.message : "Could not update setting");
     }
   }
+
+  async function updateTool(
+    tool: ToolSetting,
+    state: "ask" | "always_allow" | "always_deny"
+  ) {
+    const capabilityId = tool.key?.startsWith("tool.") ? tool.key.slice(5) : "";
+    if (!capabilityId) return;
+    setUpdatingTool(capabilityId);
+    try {
+      await api.setToolPermission(capabilityId, state);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update tool permission");
+    } finally {
+      setUpdatingTool("");
+    }
+  }
+
+  const capabilityTools = tools.filter((tool) => tool.key?.startsWith("tool."));
 
   return (
     <Screen style={styles.flush}>
@@ -64,14 +84,34 @@ export default function SettingsScreen() {
         </Card>
         <Card>
           <Text style={textStyles.heading}>Tools</Text>
-          {tools.length ? tools.map((tool, index) => (
+          {capabilityTools.length ? capabilityTools.map((tool, index) => {
+            const value = tool.value && typeof tool.value === "object"
+              ? (tool.value as { state?: string }).state
+              : tool.state;
+            const capabilityId = tool.key?.slice(5) ?? "";
+            return (
             <View key={tool.key ?? tool.name ?? index} style={styles.tool}>
               <Text style={textStyles.body}>{tool.name ?? tool.key ?? "Tool setting"}</Text>
-              <Text style={textStyles.muted}>
-                {typeof tool.state === "string" ? tool.state : JSON.stringify(tool.value)}
-              </Text>
+              <Text style={textStyles.muted}>{value ?? "ask"}</Text>
+              <View style={styles.permissions}>
+                {([
+                  ["Ask", "ask"],
+                  ["Allow", "always_allow"],
+                  ["Deny", "always_deny"]
+                ] as const).map(([label, state]) => (
+                  <View key={state} style={styles.grow}>
+                    <Button
+                      title={updatingTool === capabilityId ? "Saving…" : label}
+                      tone={value === state ? "primary" : state === "always_deny" ? "danger" : "secondary"}
+                      disabled={Boolean(updatingTool)}
+                      onPress={() => void updateTool(tool, state)}
+                    />
+                  </View>
+                ))}
+              </View>
             </View>
-          )) : <Text style={textStyles.muted}>No tool settings reported.</Text>}
+            );
+          }) : <Text style={textStyles.muted}>No tool permissions reported.</Text>}
         </Card>
         {error ? <Text style={textStyles.error}>{error}</Text> : null}
         <Button title="Refresh settings" tone="secondary" onPress={() => void refresh()} />
@@ -86,5 +126,6 @@ const styles = StyleSheet.create({
   content: { padding: 16, gap: 12 },
   row: { flexDirection: "row", alignItems: "center", gap: 12 },
   grow: { flex: 1 },
-  tool: { borderTopColor: colors.border, borderTopWidth: 1, paddingTop: 10, gap: 2 }
+  tool: { borderTopColor: colors.border, borderTopWidth: 1, paddingTop: 10, gap: 8 },
+  permissions: { flexDirection: "row", gap: 6 }
 });

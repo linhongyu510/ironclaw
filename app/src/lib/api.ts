@@ -138,6 +138,16 @@ export class IronClawApi {
     });
   }
 
+  setToolPermission(
+    capabilityId: string,
+    state: "ask" | "always_allow" | "always_deny"
+  ) {
+    return this.request(`${V2}/settings/tools/${encodeURIComponent(capabilityId)}`, {
+      method: "POST",
+      body: JSON.stringify({ state })
+    });
+  }
+
   authProviders() {
     return this.request<{ providers: string[] }>("/auth/providers");
   }
