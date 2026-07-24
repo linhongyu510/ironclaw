@@ -15,9 +15,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
-    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
+    RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, product_auth_route_mount, serve_webui_v2,
+    webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -85,7 +86,7 @@ impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMint
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct ServeCommand {
     /// Host interface for the Reborn WebChat v2 HTTP listener.
     /// Overrides `[webui].listen_host` from the boot config file.
@@ -563,7 +564,7 @@ impl ServeCommand {
                 serve_config = serve_config.with_canonical_host(host);
             }
             {
-                let mut state = ironclaw_reborn_composition::ProductAuthRouteState::new(
+                let mut state = ProductAuthRouteState::new(
                     runtime.product_auth_services(),
                     tenant_id.clone(),
                     Some(default_agent_id.clone()),
@@ -577,9 +578,7 @@ impl ServeCommand {
                         ),
                     );
                 }
-                serve_config = serve_config.with_split_route_mount(
-                    ironclaw_reborn_composition::product_auth_route_mount(state),
-                );
+                serve_config = serve_config.with_split_route_mount(product_auth_route_mount(state));
             }
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
@@ -1600,10 +1599,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1633,10 +1632,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1677,10 +1676,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
