@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  AppState,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -48,6 +49,13 @@ export default function ThreadScreen() {
   React.useEffect(() => {
     void Promise.all([refresh(), loadDraft(scope, id).then(setDraft)]);
   }, [id, refresh, scope]);
+
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      if (AppState.currentState === "active") void refresh();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [refresh]);
 
   React.useEffect(() => {
     const timeout = setTimeout(() => void saveDraft(scope, id, draft), 250);

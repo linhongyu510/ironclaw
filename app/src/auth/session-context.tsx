@@ -4,7 +4,14 @@ import * as WebBrowser from "expo-web-browser";
 import * as Linking from "expo-linking";
 import React from "react";
 import { Platform } from "react-native";
-import { IronClawApi, providerLoginUrl } from "@/lib/api";
+import { IronClawApi } from "@/lib/api";
+import {
+  callbackAccountToken,
+  HostedControlApi,
+  hostedControlOrigin,
+  hostedLoginUrl,
+  preferredIronClawInstance
+} from "@/lib/hosted";
 import type { Deployment, Session } from "@/types";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -89,17 +96,22 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
   const loginWithProvider = React.useCallback(
     async (provider: string) => {
       const returnUrl = Linking.createURL("auth/callback");
+      const controlOrigin = hostedControlOrigin(DEFAULT_ORIGIN);
       const result = await WebBrowser.openAuthSessionAsync(
-        providerLoginUrl(DEFAULT_ORIGIN, provider, returnUrl),
+        hostedLoginUrl(controlOrigin, provider, returnUrl),
         returnUrl
       );
       if (result.type !== "success") return;
-      const callback = new URL(result.url);
-      const ticket = callback.searchParams.get("login_ticket");
-      if (!ticket) throw new Error("The hosted login did not return a mobile login ticket");
-      const exchangeApi = new IronClawApi(DEFAULT_ORIGIN, "");
-      const response = await exchangeApi.exchangeLoginTicket(ticket);
-      await validate(DEFAULT_ORIGIN, response.token);
+      const accountToken = callbackAccountToken(result.url);
+      if (!accountToken) throw new Error("The hosted login did not return an account token");
+      const instances = await new HostedControlApi(controlOrigin, accountToken).listInstances();
+      const instance = preferredIronClawInstance(instances);
+      if (!instance?.dashboard_url) {
+        throw new Error(
+          "No hosted IronClaw deployment is ready. Create or start one at agent.near.ai, then try again."
+        );
+      }
+      await validate(instance.dashboard_url, accountToken);
     },
     [validate]
   );
