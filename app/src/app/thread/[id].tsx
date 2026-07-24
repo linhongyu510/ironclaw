@@ -37,6 +37,22 @@ function valueText(value: unknown): string {
   }
 }
 
+function visibleTimeline(messages: TimelineMessage[]): TimelineMessage[] {
+  return messages.filter((message) => {
+    const raw = message as Record<string, unknown>;
+    if (raw.kind === "tool_result_reference") return false;
+    if (typeof raw.content === "string" && raw.content.trimStart().startsWith("{")) {
+      try {
+        const parsed: unknown = JSON.parse(raw.content);
+        if (parsed && typeof parsed === "object" && "result_ref" in parsed && "safe_summary" in parsed) return false;
+      } catch {
+        // Keep malformed or ordinary message content visible.
+      }
+    }
+    return true;
+  });
+}
+
 function actionFor(item: TimelineMessage) {
   const raw = item as Record<string, unknown>;
   const role = String(raw.role ?? raw.kind ?? "");
@@ -98,12 +114,13 @@ export default function ThreadScreen() {
 
   const refresh = React.useCallback(async () => {
     setRefreshing(true);
-    const local = await cachedTimeline(scope, id);
+    const local = visibleTimeline(await cachedTimeline(scope, id));
     if (local.length) setMessages(local);
     try {
       const response = await api.timeline(id);
-      setMessages(response.messages);
-      await cacheTimeline(scope, id, response.messages);
+      const visible = visibleTimeline(response.messages);
+      setMessages(visible);
+      await cacheTimeline(scope, id, visible);
       setOffline(false);
     } catch (reason) {
       setOffline(true);
