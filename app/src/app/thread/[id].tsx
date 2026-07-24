@@ -9,7 +9,8 @@ import {
   Text,
   View
 } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useNavigation } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
 import * as Clipboard from "expo-clipboard";
@@ -87,6 +88,7 @@ export default function ThreadScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] ?? "" : params.id;
   const { api, deployment, session } = useSession();
+  const navigation = useNavigation();
   const scope = `${deployment.origin}|${session?.user_id ?? "cached"}`;
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
   const [draft, setDraft] = React.useState("");
@@ -224,6 +226,9 @@ export default function ThreadScreen() {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={88}
     >
+      <Pressable accessibilityRole="button" accessibilityLabel="Open navigation" onPress={() => (navigation as unknown as { openDrawer: () => void }).openDrawer()} style={styles.drawerButton}>
+        <Ionicons name="menu-outline" size={21} color={colors.text} />
+      </Pressable>
       {offline ? (
         <View style={styles.offline}>
           <Text style={styles.offlineText}>Offline · saved conversation</Text>
@@ -306,6 +311,7 @@ export default function ThreadScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
+  drawerButton: { position: "absolute", top: 10, left: 10, zIndex: 5, width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceRaised, borderColor: colors.border, borderWidth: 1 },
   list: { padding: 16, gap: 10 },
   composer: {
     backgroundColor: colors.surface,

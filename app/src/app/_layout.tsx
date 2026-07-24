@@ -1,4 +1,5 @@
 import { Drawer } from "expo-router/drawer";
+import { usePathname } from "expo-router";
 import { Platform } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SessionProvider } from "@/auth/session-context";
@@ -6,6 +7,8 @@ import { colors } from "@/theme";
 import { AppDrawer } from "@/components/app-drawer";
 
 export default function RootLayout() {
+  const pathname = usePathname();
+  const threadOpen = pathname.startsWith("/thread/");
   return (
     <SessionProvider>
       <StatusBar style="light" />
@@ -13,7 +16,7 @@ export default function RootLayout() {
         drawerContent={(props) => <AppDrawer {...props} />}
         screenOptions={{
           headerShown: false,
-          drawerType: Platform.OS === "web" ? "permanent" : "front",
+          drawerType: Platform.OS === "web" && !threadOpen ? "permanent" : "front",
           swipeEnabled: true,
           drawerStyle: { backgroundColor: colors.surface, width: 300 },
           sceneStyle: { backgroundColor: colors.background }
