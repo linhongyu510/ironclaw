@@ -87,7 +87,8 @@ export function CollapsibleAction({
   detail,
   parameters,
   result,
-  error
+  error,
+  onRetry
 }: {
   name: string;
   status: string;
@@ -95,9 +96,10 @@ export function CollapsibleAction({
   parameters?: string;
   result?: string;
   error?: string;
+  onRetry?: () => void;
 }) {
   const [expanded, setExpanded] = React.useState(status === "error" || status === "declined");
-  const failed = status === "error" || status === "declined";
+  const failed = status === "error" || status === "declined" || status === "failed";
   const label = status === "running" ? "Working" : status === "success" ? "Done" : status === "declined" ? "Declined" : status === "error" ? "Failed" : status;
   return (
     <View style={styles.action}>
@@ -114,6 +116,7 @@ export function CollapsibleAction({
           {parameters ? <Text selectable style={styles.payload}>{parameters}</Text> : null}
           {result ? <Text selectable style={styles.payload}>{result}</Text> : null}
           {!error && !detail && !parameters && !result ? <Text style={styles.detail}>No additional details</Text> : null}
+          {onRetry ? <Pressable accessibilityRole="button" onPress={onRetry} style={styles.retry}><Text style={styles.retryText}>Retry</Text></Pressable> : null}
         </View>
       ) : null}
     </View>
@@ -142,5 +145,7 @@ const styles = StyleSheet.create({
   actionBody: { backgroundColor: colors.backgroundStrong, borderColor: colors.border, borderLeftWidth: 1, borderRightWidth: 1, borderTopWidth: 1, borderTopLeftRadius: 8, borderTopRightRadius: 8, padding: 12, gap: 8 },
   detail: { color: colors.body, fontSize: 13, lineHeight: 19 },
   payload: { color: colors.body, fontFamily: "Menlo", fontSize: 12, lineHeight: 18 },
-  error: { color: colors.danger, fontSize: 13, lineHeight: 19 }
+  error: { color: colors.danger, fontSize: 13, lineHeight: 19 },
+  retry: { alignSelf: "flex-start", marginTop: 2, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceRaised },
+  retryText: { color: colors.primaryText, fontSize: 13, fontWeight: "700" }
 });

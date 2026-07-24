@@ -40,19 +40,28 @@ function valueText(value: unknown): string {
 function actionFor(item: TimelineMessage) {
   const raw = item as Record<string, unknown>;
   const role = String(raw.role ?? raw.kind ?? "");
-  const name = raw.toolName ?? raw.tool_name ?? raw.capability_name ?? raw.capability_id;
-  const preview = raw.capability_display_preview ?? raw.tool_result_preview ?? raw.toolResultPreview;
-  const isAction = role === "tool_activity" || role === "tool" || role === "capability" || name != null || raw.capability_display_preview != null;
+  let envelope: Record<string, unknown> = raw;
+  if (raw.kind === "capability_display_preview" && typeof raw.content === "string") {
+    try {
+      const parsed: unknown = JSON.parse(raw.content);
+      if (parsed && typeof parsed === "object") envelope = parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  const name = envelope.toolName ?? envelope.tool_name ?? envelope.capability_name ?? envelope.capability_id ?? envelope.title;
+  const preview = envelope.capability_display_preview ?? envelope.tool_result_preview ?? envelope.toolResultPreview ?? envelope.output_preview ?? envelope.output_summary;
+  const isAction = raw.kind === "capability_display_preview" || role === "tool_activity" || role === "tool" || role === "capability" || name != null || raw.capability_display_preview != null;
   if (!isAction) return null;
-  const rawStatus = String(raw.toolStatus ?? raw.tool_status ?? raw.status ?? (raw.error ? "error" : "success"));
-  const status = rawStatus === "completed" || rawStatus === "ok" ? "success" : rawStatus;
+  const rawStatus = String(envelope.toolStatus ?? envelope.tool_status ?? envelope.status ?? (envelope.error ? "error" : "success"));
+  const status = rawStatus === "completed" || rawStatus === "ok" ? "success" : rawStatus === "failed" || rawStatus === "killed" ? "error" : rawStatus;
   return {
     name: valueText(name || "Agent action"),
     status,
-    detail: valueText(raw.toolDetail ?? raw.tool_detail),
-    parameters: valueText(raw.toolParameters ?? raw.tool_parameters ?? raw.capability_parameters),
+    detail: valueText(envelope.toolDetail ?? envelope.tool_detail ?? envelope.subtitle),
+    parameters: valueText(envelope.toolParameters ?? envelope.tool_parameters ?? envelope.capability_parameters ?? envelope.input_summary),
     result: valueText(preview),
-    error: valueText(raw.toolError ?? raw.tool_error ?? raw.error)
+    error: valueText(envelope.toolError ?? envelope.tool_error ?? envelope.error ?? envelope.output_summary)
   };
 }
 
@@ -183,6 +192,13 @@ export default function ThreadScreen() {
     setTimeout(() => setCopiedId(""), 1400);
   }
 
+  function retryableMessage(item: TimelineMessage, index: number) {
+    const role = item.role ?? item.kind ?? "";
+    const status = String((item as Record<string, unknown>).status ?? "");
+    return !activeRunId && Boolean(latestRunId) && index === messages.length - 1 &&
+      (role === "error" || status === "error" || status === "failed");
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.root}
@@ -206,11 +222,11 @@ export default function ThreadScreen() {
           setShowJump(distance > 240);
         }}
         scrollEventThrottle={100}
-        renderItem={({ item }) => {
+        renderItem={({ item, index }) => {
           const role = item.role ?? item.kind ?? "message";
           const action = actionFor(item);
           if (action) {
-            return <CollapsibleAction {...action} />;
+            return <CollapsibleAction {...action} onRetry={action.status === "error" && !activeRunId && latestRunId ? () => void retry() : undefined} />;
           }
           const content = messageText(item);
           return (
@@ -223,6 +239,11 @@ export default function ThreadScreen() {
               {role === "assistant" && content ? (
                 <Pressable accessibilityRole="button" onPress={() => void copyMessage(item)} style={styles.copy}>
                   <Text style={styles.copyText}>{copiedId === (item.message_id ?? item.id ?? "") ? "Copied" : "Copy"}</Text>
+                </Pressable>
+              ) : null}
+              {retryableMessage(item, index) ? (
+                <Pressable accessibilityRole="button" onPress={() => void retry()} style={styles.retry}>
+                  <Text style={styles.retryText}>Retry</Text>
                 </Pressable>
               ) : null}
             </View>
@@ -239,17 +260,26 @@ export default function ThreadScreen() {
             {attachments.map((attachment) => <Text key={attachment.id} numberOfLines={1} style={styles.attachment}>📎 {attachment.name}</Text>)}
           </View>
         ) : null}
-        <Field
-          multiline
-          onChangeText={setDraft}
-          placeholder="Ask your agent…"
-          value={draft}
-        />
         <View style={styles.composerRow}>
-          <View style={styles.attachButton}><Button title="＋" tone="secondary" disabled={busy || offline} onPress={() => void pickAttachment()} /></View>
-          <View style={styles.sendButton}>{activeRunId ? <Button title="Stop" tone="danger" onPress={() => void cancel()} /> : <Button title={busy ? "Sending…" : offline ? "Offline" : "Send"} disabled={busy || offline || !draft.trim()} onPress={() => void send()} />}</View>
+          <View style={styles.composerInput}>
+            <Field
+              multiline
+              onChangeText={setDraft}
+              onKeyPress={(event) => {
+                const keyEvent = event.nativeEvent as unknown as { key?: string; metaKey?: boolean; ctrlKey?: boolean };
+                if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
+              placeholder="Ask your agent…"
+              value={draft}
+              style={styles.composerField}
+            />
+          </View>
+          <View style={styles.attachButton}><Button compact title="＋" tone="secondary" disabled={busy || offline} onPress={() => void pickAttachment()} /></View>
+          <Button compact title={activeRunId ? "■" : "↑"} tone={activeRunId ? "danger" : "primary"} disabled={busy || offline || (!activeRunId && !draft.trim())} onPress={() => void (activeRunId ? cancel() : send())} />
         </View>
-        {latestRunId && !activeRunId ? <Button title="Retry last run" tone="secondary" onPress={() => void retry()} /> : null}
       </View>
     </KeyboardAvoidingView>
   );
@@ -265,13 +295,16 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8
   },
-  composerRow: { flexDirection: "row", gap: 8 },
-  attachButton: { width: 54 },
-  sendButton: { flex: 1 },
+  composerRow: { flexDirection: "row", gap: 8, alignItems: "flex-end" },
+  composerInput: { flex: 1 },
+  composerField: { maxHeight: 140, minHeight: 44, paddingRight: 12 },
+  attachButton: { width: 40 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
   copy: { alignSelf: "flex-start", paddingVertical: 3, paddingHorizontal: 2 },
   copyText: { color: colors.muted, fontSize: 12 },
+  retry: { alignSelf: "flex-start", marginTop: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceRaised },
+  retryText: { color: colors.primaryText, fontSize: 13, fontWeight: "700" },
   assistantMessage: { width: "100%", paddingHorizontal: 4, paddingVertical: 8 },
   userCard: { marginLeft: 32, backgroundColor: colors.surfaceRaised },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },

@@ -28,12 +28,14 @@ export function Button({
   title,
   onPress,
   disabled,
-  tone = "primary"
+  tone = "primary",
+  compact = false
 }: {
   title: string;
   onPress: () => void;
   disabled?: boolean;
   tone?: "primary" | "secondary" | "danger";
+  compact?: boolean;
 }) {
   return (
     <Pressable
@@ -45,6 +47,7 @@ export function Button({
       }}
       style={({ pressed }) => [
         styles.button,
+        compact && styles.buttonCompact,
         tone === "secondary" && styles.buttonSecondary,
         tone === "danger" && styles.buttonDanger,
         (pressed || disabled) && styles.buttonPressed
@@ -110,6 +113,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16
   },
   buttonSecondary: { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border },
+  buttonCompact: { minHeight: 40, minWidth: 40, paddingHorizontal: 11, borderRadius: 20 },
   buttonDanger: {
     backgroundColor: "transparent",
     borderWidth: 1,
