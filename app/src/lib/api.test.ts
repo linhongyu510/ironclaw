@@ -27,4 +27,19 @@ describe("IronClawApi", () => {
     expect(url).toContain("redirect_after=ironclaw%3A%2F%2Fauth%2Fcallback");
     expect(url).not.toContain("token");
   });
+
+  it("rejects a frontend HTML fallback instead of treating it as API data", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("<!doctype html><title>Frontend</title>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        })
+      )
+    );
+    await expect(
+      new IronClawApi("https://agent-stg.near.ai", "secret").session()
+    ).rejects.toThrow("does not expose the IronClaw mobile API");
+  });
 });

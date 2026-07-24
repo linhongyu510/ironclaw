@@ -56,6 +56,13 @@ export class IronClawApi {
     if (!response.ok) {
       throw new ApiError(readableError(payload, response.statusText), response.status, payload);
     }
+    if (!contentType.includes("application/json")) {
+      throw new ApiError(
+        "This deployment does not expose the IronClaw mobile API",
+        response.status,
+        undefined
+      );
+    }
     return payload as T;
   }
 
