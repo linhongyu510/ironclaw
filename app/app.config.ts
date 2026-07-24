@@ -30,6 +30,7 @@ const config: ExpoConfig = {
   },
   plugins: [
     "expo-router",
+    "expo-font",
     [
       "expo-secure-store",
       {
