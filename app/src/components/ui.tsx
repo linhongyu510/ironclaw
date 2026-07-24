@@ -21,7 +21,8 @@ export function Card({ style, ...props }: ViewProps) {
 }
 
 export function Field(props: TextInputProps) {
-  return <TextInput placeholderTextColor={colors.muted} style={styles.field} {...props} />;
+  const { style, ...rest } = props;
+  return <TextInput placeholderTextColor={colors.muted} selectionColor={colors.primaryText} style={[styles.field, style]} {...rest} />;
 }
 
 export function Button({

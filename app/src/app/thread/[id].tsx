@@ -322,7 +322,7 @@ const styles = StyleSheet.create({
   },
   composerRow: { flexDirection: "row", gap: 8, alignItems: "flex-end" },
   composerInput: { flex: 1 },
-  composerField: { maxHeight: 140, minHeight: 44, paddingRight: 12 },
+  composerField: { maxHeight: 140, minHeight: 44, paddingRight: 12, paddingVertical: 11, textAlignVertical: "center" },
   attachButton: { width: 40 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
