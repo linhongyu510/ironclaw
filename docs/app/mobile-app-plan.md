@@ -59,10 +59,11 @@ The Expo application shell is now present under `app/` with:
 - automation pause, resume, rename, and delete controls;
 - tool settings and global auto-approval controls.
 
-TypeScript checking, unit tests, Expo web export, Expo Doctor, and native Expo
-prebuild pass. The current staging account frontend and control plane are
-reachable, but its deployed agent image must expose the Reborn WebChat v2
-contract at the instance `dashboard_url` before hosted end-to-end chat can pass.
+TypeScript checking, unit tests, Expo web export, Expo Doctor, native Expo
+prebuild, and an Xcode iOS simulator build pass. The current staging account
+frontend and control plane are reachable, but its deployed agent image must
+expose the Reborn WebChat v2 contract at the instance `dashboard_url` before
+hosted end-to-end chat can pass.
 The client detects and reports an HTML frontend fallback rather than
 misclassifying it as an authenticated API response.
 
