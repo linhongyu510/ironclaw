@@ -2,6 +2,7 @@ import React from "react";
 import { Alert, FlatList, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { useSession } from "@/auth/session-context";
 import { Button, Card, Field, Screen, textStyles } from "@/components/ui";
+import { DrawerButton } from "@/components/drawer-button";
 import { cacheAutomations, cachedAutomations } from "@/storage/database";
 import type { Automation } from "@/types";
 import { colors } from "@/theme";
@@ -84,6 +85,7 @@ export default function AutomationsScreen() {
 
   return (
     <Screen style={styles.flush}>
+      <DrawerButton />
       {offline ? <Text style={styles.banner}>Offline · saved automations</Text> : null}
       {!scheduler ? <Text style={styles.banner}>Scheduling is disabled on this deployment</Text> : null}
       {error ? <Text style={[textStyles.error, styles.pad]}>{error}</Text> : null}

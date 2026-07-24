@@ -2,6 +2,7 @@ import React from "react";
 import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useSession } from "@/auth/session-context";
 import { Button, Card, Screen, textStyles } from "@/components/ui";
+import { DrawerButton } from "@/components/drawer-button";
 import type { ToolSetting } from "@/types";
 import { colors } from "@/theme";
 
@@ -73,6 +74,7 @@ export default function SettingsScreen() {
 
   return (
     <Screen style={styles.flush}>
+      <DrawerButton />
       <ScrollView contentContainerStyle={styles.content}>
         <Card>
           <Text style={textStyles.heading}>Agent connection</Text>

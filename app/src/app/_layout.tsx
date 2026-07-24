@@ -8,7 +8,7 @@ import { AppDrawer } from "@/components/app-drawer";
 
 export default function RootLayout() {
   const pathname = usePathname();
-  const threadOpen = pathname.startsWith("/thread/");
+  const focusedWorkspace = pathname.startsWith("/thread/") || pathname.startsWith("/automations") || pathname.startsWith("/settings");
   return (
     <SessionProvider>
       <StatusBar style="light" />
@@ -16,7 +16,7 @@ export default function RootLayout() {
         drawerContent={(props) => <AppDrawer {...props} />}
         screenOptions={{
           headerShown: false,
-          drawerType: Platform.OS === "web" && !threadOpen ? "permanent" : "front",
+          drawerType: Platform.OS === "web" && !focusedWorkspace ? "permanent" : "front",
           swipeEnabled: true,
           drawerStyle: { backgroundColor: colors.surface, width: 300 },
           sceneStyle: { backgroundColor: colors.background }
