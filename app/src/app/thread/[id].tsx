@@ -91,6 +91,7 @@ export default function ThreadScreen() {
   const scope = `${deployment.origin}|${session?.user_id ?? "cached"}`;
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
   const pendingRef = React.useRef<TimelineMessage[]>([]);
+  const initialScrollRef = React.useRef(false);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -124,6 +125,10 @@ export default function ThreadScreen() {
       const remaining = pendingRef.current.filter((pending) => !visible.some((message) => message.role === "user" && messageText(message) === messageText(pending)));
       pendingRef.current = remaining;
       setMessages([...visible, ...remaining]);
+      if (!initialScrollRef.current && (visible.length || remaining.length)) {
+        initialScrollRef.current = true;
+        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 0);
+      }
       await cacheTimeline(scope, id, visible);
       setOffline(false);
     } catch (reason) {
@@ -152,12 +157,13 @@ export default function ThreadScreen() {
 
   async function send() {
     const content = draft.trim();
-    if (!content) return;
+    if (!content || busy || offline || activeRunId) return;
     setBusy(true);
     setError("");
     const pending: TimelineMessage = { id: `pending-${Date.now()}`, role: "user", content };
     pendingRef.current = [...pendingRef.current, pending];
     setMessages((current) => [...current, pending]);
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 0);
     try {
       const wireAttachments = await Promise.all(
         attachments.map(async (attachment) => ({
@@ -295,13 +301,16 @@ export default function ThreadScreen() {
               multiline
               onChangeText={setDraft}
               onKeyPress={(event) => {
-                const keyEvent = event.nativeEvent as unknown as { key?: string; metaKey?: boolean; ctrlKey?: boolean };
-                if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
+                const keyEvent = event.nativeEvent as unknown as { key?: string; shiftKey?: boolean };
+                if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
                   event.preventDefault();
                   void send();
                 }
               }}
+              onSubmitEditing={() => void send()}
               placeholder="Ask your agent…"
+              returnKeyType="send"
+              submitBehavior="submit"
               value={draft}
               style={styles.composerField}
             />
@@ -335,7 +344,7 @@ const styles = StyleSheet.create({
   retry: { alignSelf: "flex-start", marginTop: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceRaised },
   retryText: { color: colors.primaryText, fontSize: 13, fontWeight: "700" },
   assistantMessage: { width: "100%", paddingHorizontal: 4, paddingVertical: 8 },
-  userCard: { marginLeft: 32, backgroundColor: colors.surfaceRaised },
+  userCard: { alignSelf: "flex-end", marginLeft: 48, maxWidth: "88%", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, backgroundColor: colors.surfaceRaised },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },
   offlineText: { color: colors.background, fontWeight: "700" }
 });
