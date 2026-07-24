@@ -46,7 +46,15 @@ export function Button({
         (pressed || disabled) && styles.buttonPressed
       ]}
     >
-      <Text style={styles.buttonText}>{title}</Text>
+      <Text
+        style={[
+          styles.buttonText,
+          tone === "secondary" && styles.buttonTextSecondary,
+          tone === "danger" && styles.buttonTextDanger
+        ]}
+      >
+        {title}
+      </Text>
     </Pressable>
   );
 }
@@ -63,7 +71,7 @@ export function Loading({ label = "Loading…" }: { label?: string }) {
 export const textStyles = StyleSheet.create({
   title: { color: colors.text, fontSize: 28, fontWeight: "700" },
   heading: { color: colors.text, fontSize: 18, fontWeight: "700" },
-  body: { color: colors.text, fontSize: 16, lineHeight: 23 },
+  body: { color: colors.body, fontSize: 16, lineHeight: 23 },
   muted: { color: colors.muted, fontSize: 14, lineHeight: 20 },
   error: { color: colors.danger, fontSize: 14 }
 });
@@ -98,9 +106,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16
   },
   buttonSecondary: { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border },
-  buttonDanger: { backgroundColor: colors.danger },
+  buttonDanger: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: colors.danger
+  },
   buttonPressed: { opacity: 0.65 },
-  buttonText: { color: "#07101f", fontWeight: "700", fontSize: 15 },
+  buttonText: { color: colors.background, fontWeight: "700", fontSize: 15 },
+  buttonTextSecondary: { color: colors.text },
+  buttonTextDanger: { color: colors.danger },
   loading: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
   muted: { color: colors.muted }
 });
