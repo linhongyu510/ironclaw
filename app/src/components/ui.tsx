@@ -1,4 +1,5 @@
 import React from "react";
+import * as Haptics from "expo-haptics";
 import {
   ActivityIndicator,
   Pressable,
@@ -38,7 +39,10 @@ export function Button({
     <Pressable
       accessibilityRole="button"
       disabled={disabled}
-      onPress={onPress}
+      onPress={() => {
+        void Haptics.selectionAsync().catch(() => undefined);
+        onPress();
+      }}
       style={({ pressed }) => [
         styles.button,
         tone === "secondary" && styles.buttonSecondary,

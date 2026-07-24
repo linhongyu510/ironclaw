@@ -9,6 +9,9 @@ import {
   View
 } from "react-native";
 import { useLocalSearchParams } from "expo-router";
+import * as DocumentPicker from "expo-document-picker";
+import * as Haptics from "expo-haptics";
+import { readAsStringAsync, EncodingType } from "expo-file-system/legacy";
 import { useSession } from "@/auth/session-context";
 import { Button, Card, Field, Screen, textStyles } from "@/components/ui";
 import { CollapsibleAction, Markdown } from "@/components/markdown";
@@ -19,7 +22,7 @@ import {
   loadDraft,
   saveDraft
 } from "@/storage/database";
-import type { TimelineMessage } from "@/types";
+import type { DraftAttachment, TimelineMessage } from "@/types";
 import { colors } from "@/theme";
 
 function valueText(value: unknown): string {
@@ -59,10 +62,28 @@ export default function ThreadScreen() {
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [refreshing, setRefreshing] = React.useState(false);
+  const [attachments, setAttachments] = React.useState<DraftAttachment[]>([]);
+  const [showJump, setShowJump] = React.useState(false);
+  const listRef = React.useRef<FlatList<TimelineMessage>>(null);
   const [offline, setOffline] = React.useState(false);
   const [error, setError] = React.useState("");
 
+  const activeRunId = React.useMemo(() => {
+    const running = [...messages].reverse().find((message) => {
+      const value = (message as Record<string, unknown>).status ?? (message as Record<string, unknown>).toolStatus;
+      return value === "running" || value === "pending" || value === "in_progress";
+    });
+    const raw = running as Record<string, unknown> | undefined;
+    return String(raw?.run_id ?? raw?.runId ?? raw?.turn_run_id ?? raw?.turnRunId ?? "") || null;
+  }, [messages]);
+  const latestRunId = React.useMemo(() => {
+    const raw = [...messages].reverse().map((message) => message as Record<string, unknown>).find((message) => message.run_id || message.runId || message.turn_run_id || message.turnRunId);
+    return String(raw?.run_id ?? raw?.runId ?? raw?.turn_run_id ?? raw?.turnRunId ?? "") || null;
+  }, [messages]);
+
   const refresh = React.useCallback(async () => {
+    setRefreshing(true);
     const local = await cachedTimeline(scope, id);
     if (local.length) setMessages(local);
     try {
@@ -73,6 +94,8 @@ export default function ThreadScreen() {
     } catch (reason) {
       setOffline(true);
       if (!local.length) setError(reason instanceof Error ? reason.message : "Could not load");
+    } finally {
+      setRefreshing(false);
     }
   }, [api, id, scope]);
 
@@ -98,14 +121,53 @@ export default function ThreadScreen() {
     setBusy(true);
     setError("");
     try {
-      await api.sendMessage(id, content, clientActionId());
+      const wireAttachments = await Promise.all(
+        attachments.map(async (attachment) => ({
+          mime_type: attachment.mimeType || "application/octet-stream",
+          filename: attachment.name,
+          data_base64: await readAsStringAsync(attachment.uri, { encoding: EncodingType.Base64 })
+        }))
+      );
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
+      await api.sendMessage(id, content, clientActionId(), wireAttachments);
       setDraft("");
+      setAttachments([]);
       await saveDraft(scope, id, "");
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not send");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function pickAttachment() {
+    const result = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+    if (result.canceled) return;
+    setAttachments((current) => [
+      ...current,
+      ...result.assets.map((asset) => ({ id: `${asset.name}-${asset.size ?? Date.now()}`, name: asset.name, mimeType: asset.mimeType ?? "application/octet-stream", uri: asset.uri, size: asset.size }))
+    ].slice(0, 10));
+  }
+
+  async function cancel() {
+    if (!activeRunId) return;
+    try {
+      await api.cancelRun(id, activeRunId);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not stop run");
+    }
+  }
+
+  async function retry() {
+    if (!latestRunId) return;
+    setError("");
+    try {
+      await api.retryRun(id, latestRunId, clientActionId());
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not retry run");
     }
   }
 
@@ -121,11 +183,17 @@ export default function ThreadScreen() {
         </View>
       ) : null}
       <FlatList
+        ref={listRef}
         data={messages}
         keyExtractor={(item, index) => item.message_id ?? item.id ?? String(index)}
         contentContainerStyle={styles.list}
         onRefresh={() => void refresh()}
-        refreshing={false}
+        refreshing={refreshing}
+        onScroll={({ nativeEvent }) => {
+          const distance = nativeEvent.contentSize.height - nativeEvent.contentOffset.y - nativeEvent.layoutMeasurement.height;
+          setShowJump(distance > 240);
+        }}
+        scrollEventThrottle={100}
         renderItem={({ item }) => {
           const role = item.role ?? item.kind ?? "message";
           const action = actionFor(item);
@@ -145,19 +213,27 @@ export default function ThreadScreen() {
           );
         }}
       />
+      {showJump ? (
+        <Button title="↓ Latest" tone="secondary" onPress={() => listRef.current?.scrollToEnd({ animated: true })} />
+      ) : null}
       <View style={styles.composer}>
         {error ? <Text style={textStyles.error}>{error}</Text> : null}
+        {attachments.length ? (
+          <View style={styles.attachments}>
+            {attachments.map((attachment) => <Text key={attachment.id} numberOfLines={1} style={styles.attachment}>📎 {attachment.name}</Text>)}
+          </View>
+        ) : null}
         <Field
           multiline
           onChangeText={setDraft}
           placeholder="Ask your agent…"
           value={draft}
         />
-        <Button
-          title={busy ? "Sending…" : offline ? "Send when online" : "Send"}
-          disabled={busy || offline || !draft.trim()}
-          onPress={() => void send()}
-        />
+        <View style={styles.composerRow}>
+          <View style={styles.attachButton}><Button title="＋" tone="secondary" disabled={busy || offline} onPress={() => void pickAttachment()} /></View>
+          <View style={styles.sendButton}>{activeRunId ? <Button title="Stop" tone="danger" onPress={() => void cancel()} /> : <Button title={busy ? "Sending…" : offline ? "Offline" : "Send"} disabled={busy || offline || !draft.trim()} onPress={() => void send()} />}</View>
+        </View>
+        {latestRunId && !activeRunId ? <Button title="Retry last run" tone="secondary" onPress={() => void retry()} /> : null}
       </View>
     </KeyboardAvoidingView>
   );
@@ -173,6 +249,11 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8
   },
+  composerRow: { flexDirection: "row", gap: 8 },
+  attachButton: { width: 54 },
+  sendButton: { flex: 1 },
+  attachments: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
   userCard: { marginLeft: 32, backgroundColor: colors.surfaceRaised },
   role: { color: colors.primary, fontWeight: "700", textTransform: "capitalize" },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },

@@ -83,6 +83,10 @@ export class IronClawApi {
     });
   }
 
+  deleteThread(threadId: string) {
+    return this.request(`${V2}/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+  }
+
   timeline(threadId: string, limit = 100, cursor?: string) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
@@ -91,14 +95,30 @@ export class IronClawApi {
     );
   }
 
-  sendMessage(threadId: string, content: string, actionId: string) {
+  sendMessage(
+    threadId: string,
+    content: string,
+    actionId: string,
+    attachments: Array<{ mime_type: string; filename: string; data_base64: string }> = []
+  ) {
     return this.request<Record<string, unknown>>(
       `${V2}/threads/${encodeURIComponent(threadId)}/messages`,
       {
         method: "POST",
-        body: JSON.stringify({ content, client_action_id: actionId })
+        body: JSON.stringify({ content, client_action_id: actionId, ...(attachments.length ? { attachments } : {}) })
       }
     );
+  }
+
+  cancelRun(threadId: string, runId: string) {
+    return this.request(`${V2}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+  }
+
+  retryRun(threadId: string, runId: string, actionId: string) {
+    return this.request(`${V2}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ client_action_id: actionId })
+    });
   }
 
   listAutomations() {

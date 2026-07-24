@@ -34,6 +34,14 @@ export type TimelineMessage = {
   [key: string]: unknown;
 };
 
+export type DraftAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  uri: string;
+  size?: number;
+};
+
 export type TimelineResponse = {
   thread: ThreadRecord;
   messages: TimelineMessage[];
