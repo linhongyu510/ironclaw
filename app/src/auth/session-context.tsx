@@ -5,6 +5,7 @@ import * as Linking from "expo-linking";
 import React from "react";
 import { Platform } from "react-native";
 import { IronClawApi } from "@/lib/api";
+import { validateDeploymentOrigin } from "@/lib/deployment-url";
 import {
   callbackAccountToken,
   HostedControlApi,
@@ -22,6 +23,7 @@ const SESSION_KEY = "ironclaw.mobile.session.v1";
 const DEFAULT_ORIGIN =
   (Constants.expoConfig?.extra?.hostedOrigin as string | undefined) ??
   "https://agent-stg.near.ai";
+const PRODUCTION = Constants.expoConfig?.extra?.buildProfile === "production";
 
 type SessionContextValue = {
   loading: boolean;
@@ -81,14 +83,15 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
   const api = React.useMemo(() => new IronClawApi(origin, token), [origin, token]);
 
   const validate = React.useCallback(async (nextOrigin: string, nextToken: string) => {
-    const nextApi = new IronClawApi(nextOrigin, nextToken);
+    const validatedOrigin = validateDeploymentOrigin(nextOrigin, PRODUCTION);
+    const nextApi = new IronClawApi(validatedOrigin, nextToken);
     const nextSession = await nextApi.session();
     await Promise.all([
       writeSecret(TOKEN_KEY, nextToken),
-      writeSecret(ORIGIN_KEY, nextOrigin),
+      writeSecret(ORIGIN_KEY, validatedOrigin),
       writeSecret(SESSION_KEY, JSON.stringify(nextSession))
     ]);
-    setOrigin(nextOrigin);
+    setOrigin(validatedOrigin);
     setToken(nextToken);
     setSession(nextSession);
     setError("");

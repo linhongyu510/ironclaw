@@ -9,6 +9,13 @@ import { colors } from "@/theme";
 const hostedOrigin =
   (Constants.expoConfig?.extra?.hostedOrigin as string | undefined) ??
   "https://agent-stg.near.ai";
+const production = Constants.expoConfig?.extra?.buildProfile === "production";
+
+function allowedOrigin(value: string): boolean {
+  if (value.startsWith("https://")) return true;
+  if (production) return false;
+  return /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/i.test(value.trim());
+}
 
 export default function LoginScreen() {
   const { token: activeToken, connectWithToken, loginWithProvider, error } = useSession();
@@ -100,7 +107,7 @@ export default function LoginScreen() {
             />
             <Button
               title={busy === "token" ? "Connecting…" : "Connect securely"}
-              disabled={!origin.startsWith("https://") || !token.trim() || Boolean(busy)}
+              disabled={!allowedOrigin(origin) || !token.trim() || Boolean(busy)}
               onPress={() => void connect()}
             />
           </Card>
