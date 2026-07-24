@@ -4,6 +4,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   View
@@ -11,6 +12,7 @@ import {
 import { useLocalSearchParams } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
+import * as Clipboard from "expo-clipboard";
 import { readAsStringAsync, EncodingType } from "expo-file-system/legacy";
 import { useSession } from "@/auth/session-context";
 import { Button, Card, Field, Screen, textStyles } from "@/components/ui";
@@ -65,6 +67,7 @@ export default function ThreadScreen() {
   const [refreshing, setRefreshing] = React.useState(false);
   const [attachments, setAttachments] = React.useState<DraftAttachment[]>([]);
   const [showJump, setShowJump] = React.useState(false);
+  const [copiedId, setCopiedId] = React.useState("");
   const listRef = React.useRef<FlatList<TimelineMessage>>(null);
   const [offline, setOffline] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -171,6 +174,15 @@ export default function ThreadScreen() {
     }
   }
 
+  async function copyMessage(item: TimelineMessage) {
+    const content = messageText(item);
+    if (!content) return;
+    await Clipboard.setStringAsync(content);
+    setCopiedId(item.message_id ?? item.id ?? "");
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    setTimeout(() => setCopiedId(""), 1400);
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.root}
@@ -209,6 +221,11 @@ export default function ThreadScreen() {
               ) : (
                 <Text selectable style={textStyles.body}>{content}</Text>
               )}
+              {role === "assistant" && content ? (
+                <Pressable accessibilityRole="button" onPress={() => void copyMessage(item)} style={styles.copy}>
+                  <Text style={styles.copyText}>{copiedId === (item.message_id ?? item.id ?? "") ? "Copied" : "Copy"}</Text>
+                </Pressable>
+              ) : null}
             </Card>
           );
         }}
@@ -254,6 +271,8 @@ const styles = StyleSheet.create({
   sendButton: { flex: 1 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
+  copy: { alignSelf: "flex-start", paddingVertical: 3, paddingHorizontal: 2 },
+  copyText: { color: colors.muted, fontSize: 12 },
   userCard: { marginLeft: 32, backgroundColor: colors.surfaceRaised },
   role: { color: colors.primary, fontWeight: "700", textTransform: "capitalize" },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },

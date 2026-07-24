@@ -108,7 +108,7 @@ export default function ThreadsScreen() {
                   <Text numberOfLines={2} style={textStyles.heading}>{title(item)}</Text>
                   <Text numberOfLines={1} style={textStyles.muted}>{threadId(item)}</Text>
                 </View>
-                <Pressable accessibilityRole="button" accessibilityLabel="Delete thread" onPress={() => remove(item)} hitSlop={10}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Delete thread" onPress={(event) => { event.stopPropagation(); remove(item); }} hitSlop={10}>
                   <Text style={styles.delete}>×</Text>
                 </Pressable>
               </View>
@@ -126,8 +126,8 @@ const styles = StyleSheet.create({
   list: { padding: 16, paddingTop: 4, gap: 10 },
   pad: { paddingHorizontal: 16 },
   offline: { backgroundColor: colors.warning, padding: 8, alignItems: "center" },
-  offlineText: { color: colors.background, fontWeight: "700" }
-  ,threadRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  offlineText: { color: colors.background, fontWeight: "700" },
+  threadRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   grow: { flex: 1 },
   delete: { color: colors.muted, fontSize: 25, fontWeight: "300" }
 });

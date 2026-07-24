@@ -11,6 +11,8 @@ export default function SettingsScreen() {
   const [autoApprove, setAutoApprove] = React.useState(false);
   const [error, setError] = React.useState("");
   const [updatingTool, setUpdatingTool] = React.useState("");
+  const [checking, setChecking] = React.useState(false);
+  const [checkedAt, setCheckedAt] = React.useState("");
 
   const refresh = React.useCallback(async () => {
     try {
@@ -54,6 +56,19 @@ export default function SettingsScreen() {
     }
   }
 
+  async function checkConnection() {
+    setChecking(true);
+    try {
+      await api.session();
+      setCheckedAt(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Connection check failed");
+    } finally {
+      setChecking(false);
+    }
+  }
+
   const capabilityTools = tools.filter((tool) => tool.key?.startsWith("tool."));
 
   return (
@@ -66,6 +81,8 @@ export default function SettingsScreen() {
           <Text style={textStyles.muted}>
             {session?.user_id ?? "Cached session"} · {session?.tenant_id ?? "offline"}
           </Text>
+          <Button title={checking ? "Checking…" : "Test connection"} tone="secondary" onPress={() => void checkConnection()} disabled={checking} />
+          {checkedAt ? <Text style={textStyles.muted}>Connected at {checkedAt}</Text> : null}
         </Card>
         <Card>
           <View style={styles.row}>
