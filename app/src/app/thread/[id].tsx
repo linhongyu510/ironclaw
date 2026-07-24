@@ -39,8 +39,12 @@ function valueText(value: unknown): string {
 }
 
 function visibleTimeline(messages: TimelineMessage[]): TimelineMessage[] {
+  const seen = new Set<string>();
   return messages.filter((message) => {
     const raw = message as Record<string, unknown>;
+    const identity = String(raw.message_id ?? raw.id ?? "");
+    if (identity && seen.has(identity)) return false;
+    if (identity) seen.add(identity);
     if (raw.kind === "tool_result_reference") return false;
     if (typeof raw.content === "string" && raw.content.trimStart().startsWith("{")) {
       try {
@@ -52,6 +56,11 @@ function visibleTimeline(messages: TimelineMessage[]): TimelineMessage[] {
     }
     return true;
   });
+}
+
+function isUserMessage(message: TimelineMessage): boolean {
+  const raw = message as Record<string, unknown>;
+  return raw.role === "user" || raw.kind === "user" || raw.kind === "user_message";
 }
 
 function actionFor(item: TimelineMessage) {
@@ -122,7 +131,7 @@ export default function ThreadScreen() {
     try {
       const response = await api.timeline(id);
       const visible = visibleTimeline(response.messages);
-      const remaining = pendingRef.current.filter((pending) => !visible.some((message) => message.role === "user" && messageText(message) === messageText(pending)));
+      const remaining = pendingRef.current.filter((pending) => !visible.some((message) => isUserMessage(message) && messageText(message) === messageText(pending)));
       pendingRef.current = remaining;
       setMessages([...visible, ...remaining]);
       if (!initialScrollRef.current && (visible.length || remaining.length)) {
