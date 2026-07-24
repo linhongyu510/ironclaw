@@ -41,10 +41,12 @@ function actionFor(item: TimelineMessage) {
   const raw = item as Record<string, unknown>;
   const role = String(raw.role ?? raw.kind ?? "");
   let envelope: Record<string, unknown> = raw;
-  if (raw.kind === "capability_display_preview" && typeof raw.content === "string") {
+  if (typeof raw.content === "string" && (raw.kind === "capability_display_preview" || raw.content.trimStart().startsWith("{"))) {
     try {
       const parsed: unknown = JSON.parse(raw.content);
-      if (parsed && typeof parsed === "object") envelope = parsed as Record<string, unknown>;
+      if (parsed && typeof parsed === "object" && (raw.kind === "capability_display_preview" || "invocation_id" in parsed || "capability_id" in parsed)) {
+        envelope = parsed as Record<string, unknown>;
+      }
     } catch {
       return null;
     }
