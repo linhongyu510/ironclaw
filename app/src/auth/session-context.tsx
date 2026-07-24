@@ -18,6 +18,7 @@ WebBrowser.maybeCompleteAuthSession();
 
 const TOKEN_KEY = "ironclaw.mobile.token.v1";
 const ORIGIN_KEY = "ironclaw.mobile.origin.v1";
+const SESSION_KEY = "ironclaw.mobile.session.v1";
 const DEFAULT_ORIGIN =
   (Constants.expoConfig?.extra?.hostedOrigin as string | undefined) ??
   "https://agent-stg.near.ai";
@@ -59,6 +60,18 @@ async function writeSecret(key: string, value: string): Promise<void> {
   else await SecureStore.deleteItemAsync(key);
 }
 
+function parseSavedSession(value: string): Session | null {
+  if (!value) return null;
+  try {
+    const candidate = JSON.parse(value) as Partial<Session>;
+    return typeof candidate.user_id === "string" && typeof candidate.tenant_id === "string"
+      ? (candidate as Session)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function SessionProvider({ children }: React.PropsWithChildren) {
   const [loading, setLoading] = React.useState(true);
   const [token, setToken] = React.useState("");
@@ -70,7 +83,11 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
   const validate = React.useCallback(async (nextOrigin: string, nextToken: string) => {
     const nextApi = new IronClawApi(nextOrigin, nextToken);
     const nextSession = await nextApi.session();
-    await Promise.all([writeSecret(TOKEN_KEY, nextToken), writeSecret(ORIGIN_KEY, nextOrigin)]);
+    await Promise.all([
+      writeSecret(TOKEN_KEY, nextToken),
+      writeSecret(ORIGIN_KEY, nextOrigin),
+      writeSecret(SESSION_KEY, JSON.stringify(nextSession))
+    ]);
     setOrigin(nextOrigin);
     setToken(nextToken);
     setSession(nextSession);
@@ -78,14 +95,17 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
   }, []);
 
   React.useEffect(() => {
-    Promise.all([readSecret(TOKEN_KEY), readSecret(ORIGIN_KEY)])
-      .then(async ([savedToken, savedOrigin]) => {
+    Promise.all([readSecret(TOKEN_KEY), readSecret(ORIGIN_KEY), readSecret(SESSION_KEY)])
+      .then(async ([savedToken, savedOrigin, savedSession]) => {
         const nextOrigin = savedOrigin || DEFAULT_ORIGIN;
         setOrigin(nextOrigin);
         setToken(savedToken);
+        setSession(parseSavedSession(savedSession));
         if (!savedToken) return;
         try {
-          setSession(await new IronClawApi(nextOrigin, savedToken).session());
+          const refreshedSession = await new IronClawApi(nextOrigin, savedToken).session();
+          setSession(refreshedSession);
+          await writeSecret(SESSION_KEY, JSON.stringify(refreshedSession));
         } catch (reason) {
           setError(reason instanceof Error ? reason.message : "Could not reach your agent");
         }
@@ -117,7 +137,11 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
   );
 
   const signOut = React.useCallback(async () => {
-    await Promise.all([writeSecret(TOKEN_KEY, ""), writeSecret(ORIGIN_KEY, "")]);
+    await Promise.all([
+      writeSecret(TOKEN_KEY, ""),
+      writeSecret(ORIGIN_KEY, ""),
+      writeSecret(SESSION_KEY, "")
+    ]);
     setToken("");
     setSession(null);
     setOrigin(DEFAULT_ORIGIN);
@@ -126,7 +150,9 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
 
   const refreshSession = React.useCallback(async () => {
     if (!token) return;
-    setSession(await api.session());
+    const refreshedSession = await api.session();
+    setSession(refreshedSession);
+    await writeSecret(SESSION_KEY, JSON.stringify(refreshedSession));
   }, [api, token]);
 
   const value: SessionContextValue = {
