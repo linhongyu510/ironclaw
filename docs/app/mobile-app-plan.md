@@ -1,6 +1,6 @@
 # IronClaw Mobile App Plan
 
-**Status:** Accepted for implementation  
+**Status:** Milestone 1 implementation in progress
 **Date:** 2026-07-24  
 **Owners:** Product, mobile, WebUI host, product workflow  
 **Target:** iOS and Android access to a user's hosted or dedicated IronClaw agent
@@ -45,6 +45,26 @@ The first release is a secure remote companion focused on:
 Operator setup, provider configuration, extension installation, filesystem
 administration, and other broad-authority surfaces remain in the WebUI for the
 first release.
+
+### Implementation checkpoint — 2026-07-24
+
+The Expo application shell is now present under `app/` with:
+
+- native iOS and Android configuration at the selected OS floors;
+- hosted account OAuth bootstrap and hosted IronClaw instance discovery;
+- advanced direct connection for a dedicated WebChat v2 deployment;
+- SecureStore credentials and a SQLCipher-backed durable read cache;
+- offline thread, timeline, automation, and draft rendering;
+- thread creation, text messaging, and foreground timeline reconciliation;
+- automation pause, resume, rename, and delete controls;
+- tool settings and global auto-approval controls.
+
+TypeScript checking, unit tests, Expo web export, Expo Doctor, and native Expo
+prebuild pass. The current staging account frontend and control plane are
+reachable, but its deployed agent image must expose the Reborn WebChat v2
+contract at the instance `dashboard_url` before hosted end-to-end chat can pass.
+The client detects and reports an HTML frontend fallback rather than
+misclassifying it as an authenticated API response.
 
 ## 2. Why this shape
 
