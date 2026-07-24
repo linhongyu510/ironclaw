@@ -1,24 +1,29 @@
-import { Stack } from "expo-router";
+import { Drawer } from "expo-router/drawer";
+import { Platform } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SessionProvider } from "@/auth/session-context";
 import { colors } from "@/theme";
+import { AppDrawer } from "@/components/app-drawer";
 
 export default function RootLayout() {
   return (
     <SessionProvider>
       <StatusBar style="light" />
-      <Stack
+      <Drawer
+        drawerContent={(props) => <AppDrawer {...props} />}
         screenOptions={{
-          headerStyle: { backgroundColor: colors.surface },
-          headerTintColor: colors.text,
-          contentStyle: { backgroundColor: colors.background }
+          headerShown: false,
+          drawerType: Platform.OS === "web" ? "permanent" : "front",
+          swipeEnabled: true,
+          drawerStyle: { backgroundColor: colors.surface, width: 300 },
+          sceneStyle: { backgroundColor: colors.background }
         }}
       >
-        <Stack.Screen name="index" options={{ headerShown: false }} />
-        <Stack.Screen name="login" options={{ headerShown: false }} />
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="thread/[id]" options={{ title: "Conversation" }} />
-      </Stack>
+        <Drawer.Screen name="index" options={{ drawerItemStyle: { display: "none" } }} />
+        <Drawer.Screen name="login" options={{ drawerItemStyle: { display: "none" } }} />
+        <Drawer.Screen name="(tabs)" options={{ drawerItemStyle: { display: "none" } }} />
+        <Drawer.Screen name="thread/[id]" options={{ drawerItemStyle: { display: "none" } }} />
+      </Drawer>
     </SessionProvider>
   );
 }
