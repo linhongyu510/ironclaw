@@ -1,0 +1,106 @@
+import React from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  type TextInputProps,
+  View,
+  type ViewProps
+} from "react-native";
+import { colors } from "@/theme";
+
+export function Screen({ style, ...props }: ViewProps) {
+  return <View style={[styles.screen, style]} {...props} />;
+}
+
+export function Card({ style, ...props }: ViewProps) {
+  return <View style={[styles.card, style]} {...props} />;
+}
+
+export function Field(props: TextInputProps) {
+  return <TextInput placeholderTextColor={colors.muted} style={styles.field} {...props} />;
+}
+
+export function Button({
+  title,
+  onPress,
+  disabled,
+  tone = "primary"
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+  tone?: "primary" | "secondary" | "danger";
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.button,
+        tone === "secondary" && styles.buttonSecondary,
+        tone === "danger" && styles.buttonDanger,
+        (pressed || disabled) && styles.buttonPressed
+      ]}
+    >
+      <Text style={styles.buttonText}>{title}</Text>
+    </Pressable>
+  );
+}
+
+export function Loading({ label = "Loading…" }: { label?: string }) {
+  return (
+    <View style={styles.loading}>
+      <ActivityIndicator color={colors.primary} />
+      <Text style={styles.muted}>{label}</Text>
+    </View>
+  );
+}
+
+export const textStyles = StyleSheet.create({
+  title: { color: colors.text, fontSize: 28, fontWeight: "700" },
+  heading: { color: colors.text, fontSize: 18, fontWeight: "700" },
+  body: { color: colors.text, fontSize: 16, lineHeight: 23 },
+  muted: { color: colors.muted, fontSize: 14, lineHeight: 20 },
+  error: { color: colors.danger, fontSize: 14 }
+});
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: colors.background, padding: 16, gap: 12 },
+  card: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
+    gap: 10
+  },
+  field: {
+    color: colors.text,
+    backgroundColor: colors.surfaceRaised,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 16
+  },
+  button: {
+    minHeight: 46,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingHorizontal: 16
+  },
+  buttonSecondary: { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border },
+  buttonDanger: { backgroundColor: colors.danger },
+  buttonPressed: { opacity: 0.65 },
+  buttonText: { color: "#07101f", fontWeight: "700", fontSize: 15 },
+  loading: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
+  muted: { color: colors.muted }
+});
