@@ -101,10 +101,12 @@ export default function ThreadScreen() {
   const scope = `${deployment.origin}|${session?.user_id ?? "cached"}`;
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
   const pendingRef = React.useRef<TimelineMessage[]>([]);
+  const awaitingContentRef = React.useRef("");
   const initialScrollRef = React.useRef(false);
   const atBottomRef = React.useRef(true);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [awaitingResponse, setAwaitingResponse] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [attachments, setAttachments] = React.useState<DraftAttachment[]>([]);
   const [showJump, setShowJump] = React.useState(false);
@@ -135,6 +137,14 @@ export default function ThreadScreen() {
       const visible = visibleTimeline(response.messages);
       const remaining = pendingRef.current.filter((pending) => !visible.some((message) => isUserMessage(message) && messageText(message) === messageText(pending)));
       pendingRef.current = remaining;
+      const awaitingContent = awaitingContentRef.current;
+      if (awaitingContent) {
+        const userIndex = visible.map(messageText).lastIndexOf(awaitingContent);
+        if (userIndex >= 0 && visible.slice(userIndex + 1).some((message) => !isUserMessage(message))) {
+          awaitingContentRef.current = "";
+          setAwaitingResponse(false);
+        }
+      }
       setMessages([...visible, ...remaining]);
       if (!initialScrollRef.current && (visible.length || remaining.length)) {
         initialScrollRef.current = true;
@@ -177,6 +187,8 @@ export default function ThreadScreen() {
     setBusy(true);
     setError("");
     const pending: TimelineMessage = { id: `pending-${Date.now()}`, role: "user", content };
+    awaitingContentRef.current = content;
+    setAwaitingResponse(true);
     pendingRef.current = [...pendingRef.current, pending];
     setMessages((current) => [...current, pending]);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 0);
@@ -196,6 +208,8 @@ export default function ThreadScreen() {
       await refresh();
     } catch (reason) {
       pendingRef.current = pendingRef.current.filter((item) => item.id !== pending.id);
+      awaitingContentRef.current = "";
+      setAwaitingResponse(false);
       setMessages((current) => current.filter((item) => item.id !== pending.id));
       setError(reason instanceof Error ? reason.message : "Could not send");
     } finally {
@@ -274,7 +288,7 @@ export default function ThreadScreen() {
           setShowJump(distance > 240);
         }}
         scrollEventThrottle={100}
-        ListFooterComponent={busy || activeRunId ? <View style={styles.progress}><ActivityIndicator color={colors.primary} size="small" /><Text style={styles.progressText}>{activeRunId ? "Working…" : "Thinking…"}</Text></View> : null}
+        ListFooterComponent={busy || awaitingResponse || activeRunId ? <View style={styles.progress}><ActivityIndicator color={colors.primary} size="small" /><Text style={styles.progressText}>{activeRunId ? "Working…" : "Thinking…"}</Text></View> : null}
         renderItem={({ item, index }) => {
           const role = item.role ?? item.kind ?? "message";
           const action = actionFor(item);
