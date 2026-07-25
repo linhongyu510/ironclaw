@@ -1,6 +1,7 @@
 import React from "react";
 import {
   AppState,
+  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -101,6 +102,7 @@ export default function ThreadScreen() {
   const [messages, setMessages] = React.useState<TimelineMessage[]>([]);
   const pendingRef = React.useRef<TimelineMessage[]>([]);
   const initialScrollRef = React.useRef(false);
+  const atBottomRef = React.useRef(true);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -158,6 +160,11 @@ export default function ThreadScreen() {
     }, 1000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!atBottomRef.current) return;
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 0);
+  }, [messages]);
 
   React.useEffect(() => {
     const timeout = setTimeout(() => void saveDraft(scope, id, draft), 250);
@@ -263,9 +270,11 @@ export default function ThreadScreen() {
         refreshing={refreshing}
         onScroll={({ nativeEvent }) => {
           const distance = nativeEvent.contentSize.height - nativeEvent.contentOffset.y - nativeEvent.layoutMeasurement.height;
+          atBottomRef.current = distance < 160;
           setShowJump(distance > 240);
         }}
         scrollEventThrottle={100}
+        ListFooterComponent={busy || activeRunId ? <View style={styles.progress}><ActivityIndicator color={colors.primary} size="small" /><Text style={styles.progressText}>{activeRunId ? "Working…" : "Thinking…"}</Text></View> : null}
         renderItem={({ item, index }) => {
           const role = item.role ?? item.kind ?? "message";
           const action = actionFor(item);
@@ -350,6 +359,8 @@ const styles = StyleSheet.create({
   attachment: { color: colors.primaryText, backgroundColor: colors.primarySoft, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5, maxWidth: "100%" },
   copy: { alignSelf: "flex-start", paddingVertical: 3, paddingHorizontal: 2 },
   copyText: { color: colors.muted, fontSize: 12 },
+  progress: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 4, paddingVertical: 10 },
+  progressText: { color: colors.muted, fontSize: 13 },
   retry: { alignSelf: "flex-start", marginTop: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceRaised },
   retryText: { color: colors.primaryText, fontSize: 13, fontWeight: "700" },
   assistantMessage: { width: "100%", paddingHorizontal: 4, paddingVertical: 8 },
