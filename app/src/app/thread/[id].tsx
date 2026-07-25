@@ -186,6 +186,7 @@ export default function ThreadScreen() {
     if (!content || busy || offline || activeRunId) return;
     setBusy(true);
     setError("");
+    atBottomRef.current = true;
     const pending: TimelineMessage = { id: `pending-${Date.now()}`, role: "user", content };
     awaitingContentRef.current = content;
     setAwaitingResponse(true);
@@ -282,8 +283,12 @@ export default function ThreadScreen() {
         contentContainerStyle={styles.list}
         onRefresh={() => void refresh()}
         refreshing={refreshing}
+        onScrollBeginDrag={() => {
+          atBottomRef.current = false;
+          setShowJump(true);
+        }}
         onScroll={({ nativeEvent }) => {
-          const distance = nativeEvent.contentSize.height - nativeEvent.contentOffset.y - nativeEvent.layoutMeasurement.height;
+          const distance = Math.max(0, nativeEvent.contentSize.height - nativeEvent.contentOffset.y - nativeEvent.layoutMeasurement.height);
           atBottomRef.current = distance < 160;
           setShowJump(distance > 240);
         }}
@@ -318,7 +323,7 @@ export default function ThreadScreen() {
         }}
       />
       {showJump ? (
-        <Button title="↓ Latest" tone="secondary" onPress={() => listRef.current?.scrollToEnd({ animated: true })} />
+        <Button title="↓ Latest" tone="secondary" onPress={() => { atBottomRef.current = true; listRef.current?.scrollToEnd({ animated: true }); }} />
       ) : null}
       <View style={styles.composer}>
         {error ? <Text style={textStyles.error}>{error}</Text> : null}
