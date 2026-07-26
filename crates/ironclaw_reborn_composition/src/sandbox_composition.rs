@@ -149,29 +149,30 @@ impl SandboxRuntimeBindings {
             reason: format!("sandbox user concurrency ceiling could not be set: {error}"),
         })?;
 
-        // D4-1: spawn the orphan-container reaper. Guarded internally —
-        // returns `None` rather than failing this build if Docker is not
-        // reachable at this (independent, best-effort) connect attempt.
-        // Shares `inputs.activity` with the exec transport (Task A5) so
-        // both observe the same per-user last-activity timestamps.
+        // D4-1: spawn the orphan-container reaper. Fails this build closed
+        // (via `?`) if Docker is unreachable — without a reaper the
+        // two-stage orphan sweep never runs and per-user sandbox containers
+        // accumulate unbounded, so this now matches the egress proxy's
+        // fail-closed posture immediately below rather than degrading
+        // silently to `None`. Shares `inputs.activity` with the exec
+        // transport (Task A5) so both observe the same per-user
+        // last-activity timestamps.
         let reaper =
-            crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&inputs.activity))
-                .await;
+            crate::sandbox_reaper_task::spawn_sandbox_reaper(Arc::clone(&inputs.activity)).await?;
 
         // Phase C: an unbindable egress proxy means sandboxed shell egress
-        // would have no enforcement, so — unlike the best-effort reaper —
-        // spawn failure here fails this build closed rather than degrading
-        // to `None`. Reuse the proxy `tenant_sandbox_process_binding`
-        // already spawned (and pointed the container at) when the caller
-        // supplied one, rather than binding a second, orphaned proxy nobody
-        // shuts down.
+        // would have no enforcement, so spawn failure here also fails this
+        // build closed rather than degrading to `None`. Reuse the proxy
+        // `tenant_sandbox_process_binding` already spawned (and pointed the
+        // container at) when the caller supplied one, rather than binding a
+        // second, orphaned proxy nobody shuts down.
         let egress_proxy = match inputs.egress_proxy {
             Some(handle) => Some(handle),
             None => Some(crate::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy().await?),
         };
 
         Ok(Self {
-            reaper,
+            reaper: Some(reaper),
             egress_proxy,
         })
     }
@@ -201,6 +202,22 @@ mod tests {
         Arc::new(InMemoryResourceGovernor::new())
     }
 
+    /// True iff `SandboxRuntimeBindings::build`'s reaper spawn will be able
+    /// to reach a Docker daemon. Reuses
+    /// `ironclaw_host_runtime::sandbox_docker_readiness` (the same one-shot
+    /// connect attempt `connect_docker_with_retry` retries) rather than
+    /// shelling out to the `docker` CLI directly — the CLI honors
+    /// `DOCKER_HOST`, not this crate's `IRONCLAW_REBORN_DOCKER_HOST`
+    /// override, so a CLI-only probe would report "reachable" even while
+    /// `sandboxed_profile_fails_closed_when_docker_unreachable`'s sibling
+    /// test has that override pointed at a nonexistent socket.
+    async fn docker_available() -> bool {
+        matches!(
+            ironclaw_host_runtime::sandbox_docker_readiness().await,
+            ironclaw_host_runtime::SandboxDockerReadiness::Ready
+        )
+    }
+
     #[tokio::test]
     async fn non_sandboxed_profile_yields_inert_bindings_with_no_reaper() {
         let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
@@ -219,24 +236,64 @@ mod tests {
         bindings.shutdown_all(Duration::from_secs(1)).await;
     }
 
-    #[tokio::test]
-    async fn sandboxed_profile_applies_the_user_ceiling() {
+    /// Plain `#[test]` + `block_on`, not `#[tokio::test]`, and guarded by
+    /// `lock_env()`: the reaper spawn this now depends on reads the
+    /// process-global `IRONCLAW_REBORN_DOCKER_HOST` runtime-env overlay, and
+    /// `sandboxed_profile_fails_closed_when_docker_unreachable` (below)
+    /// mutates that same overlay under the same guard — without sharing it,
+    /// cargo's default parallel test execution could interleave the two and
+    /// make this test observe the other's override. See
+    /// `sandbox_reaper_task::tests::docker_unreachable_fails_the_spawn_closed`
+    /// for why the guard must not be held across an `.await` in an outer
+    /// async fn.
+    ///
+    /// `SandboxRuntimeBindings::build` now fails closed (D4-1) when the
+    /// reaper can't connect to Docker, which makes this call-site test
+    /// genuinely Docker-dependent — `cargo test -p ironclaw_reborn_composition
+    /// --lib` is a plain, non-docker-gated lane, so a runner without a
+    /// reachable daemon must SKIP rather than fail. The per-user-ceiling
+    /// assertion itself (`apply_sandbox_user_ceiling`) is Docker-free and
+    /// already has direct, dedicated coverage in
+    /// `sandbox_quota::tests::ceiling_denies_the_second_concurrent_reservation_from_any_user_in_the_tenant`
+    /// — reasserting it here via a bypassed, Docker-free `build()` path would
+    /// just duplicate that coverage while still needing to fake the reaper,
+    /// so a visible runtime skip (matching
+    /// `ironclaw_host_runtime`'s `docker_gate` convention) is the correct
+    /// shape for this call-site test, not a Docker-free rewrite.
+    #[test]
+    fn sandboxed_profile_applies_the_user_ceiling() {
+        let _guard = ironclaw_common::env_helpers::lock_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test");
+
+        if !runtime.block_on(docker_available()) {
+            eprintln!(
+                "SKIP: no docker daemon reachable — sandboxed_profile_applies_the_user_ceiling requires a real Docker daemon for SandboxRuntimeBindings::build's reaper spawn (CI/hosted Docker lane only)"
+            );
+            return;
+        }
         let governor = governor();
         let owner_user_id = UserId::new("probe-user").unwrap();
-        let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
-            is_sandboxed_profile: true,
-            local_runtime_identity: None,
-            resource_governor: Arc::clone(&governor),
-            activity: Arc::new(SandboxActivityRegistry::new()),
-            owner_user_id: owner_user_id.clone(),
-            egress_proxy: None,
-        })
-        .await
-        .expect("sandboxed profile build succeeds even with no reachable Docker daemon");
 
-        // The ceiling is live regardless of whether the reaper spawn found
-        // a Docker daemon (best-effort, mirrors
-        // `sandbox_reaper_task::tests::no_docker_daemon_yields_no_handle`).
+        let bindings = runtime
+            .block_on(SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
+                is_sandboxed_profile: true,
+                local_runtime_identity: None,
+                resource_governor: Arc::clone(&governor),
+                activity: Arc::new(SandboxActivityRegistry::new()),
+                owner_user_id: owner_user_id.clone(),
+                egress_proxy: None,
+            }))
+            .expect(
+                "sandboxed profile build succeeds against this machine's reachable Docker daemon",
+            );
+
+        // The ceiling is live once the build succeeds (which now requires a
+        // reachable Docker daemon for the reaper spawn — see
+        // `sandboxed_profile_fails_closed_when_docker_unreachable` for the
+        // fail-closed path when the daemon is not reachable).
         let tenant_id = crate::sandbox_quota::resolve_local_runtime_tenant_id(None).unwrap();
         let scope = ResourceScope {
             tenant_id,
@@ -252,7 +309,53 @@ mod tests {
             .expect("first reservation is within the default ceiling");
         drop(first);
 
-        bindings.shutdown_all(Duration::from_secs(1)).await;
+        assert!(bindings.reaper.is_some());
+        runtime.block_on(bindings.shutdown_all(Duration::from_secs(1)));
+    }
+
+    /// Call-site coverage for the fail-closed posture pinned at the helper
+    /// level by `sandbox_reaper_task::tests::docker_unreachable_fails_the_spawn_closed`:
+    /// on the sandboxed profile, a reaper-spawn failure must fail
+    /// `SandboxRuntimeBindings::build` itself, not just the helper in
+    /// isolation. Forces the unreachable condition deterministically via
+    /// `IRONCLAW_REBORN_DOCKER_HOST` (this machine has a real daemon
+    /// running). Plain `#[test]` + `block_on`, not `#[tokio::test]`, so the
+    /// `lock_env()` guard is never held across an `.await` in an outer
+    /// async fn.
+    #[test]
+    fn sandboxed_profile_fails_closed_when_docker_unreachable() {
+        let _guard = ironclaw_common::env_helpers::lock_env();
+        ironclaw_common::env_helpers::set_runtime_env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-w3-reaper-composition-test-docker.sock",
+        );
+
+        let owner_user_id = UserId::new("probe-user").unwrap();
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
+                is_sandboxed_profile: true,
+                local_runtime_identity: None,
+                resource_governor: governor(),
+                activity: Arc::new(SandboxActivityRegistry::new()),
+                owner_user_id,
+                egress_proxy: None,
+            }));
+
+        ironclaw_common::env_helpers::remove_runtime_env("IRONCLAW_REBORN_DOCKER_HOST");
+
+        match result {
+            Err(RebornBuildError::InvalidConfig { reason }) => {
+                assert!(
+                    reason.contains("reaper"),
+                    "expected reason to name the reaper, got: {reason}"
+                );
+            }
+            Ok(_) => panic!("expected build to fail closed when Docker is unreachable"),
+            Err(other) => panic!("expected InvalidConfig, got other RebornBuildError: {other:?}"),
+        }
     }
 
     #[test]

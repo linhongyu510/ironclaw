@@ -4,16 +4,21 @@
 //! deliberately unopinionated about scheduling — composition is the one
 //! place that connects to Docker, constructs the reaper, spawns it as a
 //! background task, and owns its cancellation. This module is that one
-//! place; `factory.rs` calls [`maybe_spawn_sandbox_reaper`] with a single
-//! line rather than growing its own Docker-connect-and-spawn logic.
+//! place; `sandbox_composition::SandboxRuntimeBindings::build` calls
+//! [`spawn_sandbox_reaper`] with a single line rather than growing its own
+//! Docker-connect-and-spawn logic.
 //!
-//! Guarded, not required: the sandboxed profile's boot path
-//! (`sandbox_boot::tenant_sandbox_process_binding`) already fails the whole
-//! boot closed if Docker is unreachable, so by the time this is called the
-//! daemon was reachable a moment ago. This function still tolerates a
-//! transient failure of its own (independent) connect attempt by returning
-//! `None` — the reaper is a best-effort orphan sweep, not a boot
-//! precondition, so its absence must never fail composition.
+//! **Fail-closed, matching the egress proxy in the same call site
+//! (`sandbox_composition::SandboxRuntimeBindings::build`):** the sandboxed
+//! profile's boot path (`sandbox_boot::tenant_sandbox_process_binding`)
+//! already made Docker a precondition for the whole build, failing closed if
+//! the daemon is unreachable — so by the time this is called the daemon was
+//! reachable a moment ago, and a fresh connect failure here is not a
+//! transient blip to shrug off. Without a reaper the two-stage orphan sweep
+//! (idle stop, aged removal/recycle) never runs at all and per-user sandbox
+//! containers accumulate unbounded, so [`spawn_sandbox_reaper`] returns
+//! `Err` on a Docker-connect failure and `build` propagates it, rather than
+//! degrading to a silently absent reaper.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +26,8 @@ use std::time::Duration;
 use ironclaw_host_runtime::{SandboxActivityRegistry, SandboxReaper, SandboxReaperConfig};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use crate::RebornBuildError;
 
 /// How long [`SandboxReaperRuntimeHandle::shutdown`] waits for the reaper's
 /// in-flight scan to observe the shutdown signal and return before it aborts
@@ -66,24 +73,18 @@ impl SandboxReaperRuntimeHandle {
 }
 
 /// Connects to Docker and spawns [`SandboxReaper::run`] as an owned
-/// background task, returning `None` (never an error) when Docker is not
-/// reachable — this machine's dev/CI environment commonly has no Docker
-/// daemon, and the sandboxed profile itself already fails closed on Docker
-/// unavailability at its own (earlier) connect, so a reaper-spawn failure
-/// here must not additionally fail boot.
-pub(crate) async fn maybe_spawn_sandbox_reaper(
+/// background task. Docker is already a precondition for reaching this call
+/// (the only caller is the sandboxed profile, whose boot path already
+/// requires a reachable daemon), so a connect failure here fails closed —
+/// see the module doc — rather than degrading to a silently absent reaper.
+pub(crate) async fn spawn_sandbox_reaper(
     activity: Arc<SandboxActivityRegistry>,
-) -> Option<SandboxReaperRuntimeHandle> {
-    let docker = match ironclaw_host_runtime::connect_docker_with_retry().await {
-        Ok(docker) => docker,
-        Err(error) => {
-            tracing::debug!(
-                ?error,
-                "sandbox reaper: Docker daemon unreachable, skipping reaper spawn"
-            );
-            return None;
-        }
-    };
+) -> Result<SandboxReaperRuntimeHandle, RebornBuildError> {
+    let docker = ironclaw_host_runtime::connect_docker_with_retry()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("sandbox reaper Docker connect failed: {error}"),
+        })?;
 
     let reaper = Arc::new(SandboxReaper::new(
         docker,
@@ -95,7 +96,7 @@ pub(crate) async fn maybe_spawn_sandbox_reaper(
         reaper.run(shutdown_rx).await;
     });
 
-    Some(SandboxReaperRuntimeHandle {
+    Ok(SandboxReaperRuntimeHandle {
         shutdown_tx,
         handle,
     })
@@ -105,27 +106,46 @@ pub(crate) async fn maybe_spawn_sandbox_reaper(
 mod tests {
     use super::*;
 
-    /// The guard the module doc promises: no Docker daemon means `None`, not
-    /// a panic/error. This machine's dev/CI default has no Docker daemon, so
-    /// that is the expected branch here; mirrors
-    /// `connect::tests::readiness_surfaces_reason_on_unreachable_daemon`'s
-    /// tolerance for a CI runner that happens to have Docker reachable —
-    /// `Some` is also a valid, non-flaky outcome there, and this test cleans
-    /// it up rather than asserting the environment.
-    #[tokio::test]
-    async fn no_docker_daemon_yields_no_handle() {
-        let activity = Arc::new(SandboxActivityRegistry::new());
+    /// The guard the module doc now promises: a Docker daemon that is
+    /// unreachable at reaper-spawn time is a hard `Err`, not a swallowed
+    /// `None` — the sandboxed profile's boot path already made Docker a
+    /// precondition, so a reaper-spawn failure here must fail the build
+    /// closed exactly like the egress proxy's bind failure does.
+    ///
+    /// Forces the unreachable condition deterministically via
+    /// `IRONCLAW_REBORN_DOCKER_HOST` (read by
+    /// `sandbox_process::connect::connect_once`) pointed at a nonexistent
+    /// socket, rather than relying on the environment happening to have no
+    /// daemon — this machine (colima) has one running. Plain `#[test]` +
+    /// `block_on`, not `#[tokio::test]`, so the `lock_env()` guard is never
+    /// held across an `.await` in an outer async fn — mirrors
+    /// `connect::tests::docker_host_env_override_is_consulted_first`.
+    #[test]
+    fn docker_unreachable_fails_the_spawn_closed() {
+        let _guard = ironclaw_common::env_helpers::lock_env();
+        ironclaw_common::env_helpers::set_runtime_env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-w3-reaper-test-docker.sock",
+        );
 
-        match maybe_spawn_sandbox_reaper(activity).await {
-            None => {}
-            Some(handle) => {
-                // A real Docker daemon happens to be reachable on this
-                // machine/CI runner: the spawn succeeding is not itself the
-                // property under test here (that is Docker-gated coverage
-                // elsewhere) — just prove the handle is a real, cancellable
-                // task and clean it up.
-                handle.shutdown(SANDBOX_REAPER_SHUTDOWN_TIMEOUT).await;
+        let activity = Arc::new(SandboxActivityRegistry::new());
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(spawn_sandbox_reaper(activity));
+
+        ironclaw_common::env_helpers::remove_runtime_env("IRONCLAW_REBORN_DOCKER_HOST");
+
+        match result {
+            Err(RebornBuildError::InvalidConfig { reason }) => {
+                assert!(
+                    reason.contains("reaper"),
+                    "expected reason to name the reaper, got: {reason}"
+                );
             }
+            Ok(_) => panic!("expected reaper spawn to fail when Docker is unreachable"),
+            Err(other) => panic!("expected InvalidConfig, got other RebornBuildError: {other:?}"),
         }
     }
 
@@ -133,8 +153,8 @@ mod tests {
     /// and returns -> join succeeds) is exercised directly against a
     /// `SandboxReaper::run` future without going through Docker, proving the
     /// handle is a real owned/cancellable task rather than a fire-and-forget
-    /// spawn. Mirrors the shape `maybe_spawn_sandbox_reaper` produces, just
-    /// without the Docker connect this machine cannot perform.
+    /// spawn. Mirrors the shape `spawn_sandbox_reaper` produces, just
+    /// without the Docker connect.
     #[tokio::test]
     async fn shutdown_stops_a_running_task_before_the_timeout() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
