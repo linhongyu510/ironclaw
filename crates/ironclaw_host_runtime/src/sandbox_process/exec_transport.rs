@@ -17,7 +17,7 @@ use bollard::{
     Docker,
     container::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, LogOutput,
-        StartContainerOptions,
+        RemoveContainerOptions, StartContainerOptions,
     },
     errors::Error as DockerError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
@@ -26,6 +26,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use ironclaw_host_api::{TenantId, UserId};
+use sha2::{Digest, Sha256};
 
 use crate::{CommandExecutionOutput, RuntimeProcessError};
 
@@ -77,6 +78,19 @@ pub(super) async fn ensure_container(
                     "sandbox container lookup returned an unnamed container".to_string(),
                 )
             })?;
+            let existing_stamp = existing
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(&registry::label_security_posture(LABEL_PREFIX)))
+                .map(String::as_str);
+            let expected_stamp = security_posture_stamp(&security_posture_fields(config));
+            if existing_stamp != Some(expected_stamp.as_str()) {
+                recycle_stale_container(docker, &container_id).await?;
+                return create_and_start_user_container(
+                    docker, config, key, tenant_id, user_id, workspace,
+                )
+                .await;
+            }
             ensure_running(docker, &container_id).await?;
             Ok(container_id)
         }
@@ -85,6 +99,41 @@ pub(super) async fn ensure_container(
             multiple.len()
         ))),
     }
+}
+
+/// Destroys a container whose stamped security posture
+/// ([`registry::label_security_posture`]) no longer matches what
+/// [`security_posture_fields`] says this code would create today — e.g. an
+/// older deployment's container still has PID 1 running as root, from
+/// before W1's non-root-init fix. This is the container-side analogue of
+/// [`verify_existing_egress_network_posture`], but deliberately does the
+/// opposite thing on mismatch: that function fails closed because other
+/// containers may already be attached to the shared network, so pulling it
+/// out from under them is worse than a loud failure. A per-user sandbox
+/// container has no such peers — it is disposable, and recreating it is
+/// already the normal healthy path (every fresh sandbox starts this way),
+/// so silently recycling it here is strictly safer than reusing a
+/// stale-posture container for up to the reaper's 7-day forced-recycle
+/// window.
+async fn recycle_stale_container(
+    docker: &Docker,
+    container_id: &str,
+) -> Result<(), RuntimeProcessError> {
+    docker
+        .remove_container(
+            container_id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "stale-security-posture sandbox container removal failed: {error}"
+            ))
+        })?;
+    Ok(())
 }
 
 async fn ensure_running(docker: &Docker, container_id: &str) -> Result<(), RuntimeProcessError> {
@@ -377,6 +426,76 @@ async fn create_and_start_user_container(
     Ok(created.id)
 }
 
+/// The security-relevant subset of a container's launch configuration —
+/// every field whose value determines the container's security posture
+/// (as opposed to resource accounting like `memory`/`cpu_shares`, which
+/// don't gate what a compromised process inside the container can do).
+/// [`security_posture_stamp`] hashes this struct into the label
+/// [`ensure_container`] compares against; [`user_container_launch_config`]
+/// builds `HostConfig`'s matching fields directly from the same struct, so
+/// there is exactly one place that decides what "the current posture" is —
+/// the stamp can never silently drift from what a freshly created
+/// container actually gets.
+///
+/// `pids_limit` is carried even though nothing currently sets it (always
+/// `None` today): a future per-process-count hardening change only needs to
+/// populate this one field to also get automatic recycling of containers
+/// created under the old limit.
+struct SecurityPostureFields {
+    user: Option<String>,
+    cap_add: Option<Vec<String>>,
+    cap_drop: Option<Vec<String>>,
+    readonly_rootfs: Option<bool>,
+    network_mode: Option<String>,
+    pids_limit: Option<i64>,
+}
+
+/// The security posture this code creates containers with today, given
+/// `config`. Deliberately independent of `tenant_id`/`user_id`/`workspace`:
+/// none of the security-relevant fields vary per user, so
+/// `ensure_container` can compute "what posture would a fresh container
+/// get" synchronously, with no Docker round trip and no async mount
+/// preparation, purely to compare against an existing container's stamped
+/// label.
+fn security_posture_fields(config: &RebornSandboxConfig) -> SecurityPostureFields {
+    SecurityPostureFields {
+        // See `user_container_launch_config`'s doc comment: PID 1 is pinned
+        // directly to uid 1000 at create time (W1), not via an in-container
+        // privilege drop.
+        user: Some(format!("{SANDBOX_EXEC_UID}:{SANDBOX_EXEC_GID}")),
+        cap_add: None,
+        cap_drop: Some(vec!["ALL".to_string()]),
+        readonly_rootfs: Some(true),
+        network_mode: config.container_network_mode(),
+        pids_limit: None,
+    }
+}
+
+/// Hashes [`SecurityPostureFields`] into a single deterministic value used
+/// as a container label — the container-side analogue of the network
+/// posture check in [`verify_existing_egress_network_posture`]. Uses SHA-256
+/// over an explicit, fixed-order serialization of the fields (never a
+/// `HashMap`'s iteration order, and never `std::collections::hash_map::
+/// DefaultHasher`, which is an unspecified algorithm not guaranteed stable
+/// across Rust versions) so the same posture always stamps identically
+/// across process restarts and Rust toolchain upgrades, and a changed
+/// field — flip `user`, add a capability, flip `readonly_rootfs` — always
+/// changes the stamp.
+fn security_posture_stamp(fields: &SecurityPostureFields) -> String {
+    let canonical = format!(
+        "user={:?}\ncap_add={:?}\ncap_drop={:?}\nreadonly_rootfs={:?}\nnetwork_mode={:?}\npids_limit={:?}",
+        fields.user,
+        fields.cap_add,
+        fields.cap_drop,
+        fields.readonly_rootfs,
+        fields.network_mode,
+        fields.pids_limit,
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 /// The persistent container's own launch `cmd` is a no-op long-lived
 /// process (`sleep infinity`) — the container never runs the model's
 /// command directly; every command arrives later via `docker exec`.
@@ -386,7 +505,9 @@ pub(super) async fn user_container_launch_config(
     user_id: &UserId,
     workspace: &Path,
 ) -> Result<Config<String>, RuntimeProcessError> {
-    let labels = build_user_container_labels(LABEL_PREFIX, tenant_id, user_id);
+    let posture = security_posture_fields(config);
+    let posture_stamp = security_posture_stamp(&posture);
+    let labels = build_user_container_labels(LABEL_PREFIX, tenant_id, user_id, &posture_stamp);
     let mut env = config.command_env(std::collections::HashMap::new())?;
     env.push("HOME=/workspace/.home".to_string());
     // npm's global install prefix defaults to `/usr` on this Debian-apt
@@ -414,10 +535,9 @@ pub(super) async fn user_container_launch_config(
     // as root. That capsh exec is gone (see docker/process-sandbox-
     // entrypoint.sh) and `cap_add` below no longer re-adds
     // SETPCAP/SETUID/SETGID, so nothing in-container can perform that drop
-    // any more — the container-create config itself must pin PID 1 to uid
-    // 1000 directly, matching the fixed identity every `docker exec`
-    // (`SANDBOX_EXEC_UID`/`GID`) already assumes.
-    let container_user = Some(format!("{SANDBOX_EXEC_UID}:{SANDBOX_EXEC_GID}"));
+    // any more — `posture.user` (below, and see [`security_posture_fields`])
+    // pins PID 1 to uid 1000 directly instead, matching the fixed identity
+    // every `docker exec` (`SANDBOX_EXEC_UID`/`GID`) already assumes.
     let mut binds = config
         .mount_sources
         .prepare_container_binds(workspace, None)
@@ -431,8 +551,8 @@ pub(super) async fn user_container_launch_config(
         memory: Some(config.memory_bytes as i64),
         cpu_shares: Some(config.cpu_shares as i64),
         auto_remove: Some(false),
-        network_mode: config.container_network_mode(),
-        cap_drop: Some(vec!["ALL".to_string()]),
+        network_mode: posture.network_mode.clone(),
+        cap_drop: posture.cap_drop.clone(),
         // No caps are re-added: PID 1 is created directly as uid 1000 (via
         // `user` below) instead of starting as root and dropping privilege
         // in-container via `capsh --drop=all --user=sandbox`. That capsh
@@ -444,9 +564,10 @@ pub(super) async fn user_container_launch_config(
         // those caps entirely, closing the root-init window: the container
         // never has a PID 1 that runs as root with privilege-manipulating
         // capabilities.
-        cap_add: None,
+        cap_add: posture.cap_add.clone(),
         security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-        readonly_rootfs: Some(true),
+        readonly_rootfs: posture.readonly_rootfs,
+        pids_limit: posture.pids_limit,
         tmpfs: Some(
             [("/tmp".to_string(), "size=512M".to_string())]
                 .into_iter()
@@ -460,7 +581,7 @@ pub(super) async fn user_container_launch_config(
         env: Some(env),
         labels: Some(labels),
         host_config: Some(host_config),
-        user: container_user,
+        user: posture.user.clone(),
         attach_stdout: Some(false),
         attach_stderr: Some(false),
         ..Default::default()
@@ -925,6 +1046,87 @@ mod tests {
         }
         let host_config = launch.host_config.unwrap();
         assert_eq!(host_config.auto_remove, Some(false));
+
+        // The launch config's own labels must carry the same stamp
+        // `security_posture_stamp` would compute for this config — the
+        // single-source-of-truth property `ensure_container` depends on.
+        let stamped = labels
+            .get(&registry::label_security_posture(LABEL_PREFIX))
+            .expect("launch config must stamp a security-posture label");
+        assert_eq!(
+            stamped,
+            &security_posture_stamp(&security_posture_fields(&config)),
+            "the label baked into the launch config must match what \
+             ensure_container computes as the expected posture"
+        );
+    }
+
+    #[test]
+    fn security_posture_stamp_is_deterministic_for_the_same_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+
+        let first = security_posture_stamp(&security_posture_fields(&config));
+        let second = security_posture_stamp(&security_posture_fields(&config));
+
+        assert_eq!(
+            first, second,
+            "the same config must always produce the same posture stamp"
+        );
+    }
+
+    #[test]
+    fn security_posture_stamp_changes_when_user_flips() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let baseline = security_posture_fields(&config);
+        let baseline_stamp = security_posture_stamp(&baseline);
+
+        let mut root_pid1 = security_posture_fields(&config);
+        root_pid1.user = None; // the pre-W1 posture: image-default (root) PID 1
+
+        assert_ne!(
+            baseline_stamp,
+            security_posture_stamp(&root_pid1),
+            "flipping the pinned uid:gid user must change the stamp — this is exactly the \
+             W1 hardening a stale container must be recycled to pick up"
+        );
+    }
+
+    #[test]
+    fn security_posture_stamp_changes_when_cap_add_flips() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let baseline = security_posture_fields(&config);
+        let baseline_stamp = security_posture_stamp(&baseline);
+
+        let mut with_caps = security_posture_fields(&config);
+        with_caps.cap_add = Some(vec![
+            "CAP_SETUID".to_string(),
+            "CAP_SETGID".to_string(),
+            "CAP_SETPCAP".to_string(),
+        ]);
+
+        assert_ne!(
+            baseline_stamp,
+            security_posture_stamp(&with_caps),
+            "re-adding capabilities must change the stamp"
+        );
+    }
+
+    #[test]
+    fn security_posture_stamp_changes_when_network_mode_flips() {
+        let temp = tempfile::tempdir().unwrap();
+        let no_net_config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces-2"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .expect("valid proxy url");
+
+        assert_ne!(
+            security_posture_stamp(&security_posture_fields(&no_net_config)),
+            security_posture_stamp(&security_posture_fields(&egress_config)),
+            "a different container_network_mode must change the stamp"
+        );
     }
 
     #[test]
@@ -1676,5 +1878,141 @@ mod docker_tests {
         );
 
         best_effort_remove(&docker, &created.id).await;
+    }
+
+    /// The container-side analogue of the egress-network posture tests
+    /// above (W1.5's `ensure_egress_network_fails_closed_on_posture_
+    /// mismatch`), but for the opposite outcome: a container is per-user and
+    /// disposable, so `ensure_container` must recycle-and-recreate on a
+    /// stale stamp rather than fail closed. Covers both halves of
+    /// `ensure_container`'s label-driven branch in one flow: a container
+    /// manually created with a stale (bogus) `security_posture` label is
+    /// destroyed and replaced by a freshly stamped one (asserting the
+    /// container ID changes, the stale container is actually gone, and the
+    /// new one carries today's stamp); a second `ensure_container` call
+    /// against that same, now-matching container reuses it untouched
+    /// (asserting the ID does NOT change).
+    #[tokio::test]
+    async fn ensure_container_recycles_stale_stamp_then_reuses_matching_stamp() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — ensure_container_recycles_stale_stamp_then_reuses_matching_stamp requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image) {
+            eprintln!(
+                "SKIP: sandbox worker image {image:?} is not built locally — requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = docker_tests_config(temp.path());
+        let tenant = ironclaw_host_api::TenantId::new("posture-tenant").unwrap();
+        let user = ironclaw_host_api::UserId::new("posture-user").unwrap();
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let workspace = key.workspace_path(temp.path());
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Manually build and start a container carrying the right
+        // tenant/user labels but a deliberately WRONG security-posture
+        // stamp — standing in for a container created under an older,
+        // less-hardened posture (e.g. pre-W1, root PID 1). Docker has no
+        // "update labels on an existing container" API, so a stale
+        // container can only be simulated by creating one directly like
+        // this, not by mutating a real one after the fact.
+        let mut stale_launch = user_container_launch_config(&config, &tenant, &user, &workspace)
+            .await
+            .expect("launch config builds");
+        let mut stale_labels = stale_launch.labels.take().unwrap_or_default();
+        stale_labels.insert(
+            registry::label_security_posture(LABEL_PREFIX),
+            "stale-posture-stamp".to_string(),
+        );
+        stale_launch.labels = Some(stale_labels);
+        let stale_created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: key.container_name(),
+                    platform: None,
+                }),
+                stale_launch,
+            )
+            .await
+            .expect("stale-stamped container create succeeds");
+        docker
+            .start_container(&stale_created.id, None::<StartContainerOptions<String>>)
+            .await
+            .expect("stale-stamped container start succeeds");
+        wait_until_running(&docker, &stale_created.id)
+            .await
+            .expect("stale-stamped container reaches running state");
+
+        let network_ready = tokio::sync::OnceCell::new();
+        let recreated_id = ensure_container(
+            &docker,
+            &config,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+        )
+        .await
+        .expect("ensure_container succeeds despite the stale stamp");
+
+        assert_ne!(
+            recreated_id, stale_created.id,
+            "a container with a stale security-posture stamp must be recycled, not reused"
+        );
+        let stale_still_exists = docker
+            .inspect_container(&stale_created.id, None::<InspectContainerOptions>)
+            .await
+            .is_ok();
+        assert!(
+            !stale_still_exists,
+            "the stale-stamped container must have been destroyed, not left running alongside \
+             the recreated one"
+        );
+
+        let recreated_inspect = docker
+            .inspect_container(&recreated_id, None::<InspectContainerOptions>)
+            .await
+            .expect("recreated container inspects");
+        let recreated_stamp = recreated_inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|labels| labels.get(&registry::label_security_posture(LABEL_PREFIX)))
+            .cloned()
+            .expect("recreated container must carry a security-posture label");
+        assert_eq!(
+            recreated_stamp,
+            security_posture_stamp(&security_posture_fields(&config)),
+            "the recreated container must carry today's expected posture stamp"
+        );
+
+        // Second call: the recreated container's stamp now matches, so it
+        // must be reused untouched — no recycle, same container ID.
+        let reused_id = ensure_container(
+            &docker,
+            &config,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+        )
+        .await
+        .expect("ensure_container succeeds on the matching-stamp path");
+        assert_eq!(
+            reused_id, recreated_id,
+            "a container whose stamp already matches must be reused, not recreated"
+        );
+
+        best_effort_remove(&docker, &recreated_id).await;
     }
 }
