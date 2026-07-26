@@ -1076,9 +1076,15 @@ mod tests {
 // (`src/sandbox_process/`, two levels above the crate root), matching the
 // convention `sandbox_reaper_docker.rs` uses one level up (that file sits
 // directly in `tests/`, so it only needs `"support/docker_gate.rs"`).
+//
+// `pub(crate)` (rather than private) so `attribution`'s own real-Docker test
+// can reuse this exact module instance instead of re-declaring the same
+// `#[path]` a second time — clippy's `duplicate_mod` lint flags loading the
+// same file into two module locations, and there is only one Docker gate
+// convention in this crate, not one per file.
 #[cfg(test)]
 #[path = "../../tests/support/docker_gate.rs"]
-mod docker_gate;
+pub(crate) mod docker_gate;
 
 /// Real-Docker tests for the exec-based persistent container lifecycle that
 /// genuinely need crate-private data. The rest of this module's former

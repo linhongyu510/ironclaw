@@ -21,6 +21,7 @@ use crate::{
     TenantSandboxProcessPort, process_output::sanitize_command_output_bytes,
 };
 
+mod attribution;
 mod broker;
 mod connect;
 mod container_identity;
