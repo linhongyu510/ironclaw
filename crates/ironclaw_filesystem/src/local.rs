@@ -31,6 +31,21 @@ pub struct DiskFilesystem {
 struct LocalMount {
     virtual_root: VirtualPath,
     host_root: PathBuf,
+    /// When `true`, this mount is shared by many callers who are each only
+    /// ever granted a single leaf subtree of it (one [`MountGrant`] target
+    /// per caller, narrowed by the composition-layer `MountView` resolver —
+    /// e.g. the sandboxed-profile `/workspace` mount, where every user's
+    /// `MountView` target is `/workspace/<digest>`). Containment for such a
+    /// mount is pinned to `host_root/<first-tail-segment>` rather than the
+    /// full `host_root`: the physical [`DiskFilesystem`] mount table is
+    /// boot-time-fixed and cannot register a distinct `host_root` per caller,
+    /// but the first path segment after `virtual_root` is never
+    /// caller-controlled — it comes from the server-computed `MountGrant`
+    /// target, not from the caller's tail — so pinning containment to it
+    /// closes a same-mount cross-leaf symlink escape (one caller's symlink
+    /// resolving into a sibling leaf) without weakening containment for any
+    /// other mount. See `ensure_contained`.
+    leaf_scoped: bool,
 }
 
 impl DiskFilesystem {
@@ -47,6 +62,33 @@ impl DiskFilesystem {
         &mut self,
         virtual_root: VirtualPath,
         host_root: HostPath,
+    ) -> Result<(), FilesystemError> {
+        self.mount_local_impl(virtual_root, host_root, false)
+    }
+
+    /// Mounts a host directory shared across many callers, each of whom is
+    /// only ever granted (via their own `MountView`) a single leaf subtree
+    /// of it — e.g. the `HostedSingleTenantVolumeSandboxed` profile's
+    /// `/workspace` mount, whose shared parent holds every user's leaf
+    /// sandbox-workspace directory. Containment for paths resolved through
+    /// this mount is pinned per-request to `host_root/<leaf>`, where `<leaf>`
+    /// is the first path segment after `virtual_root` — closing a symlink
+    /// planted inside one caller's leaf from resolving into a sibling leaf,
+    /// which a plain [`mount_local`](Self::mount_local) mount (containment at
+    /// the full shared `host_root`) would not catch. See [`LocalMount::leaf_scoped`].
+    pub fn mount_local_per_leaf(
+        &mut self,
+        virtual_root: VirtualPath,
+        host_root: HostPath,
+    ) -> Result<(), FilesystemError> {
+        self.mount_local_impl(virtual_root, host_root, true)
+    }
+
+    fn mount_local_impl(
+        &mut self,
+        virtual_root: VirtualPath,
+        host_root: HostPath,
+        leaf_scoped: bool,
     ) -> Result<(), FilesystemError> {
         if self
             .mounts
@@ -75,6 +117,7 @@ impl DiskFilesystem {
         self.mounts.push(LocalMount {
             virtual_root,
             host_root: canonical_root,
+            leaf_scoped,
         });
         Ok(())
     }
@@ -84,11 +127,11 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (mount, joined) = self.resolve_joined(path)?;
+        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
         let canonical = tokio::fs::canonicalize(&joined)
             .await
             .map_err(|error| io_error(path.clone(), operation, error))?;
-        ensure_contained(path, mount, &canonical, true)?;
+        ensure_contained(path, &containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
@@ -97,7 +140,7 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (mount, joined) = self.resolve_joined(path)?;
+        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
 
         if tokio::fs::try_exists(&joined)
             .await
@@ -106,14 +149,14 @@ impl DiskFilesystem {
             let canonical = tokio::fs::canonicalize(&joined)
                 .await
                 .map_err(|error| io_error(path.clone(), operation, error))?;
-            ensure_contained(path, mount, &canonical, true)?;
+            ensure_contained(path, &containment_root, &canonical, true)?;
             return Ok(canonical);
         }
 
         let parent = joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        ensure_existing_ancestor_contained(path, mount, parent, operation).await?;
+        ensure_existing_ancestor_contained(path, &containment_root, parent, operation).await?;
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
@@ -123,7 +166,7 @@ impl DiskFilesystem {
         // `joined` is constructed from validated virtual path segments under the
         // backend root. If its canonical parent leaves the backend root, an
         // existing symlink in the parent chain caused the escape.
-        ensure_contained(path, mount, &canonical_parent, true)?;
+        ensure_contained(path, &containment_root, &canonical_parent, true)?;
         // Re-root the final path on the canonicalized, containment-checked
         // parent rather than returning `joined` (which still contains the
         // un-canonicalized ancestor components). This narrows the TOCTOU
@@ -141,23 +184,40 @@ impl DiskFilesystem {
         &self,
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
-        let (mount, joined) = self.resolve_joined(path)?;
-        ensure_existing_ancestor_contained(path, mount, &joined, FilesystemOperation::CreateDirAll)
-            .await?;
+        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
+        ensure_existing_ancestor_contained(
+            path,
+            &containment_root,
+            &joined,
+            FilesystemOperation::CreateDirAll,
+        )
+        .await?;
         tokio::fs::create_dir_all(&joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
         let canonical = tokio::fs::canonicalize(&joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        ensure_contained(path, mount, &canonical, true)?;
+        ensure_contained(path, &containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
+    /// Resolves `path` to `(mount, joined host path, containment root)`.
+    ///
+    /// `containment_root` is the boundary [`ensure_contained`] checks
+    /// against. For an ordinary mount it is `mount.host_root`. For a
+    /// [`LocalMount::leaf_scoped`] mount it is `mount.host_root` plus the
+    /// first tail segment after `virtual_root` — the caller's own leaf,
+    /// which the composition-layer `MountView` grant target (not the
+    /// caller-controlled tail) determines. This is what closes the
+    /// same-mount cross-leaf symlink escape: a symlink planted inside one
+    /// caller's leaf that resolves into a sibling leaf still starts with the
+    /// shared `host_root`, but no longer starts with the caller's own
+    /// `containment_root`.
     fn resolve_joined(
         &self,
         path: &VirtualPath,
-    ) -> Result<(&LocalMount, PathBuf), FilesystemError> {
+    ) -> Result<(&LocalMount, PathBuf, PathBuf), FilesystemError> {
         let mount = self
             .mounts
             .iter()
@@ -172,12 +232,25 @@ impl DiskFilesystem {
             .trim_start_matches('/');
 
         let mut joined = mount.host_root.clone();
-        if !tail.is_empty() {
-            for segment in tail.split('/') {
+        let mut containment_root = mount.host_root.clone();
+        if tail.is_empty() {
+            // A leaf-scoped mount has no safe containment root for the bare
+            // mount path itself — that would be "every caller's leaf", the
+            // shared-parent boundary this mount kind exists to eliminate.
+            // The composition-layer `MountView` always supplies a leaf, but
+            // that invariant is enforced one layer up, so fail closed here.
+            if mount.leaf_scoped {
+                return Err(FilesystemError::PathOutsideMount { path: path.clone() });
+            }
+        } else {
+            for (index, segment) in tail.split('/').enumerate() {
                 joined.push(segment);
+                if mount.leaf_scoped && index == 0 {
+                    containment_root.push(segment);
+                }
             }
         }
-        Ok((mount, joined))
+        Ok((mount, joined, containment_root))
     }
 }
 
@@ -499,7 +572,7 @@ async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<()
 
 async fn ensure_existing_ancestor_contained(
     virtual_path: &VirtualPath,
-    mount: &LocalMount,
+    containment_root: &Path,
     candidate: &Path,
     operation: FilesystemOperation,
 ) -> Result<(), FilesystemError> {
@@ -518,16 +591,23 @@ async fn ensure_existing_ancestor_contained(
     let canonical = tokio::fs::canonicalize(&ancestor)
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
-    ensure_contained(virtual_path, mount, &canonical, true)
+    ensure_contained(virtual_path, containment_root, &canonical, true)
 }
 
+/// Checks `candidate` (an already-canonicalized host path) is contained
+/// within `containment_root`. For a plain mount, `containment_root` is the
+/// mount's `host_root`; for a [`LocalMount::leaf_scoped`] mount it is the
+/// caller's own leaf under `host_root` (see [`DiskFilesystem::resolve_joined`]),
+/// so a symlink that escapes the caller's leaf — even while staying inside
+/// the shared `host_root` — is rejected here exactly like an escape past
+/// `host_root` itself.
 fn ensure_contained(
     virtual_path: &VirtualPath,
-    mount: &LocalMount,
+    containment_root: &Path,
     candidate: &Path,
     existing_target: bool,
 ) -> Result<(), FilesystemError> {
-    if candidate.starts_with(&mount.host_root) {
+    if candidate.starts_with(containment_root) {
         Ok(())
     } else if existing_target {
         Err(FilesystemError::SymlinkEscape {
@@ -620,5 +700,36 @@ mod tests {
 
         assert!(matches!(error, FilesystemError::Backend { .. }));
         assert!(logs_contain("local filesystem backend error"));
+    }
+
+    /// A `mount_local_per_leaf` mount's containment boundary is the caller's
+    /// own leaf (`host_root/<first-tail-segment>`), derived from the tail —
+    /// there is no safe containment root for the bare mount path itself
+    /// (that would mean "every caller's leaf", the exact shared-parent
+    /// boundary `mount_local_per_leaf` exists to eliminate). Today every
+    /// legitimate grant against such a mount always resolves to a
+    /// leaf-prefixed target (`sandbox_user_workspace_mount_view` in
+    /// `ironclaw_reborn_composition`), but that is an invariant enforced one
+    /// layer up, not by this crate — so a bare-root request must fail closed
+    /// here rather than silently fall back to the full shared parent.
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_bare_mount_root_request() {
+        let storage = tempdir().unwrap();
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/workspace").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .read_file(&VirtualPath::new("/workspace").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::PathOutsideMount { .. }),
+            "expected PathOutsideMount, got: {error:?}"
+        );
     }
 }

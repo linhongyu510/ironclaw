@@ -275,7 +275,13 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
             crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
                 .expect("sandboxed policy resolves"),
         )
-        .with_runtime_process_binding(tenant_sandbox_process_binding_for_test()),
+        .with_runtime_process_binding(tenant_sandbox_process_binding_for_test())
+        // This test deliberately shares one root for both the plain LocalDev
+        // storage and the sandbox-workspaces root (unlike the CLI, which
+        // uses `<root>/sandbox-workspaces` for the latter — see
+        // `sandboxed_profile_workspace_mount_resolves_the_container_bind_root_not_the_plain_storage_root`
+        // below for the CLI-realistic divergent-roots case).
+        .with_sandbox_workspaces_root(storage_root.clone()),
     )
     .await
     .expect("hosted-single-tenant-volume-sandboxed services build");
@@ -327,6 +333,24 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
     // translation here means writing/reading through the digest-prefixed
     // path directly, matching exactly what the capability dispatch path
     // resolves `/workspace/f.txt` to for this owner.
+    // Production never reaches the raw composite mount without first
+    // provisioning the caller's own leaf directory —
+    // `RefreshingLoopCapabilityPortFactory::create_capability_port`
+    // (`runtime/local_dev.rs`) `create_dir_all`s the digest leaf before
+    // handing back the narrowed `MountView`. This test drives
+    // `extension_filesystem` directly (bypassing that narrowing to exercise
+    // the raw mount, per the comment above), so it must reproduce that same
+    // provisioning step rather than relying on the pre-fix shared-parent
+    // containment root, which happened to tolerate a not-yet-created leaf.
+    let owner_scope = default_runtime_owner_scope(
+        ironclaw_host_api::UserId::new("sandbox-owner").expect("owner id"),
+    )
+    .expect("owner scope resolves");
+    let canonical_root = storage_root.canonicalize().expect("canonical storage root");
+    let host_workspace_dir = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+        .workspace_path(&canonical_root);
+    std::fs::create_dir_all(&host_workspace_dir).expect("provision caller's own leaf directory");
+
     let path = ironclaw_host_api::VirtualPath::new(format!("/workspace/{workspace_digest}/f.txt"))
         .expect("virtual path");
     local_runtime
@@ -335,13 +359,6 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
         .await
         .expect("write through composite /workspace mount");
 
-    let owner_scope = default_runtime_owner_scope(
-        ironclaw_host_api::UserId::new("sandbox-owner").expect("owner id"),
-    )
-    .expect("owner scope resolves");
-    let canonical_root = storage_root.canonicalize().expect("canonical storage root");
-    let host_workspace_dir = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
-        .workspace_path(&canonical_root);
     assert_eq!(
         std::fs::read(host_workspace_dir.join("f.txt")).expect("host file exists"),
         b"from-fs-tools"
@@ -360,6 +377,116 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
         .await
         .expect("read through composite /workspace mount");
     assert_eq!(bytes, b"from-shell");
+}
+
+/// Pins the CLI-level divergence a hand-constructed-both-sides test cannot
+/// catch: `sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_host_dir`
+/// above builds the abstract-FS mount AND derives the "host workspace dir"
+/// it compares against from the SAME `storage_root` parameter, so it can
+/// never observe a real CLI where the `TenantSandbox` container bind is
+/// rooted at a *different* directory
+/// (`<local runtime root>/sandbox-workspaces`,
+/// `ironclaw_reborn_cli::runtime::build_sandboxed_local_runtime_services_input`)
+/// than the plain LocalDev storage root
+/// (`<local runtime root>`) composition's `/workspace` mount used to
+/// re-derive `users/` from. This test drives the two roots apart exactly
+/// the way the CLI does (`with_sandbox_workspaces_root` set to a `..
+/// /sandbox-workspaces` child of the storage root, mirroring
+/// `SANDBOX_WORKSPACES_SUBDIR`) and asserts the abstract-FS write lands
+/// under the SANDBOX workspaces root (what the container bind uses), never
+/// under the plain storage root's `users/` subtree.
+#[tokio::test]
+async fn sandboxed_profile_workspace_mount_resolves_the_container_bind_root_not_the_plain_storage_root()
+ {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("hosted-sandboxed");
+    let sandbox_workspaces_root = storage_root.join("sandbox-workspaces");
+
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            "sandbox-owner",
+            storage_root.clone(),
+        )
+        .with_runtime_policy(
+            crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
+                .expect("sandboxed policy resolves"),
+        )
+        .with_runtime_process_binding(tenant_sandbox_process_binding_for_test())
+        .with_sandbox_workspaces_root(sandbox_workspaces_root.clone()),
+    )
+    .await
+    .expect("hosted-single-tenant-volume-sandboxed services build");
+    let local_runtime = services
+        .local_runtime_for_test()
+        .expect("local-dev runtime substrate");
+
+    let owner_scope = default_runtime_owner_scope(
+        ironclaw_host_api::UserId::new("sandbox-owner").expect("owner id"),
+    )
+    .expect("owner scope resolves");
+    let workspace_digest = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+        .workspace_path(std::path::Path::new(""))
+        .strip_prefix("users")
+        .expect("workspace_path is always users/<digest>")
+        .to_str()
+        .expect("digest is valid UTF-8")
+        .to_string();
+
+    // Production never reaches the raw composite mount without first
+    // provisioning the caller's own leaf directory —
+    // `RefreshingLoopCapabilityPortFactory::create_capability_port`
+    // (`runtime/local_dev.rs`) `create_dir_all`s the digest leaf before
+    // handing back the narrowed `MountView`. This test drives
+    // `extension_filesystem` directly (bypassing that narrowing), so it must
+    // reproduce that same provisioning step.
+    let canonical_sandbox_workspaces_root_for_provisioning = sandbox_workspaces_root
+        .canonicalize()
+        .expect("canonical sandbox workspaces root (created by the build)");
+    let host_workspace_dir_for_provisioning =
+        ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+            .workspace_path(&canonical_sandbox_workspaces_root_for_provisioning);
+    std::fs::create_dir_all(&host_workspace_dir_for_provisioning)
+        .expect("provision caller's own leaf directory");
+
+    let path = ironclaw_host_api::VirtualPath::new(format!("/workspace/{workspace_digest}/f.txt"))
+        .expect("virtual path");
+    local_runtime
+        .extension_filesystem
+        .write_file(&path, b"from-fs-tools")
+        .await
+        .expect("write through composite /workspace mount");
+
+    // Must land under the sandbox-workspaces root — the same host tree the
+    // `TenantSandbox` container bind is rooted at
+    // (`RebornSandboxConfig::new(sandbox_workspaces_root)`) — not under
+    // `<storage_root>/users`, which is what re-deriving from the plain
+    // LocalDev storage root gave before this fix.
+    let canonical_sandbox_workspaces_root = sandbox_workspaces_root
+        .canonicalize()
+        .expect("canonical sandbox workspaces root (created by the build)");
+    let container_bind_workspace_dir =
+        ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+            .workspace_path(&canonical_sandbox_workspaces_root);
+    assert_eq!(
+        std::fs::read(container_bind_workspace_dir.join("f.txt"))
+            .expect("file exists under the sandbox-workspaces root the container binds"),
+        b"from-fs-tools"
+    );
+
+    // And it must NOT have leaked into the plain storage root's `users/`
+    // subtree — the divergence this test pins.
+    let canonical_storage_root = storage_root
+        .canonicalize()
+        .expect("canonical storage root (created by the build)");
+    let plain_root_workspace_dir =
+        ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+            .workspace_path(&canonical_storage_root);
+    assert!(
+        !plain_root_workspace_dir.join("f.txt").exists(),
+        "abstract-FS write must not leak into the plain storage root's users/ subtree \
+         (container bind and abstract-FS mount must resolve the SAME host tree)"
+    );
 }
 
 #[tokio::test]
@@ -407,5 +534,176 @@ async fn sandbox_user_workspace_directories_do_not_overlap_across_owners() {
     assert!(
         escape.is_err(),
         "user A's /workspace mount must not see user B's file"
+    );
+}
+
+/// Sets up the SHARED-mount shape production actually uses (unlike
+/// `sandbox_user_workspace_directories_do_not_overlap_across_owners` above,
+/// which mounts each user's own leaf directly): one `mount_sandbox_user_workspace_root`
+/// mount at the `users` PARENT, narrowed per invocation to the caller's own
+/// digest leaf via `sandbox_user_workspace_mount_view` — exactly what
+/// `RefreshingLoopCapabilityPortFactory::create_capability_port`
+/// (`runtime/local_dev.rs`) resolves for every capability call. Returns
+/// `(TempDir, CompositeRootFilesystem, digest_a, digest_b, path_a, path_b)`
+/// with both users' leaf directories created and user B's `secret.txt`
+/// written. The `TempDir` must be kept alive by the caller (bind it to a
+/// named variable, not `_`) — dropping it deletes the whole backing tree.
+async fn shared_sandbox_workspace_mount_with_two_users() -> (
+    tempfile::TempDir,
+    CompositeRootFilesystem,
+    String,
+    String,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(&root).expect("root");
+    let canonical_root = root.canonicalize().expect("canonical root");
+    let users_root = canonical_root.join("users");
+
+    let scope_a =
+        default_runtime_owner_scope(ironclaw_host_api::UserId::new("user-a").expect("user id"))
+            .expect("owner scope resolves");
+    let scope_b =
+        default_runtime_owner_scope(ironclaw_host_api::UserId::new("user-b").expect("user id"))
+            .expect("owner scope resolves");
+
+    let path_a = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&scope_a)
+        .workspace_path(&canonical_root);
+    let path_b = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&scope_b)
+        .workspace_path(&canonical_root);
+    std::fs::create_dir_all(&path_a).expect("user a dir");
+    std::fs::create_dir_all(&path_b).expect("user b dir");
+    std::fs::write(path_b.join("secret.txt"), b"user-b-only").expect("user b secret file");
+
+    let digest_of = |scope: &ironclaw_host_api::ResourceScope| {
+        ironclaw_host_runtime::RebornSandboxUserKey::from_scope(scope)
+            .workspace_path(std::path::Path::new(""))
+            .strip_prefix("users")
+            .expect("workspace_path is always users/<digest>")
+            .to_str()
+            .expect("digest is valid UTF-8")
+            .to_string()
+    };
+    let digest_a = digest_of(&scope_a);
+    let digest_b = digest_of(&scope_b);
+
+    let mut composite = CompositeRootFilesystem::new();
+    mount_sandbox_user_workspace_root(&mut composite, &users_root)
+        .expect("mount shared sandbox users root, production shape");
+
+    (dir, composite, digest_a, digest_b, path_a, path_b)
+}
+
+/// THE cross-tenant read escape this module closes: a symlink planted
+/// inside user A's own leaf directory (something A's sandboxed shell can do
+/// unassisted — `ln -s`) pointing at user B's file. Before the
+/// `mount_local_per_leaf` containment fix, `ensure_contained` pinned to the
+/// shared `users` parent (`mount.host_root`), so the canonicalized symlink
+/// target — which lands inside user B's leaf but still starts with the
+/// shared parent — passed containment and the read succeeded with user B's
+/// bytes. RED on pre-fix `local.rs` (`ensure_contained` checking
+/// `mount.host_root`): this assertion fails because the read returns
+/// `Ok(b"user-b-only")` instead of erroring.
+#[tokio::test]
+async fn sandbox_workspace_shared_mount_rejects_cross_user_symlink_read() {
+    let (_dir, composite, digest_a, _digest_b, path_a, path_b) =
+        shared_sandbox_workspace_mount_with_two_users().await;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(path_b.join("secret.txt"), path_a.join("evil-read"))
+        .expect("plant cross-user symlink inside user A's own leaf");
+
+    let escape = composite
+        .read_file(
+            &ironclaw_host_api::VirtualPath::new(format!("/workspace/{digest_a}/evil-read"))
+                .expect("virtual path"),
+        )
+        .await;
+
+    let error = escape.expect_err(
+        "user A's per-leaf /workspace mount must reject a symlink resolving into user B's leaf",
+    );
+    assert!(
+        matches!(
+            error,
+            ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
+        ),
+        "expected SymlinkEscape, got: {error:?}"
+    );
+}
+
+/// Mirrors the read case for `write_file`: `resolve_for_write` is a
+/// separate resolution path from `resolve_existing` (it branches on whether
+/// the target already exists before canonicalizing), so it needs its own
+/// coverage rather than relying on the read test alone. Plants the same
+/// cross-user symlink and asserts a write through it is rejected rather than
+/// silently overwriting (or reading through, for the CAS check) user B's
+/// file.
+#[tokio::test]
+async fn sandbox_workspace_shared_mount_rejects_cross_user_symlink_write() {
+    let (_dir, composite, digest_a, _digest_b, path_a, path_b) =
+        shared_sandbox_workspace_mount_with_two_users().await;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(path_b.join("secret.txt"), path_a.join("evil-write"))
+        .expect("plant cross-user symlink inside user A's own leaf");
+
+    let escape = composite
+        .write_file(
+            &ironclaw_host_api::VirtualPath::new(format!("/workspace/{digest_a}/evil-write"))
+                .expect("virtual path"),
+            b"clobbered-by-user-a",
+        )
+        .await;
+
+    let error = escape.expect_err(
+        "user A's per-leaf /workspace mount must reject a write through a symlink resolving \
+         into user B's leaf",
+    );
+    assert!(
+        matches!(
+            error,
+            ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
+        ),
+        "expected SymlinkEscape, got: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(path_b.join("secret.txt")).expect("user b file still readable"),
+        b"user-b-only",
+        "user B's file must be untouched by the rejected write"
+    );
+}
+
+/// Regression guard for the fix's own containment boundary: an escape past
+/// the mount entirely (not into a sibling leaf, but outside `users_root`
+/// altogether) must still be rejected exactly as before. Not the bug this
+/// module closes (that gap was always correctly caught — see the module
+/// doc), but pinned here so the leaf-scoped containment change can't
+/// accidentally narrow this case's coverage away.
+#[tokio::test]
+async fn sandbox_workspace_shared_mount_still_rejects_outside_root_escape() {
+    let (_dir, composite, digest_a, _digest_b, path_a, _path_b) =
+        shared_sandbox_workspace_mount_with_two_users().await;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/etc/passwd", path_a.join("evil-outside"))
+        .expect("plant outside-root symlink inside user A's own leaf");
+
+    let escape = composite
+        .read_file(
+            &ironclaw_host_api::VirtualPath::new(format!("/workspace/{digest_a}/evil-outside"))
+                .expect("virtual path"),
+        )
+        .await;
+
+    let error = escape.expect_err("an outside-root escape must still be rejected");
+    assert!(
+        matches!(
+            error,
+            ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
+        ),
+        "expected SymlinkEscape, got: {error:?}"
     );
 }

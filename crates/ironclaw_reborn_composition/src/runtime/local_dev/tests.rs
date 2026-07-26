@@ -5096,9 +5096,10 @@ mod tests {
             .with_local_dev_secret_master_key(ironclaw_secrets::SecretMaterial::from(
                 "01234567890123456789012345678901".to_string(),
             ))
-            .with_runtime_process_binding(
-                crate::RebornRuntimeProcessBinding::tenant_sandbox(process_port),
-            ),
+            .with_runtime_process_binding(crate::RebornRuntimeProcessBinding::tenant_sandbox(
+                process_port,
+            ))
+            .with_sandbox_workspaces_root(dir.path().to_path_buf()),
         )
         .await
         .expect("sandboxed profile services build"); // safety: test-only assertion in #[cfg(test)] module.

@@ -185,7 +185,8 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
     )
     .expect("sandboxed profile build input resolves with the master key env set")
     .with_runtime_policy(policy)
-    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port));
+    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port))
+    .with_sandbox_workspaces_root(dir.path().to_path_buf());
 
     let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
         .await

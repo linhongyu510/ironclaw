@@ -201,6 +201,18 @@ pub struct RebornHostBindings {
     /// independently spawned one. `None` for every non-sandboxed profile.
     pub(crate) sandbox_egress_proxy:
         Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
+    /// The host directory the `TenantSandbox` container bind mounts as its
+    /// per-user workspace parent — the SAME value the assembling binary
+    /// passed into `tenant_sandbox_process_binding` to build
+    /// `runtime_process_binding` (see `sandbox_boot::tenant_sandbox_process_binding`
+    /// and `RebornSandboxConfig::new`). `build_local_storage_production_shaped`
+    /// roots the abstract-FS `/workspace` catalog mount
+    /// (`mount_sandbox_user_workspace_root`) here instead of re-deriving
+    /// `<storage root>/users`, so the container bind and the abstract-FS mount
+    /// resolve the SAME host tree for the SAME `{tenant,user}` scope. `None`
+    /// for every non-sandboxed profile; required (fail-closed) whenever
+    /// `runtime_process_binding` is `TenantSandbox`.
+    pub(crate) sandbox_workspaces_root: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -827,6 +839,18 @@ impl RebornHostBindings {
         self
     }
 
+    /// Supply the sandbox workspaces root the assembling binary passed into
+    /// `tenant_sandbox_process_binding` (the same value the `TenantSandbox`
+    /// container bind is rooted at), so the abstract-FS `/workspace` mount
+    /// resolves the identical host directory the container bind uses instead
+    /// of re-deriving it from the plain storage root. Required whenever
+    /// `runtime_process_binding` is `TenantSandbox`; the sandboxed-profile
+    /// build fails closed if it is missing.
+    pub fn with_sandbox_workspaces_root(mut self, sandbox_workspaces_root: PathBuf) -> Self {
+        self.sandbox_workspaces_root = Some(sandbox_workspaces_root);
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.deployment.require_runtime_http_egress = true;
         self
@@ -985,6 +1009,7 @@ impl RebornHostBindings {
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
             sandbox_activity: None,
             sandbox_egress_proxy: None,
+            sandbox_workspaces_root: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]

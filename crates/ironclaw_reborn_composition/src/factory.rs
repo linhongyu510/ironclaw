@@ -2307,12 +2307,22 @@ fn mount_local_dev_project_roots(
 /// `/workspace` bind (Task A3, `RebornSandboxMountSources::add_local_source`)
 /// resolve to the identical host directory for the SAME caller. Sandboxed-
 /// profile builds only.
+///
+/// Mounted with [`DiskFilesystem::mount_local_per_leaf`], not the plain
+/// [`DiskFilesystem::mount_local`]: many callers share this single physical
+/// mount, each authorized (via their own `MountView` grant target) for only
+/// their own leaf subtree. `mount_local_per_leaf` pins symlink-escape
+/// containment to that leaf instead of the whole shared parent, so a symlink
+/// planted inside one user's sandbox workspace pointing at a sibling user's
+/// directory is rejected the same way an escape past the mount root is —
+/// closing a same-mount cross-user read/write that the plain `mount_local`
+/// containment boundary (the shared parent) would not have caught.
 fn mount_sandbox_user_workspace_root(
     root: &mut CompositeRootFilesystem,
     sandbox_workspace_users_root: &Path,
 ) -> Result<(), RebornBuildError> {
     let mut disk = DiskFilesystem::new();
-    disk.mount_local(
+    disk.mount_local_per_leaf(
         VirtualPath::new("/workspace")?,
         HostPath::from_path_buf(sandbox_workspace_users_root.to_path_buf()),
     )?;
@@ -3299,6 +3309,7 @@ async fn build_production_shaped(
         runtime_process_binding,
         sandbox_activity,
         sandbox_egress_proxy,
+        sandbox_workspaces_root,
         product_auth_ports,
         native_extension_factories,
         channel_extension_bindings,
@@ -3394,6 +3405,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_workspaces_root: sandbox_workspaces_root.clone(),
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_callback,
@@ -3457,6 +3469,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_workspaces_root: sandbox_workspaces_root.clone(),
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_callback,
@@ -3531,6 +3544,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_workspaces_root: None,
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_callback,
@@ -3594,6 +3608,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_workspaces_root: None,
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_callback,
@@ -3733,7 +3748,32 @@ async fn build_local_storage_production_shaped(
                 }
             })?,
         };
-        let users_root = root.join("users");
+        // Root the abstract-FS `/workspace` mount at the SAME host directory
+        // the `TenantSandbox` container bind is rooted at
+        // (`RebornSandboxConfig::new(sandbox_workspaces_root)` in
+        // `sandbox_boot::tenant_sandbox_process_binding`), rather than
+        // re-deriving `<storage root>/users` from the plain local-dev
+        // storage root — those are two different host trees (the container
+        // binds `<storage root>/sandbox-workspaces/users/<digest>`), so
+        // deriving from `root` here left `read_file`/`write_file` and the
+        // sandboxed shell looking at different files. Fail-closed when
+        // absent: every caller that resolves a `TenantSandbox` process
+        // binding also supplies this (`build_sandboxed_local_runtime_services_input`
+        // in the CLI), so a missing value means composition wiring drifted,
+        // not a legitimately unset optional.
+        let sandbox_workspaces_root = context.sandbox_workspaces_root.clone().ok_or_else(|| {
+            RebornBuildError::InvalidConfig {
+                reason: "sandboxed profile requires a sandbox workspaces root".to_string(),
+            }
+        })?;
+        std::fs::create_dir_all(&sandbox_workspaces_root).map_err(|_| {
+            RebornBuildError::InvalidConfig {
+                reason: "sandbox workspaces root could not be initialized".to_string(),
+            }
+        })?;
+        let sandbox_workspaces_root =
+            canonicalize_local_dev_path(&sandbox_workspaces_root, "sandbox workspaces root")?;
+        let users_root = sandbox_workspaces_root.join("users");
         std::fs::create_dir_all(&users_root).map_err(|_| RebornBuildError::InvalidConfig {
             reason: "sandbox user workspace root could not be initialized".to_string(),
         })?;
@@ -3853,6 +3893,13 @@ struct RebornProductionBuildContext {
     /// spawned, carried so `shutdown_all` shuts down the SAME proxy the
     /// container was pointed at. `None` for every non-sandboxed profile.
     sandbox_egress_proxy: Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
+    /// The host directory the `TenantSandbox` container bind is rooted at
+    /// (see `RebornHostBindings::sandbox_workspaces_root`). Consulted by
+    /// `build_local_storage_production_shaped`'s `is_sandboxed_profile`
+    /// branch to root the abstract-FS `/workspace` mount at the SAME tree
+    /// the container bind uses, instead of re-deriving `<root>/users` from
+    /// the plain storage root. `None` for every non-sandboxed profile.
+    sandbox_workspaces_root: Option<PathBuf>,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
@@ -4486,6 +4533,10 @@ async fn build_backend_production(
         local_process_port,
         sandbox_activity,
         sandbox_egress_proxy,
+        // Already consumed above (`workspace_root_mode`'s `is_sandboxed_profile`
+        // branch, computed before this context is passed in here) — not
+        // needed again in this function.
+        sandbox_workspaces_root: _,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,

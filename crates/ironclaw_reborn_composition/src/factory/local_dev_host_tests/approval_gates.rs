@@ -101,13 +101,12 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         transport.clone(),
     ));
+    let local_dev_root = dir.path().join("local-dev");
     let services = build_runtime_substrate(
-        crate::deployment::local_dev_build_input(
-            "sandbox-port-owner",
-            dir.path().join("local-dev"),
-        )
-        .with_runtime_policy(tenant_sandbox_process_policy())
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port)),
+        crate::deployment::local_dev_build_input("sandbox-port-owner", local_dev_root.clone())
+            .with_runtime_policy(tenant_sandbox_process_policy())
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port))
+            .with_sandbox_workspaces_root(local_dev_root),
     )
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
