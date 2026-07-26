@@ -591,8 +591,15 @@ mod tests {
             .expect("test network create succeeds");
 
         let container_name = format!("ironclaw-test-attribution-c-{}", uuid::Uuid::new_v4());
-        let create_labels =
-            super::super::registry::build_user_container_labels(PREFIX, &tenant, &user);
+        // The security-posture stamp (W16) is irrelevant to attribution — this
+        // test only cares that the tenant/user labels resolve from an IP — so
+        // any non-empty stamp value works here.
+        let create_labels = super::super::registry::build_user_container_labels(
+            PREFIX,
+            &tenant,
+            &user,
+            "attribution-test-posture-stamp",
+        );
         let created = docker
             .create_container(
                 Some(bollard::container::CreateContainerOptions {
