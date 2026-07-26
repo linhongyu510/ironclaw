@@ -317,7 +317,17 @@ pub(super) async fn user_container_launch_config(
         "PATH=/workspace/.home/.npm-global/bin:/workspace/.home/.local/bin:/home/sandbox/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             .to_string(),
     );
-    let container_user = config.container_identity.container_user()?;
+    // Historically `config.container_identity.container_user()` (default
+    // `None`, i.e. image default) fed `Config.user` here, and the image's
+    // own trailing `USER root` + entrypoint `capsh --drop=all --user=sandbox`
+    // dropped to uid 1000 *inside* the container after PID 1 already started
+    // as root. That capsh exec is gone (see docker/process-sandbox-
+    // entrypoint.sh) and `cap_add` below no longer re-adds
+    // SETPCAP/SETUID/SETGID, so nothing in-container can perform that drop
+    // any more — the container-create config itself must pin PID 1 to uid
+    // 1000 directly, matching the fixed identity every `docker exec`
+    // (`SANDBOX_EXEC_UID`/`GID`) already assumes.
+    let container_user = Some(format!("{SANDBOX_EXEC_UID}:{SANDBOX_EXEC_GID}"));
     let mut binds = config
         .mount_sources
         .prepare_container_binds(workspace, None)
@@ -333,21 +343,18 @@ pub(super) async fn user_container_launch_config(
         auto_remove: Some(false),
         network_mode: config.container_network_mode(),
         cap_drop: Some(vec!["ALL".to_string()]),
-        // The image ENTRYPOINT (docker/process-sandbox-entrypoint.sh) execs
-        // `capsh --drop=all --user=sandbox`, which itself needs
-        // CAP_SETPCAP/CAP_SETUID/CAP_SETGID to drop its own remaining
-        // capabilities and switch to the unprivileged `sandbox` user before
-        // handing off to the workload. `cap_drop: ALL` above strips those
-        // too, so without re-adding exactly these three the container
-        // crashes on start. The workload still ends up with an empty
-        // effective/bounding capability set (uid 1000) once capsh finishes —
-        // these three are consumed by capsh itself, never inherited by the
-        // command it execs.
-        cap_add: Some(vec![
-            "SETPCAP".to_string(),
-            "SETUID".to_string(),
-            "SETGID".to_string(),
-        ]),
+        // No caps are re-added: PID 1 is created directly as uid 1000 (via
+        // `user` below) instead of starting as root and dropping privilege
+        // in-container via `capsh --drop=all --user=sandbox`. That capsh
+        // exec previously required re-adding exactly
+        // CAP_SETPCAP/CAP_SETUID/CAP_SETGID so it could drop its own
+        // remaining capabilities and switch users — a circular grant that
+        // existed solely to enable the drop. Removing the capsh step
+        // (docker/process-sandbox-entrypoint.sh) eliminates the need for
+        // those caps entirely, closing the root-init window: the container
+        // never has a PID 1 that runs as root with privilege-manipulating
+        // capabilities.
+        cap_add: None,
         security_opt: Some(vec!["no-new-privileges:true".to_string()]),
         readonly_rootfs: Some(true),
         tmpfs: Some(
@@ -413,12 +420,11 @@ fn wrap_command_for_pgid_isolation(command: &str) -> String {
 
 /// The unprivileged user (baked into the image by
 /// `docker/process-sandbox-entrypoint.sh`, uid 1000) every dispatched
-/// command must run as. The container's own init process stays root (see
-/// [`user_container_launch_config`] — the image ENTRYPOINT itself needs root
-/// to `capsh --drop=all --user=sandbox` before handing off), but nothing
-/// reaching the sandbox through `docker exec` should ever run as root:
-/// every `CreateExecOptions` built in this module must set `user` to this
-/// value.
+/// command must run as. The container's own init process (PID 1) also runs
+/// as this identity now (see [`user_container_launch_config`], which sets
+/// `Config.user` to `SANDBOX_EXEC_UID`:`SANDBOX_EXEC_GID` directly) — there
+/// is no longer a root init window. Every `CreateExecOptions` built in this
+/// module must still set `user` to this value explicitly.
 const SANDBOX_EXEC_USER: &str = "sandbox";
 
 /// Numeric uid/gid backing [`SANDBOX_EXEC_USER`] — `Dockerfile.
@@ -1080,23 +1086,13 @@ mod docker_tests {
             cap_drop.iter().any(|cap| cap == "ALL"),
             "applied container must drop ALL capabilities: {cap_drop:?}"
         );
-        let mut cap_add = host_config.cap_add.unwrap_or_default();
-        cap_add.sort();
-        assert_eq!(
-            cap_add,
-            vec![
-                "SETGID".to_string(),
-                "SETPCAP".to_string(),
-                "SETUID".to_string()
-            ],
-            "applied container must re-add exactly the three caps the image entrypoint's \
-             `capsh --drop=all --user=sandbox` needs to drop its own remaining capabilities \
-             and switch to the sandbox user — no more, no less: {cap_add:?}"
-        );
+        let cap_add = host_config.cap_add.unwrap_or_default();
         assert!(
-            !cap_add.iter().any(|cap| cap == "NET_ADMIN"),
-            "must never add NET_ADMIN — egress enforcement here is the topological internal \
-             network + proxy, not iptables inside the container: {cap_add:?}"
+            cap_add.is_empty(),
+            "the image entrypoint no longer execs `capsh --drop=all --user=sandbox` (removed \
+             so the container never runs an init process with privilege-manipulating \
+             capabilities), so nothing re-adds SETPCAP/SETUID/SETGID any more — applied \
+             cap_add must be empty: {cap_add:?}"
         );
         let security_opt = host_config.security_opt.unwrap_or_default();
         assert!(
@@ -1104,6 +1100,48 @@ mod docker_tests {
                 .iter()
                 .any(|opt| opt == "no-new-privileges:true"),
             "applied container must set no-new-privileges: {security_opt:?}"
+        );
+
+        // The container-create config itself must pin PID 1 to uid 1000 —
+        // previously only `docker exec` identity was proven (every exec
+        // already ran as uid 1000 via `SANDBOX_EXEC_USER`), leaving the
+        // container's own init process (PID 1) running as root. That is the
+        // actual gap this test guards: the *configured* User.
+        assert_eq!(
+            inspected.config.as_ref().and_then(|c| c.user.clone()),
+            Some("1000:1000".to_string()),
+            "applied container's configured User must be uid:gid 1000:1000, not root or the \
+             `sandbox` username: {:?}",
+            inspected.config
+        );
+
+        // ...and the *live* PID 1 itself, read via `/proc/1/status` from
+        // inside the container's own pid namespace (an exec'd process always
+        // shares PID 1's pid namespace, so this reflects the real init
+        // process, not just the exec's own identity).
+        let proc1_status = exec_in_container(
+            &docker,
+            &container_id,
+            ContainerWorkdir::workspace_root(),
+            Vec::new(),
+            "cat /proc/1/status".to_string(),
+            Duration::from_secs(10),
+            4096,
+        )
+        .await
+        .expect("exec reading /proc/1/status succeeds");
+        let uid_line = proc1_status
+            .output
+            .lines()
+            .find(|line| line.starts_with("Uid:"))
+            .unwrap_or_else(|| panic!("/proc/1/status must contain a Uid line: {proc1_status:?}"));
+        assert!(
+            uid_line
+                .split_whitespace()
+                .skip(1)
+                .all(|field| field == "1000"),
+            "PID 1 itself (the container's init process) must run as uid 1000, not root — \
+             this is the actual root-init-window gap: {uid_line:?}"
         );
 
         best_effort_remove(&docker, &container_id).await;
