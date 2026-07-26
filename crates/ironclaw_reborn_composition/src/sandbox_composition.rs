@@ -202,6 +202,22 @@ mod tests {
         Arc::new(InMemoryResourceGovernor::new())
     }
 
+    /// True iff `SandboxRuntimeBindings::build`'s reaper spawn will be able
+    /// to reach a Docker daemon. Reuses
+    /// `ironclaw_host_runtime::sandbox_docker_readiness` (the same one-shot
+    /// connect attempt `connect_docker_with_retry` retries) rather than
+    /// shelling out to the `docker` CLI directly — the CLI honors
+    /// `DOCKER_HOST`, not this crate's `IRONCLAW_REBORN_DOCKER_HOST`
+    /// override, so a CLI-only probe would report "reachable" even while
+    /// `sandboxed_profile_fails_closed_when_docker_unreachable`'s sibling
+    /// test has that override pointed at a nonexistent socket.
+    async fn docker_available() -> bool {
+        matches!(
+            ironclaw_host_runtime::sandbox_docker_readiness().await,
+            ironclaw_host_runtime::SandboxDockerReadiness::Ready
+        )
+    }
+
     #[tokio::test]
     async fn non_sandboxed_profile_yields_inert_bindings_with_no_reaper() {
         let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
@@ -230,16 +246,37 @@ mod tests {
     /// `sandbox_reaper_task::tests::docker_unreachable_fails_the_spawn_closed`
     /// for why the guard must not be held across an `.await` in an outer
     /// async fn.
+    ///
+    /// `SandboxRuntimeBindings::build` now fails closed (D4-1) when the
+    /// reaper can't connect to Docker, which makes this call-site test
+    /// genuinely Docker-dependent — `cargo test -p ironclaw_reborn_composition
+    /// --lib` is a plain, non-docker-gated lane, so a runner without a
+    /// reachable daemon must SKIP rather than fail. The per-user-ceiling
+    /// assertion itself (`apply_sandbox_user_ceiling`) is Docker-free and
+    /// already has direct, dedicated coverage in
+    /// `sandbox_quota::tests::ceiling_denies_the_second_concurrent_reservation_from_any_user_in_the_tenant`
+    /// — reasserting it here via a bypassed, Docker-free `build()` path would
+    /// just duplicate that coverage while still needing to fake the reaper,
+    /// so a visible runtime skip (matching
+    /// `ironclaw_host_runtime`'s `docker_gate` convention) is the correct
+    /// shape for this call-site test, not a Docker-free rewrite.
     #[test]
     fn sandboxed_profile_applies_the_user_ceiling() {
         let _guard = ironclaw_common::env_helpers::lock_env();
-        let governor = governor();
-        let owner_user_id = UserId::new("probe-user").unwrap();
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build current-thread runtime for test");
+
+        if !runtime.block_on(docker_available()) {
+            eprintln!(
+                "SKIP: no docker daemon reachable — sandboxed_profile_applies_the_user_ceiling requires a real Docker daemon for SandboxRuntimeBindings::build's reaper spawn (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let governor = governor();
+        let owner_user_id = UserId::new("probe-user").unwrap();
+
         let bindings = runtime
             .block_on(SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
                 is_sandboxed_profile: true,
