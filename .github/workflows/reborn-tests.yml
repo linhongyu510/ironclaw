@@ -530,6 +530,95 @@ jobs:
       - name: Run Reborn group tests
         run: scripts/ci/run-reborn-group-tests.sh
 
+  sandbox-docker-tests:
+    name: Reborn sandbox Docker tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    # Builds Dockerfile.process-sandbox and runs every docker-gated sandbox
+    # test (container identity/caps, ICC lateral-isolation, network posture,
+    # CA-start regression, cross-tenant escape, reaper lifecycle) against the
+    # freshly-built image. Before this job, these tests only ran on one
+    # developer's laptop: everywhere else the `docker_gate` helper printed a
+    # `SKIP: ...` line and passed, so the lane stayed green through three
+    # sandbox security bugs (a capability bug, an exec-as-root bug, and a
+    # container start race). IRONCLAW_REQUIRE_DOCKER_TESTS=1 below makes the
+    # gate panic instead of skip, so a missing daemon/image is a hard CI
+    # failure, not a quiet pass.
+    timeout-minutes: 30
+    env:
+      IRONCLAW_REQUIRE_DOCKER_TESTS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Dedicated key: this job builds ironclaw_host_runtime and the root
+          # integration-test package but with a plain (non-instrumented) test
+          # profile, distinct from both `reborn-tests-crates-cov` (llvm-cov
+          # instrumented) and `reborn-tests-root` (different partitioning).
+          shared-key: reborn-sandbox-docker-tests
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build ironclaw-worker sandbox image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.process-sandbox
+          # Load into the local daemon (not pushed) so docker_gate's `docker
+          # image inspect ironclaw-worker:latest` and the tests' own `docker
+          # run` see it exactly like a developer's locally-built image.
+          load: true
+          tags: ironclaw-worker:latest
+          # Same cache scope as the `ironclaw.yml` docker.yml worker build so
+          # PR runs restore its layers instead of a cold apt-get; PR branches
+          # never write to it (mirrors the Rust cache save-if gate above), so
+          # they can't evict the shared entry the main-branch build seeds.
+          cache-from: type=gha,scope=worker
+          cache-to: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && 'type=gha,mode=max,scope=worker' || '' }}
+
+      - name: Run host_runtime docker-gated unit tests (container caps/ICC/network posture)
+        run: |
+          cargo test -p ironclaw_host_runtime --lib docker_tests:: -- --nocapture
+
+      - name: Run host_runtime docker-gated integration tests
+        run: |
+          cargo test -p ironclaw_host_runtime \
+            --test cli_session_docker \
+            --test sandbox_exec_transport_docker \
+            --test sandbox_reaper_docker \
+            --test sandbox_workspace_fs_parity_docker \
+            --test sandbox_cross_tenant_escape \
+            -- --nocapture
+
+      - name: Run root Reborn docker-gated integration test (egress proxy)
+        run: |
+          cargo test -p ironclaw_reborn_integration_tests \
+            --test reborn_integration_sandbox_egress_proxy \
+            -- --nocapture
+
   reborn-integration-coverage:
     name: Reborn integration coverage (${{ matrix.lane }})
     needs: changes
@@ -819,6 +908,7 @@ jobs:
       - crate-tests
       - root-reborn-parity-tests
       - reborn-group-tests
+      - sandbox-docker-tests
       - reborn-integration-coverage
       - coverage-report
       - webui-v2-js-tests
@@ -868,6 +958,11 @@ jobs:
 
           if ! job_result_ok "reborn-group-tests" "${{ needs.reborn-group-tests.result }}" false "allow"; then
             echo "One or more Reborn group tests failed: ${{ needs.reborn-group-tests.result }}"
+            exit 1
+          fi
+
+          if ! job_result_ok "sandbox-docker-tests" "${{ needs.sandbox-docker-tests.result }}" false "allow"; then
+            echo "One or more Reborn sandbox Docker tests failed: ${{ needs.sandbox-docker-tests.result }}"
             exit 1
           fi
 
