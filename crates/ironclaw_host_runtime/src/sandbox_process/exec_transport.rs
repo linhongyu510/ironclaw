@@ -1146,4 +1146,102 @@ mod docker_tests {
 
         best_effort_remove(&docker, &container_id).await;
     }
+
+    /// Pins the property W5's planned CA trust distribution depends on: the
+    /// persistent container never sets `IRONCLAW_EGRESS_LOCKDOWN` (see this
+    /// module's doc comment), but W5 sets `SSL_CERT_FILE` regardless as its
+    /// trust-distribution mechanism. `docker/process-sandbox-entrypoint.sh`
+    /// used to gate its CA-install branch on `SSL_CERT_FILE` alone, so that
+    /// env var by itself made the entrypoint `cp`/`update-ca-certificates`
+    /// under uid 1000 + `readonly_rootfs` — which fails, and `set -eu`
+    /// aborts the entrypoint, so the container never starts. This builds the
+    /// exact launch config `create_and_start_user_container` would produce,
+    /// adds only `SSL_CERT_FILE` (no lockdown env), and asserts the
+    /// container is still running once the entrypoint has run.
+    #[tokio::test]
+    async fn persistent_container_starts_with_ssl_cert_file_but_no_lockdown() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — persistent_container_starts_with_ssl_cert_file_but_no_lockdown requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image) {
+            eprintln!(
+                "SKIP: sandbox worker image {image:?} is not built locally — requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = docker_tests_config(temp.path());
+        let tenant = ironclaw_host_api::TenantId::new("ssl-cert-file-tenant").unwrap();
+        let user = ironclaw_host_api::UserId::new("ssl-cert-file-user").unwrap();
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let workspace = key.workspace_path(temp.path());
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let mut launch = user_container_launch_config(&config, &tenant, &user, &workspace)
+            .await
+            .expect("launch config builds");
+        let mut env = launch.env.take().unwrap_or_default();
+        // A real, readable file — the same CA bundle the base image already
+        // installs via `ca-certificates` — so `[ -f "${SSL_CERT_FILE}" ]`
+        // is true, exactly as it would be for W5's bind-mounted bundle.
+        env.push("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt".to_string());
+        launch.env = Some(env);
+
+        let container_name = format!("ironclaw-test-ssl-cert-file-{}", uuid::Uuid::new_v4());
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: container_name,
+                    platform: None,
+                }),
+                launch,
+            )
+            .await
+            .expect("container create succeeds");
+        docker
+            .start_container(&created.id, None::<StartContainerOptions<String>>)
+            .await
+            .expect("container start succeeds");
+
+        wait_until_running(&docker, &created.id)
+            .await
+            .expect("container reaches running state");
+
+        // `wait_until_running`'s first successful poll can land in the
+        // narrow window where Docker already reports `running: true` but a
+        // failing entrypoint (e.g. `cp` into a read-only rootfs) is about to
+        // exit the container milliseconds later via `set -eu` — a bare
+        // single inspect right after start is not enough to distinguish
+        // "started and stayed up" from "started and immediately aborted".
+        // Give the entrypoint's synchronous CA-install work time to finish
+        // (or fail) before re-checking that the container is still up.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let inspected = docker
+            .inspect_container(&created.id, None::<InspectContainerOptions>)
+            .await
+            .expect("inspect succeeds");
+        let running = inspected
+            .state
+            .as_ref()
+            .and_then(|state| state.running)
+            .unwrap_or(false);
+        assert!(
+            running,
+            "container with SSL_CERT_FILE set but no IRONCLAW_EGRESS_LOCKDOWN must still be \
+             running a second after the entrypoint has run (regression: the entrypoint's \
+             CA-install branch was gated only on SSL_CERT_FILE, not on the lockdown flag, so \
+             `update-ca-certificates` under uid 1000 + readonly rootfs failed and `set -eu` \
+             aborted the entrypoint before it could exec `sleep infinity`): {:?}",
+            inspected.state
+        );
+
+        best_effort_remove(&docker, &created.id).await;
+    }
 }
