@@ -31,15 +31,33 @@ pub(crate) fn label_created_at(prefix: &str) -> String {
     format!("{prefix}.created_at")
 }
 
+/// Stamps the container with the security-posture generation
+/// [`super::exec_transport::security_posture_stamp`] computed at create
+/// time — the container-side analogue of `verify_existing_egress_network_
+/// posture`'s network check. `ensure_container` reads this label back on
+/// every subsequent lookup and recycles the container the moment the stamp
+/// no longer matches what the running code would create today, so a
+/// hardening change (e.g. W1's non-root PID 1) reaches existing containers
+/// on their next use instead of waiting up to the reaper's 7-day forced
+/// recycle.
+pub(crate) fn label_security_posture(prefix: &str) -> String {
+    format!("{prefix}.security_posture")
+}
+
 pub(crate) fn build_user_container_labels(
     prefix: &str,
     tenant_id: &TenantId,
     user_id: &UserId,
+    security_posture_stamp: &str,
 ) -> HashMap<String, String> {
     HashMap::from([
         (label_tenant(prefix), tenant_id.as_str().to_string()),
         (label_user(prefix), user_id.as_str().to_string()),
         (label_created_at(prefix), Utc::now().to_rfc3339()),
+        (
+            label_security_posture(prefix),
+            security_posture_stamp.to_string(),
+        ),
     ])
 }
 
@@ -198,7 +216,7 @@ mod tests {
     fn candidate_parses_created_at_and_ignores_missing_labels() {
         let tenant = TenantId::new("tenant-a").unwrap();
         let user = UserId::new("user-a").unwrap();
-        let labels = build_user_container_labels("ironclaw", &tenant, &user);
+        let labels = build_user_container_labels("ironclaw", &tenant, &user, "stamp-abc");
         let container = ContainerSummary {
             id: Some("abc123".to_string()),
             labels: Some(labels),
