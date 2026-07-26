@@ -22,7 +22,7 @@ use bollard::{
     errors::Error as DockerError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
     models::{HostConfig, Ipam, IpamConfig},
-    network::CreateNetworkOptions,
+    network::{CreateNetworkOptions, InspectNetworkOptions},
 };
 use futures_util::StreamExt;
 use ironclaw_host_api::{TenantId, UserId};
@@ -185,11 +185,78 @@ async fn ensure_egress_network(
         .await
     {
         Ok(_) => Ok(()),
-        Err(error) if is_network_already_exists_error(&error) => Ok(()),
+        // "Already exists" only proves *a* network by this name is present,
+        // not that it has the isolation posture this function requires — an
+        // older deployment's network (created before `enable_icc` was added
+        // below, or hand-rolled) would silently leave containers on a
+        // lateral-movement-capable network forever, since (unlike
+        // containers, which the reaper recycles) nothing ever recreates this
+        // network. Verify the existing network's actual options before
+        // treating this as success.
+        Err(error) if is_network_already_exists_error(&error) => {
+            verify_existing_egress_network_posture(docker).await
+        }
         Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
             "sandbox egress network ensure failed: {error}"
         ))),
     }
+}
+
+/// Inspects the already-existing [`SANDBOX_EGRESS_NETWORK_NAME`] network and
+/// fails closed if its live options don't match what
+/// [`sandbox_egress_network_create_options`] requires — in particular
+/// [`SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY`], the setting that removes the
+/// container↔container path a shared-network deployment would otherwise
+/// leave open (see this module's `enable_icc` doc comment). Deliberately
+/// does not delete or recreate the network on mismatch — other containers
+/// may already be attached, and pulling the network out from under a
+/// running deployment is worse than a loud, explicit failure.
+async fn verify_existing_egress_network_posture(
+    docker: &Docker,
+) -> Result<(), RuntimeProcessError> {
+    let network = docker
+        .inspect_network(
+            SANDBOX_EGRESS_NETWORK_NAME,
+            None::<InspectNetworkOptions<String>>,
+        )
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox egress network {SANDBOX_EGRESS_NETWORK_NAME:?} already exists but \
+                 could not be inspected to verify its isolation posture: {error}"
+            ))
+        })?;
+
+    let expected = sandbox_egress_network_create_options();
+    let expected_icc = expected
+        .options
+        .get(SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY)
+        .cloned();
+    let actual_internal = network.internal;
+    let actual_icc = network
+        .options
+        .as_ref()
+        .and_then(|options| options.get(SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY))
+        .cloned();
+
+    if actual_internal == Some(expected.internal) && actual_icc == expected_icc {
+        return Ok(());
+    }
+
+    Err(RuntimeProcessError::ExecutionFailed(format!(
+        "sandbox egress network {SANDBOX_EGRESS_NETWORK_NAME:?} already exists but its isolation \
+         posture does not match what this deployment requires — expected internal={:?} and \
+         {}={:?}, found internal={:?} and {}={:?}. Refusing to proceed silently: a mismatched \
+         network would leave container-to-container lateral movement open and undermine \
+         source-IP attribution for the egress proxy. Recreate {SANDBOX_EGRESS_NETWORK_NAME:?} \
+         manually with the required options (no containers may currently be attached).",
+        expected.internal,
+        SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY,
+        expected_icc,
+        actual_internal,
+        SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY,
+        actual_icc,
+    )))
 }
 
 /// Gates [`ensure_egress_network`] behind `network_ready` so the (already
@@ -211,6 +278,13 @@ async fn ensure_egress_network_once(
         .await
         .map(|_| ())
 }
+
+/// The bridge-driver option key that disables inter-container communication
+/// (ICC) on the network — verified empirically (see the doc comment on
+/// [`sandbox_egress_network_create_options`]'s `options` field below) to
+/// drop container↔container TCP/ICMP on the shared L2 while leaving
+/// container↔gateway reachability (the egress proxy path) intact.
+const SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY: &str = "com.docker.network.bridge.enable_icc";
 
 /// Pure builder for the `internal: true`, pinned-subnet network Docker
 /// creates for [`SANDBOX_EGRESS_NETWORK_NAME`] — kept as a standalone
@@ -234,6 +308,22 @@ fn sandbox_egress_network_create_options() -> CreateNetworkOptions<String> {
             }]),
             ..Default::default()
         },
+        // Every per-user sandbox container shares this ONE network, so
+        // `internal: true` alone isn't enough: it removes the default route
+        // *off-host*, but says nothing about container-to-container traffic
+        // on the shared L2 — user A's container can otherwise reach user
+        // B's container directly. Disabling ICC closes that lateral path
+        // and is also what makes source-IP attribution at the egress proxy
+        // sound (a container that can't reach its neighbors can't intercept
+        // or spoof their traffic either). Verified empirically: with this
+        // set, container-to-container TCP and ICMP are dropped while
+        // container-to-gateway reachability (the proxy path) is preserved.
+        options: [(
+            SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY.to_string(),
+            "false".to_string(),
+        )]
+        .into_iter()
+        .collect(),
         ..Default::default()
     }
 }
@@ -860,6 +950,16 @@ mod tests {
             ipam_config.gateway.as_deref(),
             Some(SANDBOX_EGRESS_NETWORK_GATEWAY)
         );
+        assert_eq!(
+            options
+                .options
+                .get(SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY)
+                .map(String::as_str),
+            Some("false"),
+            "must disable inter-container communication (E-ICC) — otherwise a container on \
+             this shared network can reach another user's container directly, defeating \
+             lateral-movement isolation and source-IP attribution at the egress proxy"
+        );
     }
 
     #[test]
@@ -1011,6 +1111,339 @@ mod docker_tests {
                 }),
             )
             .await;
+    }
+
+    async fn best_effort_remove_network(docker: &Docker, network_name: &str) {
+        let _ = docker.remove_network(network_name).await;
+    }
+
+    /// `SANDBOX_EGRESS_NETWORK_NAME` is one real, singleton Docker resource.
+    /// `cargo test`'s default parallel runner would otherwise let this
+    /// module's network-recreating tests race each other for the same
+    /// name (the other `docker_tests` below use `disable_network: true`
+    /// with no broker, which resolves to the `none` network mode and never
+    /// touches this network at all — see `container_network_mode`). Every
+    /// test that creates, deletes, or posture-checks the real egress
+    /// network acquires this lock for its duration instead of relying on
+    /// `--test-threads=1`.
+    static EGRESS_NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A tiny (`busybox`, already present wherever these tests actually run)
+    /// container attached to `network_name`, running `command` under `sh
+    /// -c`. Used by the ICC probes below instead of the real sandbox worker
+    /// image — these tests only need raw network reachability between two
+    /// containers, not the sandbox's exec/workdir/user conventions.
+    async fn start_probe_container(
+        docker: &Docker,
+        network_name: &str,
+        name: &str,
+        command: &str,
+    ) -> String {
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: name.to_string(),
+                    platform: None,
+                }),
+                Config {
+                    image: Some("busybox:1.36".to_string()),
+                    cmd: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        command.to_string(),
+                    ]),
+                    host_config: Some(HostConfig {
+                        network_mode: Some(network_name.to_string()),
+                        auto_remove: Some(false),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("probe container create succeeds");
+        docker
+            .start_container(&created.id, None::<StartContainerOptions<String>>)
+            .await
+            .expect("probe container start succeeds");
+        created.id
+    }
+
+    /// The probe container's IPv4 address on `network_name`, read back via
+    /// `docker inspect` rather than assumed — this is what another
+    /// container would actually dial.
+    async fn probe_container_ip(docker: &Docker, container_id: &str, network_name: &str) -> String {
+        let inspected = docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .expect("probe container inspect succeeds");
+        inspected
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .and_then(|networks| networks.get(network_name).cloned())
+            .and_then(|endpoint| endpoint.ip_address)
+            .filter(|ip| !ip.is_empty())
+            .unwrap_or_else(|| panic!("probe container {container_id} has no IP on {network_name}"))
+    }
+
+    /// A short exec inside `container_id`, returning `(stdout, exit_code)`.
+    /// Deliberately bypasses [`exec_in_container`] (which assumes the
+    /// sandbox worker image's fixed uid/workdir conventions) — these probe
+    /// containers are plain `busybox`, so the exec just runs as the image
+    /// default user with no working-directory requirement.
+    async fn probe_exec(docker: &Docker, container_id: &str, command: &str) -> (String, i64) {
+        let exec = docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        command.to_string(),
+                    ]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("probe exec create succeeds");
+        let output = match docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("probe exec start succeeds")
+        {
+            StartExecResults::Attached { output, .. } => collect_exec_output(output, 4096)
+                .await
+                .expect("probe exec output collects"),
+            StartExecResults::Detached => panic!("probe exec unexpectedly detached"),
+        };
+        let exit_code = docker
+            .inspect_exec(&exec.id)
+            .await
+            .expect("probe exec inspect succeeds")
+            .exit_code
+            .unwrap_or(-1);
+        (output, exit_code)
+    }
+
+    /// Recreates the real [`SANDBOX_EGRESS_NETWORK_NAME`] network with the
+    /// production create options, after best-effort tearing down whatever
+    /// was there before (this box, like any dev machine, may still have an
+    /// older network by this name left over from before `enable_icc` was
+    /// added — see this module's `enable_icc` doc comment). Tests using
+    /// this must not depend on ambient network state and must clean up
+    /// after themselves.
+    async fn recreate_real_egress_network(docker: &Docker) {
+        best_effort_remove_stale_network_containers(docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+        best_effort_remove_network(docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+        docker
+            .create_network(sandbox_egress_network_create_options())
+            .await
+            .expect("fresh egress network create succeeds");
+    }
+
+    /// Force-removes any containers still attached to `network_name` from a
+    /// prior interrupted test run — `remove_network` refuses to delete a
+    /// network with attached containers, so a stale container left over
+    /// from a killed test process would otherwise wedge every later test
+    /// that needs a clean network.
+    async fn best_effort_remove_stale_network_containers(docker: &Docker, network_name: &str) {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("network".to_string(), vec![network_name.to_string()]);
+        let Ok(containers) = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+        else {
+            return;
+        };
+        for container in containers {
+            if let Some(id) = container.id {
+                best_effort_remove(docker, &id).await;
+            }
+        }
+    }
+
+    /// Plan row 11: `enable_icc=false` must actually block container-to-
+    /// container traffic on the shared egress network, not just be set in
+    /// the create-options struct (that's the pure unit test above). Proves
+    /// the block with a real attack — A tries to open TCP to B — and
+    /// separately proves B's listener was genuinely alive throughout,
+    /// checked from B itself: without that second check, a dead listener
+    /// would make the "blocked" assertion pass for the wrong reason.
+    #[tokio::test]
+    async fn icc_disabled_blocks_container_to_container() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — icc_disabled_blocks_container_to_container requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let _network_guard = EGRESS_NETWORK_TEST_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        recreate_real_egress_network(&docker).await;
+
+        let b_name = format!("ironclaw-test-icc-b-{}", uuid::Uuid::new_v4());
+        let a_name = format!("ironclaw-test-icc-a-{}", uuid::Uuid::new_v4());
+        let b_id = start_probe_container(
+            &docker,
+            SANDBOX_EGRESS_NETWORK_NAME,
+            &b_name,
+            // Restart the listener after every connection attempt so
+            // ordering between the attack and the aliveness check below
+            // can't accidentally consume the one-shot listener and produce
+            // a false "blocked" result.
+            "while true; do nc -l -p 8080 -e /bin/true; done",
+        )
+        .await;
+        let a_id =
+            start_probe_container(&docker, SANDBOX_EGRESS_NETWORK_NAME, &a_name, "sleep 300").await;
+        let b_ip = probe_container_ip(&docker, &b_id, SANDBOX_EGRESS_NETWORK_NAME).await;
+
+        let (_output, exit_code) =
+            probe_exec(&docker, &a_id, &format!("nc -z -w2 {b_ip} 8080")).await;
+        assert_ne!(
+            exit_code, 0,
+            "with enable_icc=false, container A must NOT be able to open a TCP connection to \
+             container B's IP on the shared egress network — got exit code {exit_code}, \
+             expected a non-zero (blocked/timed out) connect"
+        );
+
+        let (_output, listener_exit_code) =
+            probe_exec(&docker, &b_id, "nc -z -w1 127.0.0.1 8080").await;
+        assert_eq!(
+            listener_exit_code, 0,
+            "B's own listener must still be alive after A's blocked connection attempt — \
+             otherwise the block above could be a dead-listener false pass rather than real \
+             ICC isolation"
+        );
+
+        best_effort_remove(&docker, &a_id).await;
+        best_effort_remove(&docker, &b_id).await;
+        best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+    }
+
+    /// Plan row 12: `enable_icc=false` must not over-block — a container on
+    /// the egress network still needs to reach the network's own gateway,
+    /// since that's where the egress proxy is reached (see
+    /// `SANDBOX_EGRESS_NETWORK_GATEWAY`'s doc comment). ICC only affects the
+    /// bridge's inter-port forwarding, not traffic to the bridge's own
+    /// gateway address, so this proves the isolation setting didn't
+    /// accidentally sever the one path containers are actually supposed to
+    /// use.
+    #[tokio::test]
+    async fn icc_disabled_preserves_gateway_reachability() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — icc_disabled_preserves_gateway_reachability requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let _network_guard = EGRESS_NETWORK_TEST_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        recreate_real_egress_network(&docker).await;
+
+        let name = format!("ironclaw-test-icc-gateway-{}", uuid::Uuid::new_v4());
+        let container_id =
+            start_probe_container(&docker, SANDBOX_EGRESS_NETWORK_NAME, &name, "sleep 300").await;
+
+        let (output, exit_code) = probe_exec(
+            &docker,
+            &container_id,
+            &format!("ping -c1 -W2 {SANDBOX_EGRESS_NETWORK_GATEWAY}"),
+        )
+        .await;
+        assert_eq!(
+            exit_code, 0,
+            "a container on the icc-disabled egress network must still reach its own gateway \
+             ({SANDBOX_EGRESS_NETWORK_GATEWAY}) — enable_icc must not sever the proxy path: \
+             {output}"
+        );
+
+        best_effort_remove(&docker, &container_id).await;
+        best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+    }
+
+    /// The fail-closed half of W1.5: an existing network that does NOT
+    /// carry the required `enable_icc=false` option (an older deployment's
+    /// network, or a hand-rolled one) must make `ensure_egress_network`
+    /// error out naming the mismatch — not silently succeed, which is what
+    /// the pre-fix "already exists ⇒ Ok" branch did. Deterministic by
+    /// construction: creates a network by the right name with deliberately
+    /// wrong options, rather than relying on whatever this machine happens
+    /// to have lying around.
+    #[tokio::test]
+    async fn ensure_egress_network_fails_closed_on_posture_mismatch() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — ensure_egress_network_fails_closed_on_posture_mismatch requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let _network_guard = EGRESS_NETWORK_TEST_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        best_effort_remove_stale_network_containers(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+        best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+
+        // A network with the right name, right subnet/gateway/internal —
+        // but WITHOUT enable_icc=false, exactly like the old network this
+        // fix must not silently accept.
+        docker
+            .create_network(CreateNetworkOptions {
+                name: SANDBOX_EGRESS_NETWORK_NAME.to_string(),
+                check_duplicate: true,
+                driver: "bridge".to_string(),
+                internal: true,
+                ipam: Ipam {
+                    config: Some(vec![IpamConfig {
+                        subnet: Some(SANDBOX_EGRESS_NETWORK_SUBNET.to_string()),
+                        gateway: Some(SANDBOX_EGRESS_NETWORK_GATEWAY.to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .expect("posture-mismatched network create succeeds");
+
+        let temp = tempfile::tempdir().unwrap();
+        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .expect("valid proxy url");
+        assert_eq!(
+            egress_config.container_network_mode(),
+            Some(SANDBOX_EGRESS_NETWORK_NAME.to_string()),
+            "test config must actually require the egress network for this test to be meaningful"
+        );
+
+        let result = ensure_egress_network(&docker, &egress_config).await;
+        let error = result.expect_err(
+            "an existing network missing enable_icc=false must be rejected, not silently \
+             accepted as if isolation were already in place",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY),
+            "the fail-closed error must name the mismatched option so an operator can act on \
+             it: {message}"
+        );
+
+        best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
     }
 
     /// Guards against the applied container's `HostConfig` diverging from
