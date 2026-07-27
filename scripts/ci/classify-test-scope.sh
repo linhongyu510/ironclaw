@@ -5,6 +5,7 @@ has_core_code=false
 docs_only=true
 has_legacy_tests=false
 has_reborn_tests=false
+has_sandbox_docker_tests=false
 
 is_docs_only_path() {
   local path="$1"
@@ -93,6 +94,36 @@ is_reborn_test_path() {
   esac
 }
 
+is_sandbox_docker_path() {
+  local path="$1"
+  case "$path" in
+    # The docker-gated sandbox suite: crate source, the docker-gated test
+    # files themselves (+ their shared docker_gate.rs helpers), the sandbox
+    # image, and this workflow file (it owns the job + its `if:` gate).
+    crates/ironclaw_host_runtime/src/sandbox_process/*)
+      return 0
+      ;;
+    crates/ironclaw_host_runtime/tests/cli_session_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_exec_transport_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_reaper_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_workspace_fs_parity_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_cross_tenant_escape.rs|crates/ironclaw_host_runtime/tests/support/docker_gate.rs)
+      return 0
+      ;;
+    crates/ironclaw_reborn_composition/src/sandbox_*)
+      return 0
+      ;;
+    tests/integration/reborn_sandbox_egress_proxy.rs|tests/integration/support/docker_gate.rs)
+      return 0
+      ;;
+    docker/process-sandbox-entrypoint.sh|Dockerfile.process-sandbox)
+      return 0
+      ;;
+    .github/workflows/reborn-tests.yml|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 is_code_path() {
   local path="$1"
   case "$path" in
@@ -133,6 +164,10 @@ while IFS= read -r path || [ -n "$path" ]; do
   elif is_code_path "$path"; then
     has_legacy_tests=true
   fi
+
+  if is_sandbox_docker_path "$path"; then
+    has_sandbox_docker_tests=true
+  fi
 done
 
 cat <<EOF
@@ -140,4 +175,5 @@ docs_only=${docs_only}
 has_core_code=${has_core_code}
 has_legacy_tests=${has_legacy_tests}
 has_reborn_tests=${has_reborn_tests}
+has_sandbox_docker_tests=${has_sandbox_docker_tests}
 EOF

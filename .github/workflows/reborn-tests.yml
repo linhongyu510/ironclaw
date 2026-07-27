@@ -55,12 +55,20 @@ jobs:
     outputs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
+      has_sandbox_docker_tests: ${{ steps.non_diff.outputs.has_sandbox_docker_tests || steps.diff.outputs.has_sandbox_docker_tests }}
     steps:
       - id: non_diff
         if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
         run: |
-          echo "docs_only=false" >> "$GITHUB_OUTPUT"
-          echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
+          # This branch covers push (only ever `main`, per the `on.push.branches`
+          # trigger above), workflow_dispatch, and workflow_call -- run the
+          # sandbox Docker lane unconditionally (with everything else) so main
+          # can never regress between narrow-trigger PRs.
+          {
+            echo "docs_only=false"
+            echo "has_reborn_tests=true"
+            echo "has_sandbox_docker_tests=true"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -81,7 +89,17 @@ jobs:
             echo "<none>"
           fi
 
-          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
+          CLASSIFY_OUTPUT="$(printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh)"
+
+          # merge_group runs after a PR has already been queued to merge into
+          # main -- treat it like push-to-main (protect main unconditionally)
+          # rather than path-filtering it like a PR, so an unrelated change
+          # merging through the queue still exercises the sandbox Docker lane.
+          if [ "${GITHUB_EVENT_NAME:-}" = "merge_group" ]; then
+            CLASSIFY_OUTPUT="$(printf '%s\n' "$CLASSIFY_OUTPUT" | sed 's/^has_sandbox_docker_tests=.*/has_sandbox_docker_tests=true/')"
+          fi
+
+          printf '%s\n' "$CLASSIFY_OUTPUT" >> "$GITHUB_OUTPUT"
 
           # Guard the tests/integration/ <-> tests/support/reborn_parity_qa/
           # one-way boundary on every PR/merge_group run, in the same step as
@@ -533,7 +551,15 @@ jobs:
   sandbox-docker-tests:
     name: Reborn sandbox Docker tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    # Narrowed beyond the blanket has_reborn_tests gate the other jobs use:
+    # has_sandbox_docker_tests only goes true for PR/merge_group diffs that
+    # touch sandbox_process/sandbox_* source, the docker-gated test files, the
+    # worker image, or this workflow (see classify-test-scope.sh); it is
+    # forced true unconditionally for push-to-main, merge_group, and
+    # workflow_dispatch/workflow_call so main can never regress between
+    # narrow-trigger PRs. The reborn-tests roll-up job mirrors this exact
+    # expression to tell "narrowed out" from "should have run but didn't".
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true' && needs.changes.outputs.has_sandbox_docker_tests == 'true'
     runs-on: ubuntu-latest
     # Builds Dockerfile.process-sandbox and runs every docker-gated sandbox
     # test (container identity/caps, ICC lateral-isolation, network posture,
@@ -961,7 +987,18 @@ jobs:
             exit 1
           fi
 
-          if ! job_result_ok "sandbox-docker-tests" "${{ needs.sandbox-docker-tests.result }}" false "allow"; then
+          # sandbox-docker-tests is path-narrowed (see its `if:` above), so a
+          # "skipped" result is only OK when has_sandbox_docker_tests is NOT
+          # 'true' -- that's the classifier saying no sandbox path changed, an
+          # intentional skip. If has_sandbox_docker_tests IS 'true', the job's
+          # own `if:` would have run it, so any non-success result (including
+          # "skipped", e.g. from a workflow bug or an upstream failure) is a
+          # real gate failure, not an ambiguous one.
+          sandbox_docker_tests_allow_skipped=true
+          if [[ "${{ needs.changes.outputs.has_sandbox_docker_tests }}" == "true" ]]; then
+            sandbox_docker_tests_allow_skipped=false
+          fi
+          if ! job_result_ok "sandbox-docker-tests" "${{ needs.sandbox-docker-tests.result }}" "$sandbox_docker_tests_allow_skipped" "allow"; then
             echo "One or more Reborn sandbox Docker tests failed: ${{ needs.sandbox-docker-tests.result }}"
             exit 1
           fi

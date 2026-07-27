@@ -62,7 +62,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn product storage crate" \
@@ -70,7 +71,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn v2 adapter crate" \
@@ -78,7 +80,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn telegram extension crate" \
@@ -86,7 +89,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn telegram v2 protocol adapter crate" \
@@ -94,7 +98,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn support crate" \
@@ -102,7 +107,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn root test runner script" \
@@ -110,7 +116,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn group test runner script" \
@@ -118,7 +125,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn root tests and support" \
@@ -128,7 +136,8 @@ tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn qa trace fixture" \
@@ -136,7 +145,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn e2e scenario" \
@@ -144,7 +154,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "legacy e2e scenario" \
@@ -152,7 +163,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=false"
+has_reborn_tests=false
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "mixed legacy and reborn root tests" \
@@ -161,7 +173,8 @@ tests/reborn_trace_first_party_tool_coverage.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "shared manifest" \
@@ -169,7 +182,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "shared substrate crate" \
@@ -177,7 +191,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "shared classifier script" \
@@ -185,7 +200,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
 
 assert_scope \
   "shared package feature flags script" \
@@ -193,7 +209,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "Reborn crate bucket script" \
@@ -201,7 +218,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "Reborn crate bucket regression suite" \
@@ -209,7 +227,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "Reborn Responses E2E manifest checker" \
@@ -217,7 +236,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "Reborn Responses E2E manifest" \
@@ -225,7 +245,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "Reborn coverage manifest" \
@@ -233,7 +254,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "shared reborn tests workflow" \
@@ -241,7 +263,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
 
 assert_scope \
   "legacy code style workflow" \
@@ -249,7 +272,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=false"
+has_reborn_tests=false
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "docs only" \
@@ -257,13 +281,15 @@ assert_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=false"
+has_reborn_tests=false
+has_sandbox_docker_tests=false"
 
 assert_empty_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=false"
+has_reborn_tests=false
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
@@ -271,7 +297,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn docs only" \
@@ -279,7 +306,8 @@ assert_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "mixed tests and reborn" \
@@ -288,7 +316,8 @@ crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
@@ -296,7 +325,8 @@ assert_scope_no_trailing_newline \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn coverage lane-run script" \
@@ -304,7 +334,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn coverage merge-lcov script" \
@@ -312,7 +343,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn coverage summary script" \
@@ -320,7 +352,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn coverage regression suite" \
@@ -328,7 +361,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "reborn coverage regression suite, sourced sibling (R-section split)" \
@@ -336,7 +370,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "test suite boundaries checker script" \
@@ -344,7 +379,8 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "test-classify-test-scope script is itself reborn-scoped" \
@@ -352,7 +388,62 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "sandbox host_runtime crate source narrows in the sandbox docker lane" \
+  "crates/ironclaw_host_runtime/src/sandbox_process/exec.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "sandbox composition crate source narrows in the sandbox docker lane" \
+  "crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "sandbox egress proxy integration test narrows in the sandbox docker lane" \
+  "tests/integration/reborn_sandbox_egress_proxy.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "sandbox worker Dockerfile narrows in the sandbox docker lane" \
+  "Dockerfile.process-sandbox" \
+  "docs_only=false
+has_core_code=false
+has_legacy_tests=false
+has_reborn_tests=false
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "sandbox entrypoint script narrows in the sandbox docker lane" \
+  "docker/process-sandbox-entrypoint.sh" \
+  "docs_only=false
+has_core_code=false
+has_legacy_tests=false
+has_reborn_tests=false
+has_sandbox_docker_tests=true"
+
+assert_scope \
+  "unrelated host_runtime source does not narrow the sandbox docker lane" \
+  "crates/ironclaw_host_runtime/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
 
 assert_scope \
   "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
@@ -360,4 +451,5 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true"
+has_reborn_tests=true
+has_sandbox_docker_tests=false"
