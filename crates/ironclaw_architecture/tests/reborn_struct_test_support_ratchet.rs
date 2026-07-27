@@ -73,8 +73,20 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
-        count: 4,
+        count: 3,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/reaper.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
