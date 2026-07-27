@@ -67,10 +67,10 @@ use super::ca::{LeafCertificate, SandboxCertificateAuthority};
 /// caller (e.g. parallel tests) would return `Err` for the loser, which is
 /// harmless — the provider is already installed by then — so this only
 /// needs to run the *first* call exactly once, not guard every call.
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
 
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 fn ensure_crypto_provider_installed() {
     INSTALL_CRYPTO_PROVIDER.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -80,7 +80,7 @@ fn ensure_crypto_provider_installed() {
 /// Errors from the TLS-termination seam. Every variant is a **fail-closed**
 /// signal to the caller: `egress_proxy::handle_connect` treats any `Err`
 /// here as "close the connection," never "fall back to a plaintext tunnel."
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TlsInterceptError {
     #[error("sandbox tls intercept: failed to mint leaf certificate for {host}: {reason}")]
@@ -140,7 +140,7 @@ pub(crate) enum TlsInterceptError {
 /// permissive production connector** being wired in; this is a wiring-time
 /// requirement the composition PR that adds a production constructor must be
 /// reviewed against, not something this phase's test suite enforces.
-#[allow(dead_code)] // fields consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
@@ -173,7 +173,7 @@ impl TlsInterceptConfig {
     /// Case-insensitive to match `egress_proxy::host_allowed`'s own
     /// normalization. Everything not in this set stays an opaque tunnel —
     /// see the module doc's D1 section.
-    #[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn is_bound(&self, host: &str) -> bool {
         self.bound_hosts.contains(&host.to_ascii_lowercase())
     }
@@ -183,7 +183,7 @@ impl TlsInterceptConfig {
     /// unbound host must never have a leaf minted for it," independent of
     /// whether traffic merely *looked* like it flowed correctly.
     #[cfg(test)]
-    #[allow(dead_code)] // consumed by egress_proxy's own tests; not exercised in this slice
+    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn cached_leaf_count(&self) -> usize {
         self.ca.cached_entry_count()
     }
@@ -202,7 +202,7 @@ impl TlsInterceptConfig {
 /// origin socket again — no code path here ever falls through to a
 /// plaintext relay. `egress_proxy::handle_connect` must preserve that: log
 /// and close, never retry unencrypted.
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) async fn terminate_and_forward(
     client: TcpStream,
     leftover: Vec<u8>,
@@ -264,7 +264,7 @@ pub(crate) async fn terminate_and_forward(
 /// needed because a CONNECT tunnel already pins the intended host before
 /// this is called (see [`terminate_and_forward`]); the client's SNI, if
 /// present, is not consulted.
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) fn build_server_config(
     leaf: &LeafCertificate,
 ) -> Result<rustls::ServerConfig, TlsInterceptError> {
@@ -299,7 +299,7 @@ pub(crate) fn build_server_config(
 /// CONNECT request, which ends up sitting in the proxy's `BufReader` rather
 /// than the socket. Writes always delegate straight to the inner stream —
 /// only reads need the replay.
-#[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+#[allow(dead_code)] // consumed by W6; not wired yet
 struct LeadingBytes<S> {
     leftover: Vec<u8>,
     leftover_pos: usize,
@@ -307,7 +307,7 @@ struct LeadingBytes<S> {
 }
 
 impl<S> LeadingBytes<S> {
-    #[allow(dead_code)] // consumed by egress_proxy's W6 wiring; not wired in this slice
+    #[allow(dead_code)] // consumed by W6; not wired yet
     fn new(leftover: Vec<u8>, inner: S) -> Self {
         Self {
             leftover,
