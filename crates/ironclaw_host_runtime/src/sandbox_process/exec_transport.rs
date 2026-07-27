@@ -1789,15 +1789,13 @@ mod docker_tests {
     }
 
     /// Pins the property W5's planned CA trust distribution depends on: the
-    /// persistent container never sets `IRONCLAW_EGRESS_LOCKDOWN` (see this
-    /// module's doc comment), but W5 sets `SSL_CERT_FILE` regardless as its
-    /// trust-distribution mechanism. `docker/process-sandbox-entrypoint.sh`
-    /// used to gate its CA-install branch on `SSL_CERT_FILE` alone, so that
-    /// env var by itself made the entrypoint `cp`/`update-ca-certificates`
-    /// under uid 1000 + `readonly_rootfs` — which fails, and `set -eu`
-    /// aborts the entrypoint, so the container never starts. This builds the
-    /// exact launch config `create_and_start_user_container` would produce,
-    /// adds only `SSL_CERT_FILE` (no lockdown env), and asserts the
+    /// persistent container's entrypoint (`docker/process-sandbox-
+    /// entrypoint.sh`) must never attempt a `cp`/`update-ca-certificates`
+    /// step, because that would run under uid 1000 with a readonly rootfs
+    /// and fail — and `set -eu` would abort the entrypoint, so the
+    /// container would never start. This builds the exact launch config
+    /// `create_and_start_user_container` would produce, adds `SSL_CERT_FILE`
+    /// (W5's planned trust-distribution mechanism), and asserts the
     /// container is still running once the entrypoint has run.
     #[tokio::test]
     async fn persistent_container_starts_with_ssl_cert_file_but_no_lockdown() {
@@ -1860,8 +1858,8 @@ mod docker_tests {
         // exit the container milliseconds later via `set -eu` — a bare
         // single inspect right after start is not enough to distinguish
         // "started and stayed up" from "started and immediately aborted".
-        // Give the entrypoint's synchronous CA-install work time to finish
-        // (or fail) before re-checking that the container is still up.
+        // Give the entrypoint's synchronous setup work time to finish (or
+        // fail) before re-checking that the container is still up.
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let inspected = docker
@@ -1875,11 +1873,11 @@ mod docker_tests {
             .unwrap_or(false);
         assert!(
             running,
-            "container with SSL_CERT_FILE set but no IRONCLAW_EGRESS_LOCKDOWN must still be \
-             running a second after the entrypoint has run (regression: the entrypoint's \
-             CA-install branch was gated only on SSL_CERT_FILE, not on the lockdown flag, so \
-             `update-ca-certificates` under uid 1000 + readonly rootfs failed and `set -eu` \
-             aborted the entrypoint before it could exec `sleep infinity`): {:?}",
+            "container with SSL_CERT_FILE set must still be running a second after the \
+             entrypoint has run (regression: if the entrypoint ever grows a CA-install step \
+             gated on SSL_CERT_FILE alone, `update-ca-certificates` under uid 1000 + readonly \
+             rootfs would fail and `set -eu` would abort the entrypoint before it could exec \
+             `sleep infinity`): {:?}",
             inspected.state
         );
 
