@@ -270,6 +270,14 @@ pub struct RebornScopedSandboxCommandTransport {
     /// (see `exec_transport::ensure_egress_network_once`) to once per
     /// process instead of once per command dispatch.
     network_ready: Arc<tokio::sync::OnceCell<()>>,
+    /// Wired so `exec_transport::ensure_container`'s posture-mismatch
+    /// recycle collapses the egress-proxy attribution cache's staleness
+    /// window to zero for the IP the recycled container releases (see
+    /// `attribution`'s module doc, "W17"). `None` by default: no resolver is
+    /// constructed in production yet (W6 is its consumer), so this is a
+    /// no-op until something wires one in via
+    /// [`Self::with_attribution_resolver`].
+    attribution: Option<Arc<dyn attribution::AttributionInvalidator>>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -299,6 +307,7 @@ impl RebornScopedSandboxCommandTransport {
             activity: Arc::new(SandboxActivityRegistry::new()),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
             network_ready: Arc::new(tokio::sync::OnceCell::new()),
+            attribution: None,
         }
     }
 
@@ -308,6 +317,20 @@ impl RebornScopedSandboxCommandTransport {
     /// expected caller.
     pub fn with_activity_registry(mut self, activity: Arc<SandboxActivityRegistry>) -> Self {
         self.activity = activity;
+        self
+    }
+
+    /// Wires a shared attribution-cache invalidator (see
+    /// [`Self::attribution`]'s doc). `pub(crate)`, not `pub`: the resolver
+    /// type is crate-private (nothing outside this crate constructs one
+    /// today — W6 is its consumer), so this stays internal until W6 gives it
+    /// a public constructor.
+    #[allow(dead_code)] // wired by tests today; a production caller lands with W6
+    pub(crate) fn with_attribution_resolver(
+        mut self,
+        resolver: Arc<dyn attribution::AttributionInvalidator>,
+    ) -> Self {
+        self.attribution = Some(resolver);
         self
     }
 
@@ -515,6 +538,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             &request.scope.user_id,
             &workspace,
             &self.network_ready,
+            self.attribution.as_deref(),
         )
         .await?;
 

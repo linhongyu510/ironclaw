@@ -9,6 +9,7 @@
 //! [`exec_in_container`] rather than a fresh container.
 
 use std::{
+    net::IpAddr,
     path::Path,
     time::{Duration, Instant},
 };
@@ -32,6 +33,7 @@ use crate::{CommandExecutionOutput, RuntimeProcessError};
 
 use super::{
     ContainerWorkdir, LABEL_PREFIX, RebornSandboxConfig, RebornSandboxUserKey,
+    attribution::{self, AttributionInvalidator},
     broker::{
         SANDBOX_EGRESS_NETWORK_GATEWAY, SANDBOX_EGRESS_NETWORK_NAME, SANDBOX_EGRESS_NETWORK_SUBNET,
     },
@@ -43,6 +45,14 @@ use super::{
 /// makes sure it is running (creating or restarting it as needed), or
 /// creates a fresh one if none exists yet. Returns the container ID a
 /// subsequent [`exec_in_container`] call can target.
+///
+/// `attribution`: when `Some`, wired so a posture-mismatch recycle below
+/// invalidates the egress-proxy attribution cache for the IP the recycled
+/// container releases (see `attribution`'s module doc, "W17"). `None` — the
+/// only value any current production caller passes, since nothing
+/// constructs a resolver yet (W6 is its consumer) — makes this a no-op,
+/// same as before this parameter existed.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_container(
     docker: &Docker,
     config: &RebornSandboxConfig,
@@ -51,6 +61,7 @@ pub(super) async fn ensure_container(
     user_id: &UserId,
     workspace: &Path,
     network_ready: &tokio::sync::OnceCell<()>,
+    attribution: Option<&dyn AttributionInvalidator>,
 ) -> Result<String, RuntimeProcessError> {
     ensure_egress_network_once(docker, config, network_ready).await?;
     let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
@@ -85,7 +96,13 @@ pub(super) async fn ensure_container(
                 .map(String::as_str);
             let expected_stamp = security_posture_stamp(&security_posture_fields(config));
             if existing_stamp != Some(expected_stamp.as_str()) {
-                recycle_stale_container(docker, &container_id).await?;
+                // Read the IP this container holds *before* removing it —
+                // once it's gone `docker inspect`/`docker ps` can no longer
+                // tell us, and that IP is exactly what a torn-down
+                // container's stale attribution-cache entry is keyed on.
+                let released_ip =
+                    attribution::container_ip_on_network(existing, SANDBOX_EGRESS_NETWORK_NAME);
+                recycle_stale_container(docker, &container_id, released_ip, attribution).await?;
                 return create_and_start_user_container(
                     docker, config, key, tenant_id, user_id, workspace,
                 )
@@ -115,9 +132,19 @@ pub(super) async fn ensure_container(
 /// so silently recycling it here is strictly safer than reusing a
 /// stale-posture container for up to the reaper's 7-day forced-recycle
 /// window.
+///
+/// `released_ip`/`attribution`: the IP the removed container held on the
+/// egress network (if any) and a wired attribution-cache handle (if any) —
+/// once the container is gone, that IP is free for Docker to hand to a
+/// *different* user's container, so this collapses the attribution cache's
+/// staleness window to zero for it rather than leaving a stale entry to
+/// serve the previous owner until the TTL expires (see `attribution`'s
+/// module doc, "W17"). A no-op when either is `None`.
 async fn recycle_stale_container(
     docker: &Docker,
     container_id: &str,
+    released_ip: Option<IpAddr>,
+    attribution: Option<&dyn AttributionInvalidator>,
 ) -> Result<(), RuntimeProcessError> {
     docker
         .remove_container(
@@ -133,6 +160,9 @@ async fn recycle_stale_container(
                 "stale-security-posture sandbox container removal failed: {error}"
             ))
         })?;
+    if let (Some(attribution), Some(ip)) = (attribution, released_ip) {
+        attribution.invalidate(ip);
+    }
     Ok(())
 }
 
@@ -1302,7 +1332,12 @@ pub(crate) mod docker_gate;
 #[cfg(test)]
 mod docker_tests {
     use super::*;
-    use bollard::container::RemoveContainerOptions;
+    use std::collections::HashMap;
+
+    use bollard::{
+        container::{NetworkingConfig, RemoveContainerOptions},
+        models::{EndpointIpamConfig, EndpointSettings},
+    };
 
     fn docker_tests_config(workspaces_root: &Path) -> RebornSandboxConfig {
         RebornSandboxConfig::new(workspaces_root.to_path_buf())
@@ -1695,6 +1730,7 @@ mod docker_tests {
             &user,
             &workspace,
             &network_ready,
+            None,
         )
         .await
         .expect("ensure_container succeeds");
@@ -1966,6 +2002,7 @@ mod docker_tests {
             &user,
             &workspace,
             &network_ready,
+            None,
         )
         .await
         .expect("ensure_container succeeds despite the stale stamp");
@@ -2011,6 +2048,7 @@ mod docker_tests {
             &user,
             &workspace,
             &network_ready,
+            None,
         )
         .await
         .expect("ensure_container succeeds on the matching-stamp path");
@@ -2020,5 +2058,166 @@ mod docker_tests {
         );
 
         best_effort_remove(&docker, &recreated_id).await;
+    }
+
+    /// Creates and starts a plain `busybox` container on `network_name`,
+    /// pinned to a static `ipv4_address` and carrying `labels` — a
+    /// deterministic stand-in for "Docker reassigns a torn-down container's
+    /// IP to a different container." Real Docker IP reuse is real (it's the
+    /// exact mechanism `attribution`'s module doc names as the reason the
+    /// cache needs bounded TTL + invalidation), but which address gets
+    /// reused depends on subnet-pool state; pinning both the torn-down and
+    /// the reassigned container to the same address makes the scenario
+    /// reproducible without depending on exhausting the /24 pool. Mirrors
+    /// `start_probe_container` above (plain busybox — these tests don't
+    /// need the sandbox worker image's exec/workdir conventions), plus an
+    /// explicit `NetworkingConfig` endpoint pin and labels.
+    async fn create_ip_pinned_labeled_container(
+        docker: &Docker,
+        network_name: &str,
+        ipv4_address: &str,
+        name: &str,
+        labels: HashMap<String, String>,
+    ) -> String {
+        let mut endpoints_config = HashMap::new();
+        endpoints_config.insert(
+            network_name.to_string(),
+            EndpointSettings {
+                ipam_config: Some(EndpointIpamConfig {
+                    ipv4_address: Some(ipv4_address.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: name.to_string(),
+                    platform: None,
+                }),
+                Config {
+                    image: Some("busybox:1.36".to_string()),
+                    cmd: Some(vec!["sleep".to_string(), "60".to_string()]),
+                    labels: Some(labels),
+                    host_config: Some(HostConfig {
+                        network_mode: Some(network_name.to_string()),
+                        auto_remove: Some(false),
+                        ..Default::default()
+                    }),
+                    networking_config: Some(NetworkingConfig { endpoints_config }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("ip-pinned container create succeeds");
+        docker
+            .start_container(&created.id, None::<StartContainerOptions<String>>)
+            .await
+            .expect("ip-pinned container start succeeds");
+        created.id
+    }
+
+    /// **The W17 deliverable.** Proves the actual defect is closed: an IP
+    /// whose container was torn down through the real, wired teardown call
+    /// site (`recycle_stale_container`, called from `ensure_container`'s
+    /// posture-mismatch branch) and reassigned to a *different* user's
+    /// container does NOT resolve to the previous owner. Before W17's fix,
+    /// `recycle_stale_container` removed the container but never told the
+    /// attribution cache, so `attributed_after_recycle` below would still
+    /// equal container A's tenant/user for up to
+    /// `DEFAULT_ATTRIBUTION_CACHE_TTL` (5s) — exactly the cross-user
+    /// credential-leak window this closes ahead of W6.
+    #[tokio::test]
+    async fn recycle_stale_container_invalidates_attribution_for_the_released_ip() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — recycle_stale_container_invalidates_attribution_for_the_released_ip requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let _network_guard = EGRESS_NETWORK_TEST_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        recreate_real_egress_network(&docker).await;
+
+        // Fixed rather than Docker-chosen — see
+        // `create_ip_pinned_labeled_container`'s doc comment.
+        let pinned_ip = "10.200.0.222";
+        let ip: IpAddr = pinned_ip.parse().unwrap();
+
+        let tenant_a = TenantId::new("attribution-recycle-tenant-a").unwrap();
+        let user_a = UserId::new("attribution-recycle-user-a").unwrap();
+        let tenant_b = TenantId::new("attribution-recycle-tenant-b").unwrap();
+        let user_b = UserId::new("attribution-recycle-user-b").unwrap();
+
+        let container_a = create_ip_pinned_labeled_container(
+            &docker,
+            SANDBOX_EGRESS_NETWORK_NAME,
+            pinned_ip,
+            &format!("ironclaw-test-recycle-a-{}", uuid::Uuid::new_v4()),
+            registry::build_user_container_labels(
+                LABEL_PREFIX,
+                &tenant_a,
+                &user_a,
+                "w17-test-posture-stamp",
+            ),
+        )
+        .await;
+
+        let resolver = attribution::ConnectionAttributionResolver::new(
+            docker.clone(),
+            SANDBOX_EGRESS_NETWORK_NAME.to_string(),
+            LABEL_PREFIX.to_string(),
+        );
+
+        let attributed_a = resolver.resolve(ip).await;
+        assert_eq!(
+            attributed_a,
+            attribution::ConnectionAttribution::Attributed {
+                tenant_id: tenant_a.clone(),
+                user_id: user_a.clone(),
+            },
+            "sanity: container A must resolve to tenant-a/user-a before teardown, or the rest \
+             of this test proves nothing"
+        );
+
+        // The real teardown call site under test: with attribution wired,
+        // tearing down container A must invalidate the cache entry for the
+        // IP it releases, not just remove the container.
+        recycle_stale_container(&docker, &container_a, Some(ip), Some(&resolver))
+            .await
+            .expect("recycle succeeds");
+
+        // Simulate Docker handing the just-released IP to a DIFFERENT
+        // user's container.
+        let container_b = create_ip_pinned_labeled_container(
+            &docker,
+            SANDBOX_EGRESS_NETWORK_NAME,
+            pinned_ip,
+            &format!("ironclaw-test-recycle-b-{}", uuid::Uuid::new_v4()),
+            registry::build_user_container_labels(
+                LABEL_PREFIX,
+                &tenant_b,
+                &user_b,
+                "w17-test-posture-stamp",
+            ),
+        )
+        .await;
+
+        let attributed_after_recycle = resolver.resolve(ip).await;
+
+        best_effort_remove(&docker, &container_b).await;
+
+        assert_eq!(
+            attributed_after_recycle,
+            attribution::ConnectionAttribution::Attributed {
+                tenant_id: tenant_b,
+                user_id: user_b,
+            },
+            "regression: a torn-down container's cached attribution must not survive to serve \
+             a different user's container that Docker reassigns the same IP to — this is the \
+             cross-user credential-leak window W17 closes"
+        );
     }
 }

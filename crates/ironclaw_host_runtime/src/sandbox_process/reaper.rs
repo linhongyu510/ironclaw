@@ -54,6 +54,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    net::IpAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -70,6 +71,8 @@ use crate::RuntimeProcessError;
 
 use super::ContainerWorkdir;
 use super::LABEL_PREFIX;
+use super::attribution::{self, AttributionInvalidator};
+use super::broker::SANDBOX_EGRESS_NETWORK_NAME;
 use super::exec_transport;
 use super::registry::{self, SandboxActivityRegistry, UserContainerCandidate};
 use super::user_key::RebornSandboxUserKey;
@@ -306,6 +309,13 @@ pub struct SandboxReaper {
     activity: Arc<SandboxActivityRegistry>,
     config: SandboxReaperConfig,
     remove_debounce: RemoveDebounce,
+    /// Wired so idle-stop, aged-remove, and forced-recycle all collapse the
+    /// egress-proxy attribution cache's staleness window to zero for the IP
+    /// a torn-down container releases (see `attribution`'s module doc,
+    /// "W17"). `None` by default: no resolver is constructed in production
+    /// yet (W6 is its consumer), so this is a no-op until something wires
+    /// one in via [`Self::with_attribution_resolver`].
+    attribution: Option<Arc<dyn AttributionInvalidator>>,
 }
 
 impl SandboxReaper {
@@ -319,7 +329,22 @@ impl SandboxReaper {
             activity,
             config,
             remove_debounce: RemoveDebounce::default(),
+            attribution: None,
         }
+    }
+
+    /// Wires a shared attribution-cache invalidator (see [`Self::attribution`]'s
+    /// doc). `pub(crate)`, not `pub`: the resolver type is crate-private
+    /// (nothing outside this crate constructs one today — W6 is its
+    /// consumer), so this stays internal until W6 gives it a public
+    /// constructor.
+    #[allow(dead_code)] // wired by tests today; a production caller lands with W6
+    pub(crate) fn with_attribution_resolver(
+        mut self,
+        resolver: Arc<dyn AttributionInvalidator>,
+    ) -> Self {
+        self.attribution = Some(resolver);
+        self
     }
 
     /// Runs the scan loop until `shutdown` reports `true`. Composition owns
@@ -413,7 +438,16 @@ impl SandboxReaper {
                 }
                 ReapAction::Stop => {
                     self.remove_debounce.observe(&candidate.container_id, false);
-                    self.stop_container(&candidate.container_id).await;
+                    // Read before stopping: a stopped container drops off
+                    // the running-containers list `attribution` queries, so
+                    // its IP is free for Docker to reassign — that IP is
+                    // exactly what a stale cache entry would be keyed on.
+                    let released_ip = attribution::container_ip_on_network(
+                        container,
+                        SANDBOX_EGRESS_NETWORK_NAME,
+                    );
+                    self.stop_container(&candidate.container_id, released_ip)
+                        .await;
                     summary.reaped += 1;
                 }
                 ReapAction::Remove => {
@@ -421,7 +455,12 @@ impl SandboxReaper {
                     // produced a `Remove` verdict on two consecutive sweeps
                     // (see the module doc's "Remove debounce" section).
                     if self.remove_debounce.observe(&candidate.container_id, true) {
-                        self.remove_container(&candidate.container_id).await;
+                        let released_ip = attribution::container_ip_on_network(
+                            container,
+                            SANDBOX_EGRESS_NETWORK_NAME,
+                        );
+                        self.remove_container(&candidate.container_id, released_ip)
+                            .await;
                         self.activity.forget(&key);
                         summary.reaped += 1;
                     }
@@ -525,25 +564,34 @@ impl SandboxReaper {
 
     /// Best-effort stop: never fail the scan over a single container's
     /// teardown error, just log at `debug!` (never `info!` — background
-    /// tasks must not write to the REPL surface).
-    async fn stop_container(&self, container_id: &str) {
-        if let Err(error) = self
+    /// tasks must not write to the REPL surface). On success, invalidates
+    /// `released_ip` against the wired attribution resolver (if any) — see
+    /// [`Self::attribution`]'s doc and `attribution`'s module doc ("W17").
+    async fn stop_container(&self, container_id: &str, released_ip: Option<IpAddr>) {
+        match self
             .docker
             .stop_container(container_id, Some(StopContainerOptions { t: 0 }))
             .await
         {
-            tracing::debug!(
-                ?error,
-                container_id,
-                "sandbox reaper best-effort stop failed"
-            );
+            Ok(()) => {
+                if let (Some(attribution), Some(ip)) = (self.attribution.as_deref(), released_ip) {
+                    attribution.invalidate(ip);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    container_id,
+                    "sandbox reaper best-effort stop failed"
+                );
+            }
         }
     }
 
     /// Best-effort forced removal, mirroring [`Self::stop_container`]'s
-    /// error handling.
-    async fn remove_container(&self, container_id: &str) {
-        if let Err(error) = self
+    /// error handling and attribution-invalidation behavior.
+    async fn remove_container(&self, container_id: &str, released_ip: Option<IpAddr>) {
+        match self
             .docker
             .remove_container(
                 container_id,
@@ -554,11 +602,18 @@ impl SandboxReaper {
             )
             .await
         {
-            tracing::debug!(
-                ?error,
-                container_id,
-                "sandbox reaper best-effort removal failed"
-            );
+            Ok(()) => {
+                if let (Some(attribution), Some(ip)) = (self.attribution.as_deref(), released_ip) {
+                    attribution.invalidate(ip);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    container_id,
+                    "sandbox reaper best-effort removal failed"
+                );
+            }
         }
     }
 }
