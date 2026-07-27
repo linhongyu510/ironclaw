@@ -732,4 +732,41 @@ mod tests {
             "expected PathOutsideMount, got: {error:?}"
         );
     }
+
+    /// The actual escape `leaf_scoped` containment exists to close: two
+    /// callers share one `mount_local_per_leaf` `host_root`, each confined to
+    /// their own leaf (`leaf-a`, `leaf-b`). A symlink planted inside
+    /// `leaf-a` pointing at `../leaf-b/secret.txt` stays within the shared
+    /// `host_root` — a plain `mount_local` containment check (host_root
+    /// only) would let it resolve — but leaves `leaf-a`'s own containment
+    /// root, so it must be rejected here.
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_cross_leaf_symlink_escape() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let leaf_a = host_root.join("leaf-a");
+        let leaf_b = host_root.join("leaf-b");
+        std::fs::create_dir_all(&leaf_a).unwrap();
+        std::fs::create_dir_all(&leaf_b).unwrap();
+        std::fs::write(leaf_b.join("secret.txt"), b"leaf-b secret").unwrap();
+        std::os::unix::fs::symlink("../leaf-b/secret.txt", leaf_a.join("escape.txt")).unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/workspace").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .read_file(&VirtualPath::new("/workspace/leaf-a/escape.txt").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::SymlinkEscape { .. }),
+            "expected SymlinkEscape, got: {error:?}"
+        );
+    }
 }
