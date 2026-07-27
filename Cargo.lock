@@ -4616,6 +4616,7 @@ version = "0.2.2"
 dependencies = [
  "aho-corasick",
  "criterion",
+ "ironclaw_secrets",
  "regex",
  "serde_json",
  "thiserror 2.0.18",
