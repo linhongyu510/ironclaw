@@ -211,7 +211,7 @@ impl SandboxCertificateAuthority {
 
     /// Test/introspection seam: how many hosts currently hold a cached
     /// leaf, without exposing the cache's contents.
-    #[allow(dead_code)] // exercised by this module's own eviction test
+    #[cfg(test)]
     pub(crate) fn cached_entry_count(&self) -> usize {
         self.lock_cache().len()
     }

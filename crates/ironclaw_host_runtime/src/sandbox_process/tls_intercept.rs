@@ -177,7 +177,7 @@ impl TlsInterceptConfig {
     /// holds a cached leaf certificate for — D1's assertion surface for "an
     /// unbound host must never have a leaf minted for it," independent of
     /// whether traffic merely *looked* like it flowed correctly.
-    #[allow(dead_code)] // exercised by egress_proxy's D1 regression test
+    #[cfg(test)]
     pub(crate) fn cached_leaf_count(&self) -> usize {
         self.ca.cached_entry_count()
     }

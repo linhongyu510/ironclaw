@@ -92,7 +92,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
-        count: 5,
+        count: 4,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
@@ -104,7 +110,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 2,
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
