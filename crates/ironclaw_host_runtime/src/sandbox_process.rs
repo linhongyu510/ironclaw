@@ -35,6 +35,7 @@ mod reaper;
 mod registry;
 mod scope_key;
 pub(crate) mod shell_limits;
+mod tls_intercept;
 mod user_key;
 
 use mounts::RebornSandboxMountSources;

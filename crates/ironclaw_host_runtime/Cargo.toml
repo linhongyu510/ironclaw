@@ -67,6 +67,14 @@ serde_json = "1"
 sha2 = "0.11"
 static_assertions = "1"
 thiserror = "2"
+# W6 phase 1 (design doc §4, `sandbox_process::tls_intercept`): the egress
+# proxy's TLS-termination seam for bound hosts. Version pinned to match the
+# `rustls` already in the workspace (`ironclaw_reborn_event_store`) rather
+# than introducing a second major version. Ships unwired — see
+# `tls_intercept`'s module doc for what still needs a caller.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 # rcgen's `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime`
 # — needed directly to compute the CA's leaf-cert validity window.
 time = { version = "0.3", default-features = false }

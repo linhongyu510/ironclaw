@@ -29,6 +29,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
+use super::tls_intercept::{self, TlsInterceptConfig};
+
 /// Hard ceiling on concurrent client connections the proxy will service at
 /// once. The proxy binds `0.0.0.0` on the internal egress network and is
 /// reachable from *inside* the sandboxed container — treat that container as
@@ -148,6 +150,13 @@ pub struct EgressAllowlistProxy {
     /// override it to a small value so the connection-cap test doesn't need
     /// to actually open 128+ sockets.
     max_connections: usize,
+    /// W6 phase 1's TLS-termination seam (see `tls_intercept`'s module
+    /// doc). Always `None` in production (`new`) — nothing in this crate
+    /// constructs a [`TlsInterceptConfig`] yet, so every CONNECT stays an
+    /// opaque tunnel until a production caller wires one in. Only this
+    /// module's own tests set it, via the struct-literal construction
+    /// pattern the other test-only fields above already use.
+    tls_intercept: Option<Arc<TlsInterceptConfig>>,
 }
 
 impl EgressAllowlistProxy {
@@ -157,6 +166,7 @@ impl EgressAllowlistProxy {
             resolver: Arc::new(DnsResolver),
             deny_private_ips: true,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
         }
     }
 
@@ -181,6 +191,7 @@ impl EgressAllowlistProxy {
             resolver: self.resolver,
             deny_private_ips: self.deny_private_ips,
             max_connections: self.max_connections,
+            tls_intercept: self.tls_intercept,
         })
     }
 }
@@ -192,6 +203,7 @@ pub struct BoundEgressAllowlistProxy {
     resolver: Arc<dyn HostResolver>,
     deny_private_ips: bool,
     max_connections: usize,
+    tls_intercept: Option<Arc<TlsInterceptConfig>>,
 }
 
 impl BoundEgressAllowlistProxy {
@@ -238,11 +250,17 @@ impl BoundEgressAllowlistProxy {
                             let policy = Arc::clone(&self.policy);
                             let resolver = Arc::clone(&self.resolver);
                             let deny_private_ips = self.deny_private_ips;
+                            let tls_intercept = self.tls_intercept.clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                if let Err(error) =
-                                    handle_connection(stream, policy, resolver, deny_private_ips)
-                                        .await
+                                if let Err(error) = handle_connection(
+                                    stream,
+                                    policy,
+                                    resolver,
+                                    deny_private_ips,
+                                    tls_intercept,
+                                )
+                                .await
                                 {
                                     tracing::debug!(?error, "egress proxy connection ended with an error");
                                 }
@@ -396,6 +414,7 @@ async fn handle_connection(
     policy: Arc<NetworkPolicy>,
     resolver: Arc<dyn HostResolver>,
     deny_private_ips: bool,
+    tls_intercept: Option<Arc<TlsInterceptConfig>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let head = match read_request_head(&mut reader).await {
@@ -424,6 +443,7 @@ async fn handle_connection(
             &policy,
             resolver.as_ref(),
             deny_private_ips,
+            tls_intercept.as_deref(),
         )
         .await
     } else {
@@ -438,12 +458,21 @@ async fn handle_connection(
 /// hardening 2 — the proxy only tunnels HTTPS), and the resolved-IP private
 /// range guard (E2 hardening 1). Each decision gets one `debug!` audit line
 /// naming the host, allow/deny, and the matched rule — never payloads.
+///
+/// **W6 phase 1:** once a target passes those checks, an allowed host is
+/// further split into BOUND (terminate TLS via `tls_intercept`, see D1 in
+/// that module's doc) or UNBOUND (unchanged opaque `copy_bidirectional`
+/// tunnel below). `tls_intercept` is `None` in every production path today
+/// (see [`EgressAllowlistProxy::new`]), so this split is a no-op in
+/// production until something wires a [`TlsInterceptConfig`] in — every host
+/// takes the unbound branch, exactly as before this phase.
 async fn handle_connect(
     mut client: BufReader<TcpStream>,
     target: &str,
     policy: &NetworkPolicy,
     resolver: &dyn HostResolver,
     deny_private_ips: bool,
+    tls_intercept: Option<&TlsInterceptConfig>,
 ) -> std::io::Result<()> {
     let host = target.rsplit_once(':').map_or(target, |(host, _port)| host);
     let port: Option<u16> = target
@@ -502,6 +531,46 @@ async fn handle_connect(
             return client.flush().await;
         }
     };
+
+    // D1 split: BOUND hosts get TLS termination (`tls_intercept`), UNBOUND
+    // hosts stay an opaque tunnel — see this function's doc and
+    // `tls_intercept`'s module doc. `filter` means a `tls_intercept: Some`
+    // config whose allowlist doesn't name this host takes the unbound path
+    // below exactly like `tls_intercept: None` would — D1 has no partial
+    // state between "bound" and "unbound."
+    if let Some(config) = tls_intercept.filter(|config| config.is_bound(host)) {
+        tracing::debug!(
+            host,
+            action = "allow",
+            rule = "allowlist_match_intercepted",
+            "egress proxy: CONNECT allowed, terminating TLS for a bound host"
+        );
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        client.flush().await?;
+        // Same "eager client" buffering case as the unbound path below —
+        // see `tls_intercept::LeadingBytes`'s doc for why these bytes can't
+        // just be dropped.
+        let leftover = client.buffer().to_vec();
+        let raw_client = client.into_inner();
+        if let Err(error) =
+            tls_intercept::terminate_and_forward(raw_client, leftover, host, dial_addr, config)
+                .await
+        {
+            // Fail CLOSED: log and close. Never fall back to a plaintext
+            // relay — the client already believes it completed a CONNECT
+            // to what it thinks is a TLS endpoint, and any bytes it sends
+            // next are the start of (or expected to be) a TLS handshake,
+            // never something safe to tunnel in the clear.
+            tracing::debug!(
+                host,
+                ?error,
+                "egress proxy: TLS interception failed, closing the connection (fail closed)"
+            );
+        }
+        return Ok(());
+    }
 
     let mut origin = match TcpStream::connect(dial_addr).await {
         Ok(origin) => origin,
@@ -727,6 +796,7 @@ mod tests {
             resolver: Arc::new(FixedAddrResolver(echo_addr)),
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -818,6 +888,7 @@ mod tests {
             )))),
             deny_private_ips: true,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1066,6 +1137,7 @@ mod tests {
             resolver: Arc::new(FixedAddrResolver(origin_addr)),
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1133,6 +1205,7 @@ mod tests {
             resolver: Arc::new(FixedAddrResolver(origin_addr)),
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1314,6 +1387,7 @@ mod tests {
             resolver: Arc::new(DnsResolver),
             deny_private_ips: true,
             max_connections,
+            tls_intercept: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1352,5 +1426,202 @@ mod tests {
         drop(held);
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
+    }
+
+    /// W6 phase 1, end to end through the real proxy: a CONNECT to a host
+    /// named in the proxy's `TlsInterceptConfig` allowlist gets its TLS
+    /// terminated with a leaf certificate chaining to OUR CA (proven by a
+    /// real rustls client trusting only that CA's root completing the
+    /// handshake), and the decrypted bytes still reach a fake origin and
+    /// echo back — the same round-trip proof `tls_intercept`'s own unit
+    /// test gives the seam directly, driven here through
+    /// `EgressAllowlistProxy::serve`/`handle_connection`/`handle_connect`'s
+    /// actual CONNECT dispatch rather than calling `terminate_and_forward`
+    /// directly.
+    #[tokio::test]
+    async fn connect_to_bound_host_through_the_real_proxy_terminates_tls_with_our_ca() {
+        use super::super::ca::SandboxCertificateAuthority;
+        use super::super::tls_intercept::{TlsInterceptConfig, build_server_config};
+        use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let host = "bound.example.com";
+
+        // Fake origin: its own CA, unrelated to the one under test.
+        let origin_ca = SandboxCertificateAuthority::generate().unwrap();
+        let origin_issued = origin_ca.issue_leaf_for_host(host).unwrap();
+        let origin_server_config = build_server_config(&origin_issued.certificate).unwrap();
+        let origin_acceptor = TlsAcceptor::from(Arc::new(origin_server_config));
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = origin_listener.accept().await
+                && let Ok(mut tls) = origin_acceptor.accept(stream).await
+            {
+                let mut buf = [0u8; 256];
+                if let Ok(n) = tls.read(&mut buf).await {
+                    let _ = tls.write_all(&buf[..n]).await;
+                }
+            }
+        });
+
+        // The proxy's own CA — this is the one the "container" client must
+        // see, not `origin_ca`'s.
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let mut origin_trust = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut origin_ca.root_certificate_pem().as_bytes()) {
+            origin_trust.add(cert.unwrap()).unwrap();
+        }
+        let origin_connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(origin_trust)
+                .with_no_client_auth(),
+        ));
+        let tls_intercept = Arc::new(TlsInterceptConfig::new(
+            ca,
+            std::collections::HashSet::from([host.to_string()]),
+            origin_connector,
+        ));
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&[host]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: Some(tls_intercept),
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+        raw_client
+            .write_all(format!("CONNECT {host}:443 HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = [0u8; 128];
+        let n = raw_client.read(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"));
+
+        let mut our_trust = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut our_root_pem.as_bytes()) {
+            our_trust.add(cert.unwrap()).unwrap();
+        }
+        let client_connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(our_trust)
+                .with_no_client_auth(),
+        ));
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).unwrap();
+        let mut client_tls = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_connector.connect(server_name, raw_client),
+        )
+        .await
+        .expect("handshake must not hang")
+        .expect("client tls handshake must succeed against our proxy's ca-issued leaf");
+
+        client_tls
+            .write_all(b"hello through the proxy's intercept")
+            .await
+            .unwrap();
+        let mut echoed = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(5), client_tls.read(&mut echoed))
+            .await
+            .expect("read must not hang")
+            .expect("reads the echoed bytes back");
+        assert_eq!(&echoed[..n], b"hello through the proxy's intercept");
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// D1, driven through the real proxy: a `TlsInterceptConfig` exists
+    /// (CA and all), but the CONNECT target isn't in its bound-host set —
+    /// the connection must stay a plain, unintercepted tunnel (bytes arrive
+    /// at the origin in the clear, exactly like `connect_to_allowed_host_
+    /// tunnels_bytes` above), and the CA must never have minted a leaf for
+    /// it. This is the case that actually matters for D1: it is not enough
+    /// that TLS interception is *possible* — an unbound host must never
+    /// trigger it even when the mechanism is fully wired and live.
+    #[tokio::test]
+    async fn connect_to_unbound_host_stays_opaque_even_with_tls_intercept_configured() {
+        use super::super::ca::SandboxCertificateAuthority;
+        use super::super::tls_intercept::TlsInterceptConfig;
+        use tokio_rustls::TlsConnector;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let echo_listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = echo_listener.accept().await {
+                let mut buf = [0u8; 64];
+                if let Ok(n) = socket.read(&mut buf).await {
+                    let _ = socket.write_all(&buf[..n]).await;
+                }
+            }
+        });
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        // Deliberately never trusted by any client in this test — proves
+        // the connector isn't even reachable for an unbound host, not just
+        // unused by convention.
+        let origin_connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        ));
+        let tls_intercept = Arc::new(TlsInterceptConfig::new(
+            ca,
+            std::collections::HashSet::from(["some-other-bound-host.example.com".to_string()]),
+            origin_connector,
+        ));
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["127.0.0.1"]),
+            resolver: Arc::new(FixedAddrResolver(echo_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: Some(Arc::clone(&tls_intercept)),
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = [0u8; 128];
+        let n = client.read(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"));
+
+        client
+            .write_all(b"plaintext through the tunnel")
+            .await
+            .unwrap();
+        let mut echoed = [0u8; 64];
+        let n = client.read(&mut echoed).await.unwrap();
+        assert_eq!(
+            &echoed[..n],
+            b"plaintext through the tunnel",
+            "an unbound host must stay a plain opaque tunnel even when tls_intercept is configured"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        // D1's other half: the CA behind this proxy's `TlsInterceptConfig`
+        // must never have minted a leaf certificate for the unbound host —
+        // checked against the cache count, not just that plaintext flowed.
+        assert_eq!(
+            tls_intercept.cached_leaf_count(),
+            0,
+            "an unbound host must never cause a leaf certificate to be minted"
+        );
     }
 }

@@ -101,6 +101,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         count: 6,
     },
     FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        count: 2,
+    },
+    FrozenPathCount {
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_extension_host/src/channel_host.rs",
