@@ -23,8 +23,10 @@ use crate::{
 
 mod attribution;
 mod broker;
+mod ca;
 mod connect;
 mod container_identity;
+mod credential_firewall;
 mod egress_proxy;
 mod exec_transport;
 mod mounts;
