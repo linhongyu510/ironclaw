@@ -27,7 +27,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStorePort};
-use ironclaw_resources::{ResourceError, ResourceGovernor};
+#[cfg(test)]
+use ironclaw_resources::ResourceLimits;
+use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort,
@@ -1086,6 +1088,85 @@ fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), Pro
     }
 }
 
+/// Lazily-registered per-(tenant, user) concurrency ceiling for the
+/// sandboxed profile's `SpawnProcess` reservations.
+///
+/// Users are not enumerable at boot (composition only knows the deployment
+/// owner then — see `ironclaw_reborn_composition::sandbox_quota::
+/// apply_sandbox_user_ceiling`'s tenant-wide boot ceiling), so this ceiling
+/// registers itself the first time each user actually dispatches a
+/// `SpawnProcess` capability, from [`BuiltinObligationHandler::
+/// reserve_resource_obligation`]. Registration is idempotent: a small
+/// in-process cache of already-registered `(tenant, user)` pairs avoids a
+/// wasted `ResourceGovernor::set_limit` call (backed by a filesystem write
+/// on `FilesystemResourceGovernor`) on every dispatch, and calling
+/// `set_limit` again for an already-registered pair is itself harmless
+/// (`set_limit_in_state` only touches the account's configured limit and
+/// usage ledger, never `reserved_by_account` — the map outstanding
+/// reservations live in — so it cannot disturb a reservation the same user
+/// already holds).
+///
+/// This is a SEPARATE ceiling from the tenant-wide one
+/// (`ResourceAccount::tenant`): both apply simultaneously via
+/// `ResourceAccount::cascade`, which checks every level that carries an
+/// explicit `set_limit`. Per-user = 1 gives serialization (at most one
+/// sandbox invocation in flight per user) and correct attribution; the
+/// tenant-wide ceiling still bounds total container fan-out across every
+/// user. Removing either reopens a hole the sibling ceiling's doc comment
+/// describes.
+pub struct SandboxPerUserCeiling {
+    max_concurrent: u32,
+    registered: Mutex<HashSet<(String, String)>>,
+}
+
+impl SandboxPerUserCeiling {
+    pub fn new(max_concurrent: u32) -> Self {
+        Self {
+            max_concurrent,
+            registered: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Registers `scope`'s `(tenant, user)` account with this ceiling's
+    /// `max_concurrent`, unless it was already registered by a prior
+    /// dispatch. Cheap on the common (already-registered) path: a single
+    /// lock + `HashSet` lookup, no governor call.
+    ///
+    /// Read-modify-write: this loads the account's current limits (if any)
+    /// and only overwrites `max_concurrency_slots`, so any other limit
+    /// dimension (spend, tokens, wall-clock, …) a different caller set on the
+    /// same account is preserved rather than reset to
+    /// `ResourceLimits::default()`.
+    fn ensure_registered(
+        &self,
+        governor: &Arc<dyn ResourceGovernor>,
+        scope: &ResourceScope,
+    ) -> Result<(), ResourceError> {
+        let key = (
+            scope.tenant_id.as_str().to_string(),
+            scope.user_id.as_str().to_string(),
+        );
+        {
+            let registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+            if registered.contains(&key) {
+                return Ok(());
+            }
+        }
+        let account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+        let existing_limits = governor
+            .account_snapshot(&account)?
+            .and_then(|snapshot| snapshot.limits)
+            .unwrap_or_default();
+        governor.set_limit(
+            account,
+            existing_limits.set_max_concurrency_slots(self.max_concurrent),
+        )?;
+        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+        registered.insert(key);
+        Ok(())
+    }
+}
+
 /// Built-in obligation handler for the current host-runtime slice.
 #[derive(Clone, Default)]
 pub struct BuiltinObligationHandler {
@@ -1096,6 +1177,7 @@ pub struct BuiltinObligationHandler {
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
+    sandbox_per_user_ceiling: Option<Arc<SandboxPerUserCeiling>>,
 }
 
 struct ResolvedSecretInjection {
@@ -1174,6 +1256,18 @@ impl BuiltinObligationHandler {
 
     pub fn with_resource_governor_dyn(mut self, governor: Arc<dyn ResourceGovernor>) -> Self {
         self.resource_governor = Some(governor);
+        self
+    }
+
+    /// Wires the lazy per-user sandbox concurrency ceiling (see
+    /// [`SandboxPerUserCeiling`]). Composition supplies this only when
+    /// building the sandboxed profile — every other profile leaves this
+    /// unset, so `reserve_resource_obligation` never registers a per-user
+    /// limit for non-sandbox `SpawnProcess` callers (e.g. the unsandboxed
+    /// local-dev `HostProcessPort`, which shares `EffectKind::SpawnProcess`
+    /// and therefore the same `ReserveResources` obligation).
+    pub fn with_sandbox_per_user_ceiling(mut self, ceiling: Arc<SandboxPerUserCeiling>) -> Self {
+        self.sandbox_per_user_ceiling = Some(ceiling);
         self
     }
 
@@ -1406,6 +1500,16 @@ impl BuiltinObligationHandler {
         let Some(governor) = &self.resource_governor else {
             return Err(resource_obligation_failed());
         };
+        // Lazy per-user registration: bounds how many concurrent sandbox
+        // invocations a single user can hold at once, as a capacity /
+        // fair-share ceiling (see `SANDBOX_PER_USER_MAX_CONCURRENT` in
+        // `ironclaw_reborn_composition::sandbox_quota`). Only set on the
+        // sandboxed profile's handler — see `with_sandbox_per_user_ceiling`.
+        if let Some(per_user_ceiling) = &self.sandbox_per_user_ceiling {
+            per_user_ceiling
+                .ensure_registered(governor, &request.context.resource_scope)
+                .map_err(|_| resource_obligation_failed())?;
+        }
         governor
             .reserve_with_id(
                 request.context.resource_scope.clone(),
@@ -2488,6 +2592,292 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    fn resource_scope_for(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant.to_string()).unwrap(),
+            user_id: UserId::new(user.to_string()).unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn execution_context_for_scope(resource_scope: ResourceScope) -> ExecutionContext {
+        ExecutionContext {
+            run_id: None,
+            origin: None,
+            invocation_id: resource_scope.invocation_id,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+            tenant_id: resource_scope.tenant_id.clone(),
+            user_id: resource_scope.user_id.clone(),
+            authenticated_actor_user_id: None,
+            agent_id: resource_scope.agent_id.clone(),
+            project_id: resource_scope.project_id.clone(),
+            mission_id: resource_scope.mission_id.clone(),
+            thread_id: resource_scope.thread_id.clone(),
+            extension_id: ExtensionId::new("caller").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust: TrustClass::Sandbox,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            resource_scope,
+        }
+    }
+
+    fn reserve_resources_obligations() -> Vec<Obligation> {
+        vec![Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
+        }]
+    }
+
+    async fn prepare_sandbox_spawn(
+        handler: &BuiltinObligationHandler,
+        context: &ExecutionContext,
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+        let obligations = reserve_resources_obligations();
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Spawn,
+                context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+    }
+
+    async fn release_sandbox_spawn(
+        handler: &BuiltinObligationHandler,
+        context: &ExecutionContext,
+        outcome: &CapabilityObligationOutcome,
+    ) {
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+        let obligations = reserve_resources_obligations();
+        handler
+            .abort(CapabilityObligationAbortRequest {
+                phase: CapabilityObligationPhase::Spawn,
+                context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                outcome,
+            })
+            .await
+            .expect("releasing an outstanding sandbox reservation succeeds");
+    }
+
+    /// Requirement 1: a second concurrent sandbox reservation for the SAME
+    /// user is denied as a model-visible outcome
+    /// (`CapabilityObligationError::Failed { kind: Resource }`, never a host
+    /// panic/error) while the first is outstanding; once the first releases,
+    /// the next dispatch for that user succeeds.
+    #[tokio::test]
+    async fn sandbox_per_user_ceiling_denies_second_concurrent_reservation_for_same_user() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
+        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
+
+        let first = prepare_sandbox_spawn(&handler, &context)
+            .await
+            .expect("first sandbox reservation for user1 is within the per-user ceiling of 1");
+
+        let second = prepare_sandbox_spawn(&handler, &context).await;
+        assert!(
+            matches!(
+                second,
+                Err(CapabilityObligationError::Failed {
+                    kind: CapabilityObligationFailureKind::Resource
+                })
+            ),
+            "a second concurrent sandbox reservation for the SAME user must be denied as a \
+             model-visible outcome while the first is outstanding, got {second:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context, &first).await;
+
+        let third = prepare_sandbox_spawn(&handler, &context).await;
+        assert!(
+            third.is_ok(),
+            "once the first reservation releases, the next dispatch for the same user succeeds"
+        );
+    }
+
+    /// Requirement 2: a second concurrent reservation for a DIFFERENT user in
+    /// the same tenant still succeeds — per-user = 1 must not accidentally
+    /// serialize the whole tenant.
+    #[tokio::test]
+    async fn sandbox_per_user_ceiling_does_not_serialize_other_users_in_the_tenant() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
+        let context_a = execution_context_for_scope(resource_scope_for("tenant1", "user-a"));
+        let context_b = execution_context_for_scope(resource_scope_for("tenant1", "user-b"));
+
+        let first = prepare_sandbox_spawn(&handler, &context_a)
+            .await
+            .expect("user-a's reservation is within its own per-user ceiling");
+
+        let second = prepare_sandbox_spawn(&handler, &context_b).await;
+        assert!(
+            second.is_ok(),
+            "a different user in the SAME tenant must not be blocked by user-a's per-user \
+             ceiling, got {second:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context_a, &first).await;
+    }
+
+    /// Requirement 3: the tenant-wide ceiling still bites with the per-user
+    /// ceiling in place — exceeding it across DISTINCT users (each within
+    /// their own per-user=1 budget) is still denied. Mirrors
+    /// `ironclaw_reborn_composition::sandbox_quota`'s tenant-wide coverage,
+    /// asserted here through the same dispatcher this ceiling is wired into.
+    #[tokio::test]
+    async fn tenant_wide_ceiling_still_bites_alongside_the_per_user_ceiling() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let tenant_id = TenantId::new("tenant1".to_string()).unwrap();
+        governor
+            .set_limit(
+                ResourceAccount::tenant(tenant_id),
+                ResourceLimits::default().set_max_concurrency_slots(1),
+            )
+            .expect("setting the tenant-wide ceiling on an empty account succeeds");
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
+        let context_a = execution_context_for_scope(resource_scope_for("tenant1", "user-a"));
+        let context_b = execution_context_for_scope(resource_scope_for("tenant1", "user-b"));
+
+        let first = prepare_sandbox_spawn(&handler, &context_a)
+            .await
+            .expect("user-a's reservation is within both the per-user and tenant ceilings");
+
+        let second = prepare_sandbox_spawn(&handler, &context_b).await;
+        assert!(
+            matches!(
+                second,
+                Err(CapabilityObligationError::Failed {
+                    kind: CapabilityObligationFailureKind::Resource
+                })
+            ),
+            "a different user's reservation must still be denied by the tenant-wide ceiling \
+             even though it is within its OWN per-user budget, got {second:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context_a, &first).await;
+    }
+
+    /// Requirement 4: registration is idempotent. Repeated dispatches for the
+    /// same user (e.g. a sequential spawn after the first released) do not
+    /// disturb an outstanding reservation the SAME user still holds at the
+    /// time a later dispatch re-registers the ceiling.
+    #[tokio::test]
+    async fn sandbox_per_user_ceiling_registration_is_idempotent() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let ceiling = Arc::new(SandboxPerUserCeiling::new(1));
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::clone(&ceiling));
+        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
+
+        // First dispatch registers the ceiling and takes the sole slot.
+        let first = prepare_sandbox_spawn(&handler, &context)
+            .await
+            .expect("first dispatch registers the ceiling and succeeds");
+
+        // A second, unrelated obligation-handler call for the SAME user that
+        // does NOT reserve resources (e.g. a network-only capability) still
+        // runs `reserve_resource_obligation` with no `ReserveResources`
+        // obligation present, so it returns `Ok(None)` early and never
+        // touches the ceiling — registration only happens on an actual
+        // `ReserveResources` dispatch. Directly re-invoke the governor
+        // through the same ceiling instance to exercise the idempotent path
+        // without perturbing the outstanding reservation above.
+        ceiling
+            .ensure_registered(&governor, &context.resource_scope)
+            .expect("re-registering an already-registered account is a cheap no-op");
+
+        // The outstanding reservation from `first` must be untouched: a
+        // second concurrent dispatch for the same user is still denied.
+        let second = prepare_sandbox_spawn(&handler, &context).await;
+        assert!(
+            matches!(
+                second,
+                Err(CapabilityObligationError::Failed {
+                    kind: CapabilityObligationFailureKind::Resource
+                })
+            ),
+            "idempotent re-registration must not disturb the outstanding reservation, got {second:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context, &first).await;
+    }
+
+    /// Regression: `ensure_registered` used to call
+    /// `governor.set_limit(account, ResourceLimits::default().set_max_concurrency_slots(n))`,
+    /// which writes a WHOLE fresh `ResourceLimits` and silently resets any
+    /// other limit dimension (spend, tokens, wall-clock, …) a different
+    /// caller previously set on the same account. Nothing sets user-level
+    /// limits in production today, so this was latent — but the fix must be
+    /// read-modify-write, not a fresh default, or the day something DOES set
+    /// a user-level spend limit, the first sandbox dispatch for that user
+    /// would silently erase it.
+    #[tokio::test]
+    async fn sandbox_per_user_ceiling_registration_preserves_unrelated_pre_existing_limit() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let account = ResourceAccount::user(
+            TenantId::new("tenant1".to_string()).unwrap(),
+            UserId::new("user1".to_string()).unwrap(),
+        );
+        let pre_existing_max_usd = rust_decimal::Decimal::from(5);
+        governor
+            .set_limit(
+                account.clone(),
+                ResourceLimits::default().set_max_usd(pre_existing_max_usd),
+            )
+            .expect("setting an unrelated pre-existing limit on the account succeeds");
+
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
+        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
+
+        let first = prepare_sandbox_spawn(&handler, &context)
+            .await
+            .expect("first sandbox reservation registers the per-user ceiling");
+
+        let snapshot = governor
+            .account_snapshot(&account)
+            .expect("reading the account snapshot succeeds")
+            .expect("the account has limits after ceiling registration");
+        let limits = snapshot
+            .limits
+            .expect("ceiling registration must have set limits on the account");
+        assert_eq!(
+            limits.max_usd,
+            Some(pre_existing_max_usd),
+            "ceiling registration must preserve an unrelated pre-existing limit dimension \
+             instead of resetting the whole ResourceLimits to default, got {limits:?}"
+        );
+        assert_eq!(
+            limits.max_concurrency_slots,
+            Some(1),
+            "ceiling registration must still set the per-user concurrency ceiling, got {limits:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context, &first).await;
     }
 
     // #5459 tenant-shared credential resolution: a caller's own secret wins;

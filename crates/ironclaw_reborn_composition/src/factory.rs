@@ -1011,6 +1011,18 @@ where
         })
 }
 
+/// Binds `binding`'s process backend onto `services`. This is the single
+/// chokepoint every production builder (`build_backend_production`'s
+/// local-storage path AND the two substrate-only public builders,
+/// `build_libsql_production_host_runtime_services` /
+/// `build_postgres_production_host_runtime_services`) routes through to turn
+/// a `RebornRuntimeProcessBinding::TenantSandbox` into a real sandbox process
+/// port. The D3-2 per-user sandbox concurrency ceiling is wired here, in the
+/// same match arm, rather than at each builder's call site: a caller cannot
+/// reach a tenant-sandbox binding without also getting the ceiling, so no
+/// future builder can silently omit it the way the two substrate-only
+/// builders previously did (code review finding, sandbox-per-user-ceiling
+/// program).
 pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
     binding: RebornRuntimeProcessBinding,
@@ -1023,9 +1035,13 @@ where
 {
     match binding {
         RebornRuntimeProcessBinding::None => services,
-        RebornRuntimeProcessBinding::TenantSandbox { process_port } => {
-            services.with_production_tenant_sandbox_process_port(process_port)
-        }
+        RebornRuntimeProcessBinding::TenantSandbox { process_port } => services
+            .with_production_tenant_sandbox_process_port(process_port)
+            .with_sandbox_per_user_ceiling(Arc::new(
+                ironclaw_host_runtime::SandboxPerUserCeiling::new(
+                    crate::sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT,
+                ),
+            )),
     }
 }
 
@@ -5000,6 +5016,12 @@ async fn build_backend_production(
         &production_wiring.runtime_process_binding,
         RebornRuntimeProcessBinding::TenantSandbox { .. }
     );
+    // Bounds concurrent sandbox invocations per (tenant, user) — a capacity /
+    // fair-share ceiling, see `sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT`.
+    // Wired inside `apply_production_runtime_process_binding` itself (the
+    // single chokepoint every production builder routes through), not here,
+    // so no builder can reach a `TenantSandbox` binding without also getting
+    // the ceiling.
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,

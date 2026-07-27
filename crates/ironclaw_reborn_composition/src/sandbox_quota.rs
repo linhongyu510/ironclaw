@@ -29,6 +29,30 @@ pub(crate) const SANDBOX_MAX_CONCURRENT_ENV: &str = "IRONCLAW_SANDBOX_MAX_CONCUR
 /// concurrent container fan-out).
 pub(crate) const DEFAULT_SANDBOX_MAX_CONCURRENT: u32 = 4;
 
+/// A given user may have at most this many sandbox invocations in flight at
+/// a time. Registered lazily, per `(tenant, user)`, at the obligation
+/// dispatcher (`ironclaw_host_runtime::obligations::SandboxPerUserCeiling`)
+/// the first time each user actually dispatches a sandboxed `SpawnProcess`
+/// capability — users are not enumerable at boot, only the deployment owner
+/// is, so unlike [`DEFAULT_SANDBOX_MAX_CONCURRENT`] this ceiling cannot be
+/// applied once at boot for every user.
+///
+/// This is a capacity / fair-share choice, not a security-load-bearing one:
+/// it bounds how much of the tenant-wide container fan-out any single user
+/// can claim for themselves, so one busy user cannot starve every sibling in
+/// the tenant. W8's credential-attribution staging is keyed `(tenant, user)`
+/// with refcounted-set semantics — each of a user's concurrent invocations
+/// holds its own staged obligation and its own lease — so it does NOT
+/// require serializing a user to a single in-flight invocation; do not
+/// re-derive this constant's value from an attribution-correctness argument.
+///
+/// Applied ALONGSIDE, never instead of, the tenant-wide
+/// [`apply_sandbox_user_ceiling`] ceiling: the per-user ceiling gives each
+/// user their own bounded share, while the tenant-wide ceiling still bounds
+/// total container fan-out across every user in the tenant. Removing either
+/// reopens a hole the other's doc comment describes.
+pub(crate) const SANDBOX_PER_USER_MAX_CONCURRENT: u32 = 4;
+
 /// Resolves the configured ceiling from [`SANDBOX_MAX_CONCURRENT_ENV`],
 /// falling back to [`DEFAULT_SANDBOX_MAX_CONCURRENT`] when the env var is
 /// absent, empty, non-numeric, or zero (zero would mean "no sandboxed shell

@@ -82,6 +82,7 @@ where
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
+            sandbox_per_user_ceiling,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -128,6 +129,7 @@ where
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
+            sandbox_per_user_ceiling,
             component_types,
         }
     }
@@ -193,6 +195,7 @@ where
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
+            sandbox_per_user_ceiling,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -249,6 +252,7 @@ where
             turn_run_wake_notifier,
             extension_tool_resolver,
             post_edit_check,
+            sandbox_per_user_ceiling,
             component_types,
         }
     }
@@ -737,6 +741,21 @@ where
     /// threads it here; the feature stays off when this is never called.
     pub fn with_post_edit_check(mut self, post_edit_check: crate::PostEditCheckConfig) -> Self {
         self.post_edit_check = Some(post_edit_check);
+        self
+    }
+
+    /// Wires the lazy per-user sandbox concurrency ceiling into the
+    /// obligation handler this service graph builds (see
+    /// [`crate::obligations::SandboxPerUserCeiling`]). Composition calls
+    /// this only when building the sandboxed profile — every other profile
+    /// leaves it unset, so `HostRuntimeServices::builtin_obligation_handler`
+    /// never registers a per-user ceiling for non-sandbox `SpawnProcess`
+    /// callers.
+    pub fn with_sandbox_per_user_ceiling(
+        mut self,
+        ceiling: Arc<crate::obligations::SandboxPerUserCeiling>,
+    ) -> Self {
+        self.sandbox_per_user_ceiling = Some(ceiling);
         self
     }
 
