@@ -104,7 +104,7 @@ pub use first_party_tools::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
-    register_outbound_delivery_first_party_handler,
+    is_allowed_code_artifact_host, register_outbound_delivery_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

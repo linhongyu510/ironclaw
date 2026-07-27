@@ -91,6 +91,10 @@ use ironclaw_extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
+    ironhub::{
+        extend_builtin_first_party_package as extend_builtin_ironhub_package,
+        insert_handlers as insert_ironhub_handlers,
+    },
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
         insert_handler as insert_operator_config_handler,
@@ -102,7 +106,7 @@ use ironclaw_extension_host::{
 };
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionRegistry, SharedExtensionRegistry,
+    ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
@@ -125,11 +129,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PostEditCheckConfig, ProductAuthProviderRuntimePorts,
-    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, TriggerCreateHook, builtin_first_party_package,
-    native_memory_first_party_package,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    PostEditCheckConfig, ProductAuthProviderRuntimePorts, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, TriggerCreateHook,
+    builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
@@ -1060,6 +1064,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -3117,6 +3122,11 @@ fn production_builtin_extension_registry(
             reason: format!("extension lifecycle package is invalid: {error}"),
         }
     })?;
+    let package = extend_builtin_ironhub_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("IronHub package is invalid: {error}"),
+        }
+    })?;
     let package = extend_builtin_admin_configuration_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("administrator configuration package is invalid: {error}"),
@@ -4900,6 +4910,49 @@ async fn build_backend_production(
                 reason: format!("first-party capability handlers are invalid: {error}"),
             })?;
     }
+    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    let extension_host_ports =
+        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host port catalog could not be loaded: {error}"),
+            }
+        })?;
+    let extension_host_api_contracts =
+        product_extension_host_api_contract_registry().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host API contracts could not be loaded: {error}"),
+            }
+        })?;
+    let extension_installation_state_path = ExtensionInstallationStore::default_state_path()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path is invalid: {error}"),
+        })?;
+    let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
+        ExtensionInstallationStore::load_at(
+            extension_filesystem.clone(),
+            extension_installation_state_path,
+            extension_host_ports,
+            extension_host_api_contracts,
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be loaded: {error}"),
+        })?,
+    );
+    let persisted_manifest_sources = extension_installation_store
+        .list_manifests()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation manifests could not be loaded: {error}"),
+        })?
+        .into_iter()
+        .map(|record| {
+            (
+                record.manifest().id.as_str().to_string(),
+                record.manifest().source,
+            )
+        })
+        .collect::<BTreeMap<String, ManifestSource>>();
     let extensions_root = VirtualPath::new("/system/extensions")?;
     #[cfg(any(test, feature = "test-support"))]
     let filesystem_catalog = if trust_fixture_extensions_for_test {
@@ -4910,18 +4963,20 @@ async fn build_backend_production(
         )
         .await
     } else {
-        AvailableExtensionCatalog::from_filesystem_root(
+        AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
             stores.filesystem.as_ref(),
             &extensions_root,
             &first_party_reserved_ids,
+            &persisted_manifest_sources,
         )
         .await
     };
     #[cfg(not(any(test, feature = "test-support")))]
-    let filesystem_catalog = AvailableExtensionCatalog::from_filesystem_root(
+    let filesystem_catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
         stores.filesystem.as_ref(),
         &extensions_root,
         &first_party_reserved_ids,
+        &persisted_manifest_sources,
     )
     .await;
     let mut available_extensions =
@@ -5026,35 +5081,6 @@ async fn build_backend_production(
         )
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("admin configuration service could not be built: {error}"),
-        })?,
-    );
-    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
-    let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension host port catalog could not be loaded: {error}"),
-            }
-        })?;
-    let extension_host_api_contracts =
-        product_extension_host_api_contract_registry().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension host API contracts could not be loaded: {error}"),
-            }
-        })?;
-    let extension_installation_state_path = ExtensionInstallationStore::default_state_path()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state path is invalid: {error}"),
-        })?;
-    let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
-        ExtensionInstallationStore::load_at(
-            extension_filesystem.clone(),
-            extension_installation_state_path,
-            extension_host_ports,
-            extension_host_api_contracts,
-        )
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be loaded: {error}"),
         })?,
     );
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
@@ -5207,6 +5233,14 @@ async fn build_backend_production(
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle handlers are invalid: {error}"),
+    })?;
+    insert_ironhub_handlers(
+        &mut first_party_registry,
+        Arc::clone(&skill_management),
+        Arc::clone(&extension_management),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("IronHub handlers are invalid: {error}"),
     })?;
     insert_admin_configuration_handler(
         &mut first_party_registry,
@@ -5577,6 +5611,7 @@ async fn build_backend_production(
         channel_dm_target_store,
         channel_disconnect_slot,
         runtime_http_egress,
+        host_runtime_http_egress,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,

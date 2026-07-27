@@ -389,6 +389,47 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/ironhub_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional search query for the signed IronHub catalog." }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_info.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_install.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] },
+                "force": { "type": "boolean", "default": false },
+                "expected_version": { "type": "string" },
+                "expected_artifact_digest": { "type": "string" }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_search.output.v1.json"
+        | "schemas/builtin/ironhub_info.output.v1.json"
+        | "schemas/builtin/ironhub_install.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "phase": { "type": "string", "enum": ["discovered", "installed"] },
+                "entries": { "type": "array", "items": { "type": "object" } },
+                "lifecycle": { "type": "object" },
+                "message": { "type": "string" }
+            },
+            "required": ["phase", "entries"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/admin_configuration_replace.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -881,6 +922,23 @@ mod tests {
         assert_eq!(
             tool_output["required"],
             serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
+        );
+    }
+
+    #[test]
+    fn ironhub_install_schema_keeps_unverified_acknowledgement_operator_only() {
+        let input =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.input.v1.json")
+                .expect("IronHub install input schema is registered");
+        let output =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.output.v1.json")
+                .expect("IronHub install output schema is registered");
+
+        assert!(input["properties"].get("acknowledge_unverified").is_none());
+        assert_eq!(input["additionalProperties"], false);
+        assert_eq!(
+            output["properties"]["phase"]["enum"],
+            serde_json::json!(["discovered", "installed"])
         );
     }
 
