@@ -141,6 +141,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectAttempts = 0;
     let disposed = false;
     let terminalErrorReceived = false;
+    let readySource = null;
     // This cursor belongs to this mounted route only. A route remount must
     // hydrate current state from the projection origin because the composite
     // cursor contains a process-local live rail. Controlled retries within this
@@ -159,6 +160,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     function markConnected(source) {
       if (disposed || terminalErrorReceived || es !== source) return;
       clearOpenWatchdog();
+      readySource = source;
       reconnectAttempts = 0;
       setStatus(CONNECTION_STATUS.CONNECTED);
     }
@@ -168,10 +170,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
       openWatchdog = setTimeout(() => {
         openWatchdog = null;
         if (disposed || terminalErrorReceived || es !== source) return;
-        if (isEventSourceOpen(source)) {
-          markConnected(source);
-          return;
-        }
         reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
       }, reconnectOpenDeadline);
     }
@@ -181,6 +179,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     ) {
       if (disposed || terminalErrorReceived) return;
       if (es) {
+        readySource = null;
         es.close();
         es = null;
       }
@@ -225,7 +224,11 @@ export function useSSE({ threadId, onEvent, enabled }) {
       if (reconnectAttempts > 0) scheduleOpenWatchdog(source);
 
       source.onopen = () => {
-        markConnected(source);
+        // HTTP headers alone do not prove the server-side subscription is
+        // usable. A proxy can open the response and immediately EOF before the
+        // server's ready frame. Keep the watchdog and retry streak until a
+        // valid application frame reaches dispatchFrame().
+        scheduleOpenWatchdog(source);
       };
 
       const dispatchFrame = (event, fallbackType) => {
@@ -268,6 +271,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
           }
+          readySource = null;
           es = null;
           source.close();
           setStatus(CONNECTION_STATUS.DISCONNECTED);
@@ -327,6 +331,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       }
       clearOpenWatchdog();
       if (es) {
+        readySource = null;
         es.close();
         es = null;
       }
@@ -349,8 +354,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
-      if (es && isEventSourceOpen(es)) {
-        markConnected(es);
+      if (es && readySource === es && isEventSourceOpen(es)) {
+        setStatus(CONNECTION_STATUS.CONNECTED);
         return;
       }
       setStatus(CONNECTION_STATUS.RECONNECTING);
@@ -378,6 +383,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       clearOpenWatchdog();
       const source = es;
+      readySource = null;
       es = null;
       source?.close();
     };

@@ -157,6 +157,10 @@ async def _install_fake_v2_event_source(page) -> None:
                 if (activeStream !== this || this.readyState === 2) return;
                 this.readyState = 1;
                 if (typeof this.onopen === "function") this.onopen(new Event("open"));
+                this.dispatchEvent(new MessageEvent("keep_alive", {
+                  data: JSON.stringify({ type: "keep_alive" }),
+                  lastEventId: crypto.randomUUID(),
+                }));
               }, 0);
             }
             close() {

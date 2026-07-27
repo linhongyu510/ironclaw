@@ -163,6 +163,10 @@ test("useSSE reflects browser offline and online events", () => {
   const stream = streams[0];
   stream.readyState = context.EventSource.OPEN;
   stream.onopen();
+  stream.listener("keep_alive")({
+    data: JSON.stringify({ type: "keep_alive" }),
+    lastEventId: "initial-ready",
+  });
   windowListeners.get("offline")();
   assert.deepEqual(statuses, ["connecting", "connected", "reconnecting"]);
 
@@ -194,6 +198,10 @@ test("useSSE resumes delivery after returning to a hidden tab", () => {
   const initial = streams[0];
   initial.readyState = context.EventSource.OPEN;
   initial.onopen();
+  initial.listener("keep_alive")({
+    data: JSON.stringify({ type: "keep_alive" }),
+    lastEventId: "initial-ready",
+  });
 
   context.document.visibilityState = "hidden";
   documentListeners.get("visibilitychange")();
@@ -218,7 +226,8 @@ test("useSSE resumes delivery after returning to a hidden tab", () => {
   });
 
   assert.equal(streams.length, 3);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
+  assert.equal(events.at(-1).type, "projection_update");
   assert.deepEqual(statuses, [
     "connecting",
     "connected",
@@ -242,14 +251,13 @@ test("useSSE replaces a short successful stream with a newer generation", () => 
 
   assert.deepEqual(statuses, [
     "connecting",
-    "connected",
     "reconnecting",
   ]);
   assert.equal(stream.closeCalls, 1);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 2000);
+  const firstRetry = timers.find((timer) => timer.delay === 2000);
+  assert.ok(firstRetry);
 
-  timers[0].handler();
+  firstRetry.handler();
   const replacement = streams[1];
   assert.equal(replacement.args.connectionGeneration, 2);
 
@@ -266,10 +274,51 @@ test("useSSE replaces a short successful stream with a newer generation", () => 
   assert.equal(streams.length, 2);
   assert.deepEqual(statuses, [
     "connecting",
-    "connected",
     "reconnecting",
     "reconnecting",
     "connected",
+  ]);
+});
+
+test("useSSE backs off streams that open then EOF before a ready frame", () => {
+  const { context, statuses, streams, timers } = createHarness();
+
+  const first = streams[0];
+  first.readyState = context.EventSource.OPEN;
+  first.onopen();
+  first.onerror({});
+
+  const firstRetry = timers.at(-1);
+  assert.equal(firstRetry.delay, 2000);
+  firstRetry.handler();
+
+  const second = streams[1];
+  second.readyState = context.EventSource.OPEN;
+  second.onopen();
+  second.onerror({});
+
+  const secondRetry = timers.at(-1);
+  assert.equal(secondRetry.delay, 4000);
+  secondRetry.handler();
+
+  const ready = streams[2];
+  ready.readyState = context.EventSource.OPEN;
+  ready.onopen();
+  ready.listener("keep_alive")({
+    data: JSON.stringify({ type: "keep_alive" }),
+    lastEventId: "ready-after-backoff",
+  });
+  ready.onerror({});
+
+  assert.equal(timers.at(-1).delay, 2000);
+  assert.deepEqual(statuses, [
+    "connecting",
+    "reconnecting",
+    "reconnecting",
+    "reconnecting",
+    "reconnecting",
+    "connected",
+    "reconnecting",
   ]);
 });
 
