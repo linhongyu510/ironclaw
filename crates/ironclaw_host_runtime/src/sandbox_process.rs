@@ -277,7 +277,12 @@ pub struct RebornScopedSandboxCommandTransport {
     /// constructed in production yet (W6 is its consumer), so this is a
     /// no-op until something wires one in via
     /// [`Self::with_attribution_resolver`].
-    attribution: Option<Arc<dyn attribution::AttributionInvalidator>>,
+    ///
+    /// Concrete type, not `Arc<dyn AttributionInvalidator>`: that trait had
+    /// exactly one impl and zero callers of the dyn-erased path, so it was
+    /// collapsed (see `attribution`'s module doc). Only the `Option` is
+    /// load-bearing today — nothing constructs a resolver yet.
+    attribution: Option<Arc<attribution::ConnectionAttributionResolver>>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -328,7 +333,7 @@ impl RebornScopedSandboxCommandTransport {
     #[allow(dead_code)] // wired by tests today; a production caller lands with W6
     pub(crate) fn with_attribution_resolver(
         mut self,
-        resolver: Arc<dyn attribution::AttributionInvalidator>,
+        resolver: Arc<attribution::ConnectionAttributionResolver>,
     ) -> Self {
         self.attribution = Some(resolver);
         self

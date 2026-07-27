@@ -71,7 +71,7 @@ use crate::RuntimeProcessError;
 
 use super::ContainerWorkdir;
 use super::LABEL_PREFIX;
-use super::attribution::{self, AttributionInvalidator};
+use super::attribution::{self, ConnectionAttributionResolver};
 use super::broker::SANDBOX_EGRESS_NETWORK_NAME;
 use super::exec_transport;
 use super::registry::{self, SandboxActivityRegistry, UserContainerCandidate};
@@ -315,7 +315,12 @@ pub struct SandboxReaper {
     /// "W17"). `None` by default: no resolver is constructed in production
     /// yet (W6 is its consumer), so this is a no-op until something wires
     /// one in via [`Self::with_attribution_resolver`].
-    attribution: Option<Arc<dyn AttributionInvalidator>>,
+    ///
+    /// Concrete type, not `Arc<dyn AttributionInvalidator>`: that trait had
+    /// exactly one impl and zero callers of the dyn-erased path, so it was
+    /// collapsed (see `attribution`'s module doc). Only the `Option` is
+    /// load-bearing today — nothing constructs a resolver yet.
+    attribution: Option<Arc<ConnectionAttributionResolver>>,
 }
 
 impl SandboxReaper {
@@ -341,7 +346,7 @@ impl SandboxReaper {
     #[allow(dead_code)] // wired by tests today; a production caller lands with W6
     pub(crate) fn with_attribution_resolver(
         mut self,
-        resolver: Arc<dyn AttributionInvalidator>,
+        resolver: Arc<ConnectionAttributionResolver>,
     ) -> Self {
         self.attribution = Some(resolver);
         self

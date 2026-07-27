@@ -33,7 +33,7 @@ use crate::{CommandExecutionOutput, RuntimeProcessError};
 
 use super::{
     ContainerWorkdir, LABEL_PREFIX, RebornSandboxConfig, RebornSandboxUserKey,
-    attribution::{self, AttributionInvalidator},
+    attribution::{self, ConnectionAttributionResolver},
     broker::{
         SANDBOX_EGRESS_NETWORK_GATEWAY, SANDBOX_EGRESS_NETWORK_NAME, SANDBOX_EGRESS_NETWORK_SUBNET,
     },
@@ -61,7 +61,7 @@ pub(super) async fn ensure_container(
     user_id: &UserId,
     workspace: &Path,
     network_ready: &tokio::sync::OnceCell<()>,
-    attribution: Option<&dyn AttributionInvalidator>,
+    attribution: Option<&ConnectionAttributionResolver>,
 ) -> Result<String, RuntimeProcessError> {
     ensure_egress_network_once(docker, config, network_ready).await?;
     let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
@@ -144,7 +144,7 @@ async fn recycle_stale_container(
     docker: &Docker,
     container_id: &str,
     released_ip: Option<IpAddr>,
-    attribution: Option<&dyn AttributionInvalidator>,
+    attribution: Option<&ConnectionAttributionResolver>,
 ) -> Result<(), RuntimeProcessError> {
     docker
         .remove_container(

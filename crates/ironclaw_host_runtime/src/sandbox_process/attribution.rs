@@ -52,12 +52,21 @@
 //! *previous* owner for up to the TTL window — once W6 injects credentials
 //! on that result, that is a cross-user credential leak. `reaper.rs`
 //! (idle-stop, aged-remove, forced-recycle) and `exec_transport.rs`'s
-//! posture-mismatch recycle each accept an `Option<Arc<dyn
-//! AttributionInvalidator>>` and call [`ConnectionAttributionResolver::invalidate`]
-//! on the IP a container held right before tearing it down, so the window
-//! collapses to zero for every teardown this crate knows about. The TTL
-//! remains the backstop for a teardown this crate doesn't observe (e.g. a
-//! container removed out-of-band by an operator).
+//! posture-mismatch recycle each accept an `Option<Arc<ConnectionAttributionResolver>>`
+//! (or `Option<&ConnectionAttributionResolver>`) and call
+//! [`ConnectionAttributionResolver::invalidate`] on the IP a container held
+//! right before tearing it down, so the window collapses to zero for every
+//! teardown this crate knows about. The TTL remains the backstop for a
+//! teardown this crate doesn't observe (e.g. a container removed out-of-band
+//! by an operator).
+//!
+//! **Trait collapsed (thermo ruling):** this used to go through a
+//! `pub(crate) trait AttributionInvalidator` with one blanket impl and zero
+//! callers of the `dyn`-erased path — pure speculative indirection. Holders
+//! now store the concrete `ConnectionAttributionResolver` (its
+//! `NetworkContainerLookup` type parameter defaults to `Docker`). Bring the
+//! trait back only if W6 genuinely needs to wire a non-`Docker` lookup
+//! through a holder.
 
 use std::{
     collections::HashMap,
@@ -266,32 +275,6 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
     }
 }
 
-/// Seam that lets a container-teardown call site (`reaper`,
-/// `exec_transport::recycle_stale_container`) collapse this resolver's
-/// cache-staleness window to zero for the IP a container it just tore down
-/// was holding — without needing to know the resolver's
-/// [`NetworkContainerLookup`] backend generic parameter. Blanket-implemented
-/// for every `ConnectionAttributionResolver<L>` (mirrors the existing
-/// `NetworkContainerLookup` seam in this same file) so production teardown
-/// sites hold a real Docker-backed resolver behind `Arc<dyn
-/// AttributionInvalidator>` and tests can wire one built on `FakeLookup`.
-///
-/// **Not built yet where it would actually change behavior**: nothing in
-/// this crate constructs a `ConnectionAttributionResolver` in production
-/// today (see the module doc's "W6 is the consumer" note) — teardown sites
-/// accept an `Option<Arc<dyn AttributionInvalidator>>` so that once W6 (or a
-/// test) plugs one in, every teardown path invalidates through it, but until
-/// then this is a no-op `None`.
-pub(crate) trait AttributionInvalidator: Send + Sync {
-    fn invalidate(&self, peer_ip: IpAddr);
-}
-
-impl<L: NetworkContainerLookup> AttributionInvalidator for ConnectionAttributionResolver<L> {
-    fn invalidate(&self, peer_ip: IpAddr) {
-        ConnectionAttributionResolver::invalidate(self, peer_ip);
-    }
-}
-
 /// Reads `container`'s IPv4/IPv6 address on `network`, or `None` if the
 /// container has no recorded address there (network-settings absent, the
 /// named network missing from its network map, or an empty/unparseable
@@ -299,8 +282,9 @@ impl<L: NetworkContainerLookup> AttributionInvalidator for ConnectionAttribution
 ///
 /// `pub(crate)` (rather than private) so container-teardown call sites
 /// (`reaper`, `exec_transport`) can read the IP a container they are about
-/// to tear down was holding, to invalidate it via [`AttributionInvalidator`]
-/// — see those modules' `SandboxReaper`/`ensure_container` wiring.
+/// to tear down was holding, to invalidate it via
+/// [`ConnectionAttributionResolver::invalidate`] — see those modules'
+/// `SandboxReaper`/`ensure_container` wiring.
 pub(crate) fn container_ip_on_network(
     container: &ContainerSummary,
     network: &str,
