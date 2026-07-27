@@ -5004,6 +5004,22 @@ async fn build_backend_production(
         services,
         production_wiring.runtime_process_binding,
     );
+    // At most one sandbox invocation per user, in flight at a time (product
+    // requirement; also what W8's credential-attribution staging depends on
+    // for correctness — see `sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT`).
+    // Gated to the sandboxed profile only: `Obligation::ReserveResources`
+    // fires for every `EffectKind::SpawnProcess` grant, including the
+    // unsandboxed local-dev `HostProcessPort`, so wiring this unconditionally
+    // would wrongly serialize non-sandbox process spawns too.
+    let services = if is_sandboxed_profile {
+        services.with_sandbox_per_user_ceiling(Arc::new(
+            ironclaw_host_runtime::SandboxPerUserCeiling::new(
+                crate::sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT,
+            ),
+        ))
+    } else {
+        services
+    };
     // Wire the operator post-edit check in production too (off unless
     // IRONCLAW_POST_EDIT_CHECK is set); it runs isolated in the tenant sandbox
     // per the process binding applied above.

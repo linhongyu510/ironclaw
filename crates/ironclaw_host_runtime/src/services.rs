@@ -177,6 +177,11 @@ where
     extension_tool_resolver: Arc<Mutex<Option<Arc<dyn ToolResolver>>>>,
     post_edit_check: Option<PostEditCheckConfig>,
     component_types: ProductionComponentTypes,
+    /// Lazy per-user sandbox concurrency ceiling (see
+    /// [`crate::obligations::SandboxPerUserCeiling`]). Composition sets this
+    /// only when building the sandboxed profile — see
+    /// `with_sandbox_per_user_ceiling`.
+    sandbox_per_user_ceiling: Option<Arc<crate::obligations::SandboxPerUserCeiling>>,
 }
 
 /// Canonical host-runtime ports used by product-auth provider adapters.
@@ -475,6 +480,7 @@ where
             turn_run_wake_notifier: None,
             extension_tool_resolver: Arc::new(Mutex::new(None)),
             post_edit_check: None,
+            sandbox_per_user_ceiling: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -809,6 +815,9 @@ where
         }
         if let Some(resolver) = &self.runtime_credential_account_resolver {
             handler = handler.with_credential_account_resolver_dyn(Arc::clone(resolver));
+        }
+        if let Some(ceiling) = &self.sandbox_per_user_ceiling {
+            handler = handler.with_sandbox_per_user_ceiling(Arc::clone(ceiling));
         }
 
         handler

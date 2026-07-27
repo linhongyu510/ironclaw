@@ -119,7 +119,7 @@ pub use invocation_services::{
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
     ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, SandboxPerUserCeiling,
 };
 pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
