@@ -38,10 +38,6 @@ impl RebornSandboxScopeKey {
     pub fn workspace_path(&self, root: &Path) -> PathBuf {
         root.join("scopes").join(&self.digest)
     }
-
-    pub fn container_name_prefix(&self) -> String {
-        format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
-    }
 }
 
 fn encode_scope_parts(parts: &[(&str, String)]) -> String {
@@ -104,7 +100,6 @@ mod tests {
         ));
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
     }
 
     #[test]
@@ -114,7 +109,6 @@ mod tests {
         let right = RebornSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("b")));
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
     }
 
     #[test]
@@ -163,6 +157,5 @@ mod tests {
         let right = RebornSandboxScopeKey::from_scope(&scope("tenant_a", "user", Some("p"), None));
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
     }
 }
