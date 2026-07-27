@@ -474,7 +474,21 @@ async fn handle_connect(
     deny_private_ips: bool,
     tls_intercept: Option<&TlsInterceptConfig>,
 ) -> std::io::Result<()> {
-    let host = target.rsplit_once(':').map_or(target, |(host, _port)| host);
+    // Single normalization point: DNS hostnames are case-insensitive, and
+    // every downstream use of `host` in this function treats it that way
+    // (`host_allowed` and `TlsInterceptConfig::is_bound` already lowercase
+    // their own side of the comparison). Fold it ONCE here so the exact same
+    // string flows into the allowlist check, `resolve_dial_addr`, the bound
+    // check, and — the one that actually needs this, since its cache is
+    // keyed on the literal string — `terminate_and_forward`'s cert mint and
+    // the origin `ServerName`. Without this, two different-cased CONNECTs for
+    // the same effective host would mint and cache two leaf certificates
+    // instead of sharing one.
+    let host = target
+        .rsplit_once(':')
+        .map_or(target, |(host, _port)| host)
+        .to_ascii_lowercase();
+    let host = host.as_str();
     let port: Option<u16> = target
         .rsplit_once(':')
         .and_then(|(_host, port)| port.parse().ok());
@@ -1622,6 +1636,100 @@ mod tests {
             tls_intercept.cached_leaf_count(),
             0,
             "an unbound host must never cause a leaf certificate to be minted"
+        );
+    }
+
+    /// Host-casing normalization: `is_bound`/`host_allowed` already fold case
+    /// (`TlsInterceptConfig::new` lowercases its allowlist; `host_allowed`
+    /// lowercases the incoming host), but `handle_connect` used to pass the
+    /// CONNECT target's *original* casing straight into
+    /// `terminate_and_forward` -> `SandboxCertificateAuthority::
+    /// issue_leaf_for_host`, whose cache is keyed on the exact string. Two
+    /// CONNECTs for the same effective host that merely differ in case (a
+    /// real client behavior — DNS hostnames are case-insensitive) minted and
+    /// cached TWO leaves for one host. `handle_connect` must normalize the
+    /// host to one canonical case ONCE, before it flows to the allowlist
+    /// check, the cert mint, and the origin SNI, so both CONNECTs land on the
+    /// same cache entry.
+    #[tokio::test]
+    async fn different_cased_connects_for_the_same_host_cache_one_leaf_not_two() {
+        use super::super::ca::SandboxCertificateAuthority;
+        use super::super::tls_intercept::TlsInterceptConfig;
+        use rustls::pki_types::ServerName;
+        use tokio_rustls::TlsConnector;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let bound_host = "bound.example.com";
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        // Trusts nothing: every client-side handshake attempt below fails
+        // certificate verification. That failure is exactly the
+        // synchronization this test needs — it can only happen after the
+        // server side has already minted (and served) a leaf for that
+        // CONNECT's host, so awaiting it proves the mint already ran.
+        let origin_connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        ));
+        let tls_intercept = Arc::new(TlsInterceptConfig::new(
+            ca,
+            std::collections::HashSet::from([bound_host.to_string()]),
+            origin_connector,
+        ));
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&[bound_host]),
+            // Never actually dialed: the client-side handshake below fails
+            // before `terminate_and_forward` gets far enough to dial the
+            // origin, so this address just needs to parse.
+            resolver: Arc::new(FixedAddrResolver("127.0.0.1:1".parse().unwrap())),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: Some(Arc::clone(&tls_intercept)),
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let untrusting_client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+
+        for cased_host in ["Bound.Example.Com", "bound.example.com"] {
+            let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+            raw_client
+                .write_all(format!("CONNECT {cased_host}:443 HTTP/1.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = [0u8; 128];
+            let n = raw_client.read(&mut response).await.unwrap();
+            assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"));
+
+            let connector = TlsConnector::from(Arc::new(untrusting_client_config.clone()));
+            let server_name = ServerName::try_from(cased_host.to_string()).unwrap();
+            let handshake = tokio::time::timeout(
+                Duration::from_secs(5),
+                connector.connect(server_name, raw_client),
+            )
+            .await
+            .expect("handshake attempt must not hang");
+            assert!(
+                handshake.is_err(),
+                "client trusts nothing, so the handshake must fail verification \
+                 (proving the server already minted a leaf before this point)"
+            );
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        assert_eq!(
+            tls_intercept.cached_leaf_count(),
+            1,
+            "two different-cased CONNECTs for the same effective host must share ONE \
+             cached leaf, not mint/cache a separate one per casing"
         );
     }
 }

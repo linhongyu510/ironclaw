@@ -107,9 +107,44 @@ pub(crate) enum TlsInterceptError {
 /// caller decision (production would use system roots; this phase leaves
 /// that to whoever eventually wires a production caller) — this type only
 /// carries whatever connector it is given.
+///
+/// # WARNING: `origin_connector`'s trust store is a production security
+/// boundary, not a test convenience
+///
+/// Every `TlsInterceptConfig` constructed anywhere in this crate today comes
+/// from a test, and every one of those tests hands it a `TlsConnector` built
+/// from a real (test) root store. **There is no production constructor yet.**
+/// When one is wired (composition, phase 2+), the `origin_connector` it
+/// builds MUST be backed by a real trusted root store — the pattern
+/// `ironclaw_reborn_event_store` already uses in this workspace via
+/// `rustls-native-certs` — and MUST NEVER be:
+///
+/// - built with `rustls::ClientConfig::dangerous()` or any verifier that
+///   skips or weakens certificate verification,
+/// - given a custom `ServerCertVerifier` that always accepts,
+/// - built with an empty `RootCertStore` (equivalent to trusting nothing on
+///   paper, but see below — the actual production risk is the opposite
+///   mistake: trusting *everything*).
+///
+/// This module re-originates a TLS connection to the real upstream on behalf
+/// of the sandboxed container, using the same host/port the container
+/// thought it was dialing. If `origin_connector` ever fails to verify the
+/// origin's certificate against a real root store, this seam stops being a
+/// credential firewall and becomes a working, silent MITM against our own
+/// users' egress traffic to every "bound" host — the exact opposite of what
+/// W6 exists to build. Every test in this file supplies its own real or
+/// deliberately-empty root store, so **no existing test would catch a
+/// permissive production connector** being wired in; this is a wiring-time
+/// requirement the composition PR that adds a production constructor must be
+/// reviewed against, not something this phase's test suite enforces.
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
+    /// See the struct-level `# WARNING` above: this MUST be built from a
+    /// real trusted root store in production (e.g. `rustls-native-certs`),
+    /// and MUST NEVER use `dangerous()`, a verifier that skips verification,
+    /// or an empty root store. Getting this wrong turns the whole TLS
+    /// interception seam into a silent MITM against our own users.
     origin_connector: TlsConnector,
 }
 
