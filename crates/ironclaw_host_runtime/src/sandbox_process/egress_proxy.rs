@@ -21,6 +21,14 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long the credential firewall's obligation lookup may take for one
+/// intercepted connection before it is treated as timed out (§3.4:
+/// CONNECTION-DENIAL, never an implicit pass-through). This bounds the
+/// *lookup*, not the grant — grant lifetime is the staging lease plus
+/// `credential_firewall::MAX_GRANT_TTL`.
+const FIREWALL_LOOKUP_DEADLINE: Duration = Duration::from_secs(5);
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkPolicy;
@@ -568,9 +576,20 @@ async fn handle_connect(
         // just be dropped.
         let leftover = client.buffer().to_vec();
         let raw_client = client.into_inner();
-        if let Err(error) =
-            tls_intercept::terminate_and_forward(raw_client, leftover, host, dial_addr, config)
-                .await
+        // Attribution (W1.5b's `ConnectionAttributionResolver`) is still
+        // unwired here, so this proxy cannot name the peer's `{tenant, user}`
+        // — `identity: None`. That is deliberately fail-closed rather than
+        // convenient: with a credential swap configured, an unattributed
+        // connection presenting a placeholder is a CONNECTION-DENIAL, so no
+        // credential can be injected before attribution is actually wired.
+        let connection = tls_intercept::InterceptedConnection {
+            identity: None,
+            deadline: Instant::now() + FIREWALL_LOOKUP_DEADLINE,
+        };
+        if let Err(error) = tls_intercept::terminate_and_forward(
+            raw_client, leftover, host, dial_addr, config, connection,
+        )
+        .await
         {
             // Fail CLOSED: log and close. Never fall back to a plaintext
             // relay — the client already believes it completed a CONNECT

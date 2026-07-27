@@ -106,11 +106,24 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
         count: 5,
     },
+    // Same W6 retirement trigger. Grew by one in W6 phase 2:
+    // `TlsInterceptConfig::with_credential_swap`, the builder that enables the
+    // credential swap, has no production caller until the profile-gated
+    // wiring lands.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 1,
+        count: 2,
+    },
+    // W6 phase 2's swap module. Same retirement trigger as the entries above:
+    // `SandboxCredentialSwap::new` and `RewrittenRequestHead::report` are
+    // consumed by the future proxy wiring / D5 annotation path.
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_swap.rs",
+        count: 2,
     },
     FrozenPathCount {
         category: "test-support",

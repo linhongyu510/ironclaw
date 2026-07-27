@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, NetworkMethod, ResourceScope};
 use ironclaw_secrets::CredentialPathPolicy;
 
 const FAR_FUTURE: Duration = Duration::from_secs(3600);
@@ -20,6 +20,42 @@ fn allow_all_targets() -> Vec<CredentialTargetPolicy> {
     Vec::new()
 }
 
+/// Test-local constructor for a [`StagedCredentialObligation`] with the
+/// staging-source fields (scope, capability, provider) every real stager
+/// supplies but this module's tests do not vary: the firewall itself never
+/// reads them — only the swap that consumes a granted obligation does (see
+/// `credential_swap`), so pinning them to one fixed value here keeps these
+/// tests about staging/revocation/expiry rather than about credential
+/// resolution.
+fn staged_obligation(
+    secret_handle: SecretHandle,
+    allowed_targets: Vec<CredentialTargetPolicy>,
+    ttl: Duration,
+) -> StagedCredentialObligation {
+    StagedCredentialObligation::new(
+        StagedCredentialObligationSource {
+            scope: test_scope(),
+            capability_id: CapabilityId::new("sandbox.shell").unwrap(),
+            provider_or_extension_id: ExtensionId::new("github").unwrap(),
+            secret_handle,
+        },
+        allowed_targets,
+        ttl,
+    )
+}
+
+fn test_scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant("tenant-a"),
+        user_id: user("user-a"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
 fn far_future_deadline() -> Instant {
     Instant::now() + FAR_FUTURE
 }
@@ -32,7 +68,7 @@ fn staged_obligation_is_retrievable_by_its_tenant_and_user() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     let decision = firewall
@@ -42,7 +78,7 @@ fn staged_obligation_is_retrievable_by_its_tenant_and_user() {
     match decision {
         SandboxCredentialDecision::Grant(obligations) => {
             assert_eq!(obligations.len(), 1);
-            assert_eq!(obligations[0].secret_handle, handle("github-token"));
+            assert_eq!(obligations[0].source.secret_handle, handle("github-token"));
         }
         SandboxCredentialDecision::NoGrant => {
             panic!("expected a grant for the exact (tenant, user) that staged it")
@@ -94,7 +130,7 @@ fn expired_deadline_denies_the_connection_even_when_a_grant_is_staged() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
     let already_passed = Instant::now()
         .checked_sub(Duration::from_secs(1))
@@ -118,11 +154,7 @@ fn expired_obligation_is_grant_denial() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(
-            handle("github-token"),
-            allow_all_targets(),
-            Duration::ZERO,
-        ),
+        staged_obligation(handle("github-token"), allow_all_targets(), Duration::ZERO),
     );
     // The obligation's `expires_at` is `Instant::now() + 0` at staging
     // time. Sleeping 2ms guarantees `authorize`'s own `now` (captured
@@ -150,7 +182,7 @@ fn revoke_removes_a_staged_obligation_before_its_ttl_expires() {
     let lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     lease.revoke();
@@ -173,7 +205,7 @@ fn user_b_cannot_retrieve_user_a_staged_obligation() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     let decision_for_b = firewall
@@ -209,11 +241,7 @@ fn expired_obligation_is_removed_from_staging_map_on_read() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(
-            handle("github-token"),
-            allow_all_targets(),
-            Duration::ZERO,
-        ),
+        staged_obligation(handle("github-token"), allow_all_targets(), Duration::ZERO),
     );
     std::thread::sleep(Duration::from_millis(2));
     assert_eq!(
@@ -246,7 +274,7 @@ fn same_user_id_under_a_different_tenant_is_isolated() {
     let _lease = firewall.stage(
         &tenant_a,
         &shared_user,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     let decision = firewall
@@ -274,12 +302,12 @@ fn staging_the_same_key_twice_keeps_both_obligations_live() {
     let _lease_old = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("old-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("old-token"), allow_all_targets(), FAR_FUTURE),
     );
     let _lease_new = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("new-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("new-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     assert_grant_contains(
@@ -312,12 +340,12 @@ fn dropping_a_stale_lease_does_not_revoke_a_newer_grant_for_the_same_key() {
     let lease_old = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("old-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("old-token"), allow_all_targets(), FAR_FUTURE),
     );
     let lease_new = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("new-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("new-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     // The hazard order: the older invocation finishes and drops its
@@ -354,7 +382,7 @@ fn dropping_the_lease_revokes_the_staged_obligation() {
     let lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     drop(lease);
@@ -376,7 +404,7 @@ fn explicit_revoke_does_not_double_revoke_or_panic_on_drop() {
     let lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     lease.revoke();
@@ -398,7 +426,7 @@ fn lease_dropped_during_unwind_still_revokes() {
     let lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -427,7 +455,7 @@ fn ttl_is_clamped_to_max_grant_ttl_backstop() {
     let lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(
+        staged_obligation(
             handle("github-token"),
             allow_all_targets(),
             Duration::from_secs(24 * 60 * 60),
@@ -472,7 +500,7 @@ fn assert_grant_contains(
         SandboxCredentialDecision::Grant(obligations) => {
             let actual: std::collections::HashSet<_> = obligations
                 .iter()
-                .map(|o| o.secret_handle.clone())
+                .map(|o| o.source.secret_handle.clone())
                 .collect();
             let expected_set: std::collections::HashSet<_> = expected.iter().cloned().collect();
             assert_eq!(
@@ -503,22 +531,22 @@ fn dropping_four_concurrent_leases_in_shuffled_order_only_revokes_each_ones_own_
     let lease_a = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-a"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-a"), allow_all_targets(), FAR_FUTURE),
     );
     let lease_b = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-b"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-b"), allow_all_targets(), FAR_FUTURE),
     );
     let lease_c = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-c"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-c"), allow_all_targets(), FAR_FUTURE),
     );
     let lease_d = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-d"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-d"), allow_all_targets(), FAR_FUTURE),
     );
 
     assert_eq!(
@@ -578,7 +606,7 @@ fn expiry_reclaims_one_entry_without_disturbing_live_siblings() {
     let _short_lived = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(
+        staged_obligation(
             handle("expiring-token"),
             allow_all_targets(),
             Duration::ZERO,
@@ -587,7 +615,7 @@ fn expiry_reclaims_one_entry_without_disturbing_live_siblings() {
     let _long_lived = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("live-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("live-token"), allow_all_targets(), FAR_FUTURE),
     );
     std::thread::sleep(Duration::from_millis(2));
 
@@ -617,12 +645,12 @@ fn user_b_cannot_retrieve_any_of_user_a_multiple_staged_obligations() {
     let _lease_1 = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-1"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-1"), allow_all_targets(), FAR_FUTURE),
     );
     let _lease_2 = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("token-2"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("token-2"), allow_all_targets(), FAR_FUTURE),
     );
 
     let decision_for_b = firewall
@@ -669,7 +697,7 @@ fn non_empty_target_policies_survive_stage_and_authorize_unchanged() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), policies.clone(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), policies.clone(), FAR_FUTURE),
     );
 
     let decision = firewall
@@ -709,7 +737,7 @@ fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
             let lease = firewall.stage(
                 &tenant_a,
                 &user_a,
-                StagedCredentialObligation::new(
+                staged_obligation(
                     handle(&format!("token-{i}")),
                     allow_all_targets(),
                     FAR_FUTURE,
@@ -738,8 +766,7 @@ fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
 
 #[test]
 fn staged_obligation_debug_output_never_contains_secret_handle() {
-    let obligation =
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE);
+    let obligation = staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE);
 
     let debug_output = format!("{obligation:?}");
 
@@ -756,7 +783,7 @@ fn firewall_debug_output_never_contains_staged_identity_or_secret_handles() {
     let _lease = firewall.stage(
         &tenant_a,
         &user_a,
-        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+        staged_obligation(handle("github-token"), allow_all_targets(), FAR_FUTURE),
     );
 
     let debug_output = format!("{firewall:?}");

@@ -49,7 +49,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, ResourceScope, SecretHandle, TenantId, UserId};
 use ironclaw_secrets::CredentialTargetPolicy;
 
 /// The key the proxy can actually derive at connection time (see module
@@ -84,21 +84,61 @@ impl StagingKey {
 #[derive(Clone, PartialEq, Eq)]
 #[allow(dead_code)] // consumed by W6 (proxy TLS termination + credential injection); not wired yet
 pub(crate) struct StagedCredentialObligation {
-    pub(crate) secret_handle: SecretHandle,
+    /// Where the real secret material for this obligation was staged by the
+    /// same capability dispatch that called
+    /// [`SandboxCredentialFirewall::stage`] — the exact
+    /// `(scope, capability_id, secret_handle)` key
+    /// `crate::obligations::RuntimeSecretInjectionStore` was keyed under.
+    /// Carried here rather than re-derived at swap time so
+    /// `credential_swap` reads the same staged material the extension and
+    /// MCP egress lanes read, instead of inventing a second secret-read
+    /// path with a guessed scope.
+    pub(crate) source: StagedCredentialObligationSource,
     pub(crate) allowed_targets: Vec<CredentialTargetPolicy>,
     expires_at: Instant,
 }
 
+/// Identity of the staged secret behind a [`StagedCredentialObligation`] —
+/// see that type's `source` field for why the stager supplies all of it.
+#[derive(Clone, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by W6; not wired yet
+pub(crate) struct StagedCredentialObligationSource {
+    pub(crate) scope: ResourceScope,
+    pub(crate) capability_id: CapabilityId,
+    /// The provider this obligation's credential belongs to. `credential_swap`
+    /// requires it to equal the provider the presented placeholder resolves
+    /// to, so one of a user's own credentials can never be swapped in for a
+    /// *different* provider's placeholder.
+    pub(crate) provider_or_extension_id: ExtensionId,
+    pub(crate) secret_handle: SecretHandle,
+}
+
+impl std::fmt::Debug for StagedCredentialObligationSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omits `secret_handle` (see
+        // `StagedCredentialObligation`'s `Debug`) and `scope` (tenant/user
+        // identity, compliance-sensitive). `capability_id` and
+        // `provider_or_extension_id` are non-secret routing metadata.
+        formatter
+            .debug_struct("StagedCredentialObligationSource")
+            .field("capability_id", &self.capability_id)
+            .field("provider_or_extension_id", &self.provider_or_extension_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for StagedCredentialObligation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Deliberately omit `secret_handle`: repository policy is to never
+        // Deliberately omit the secret handle: repository policy is to never
         // let a secret-handle identifier reach logs/panic output
         // unredacted, and this type's derived `Debug` would otherwise flow
         // through both `SandboxCredentialDecision::Grant` and the
         // firewall's own (also redacted) `Debug`. `allowed_targets` is
-        // target metadata, not secret material, so it is safe to print.
+        // target metadata, not secret material, so it is safe to print, and
+        // `source`'s own `Debug` is redacted the same way.
         formatter
             .debug_struct("StagedCredentialObligation")
+            .field("source", &self.source)
             .field("allowed_targets", &self.allowed_targets)
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
@@ -118,7 +158,7 @@ pub(crate) const MAX_GRANT_TTL: Duration = Duration::from_secs(30 * 60);
 impl StagedCredentialObligation {
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn new(
-        secret_handle: SecretHandle,
+        source: StagedCredentialObligationSource,
         allowed_targets: Vec<CredentialTargetPolicy>,
         ttl: Duration,
     ) -> Self {
@@ -128,7 +168,7 @@ impl StagedCredentialObligation {
         // honored verbatim, whether or not the lease's `Drop` ever runs.
         let clamped_ttl = ttl.min(MAX_GRANT_TTL);
         Self {
-            secret_handle,
+            source,
             allowed_targets,
             // `checked_add` rather than `+`: an overflowing TTL must fail
             // closed (never staged / immediately expired), not panic — see

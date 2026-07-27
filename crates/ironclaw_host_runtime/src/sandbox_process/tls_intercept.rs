@@ -23,11 +23,18 @@
 //! or per-binding predicates as its own, separately-justified follow-up, not
 //! something to build speculatively here.
 //!
-//! **Phase 1 scope: forward the decrypted stream unchanged.** No credential
-//! injection, no body parsing — that is phase 2, gated on a `RuntimeKind::
-//! Sandbox` variant that does not exist yet (design doc, W6 gating note).
-//! Proving the interception mechanism works (real MITM, real fail-closed
-//! behavior) stands on its own before any injection logic lands on top.
+//! **Phase 1 scope: forward the decrypted stream unchanged.** Preserved
+//! exactly when [`TlsInterceptConfig`]'s `credential_swap` is `None`.
+//!
+//! **Phase 2 scope: the credential swap.** When a
+//! [`super::credential_swap::SandboxCredentialSwap`] is configured, the first
+//! decrypted request head is read (bounded by [`MAX_REQUEST_HEAD_BYTES`]),
+//! any `icsbx_` placeholder in it is resolved/authorized/substituted, and the
+//! rewritten head is what reaches the origin. The response direction is
+//! untouched. Ordering is load-bearing: the swap runs **before** the origin is
+//! dialed, so a CONNECTION-DENIAL means no origin socket is ever opened. See
+//! `credential_swap`'s module doc for the two-refusal contract and the
+//! keep-alive limitation.
 //!
 //! **Fail closed.** Any failure — leaf mint, server handshake with the
 //! client, origin dial, or origin handshake — closes the connection. There
@@ -54,12 +61,25 @@ use std::{
 
 use rustls::pki_types::ServerName;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional},
     net::TcpStream,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use super::ca::{LeafCertificate, SandboxCertificateAuthority};
+use super::{
+    ca::{LeafCertificate, SandboxCertificateAuthority},
+    credential_firewall::SandboxCredentialFirewallError,
+    credential_swap::{SandboxCredentialSwap, scrub_for_model_visibility},
+};
+
+/// Cap on the decrypted request head this seam will buffer before deciding a
+/// credential swap. Bounded because the bytes come from the container: without
+/// a cap, a client that opens a request and never sends `\r\n\r\n` would grow
+/// a host-side buffer without limit. Exceeding it is fail-closed (the
+/// connection is refused), never "give up and forward it raw".
+const MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+
+const REQUEST_HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
 
 /// Installs rustls's default (`ring`) process-level crypto provider exactly
 /// once. rustls 0.23 requires one to be installed before any `ServerConfig`/
@@ -97,6 +117,23 @@ pub(crate) enum TlsInterceptError {
     InvalidSniHost { host: String, reason: String },
     #[error("sandbox tls intercept: relaying decrypted bytes failed: {0}")]
     RelayFailed(String),
+    /// CONNECTION-DENIAL from the credential firewall (attribution failed, or
+    /// the lookup deadline passed). Kept as its own variant carrying the
+    /// firewall's own error so the caller can still tell the two refusals
+    /// apart in audit; it is deliberately **not** merged with the
+    /// GRANT-DENIAL path, which never surfaces as an error at all (D5: strip
+    /// and forward bare).
+    #[error("sandbox tls intercept: {0}")]
+    CredentialFirewallDenied(#[from] SandboxCredentialFirewallError),
+    /// The container sent more than [`MAX_REQUEST_HEAD_BYTES`] without
+    /// terminating the request head. Carries only the limit — never the bytes.
+    #[error("sandbox tls intercept: request head exceeded {limit_bytes} bytes without terminating")]
+    RequestHeadTooLarge { limit_bytes: usize },
+    /// The stream ended (or was not HTTP) before a request head could be
+    /// framed. Carries no detail: the only material available to describe it
+    /// is the container's own bytes.
+    #[error("sandbox tls intercept: decrypted stream did not contain a complete request head")]
+    MalformedRequestHead,
 }
 
 /// Shared, per-proxy-instance TLS-interception configuration:
@@ -137,6 +174,13 @@ pub(crate) enum TlsInterceptError {
 /// permissive production connector** being wired in; this is a wiring-time
 /// requirement the composition PR that adds a production constructor must be
 /// reviewed against, not something this phase's test suite enforces.
+///
+/// **Phase 2 raises the stakes.** Phase 1 forwarded the container's own bytes;
+/// phase 2 substitutes the user's **real secret** into the request before it
+/// leaves. A connector that does not verify the origin therefore no longer
+/// leaks only the container's traffic — it hands the real credential to
+/// whatever answers at the dialed address. Treat any production
+/// `origin_connector` construction as a blocking review item.
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
@@ -146,6 +190,12 @@ pub(crate) struct TlsInterceptConfig {
     /// or an empty root store. Getting this wrong turns the whole TLS
     /// interception seam into a silent MITM against our own users.
     origin_connector: TlsConnector,
+    /// W6 phase 2. `None` reproduces phase 1 exactly: the decrypted stream is
+    /// relayed byte-for-byte with no parsing and no credential handling.
+    /// `Some` enables the placeholder → real-secret substitution described in
+    /// [`super::credential_swap`]. Production leaves this `None` today; it is
+    /// populated by future profile-gated wiring.
+    credential_swap: Option<SandboxCredentialSwap>,
 }
 
 impl TlsInterceptConfig {
@@ -162,7 +212,15 @@ impl TlsInterceptConfig {
                 .map(|host| host.to_ascii_lowercase())
                 .collect(),
             origin_connector,
+            credential_swap: None,
         }
+    }
+
+    /// Enables W6 phase 2's credential substitution on this config.
+    #[allow(dead_code)] // used by this module's tests; production wiring is future
+    pub(crate) fn with_credential_swap(mut self, swap: SandboxCredentialSwap) -> Self {
+        self.credential_swap = Some(swap);
+        self
     }
 
     /// D1's predicate: is `host` one this proxy instance terminates TLS for?
@@ -202,13 +260,18 @@ pub(crate) async fn terminate_and_forward(
     host: &str,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
+    connection: InterceptedConnection<'_>,
 ) -> Result<(), TlsInterceptError> {
     let issued =
         config
             .ca
             .issue_leaf_for_host(host)
             .map_err(|error| TlsInterceptError::LeafMintFailed {
-                host: host.to_string(),
+                // `host` is container-controlled (it comes from the CONNECT
+                // line), and this error's `Display` can reach a log line or,
+                // once the sandbox lane is wired, `DispatchError::Script`'s
+                // `model_visible_cause`. Scrub before it can.
+                host: scrub_for_model_visibility(host),
                 reason: error.to_string(),
             })?;
     tracing::debug!(
@@ -225,6 +288,27 @@ pub(crate) async fn terminate_and_forward(
         .await
         .map_err(|error| TlsInterceptError::ClientHandshakeFailed(error.to_string()))?;
 
+    // W6 phase 2: read and rewrite the first request head BEFORE the origin is
+    // dialed. Ordering is load-bearing — a CONNECTION-DENIAL from the
+    // credential firewall must mean the origin socket is never opened at all,
+    // not "opened and then abandoned."
+    let rewritten_head = match &config.credential_swap {
+        None => None,
+        Some(swap) => {
+            let Some(head) = read_request_head(&mut client_tls).await? else {
+                // The client closed without sending anything. Nothing to
+                // forward, and no reason to dial the origin.
+                return Ok(());
+            };
+            Some(swap.rewrite_request_head(
+                &head,
+                host,
+                connection.identity,
+                connection.deadline,
+            )?)
+        }
+    };
+
     // Only reachable once the client trusts our leaf and completed its
     // handshake — a client-side failure above never gets this far, so an
     // unbound/failed interception never opens an origin socket either.
@@ -236,7 +320,8 @@ pub(crate) async fn terminate_and_forward(
     })?;
     let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
         TlsInterceptError::InvalidSniHost {
-            host: host.to_string(),
+            // Container-controlled, same reasoning as `LeafMintFailed` above.
+            host: scrub_for_model_visibility(host),
             reason: error.to_string(),
         }
     })?;
@@ -246,10 +331,83 @@ pub(crate) async fn terminate_and_forward(
         .await
         .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
 
-    copy_bidirectional(&mut client_tls, &mut origin_tls)
+    let (Some(swap), Some(rewritten_head)) = (&config.credential_swap, rewritten_head) else {
+        copy_bidirectional(&mut client_tls, &mut origin_tls)
+            .await
+            .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+        return Ok(());
+    };
+
+    let (mut client_read, mut client_write) = tokio::io::split(client_tls);
+    let (mut origin_read, mut origin_write) = tokio::io::split(origin_tls);
+    origin_write
+        .write_all(rewritten_head.bytes())
         .await
         .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+    // Drop the rewritten head as soon as it is on the wire: it holds the real
+    // secret, and `SecretSlice`'s `Drop` zeroizes it.
+    drop(rewritten_head);
+
+    let upstream = swap.relay_scrubbing_placeholders(&mut client_read, &mut origin_write);
+    let downstream = async {
+        tokio::io::copy(&mut origin_read, &mut client_write).await?;
+        client_write.shutdown().await
+    };
+    tokio::try_join!(upstream, downstream)
+        .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
     Ok(())
+}
+
+/// Per-connection inputs the credential swap needs and the per-proxy
+/// [`TlsInterceptConfig`] cannot carry: who the proxy attributed this
+/// connection to (`None` = attribution failed), and the deadline bounding the
+/// firewall lookup.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InterceptedConnection<'a> {
+    pub(crate) identity: Option<(
+        &'a ironclaw_host_api::TenantId,
+        &'a ironclaw_host_api::UserId,
+    )>,
+    pub(crate) deadline: std::time::Instant,
+}
+
+/// Reads one HTTP request head (through `\r\n\r\n`) off the decrypted client
+/// stream, bounded by [`MAX_REQUEST_HEAD_BYTES`].
+///
+/// `Ok(None)` means the client closed without sending a byte. Anything else
+/// that fails to frame — EOF mid-head, a non-HTTP protocol, or exceeding the
+/// cap — is an `Err`, i.e. fail closed: a bound host is an HTTPS API by
+/// construction, and forwarding unframed bytes would mean forwarding a
+/// placeholder this seam never got to inspect.
+async fn read_request_head(
+    client: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<Vec<u8>>, TlsInterceptError> {
+    let mut head = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = client
+            .read(&mut chunk)
+            .await
+            .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+        if read == 0 {
+            if head.is_empty() {
+                return Ok(None);
+            }
+            return Err(TlsInterceptError::MalformedRequestHead);
+        }
+        head.extend_from_slice(&chunk[..read]);
+        if head
+            .windows(REQUEST_HEAD_TERMINATOR.len())
+            .any(|window| window == REQUEST_HEAD_TERMINATOR)
+        {
+            return Ok(Some(head));
+        }
+        if head.len() > MAX_REQUEST_HEAD_BYTES {
+            return Err(TlsInterceptError::RequestHeadTooLarge {
+                limit_bytes: MAX_REQUEST_HEAD_BYTES,
+            });
+        }
+    }
 }
 
 /// Builds a single-host rustls server config serving exactly the leaf
@@ -346,7 +504,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for LeadingBytes<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -464,7 +622,15 @@ mod tests {
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             let (stream, _) = proxy_listener.accept().await.unwrap();
-            terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+            terminate_and_forward(
+                stream,
+                Vec::new(),
+                host,
+                origin_addr,
+                &config,
+                unattributed_connection(),
+            )
+            .await
         });
 
         // The "container" side: a real rustls client, trusting only OUR
@@ -569,7 +735,15 @@ mod tests {
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             let (stream, _) = proxy_listener.accept().await.unwrap();
-            terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+            terminate_and_forward(
+                stream,
+                Vec::new(),
+                host,
+                origin_addr,
+                &config,
+                unattributed_connection(),
+            )
+            .await
         });
 
         let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
@@ -596,6 +770,571 @@ mod tests {
             origin_result.is_err(),
             "origin must never be dialed after a failed client handshake (fail-closed, no \
              plaintext fallback)"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // W6 phase 2 — the credential swap
+    // ---------------------------------------------------------------
+
+    use crate::obligations::RuntimeSecretInjectionStore;
+    use ironclaw_host_api::{
+        CapabilityId, ExtensionId, InvocationId, NetworkMethod, ResourceScope, SecretHandle,
+        TenantId, UserId,
+    };
+    use ironclaw_secrets::{
+        CredentialPathPolicy, CredentialPlaceholderRegistry, CredentialTargetPolicy, SecretMaterial,
+    };
+    use std::sync::Mutex;
+
+    use super::super::credential_firewall::{
+        SandboxCredentialFirewall, StagedCredentialObligation, StagedCredentialObligationSource,
+    };
+    use super::super::credential_swap::SandboxCredentialSwap;
+
+    const REAL_SECRET: &str = "ghp-REAL-SECRET-MATERIAL-nsQ82hd7";
+    const BOUND_HOST: &str = "bound.example.com";
+
+    fn unattributed_connection() -> InterceptedConnection<'static> {
+        InterceptedConnection {
+            identity: None,
+            deadline: Instant::now() + Duration::from_secs(3600),
+        }
+    }
+
+    fn tenant() -> TenantId {
+        TenantId::new("tenant-a").unwrap()
+    }
+
+    fn user() -> UserId {
+        UserId::new("user-a").unwrap()
+    }
+
+    fn provider() -> ExtensionId {
+        ExtensionId::new("github").unwrap()
+    }
+
+    fn scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: tenant(),
+            user_id: user(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn get_policy(path: &str) -> CredentialTargetPolicy {
+        CredentialTargetPolicy {
+            scheme: "https".to_string(),
+            host: BOUND_HOST.to_string(),
+            port: None,
+            path: CredentialPathPolicy::Prefix(path.to_string()),
+            methods: vec![NetworkMethod::Get],
+        }
+    }
+
+    /// Builds the full phase-2 wiring a swap needs: a registry holding a
+    /// stable placeholder for `(tenant-a, user-a, github)`, an injection
+    /// store holding [`REAL_SECRET`] under a known
+    /// `(scope, capability, handle)`, and a firewall with (optionally) a
+    /// matching obligation staged. Returns the swap, the placeholder token,
+    /// and the lease keeping the obligation staged (dropping it revokes).
+    fn swap_fixture(
+        stage_grant: bool,
+        policy: CredentialTargetPolicy,
+    ) -> (
+        SandboxCredentialSwap,
+        String,
+        Option<super::super::credential_firewall::StagedObligationLease>,
+    ) {
+        let registry = Arc::new(CredentialPlaceholderRegistry::new());
+        let placeholder = registry
+            .get_or_create(&tenant(), &user(), &provider())
+            .expect("placeholder mints");
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let injections = RuntimeSecretInjectionStore::new();
+        let handle = SecretHandle::new("github-token").unwrap();
+        let capability = CapabilityId::new("sandbox.shell").unwrap();
+        // One scope value, used for BOTH the staged material and the
+        // obligation that points at it: `ResourceScope` carries a fresh
+        // `InvocationId`, so building it twice would key the injection store
+        // under a scope the obligation never names.
+        let staged_scope = scope();
+        injections
+            .insert(
+                &staged_scope,
+                &capability,
+                &handle,
+                SecretMaterial::from(REAL_SECRET.to_string()),
+            )
+            .expect("staged material inserts");
+        let lease = stage_grant.then(|| {
+            firewall.stage(
+                &tenant(),
+                &user(),
+                StagedCredentialObligation::new(
+                    StagedCredentialObligationSource {
+                        scope: staged_scope,
+                        capability_id: capability,
+                        provider_or_extension_id: provider(),
+                        secret_handle: handle,
+                    },
+                    vec![policy],
+                    Duration::from_secs(600),
+                ),
+            )
+        });
+        let token = placeholder.as_str().to_string();
+        (
+            SandboxCredentialSwap::new(registry, firewall, injections),
+            token,
+            lease,
+        )
+    }
+
+    /// A TLS "origin" that records every byte it is sent and answers each
+    /// request with a fixed HTTP response, so a test can assert on exactly
+    /// what crossed the boundary in each direction.
+    async fn spawn_recording_tls_origin(
+        host: &str,
+        responses: usize,
+    ) -> (SocketAddr, String, Arc<Mutex<Vec<u8>>>) {
+        let origin_ca = SandboxCertificateAuthority::generate().expect("origin ca generates");
+        let issued = origin_ca
+            .issue_leaf_for_host(host)
+            .expect("origin leaf issues");
+        let server_config =
+            build_server_config(&issued.certificate).expect("origin server config builds");
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener binds");
+        let addr = listener.local_addr().expect("origin listener has an addr");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await
+                && let Ok(mut tls) = acceptor.accept(stream).await
+            {
+                let mut buf = [0u8; 4096];
+                let mut answered = 0usize;
+                while let Ok(n) = tls.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut guard) = sink.lock() {
+                        guard.extend_from_slice(&buf[..n]);
+                    }
+                    if answered < responses {
+                        answered += 1;
+                        let _ = tls
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                            .await;
+                    }
+                }
+                let _ = tls.shutdown().await;
+            }
+        });
+
+        (addr, origin_ca.root_certificate_pem().to_string(), received)
+    }
+
+    /// Drives one intercepted connection end to end and returns
+    /// `(terminate_and_forward result, bytes the container observed)`.
+    async fn drive_intercepted_connection(
+        config: TlsInterceptConfig,
+        our_root_pem: String,
+        origin_addr: SocketAddr,
+        identity: bool,
+        deadline: Instant,
+        requests: Vec<Vec<u8>>,
+    ) -> (Result<(), TlsInterceptError>, Vec<u8>) {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = proxy_listener.accept().await.unwrap();
+            let tenant_id = tenant();
+            let user_id = user();
+            terminate_and_forward(
+                stream,
+                Vec::new(),
+                BOUND_HOST,
+                origin_addr,
+                &config,
+                InterceptedConnection {
+                    identity: identity.then_some((&tenant_id, &user_id)),
+                    deadline,
+                },
+            )
+            .await
+        });
+
+        let mut our_roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut our_root_pem.as_bytes()) {
+            our_roots.add(cert.unwrap()).unwrap();
+        }
+        ensure_crypto_provider_installed();
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(our_roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+        let server_name = ServerName::try_from(BOUND_HOST.to_string()).unwrap();
+        let container_visible = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&container_visible);
+        let client_task = tokio::spawn(async move {
+            let mut client_tls = connector
+                .connect(server_name, raw_client)
+                .await
+                .expect("client tls handshake");
+            for request in requests {
+                if client_tls.write_all(&request).await.is_err() {
+                    break;
+                }
+                let mut buf = [0u8; 4096];
+                match client_tls.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut guard) = sink.lock() {
+                            guard.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                }
+            }
+            let _ = client_tls.shutdown().await;
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(10), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic");
+        let _ = tokio::time::timeout(Duration::from_secs(5), client_task).await;
+        let observed = container_visible.lock().unwrap().clone();
+        (result, observed)
+    }
+
+    fn request_with(token: &str) -> Vec<u8> {
+        format!(
+            "GET /repos/x HTTP/1.1\r\nHost: {BOUND_HOST}\r\nAuthorization: token {token}\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// **THE core invariant** (design doc §6 row 8): the real secret is what
+    /// the ORIGIN sees and is never anything the CONTAINER can observe.
+    ///
+    /// Discriminating in three separate directions, so it cannot pass by
+    /// accident:
+    /// - a no-op implementation fails, because the origin would receive the
+    ///   placeholder and never the secret;
+    /// - a swap applied in the wrong direction (rewriting the response
+    ///   instead of the request) fails on *both* the origin assertion and
+    ///   the container assertion;
+    /// - a secret that leaks into the error path fails, because the
+    ///   `Result`'s rendered error is checked for the secret too.
+    #[tokio::test]
+    async fn real_secret_never_appears_in_container() {
+        let (origin_addr, origin_root_pem, origin_received) =
+            spawn_recording_tls_origin(BOUND_HOST, 1).await;
+        let (swap, token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_only(&origin_root_pem),
+        )
+        .with_credential_swap(swap);
+
+        let (result, container_visible) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() + Duration::from_secs(3600),
+            vec![request_with(&token)],
+        )
+        .await;
+
+        let origin_bytes = origin_received.lock().unwrap().clone();
+        let origin_text = String::from_utf8_lossy(&origin_bytes).to_string();
+        assert!(
+            origin_text.contains(REAL_SECRET),
+            "the origin must receive the REAL secret — got: {origin_text:?}"
+        );
+        assert!(
+            !origin_text.contains(&token),
+            "the placeholder must never leave the boundary — got: {origin_text:?}"
+        );
+
+        let container_text = String::from_utf8_lossy(&container_visible).to_string();
+        assert!(
+            !container_text.contains(REAL_SECRET),
+            "the container must never observe the real secret — got: {container_text:?}"
+        );
+        let rendered_error = match &result {
+            Ok(()) => String::new(),
+            Err(error) => format!("{error} / {error:?}"),
+        };
+        assert!(
+            !rendered_error.contains(REAL_SECRET),
+            "the real secret must never reach an error surfaced to the container: \
+             {rendered_error}"
+        );
+    }
+
+    /// D5 GRANT-DENIAL: nothing staged, so the placeholder is stripped and
+    /// the request is still forwarded — the origin's own 401 is the better
+    /// error than refusing a request that may not have needed a credential.
+    #[tokio::test]
+    async fn grant_denial_strips_the_placeholder_and_forwards_the_request_bare() {
+        let (origin_addr, origin_root_pem, origin_received) =
+            spawn_recording_tls_origin(BOUND_HOST, 1).await;
+        let (swap, token, _lease) = swap_fixture(false, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_only(&origin_root_pem),
+        )
+        .with_credential_swap(swap);
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() + Duration::from_secs(3600),
+            vec![request_with(&token)],
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a grant denial must NOT tear down the connection: {result:?}"
+        );
+
+        let origin_text = String::from_utf8_lossy(&origin_received.lock().unwrap()).to_string();
+        assert!(
+            origin_text.starts_with("GET /repos/x HTTP/1.1"),
+            "the request must still be forwarded, bare — got: {origin_text:?}"
+        );
+        assert!(
+            !origin_text.contains(&token),
+            "the placeholder must be stripped, not forwarded — got: {origin_text:?}"
+        );
+        assert!(
+            !origin_text.contains(REAL_SECRET),
+            "no secret may be attached without a grant — got: {origin_text:?}"
+        );
+    }
+
+    /// CONNECTION-DENIAL (attribution failed) is categorically different
+    /// from a grant denial: nothing is forwarded, and the origin is never
+    /// even dialed. Asserted against the origin socket directly, not just
+    /// from the returned error.
+    #[tokio::test]
+    async fn connection_denial_refuses_outright_and_never_dials_the_origin() {
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let origin_probe = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(500), origin_listener.accept()).await
+        });
+
+        let (swap, token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_nothing(),
+        )
+        .with_credential_swap(swap);
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            false, // attribution failed
+            Instant::now() + Duration::from_secs(3600),
+            vec![request_with(&token)],
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(TlsInterceptError::CredentialFirewallDenied(
+                    SandboxCredentialFirewallError::AttributionFailed
+                ))
+            ),
+            "expected a connection denial for an unattributed peer, got: {result:?}"
+        );
+        assert!(
+            origin_probe.await.unwrap().is_err(),
+            "a connection denial must never dial the origin"
+        );
+    }
+
+    /// The other CONNECTION-DENIAL: the lookup deadline has already passed
+    /// by the time the request arrives. Same fail-closed shape, different
+    /// variant — the two must stay distinguishable.
+    #[tokio::test]
+    async fn expired_deadline_denies_the_connection_mid_flight() {
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let origin_probe = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(500), origin_listener.accept()).await
+        });
+
+        let (swap, token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_nothing(),
+        )
+        .with_credential_swap(swap);
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() - Duration::from_secs(1), // already expired
+            vec![request_with(&token)],
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(TlsInterceptError::CredentialFirewallDenied(
+                    SandboxCredentialFirewallError::LookupTimedOut
+                ))
+            ),
+            "expected a deadline-expiry connection denial, got: {result:?}"
+        );
+        assert!(
+            origin_probe.await.unwrap().is_err(),
+            "an expired deadline must never dial the origin"
+        );
+    }
+
+    /// D1 still holds with the swap configured: an unbound host is not
+    /// bound, and configuring credential substitution mints no leaf for it.
+    #[test]
+    fn unbound_host_stays_opaque_with_the_credential_swap_configured() {
+        let (swap, _token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_nothing(),
+        )
+        .with_credential_swap(swap);
+
+        assert!(!config.is_bound("unbound.example.com"));
+        assert_eq!(
+            config.cached_leaf_count(),
+            0,
+            "configuring the credential swap must not mint a leaf for anything"
+        );
+    }
+
+    /// A token that is not a valid placeholder — 40 suffix characters
+    /// instead of exactly 32, and a truncated one — is left completely
+    /// untouched, and the origin sees it verbatim. Pins that untrusted
+    /// container input cannot drive the registry/firewall path at all.
+    #[tokio::test]
+    async fn malformed_or_oversized_token_is_not_a_placeholder() {
+        let (origin_addr, origin_root_pem, origin_received) =
+            spawn_recording_tls_origin(BOUND_HOST, 1).await;
+        let (swap, _token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_only(&origin_root_pem),
+        )
+        .with_credential_swap(swap);
+
+        let oversized = format!("icsbx_{}", "a".repeat(40));
+        let truncated = "icsbx_short";
+        let request = format!(
+            "GET /repos/x HTTP/1.1\r\nHost: {BOUND_HOST}\r\nAuthorization: token {oversized}\r\n\
+             X-Other: {truncated}\r\n\r\n"
+        )
+        .into_bytes();
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() + Duration::from_secs(3600),
+            vec![request],
+        )
+        .await;
+        assert!(result.is_ok(), "unexpected failure: {result:?}");
+
+        let origin_text = String::from_utf8_lossy(&origin_received.lock().unwrap()).to_string();
+        assert!(
+            origin_text.contains(&oversized) && origin_text.contains(truncated),
+            "a non-placeholder must be forwarded verbatim — got: {origin_text:?}"
+        );
+        assert!(
+            !origin_text.contains(REAL_SECRET),
+            "a malformed token must never resolve to a secret — got: {origin_text:?}"
+        );
+    }
+
+    /// Keep-alive: the swap only parses the FIRST request head, so a
+    /// placeholder on a later request on the same connection is *stripped*
+    /// rather than forwarded. Pins the invariant "the placeholder never
+    /// leaves the boundary" across the whole connection, not just its first
+    /// request.
+    #[tokio::test]
+    async fn placeholder_on_a_later_keep_alive_request_never_leaves_the_boundary() {
+        let (origin_addr, origin_root_pem, origin_received) =
+            spawn_recording_tls_origin(BOUND_HOST, 2).await;
+        let (swap, token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_only(&origin_root_pem),
+        )
+        .with_credential_swap(swap);
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() + Duration::from_secs(3600),
+            vec![request_with(&token), request_with(&token)],
+        )
+        .await;
+        assert!(result.is_ok(), "unexpected failure: {result:?}");
+
+        let origin_text = String::from_utf8_lossy(&origin_received.lock().unwrap()).to_string();
+        assert!(
+            !origin_text.contains(&token),
+            "no placeholder may cross the boundary on any request — got: {origin_text:?}"
+        );
+        assert_eq!(
+            origin_text.matches(REAL_SECRET).count(),
+            1,
+            "only the first request's placeholder is swapped; the second is stripped — got: \
+             {origin_text:?}"
         );
     }
 }
