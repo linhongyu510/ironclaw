@@ -53,6 +53,7 @@ use std::{
 };
 
 use rustls::pki_types::ServerName;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional},
     net::TcpStream,
@@ -269,18 +270,19 @@ pub(crate) fn build_server_config(
     leaf: &LeafCertificate,
 ) -> Result<rustls::ServerConfig, TlsInterceptError> {
     ensure_crypto_provider_installed();
-    let chain = rustls_pemfile::certs(&mut leaf.cert_pem.as_bytes())
+    let chain = CertificateDer::pem_slice_iter(leaf.cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
             TlsInterceptError::ServerConfigFailed(format!("parsing leaf cert pem: {error}"))
         })?;
-    let key = rustls_pemfile::private_key(&mut leaf.key_pem.as_bytes())
-        .map_err(|error| {
-            TlsInterceptError::ServerConfigFailed(format!("parsing leaf key pem: {error}"))
-        })?
-        .ok_or_else(|| {
-            TlsInterceptError::ServerConfigFailed("leaf key pem contained no key".to_string())
-        })?;
+    // `PrivateKeyDer::from_pem_slice` (unlike `rustls_pemfile::private_key`'s
+    // `Result<Option<_>>`) already returns `Err(pem::Error::NoItemsFound)`
+    // when the PEM contains no key — no separate `None` case to handle, and
+    // still fails closed exactly the same as the explicit `ok_or_else` this
+    // replaces.
+    let key = PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).map_err(|error| {
+        TlsInterceptError::ServerConfigFailed(format!("parsing leaf key pem: {error}"))
+    })?;
 
     rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -371,7 +373,7 @@ mod tests {
     fn connector_trusting_only(root_pem: &str) -> TlsConnector {
         ensure_crypto_provider_installed();
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut root_pem.as_bytes()) {
+        for cert in CertificateDer::pem_slice_iter(root_pem.as_bytes()) {
             roots
                 .add(cert.expect("valid root cert pem"))
                 .expect("root cert adds");
@@ -481,7 +483,7 @@ mod tests {
         // CA's root — if the proxy served the origin's own cert (or any
         // cert not signed by our CA), this handshake fails.
         let mut our_roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut our_root_pem.as_bytes()) {
+        for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
             our_roots.add(cert.unwrap()).unwrap();
         }
         ensure_crypto_provider_installed();

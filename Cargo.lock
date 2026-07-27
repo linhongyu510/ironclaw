@@ -3929,7 +3929,7 @@ dependencies = [
  "rcgen",
  "rust_decimal",
  "rustls 0.23.41",
- "rustls-pemfile",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "serde_json",

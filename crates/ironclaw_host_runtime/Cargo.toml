@@ -72,7 +72,11 @@ thiserror = "2"
 # than introducing a second major version. Ships unwired — see
 # `tls_intercept`'s module doc for what still needs a caller.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-rustls-pemfile = "2"
+# PEM parsing for `tls_intercept`'s leaf cert/key and test root stores.
+# `rustls-pemfile` is unmaintained (RUSTSEC-2025-0134); `rustls-pki-types`
+# (already pulled in by `rustls`) absorbed the same `PemObject` decoding and
+# is the maintained upstream replacement the advisory itself points to.
+rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 # rcgen's `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime`
 # — needed directly to compute the CA's leaf-cert validity window.
