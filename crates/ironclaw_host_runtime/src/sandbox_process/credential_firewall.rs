@@ -137,8 +137,29 @@ impl StagedCredentialObligation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) enum SandboxCredentialDecision {
-    /// Inject this obligation's secret for the matching request.
-    Grant(StagedCredentialObligation),
+    /// One or more staged obligations are currently live for this
+    /// connection's `(tenant_id, user_id)` — never empty (an empty set
+    /// decays to `NoGrant`, see `authorize`). The per-user sandbox
+    /// concurrency ceiling is >1 (`sandbox_quota.rs`), so this is the normal
+    /// case, not a race: each concurrent invocation stages its own
+    /// obligation for possibly a different provider/binding, and all of
+    /// them stay live simultaneously.
+    ///
+    /// The firewall deliberately does not pick one for the caller: per
+    /// design doc §2.2/§3.3, obligations carry `allowed_targets`
+    /// (`CredentialTargetPolicy`) that only the proxy can evaluate, because
+    /// only the proxy has parsed the actual per-request method/URL — the
+    /// firewall's `authorize` is called with just a `(tenant_id, user_id)`
+    /// and no request target. So matching which obligation authorizes a
+    /// given destination is the caller's (W6's) job, via
+    /// `CredentialTargetPolicy::matches` against each entry in turn; the
+    /// firewall's contract stops at "here is everything currently entitled
+    /// for this principal." Also: §3.3 already accepts that any process
+    /// during an active invocation can mint a grant for any of that user's
+    /// bindings, so handing back the full live set does not widen the
+    /// existing security envelope — it was already "all of this user's
+    /// bindings," just previously expressed one obligation at a time.
+    Grant(Vec<StagedCredentialObligation>),
     /// GRANT-DENIAL: no live obligation for this `(tenant_id, user_id)`.
     /// Strip the placeholder, forward the request bare, annotate output.
     NoGrant,
@@ -177,51 +198,51 @@ impl std::fmt::Display for SandboxCredentialFirewallError {
 
 impl std::error::Error for SandboxCredentialFirewallError {}
 
-/// A staged obligation paired with the generation token that staged it.
-///
-/// The token exists to make [`SandboxCredentialFirewall::revoke`] a
-/// compare-and-delete instead of an unconditional remove-by-key (the same
-/// discipline as `cas_update` in `.claude/rules/database.md`, applied to an
-/// in-memory map instead of a filesystem mount). Without it, two
-/// invocations staging for the same `(tenant_id, user_id)` back to back — the
-/// second legitimately overwriting the first, which `stage()`'s doc already
-/// calls out as expected — leave the first invocation's [`StagedObligationLease`]
-/// holding no way to tell "the entry for my key is gone" apart from "the
-/// entry for my key was replaced by someone else's live, unexpired grant".
-/// Dropping the first lease previously called an unconditional `remove`,
-/// which silently deleted the second invocation's grant out from under it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StagedEntry {
-    generation: u64,
-    obligation: StagedCredentialObligation,
-}
-
 /// The obligation-staging chokepoint itself. Concrete struct, no trait: this
 /// crate has exactly one implementation and one process-local store; see the
 /// module doc for why a port here would be the over-engineering this design
 /// already rejected.
+///
+/// **Refcounted-set staging (not a single slot).** The per-user sandbox
+/// concurrency ceiling (`sandbox_quota.rs`) is >1: several invocations for
+/// the same `(tenant_id, user_id)` legitimately run at once, each staging
+/// its own obligation. `stage()` therefore *adds* an entry under a unique id
+/// rather than replacing whatever the key currently holds, and
+/// [`SandboxCredentialFirewall::revoke`] removes only the one entry its
+/// caller's [`StagedObligationLease`] owns. A key's inner set is dropped
+/// entirely once its last entry is gone — there is never a stray empty
+/// collection left keyed by `(tenant_id, user_id)`.
+///
+/// This is a correction of an earlier single-slot design where `stage()`
+/// overwrote any existing entry for the key and `revoke()` removed the
+/// entire key unconditionally: with concurrency >1 that let an invocation
+/// which finished first silently delete a still-live sibling invocation's
+/// grant, just by dropping its own lease.
 #[derive(Debug, Default)]
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct SandboxCredentialFirewall {
     /// Eviction policy (bounded-resources rule,
-    /// `.claude/rules/safety-and-sandbox.md`): entries leave this map via
-    /// explicit [`SandboxCredentialFirewall::revoke`] (D4's primary bound),
-    /// or lazily on the next [`SandboxCredentialFirewall::authorize`] read
-    /// that finds the entry past its TTL (`StagedCredentialObligation::is_expired`),
-    /// which removes it before returning `NoGrant`. There is no size cap and
-    /// no periodic sweep: the key space is `(TenantId, UserId)` pairs, which
-    /// an attacker cannot cheaply mint, so the only failure mode without
-    /// lazy removal is a slow leak from callers who stage once and never
-    /// return — not an unbounded-growth attack surface.
-    staged: Mutex<HashMap<StagingKey, StagedEntry>>,
-    /// Monotonic source of the generation token in [`StagedEntry`]. A plain
-    /// `u64` counter (not a random nonce): uniqueness only needs to hold
-    /// within this one process's lifetime — the same scope `staged` itself
-    /// lives in — and a counter is cheaper and trivially testable (no
-    /// collision-probability argument needed). `Relaxed` ordering is enough
-    /// because the counter's only job is producing distinct values; the
-    /// `staged` mutex is what actually orders the insert each token guards.
-    next_generation: AtomicU64,
+    /// `.claude/rules/safety-and-sandbox.md`): an entry leaves its key's set
+    /// via explicit [`SandboxCredentialFirewall::revoke`] (D4's primary
+    /// bound), or lazily on the next [`SandboxCredentialFirewall::authorize`]
+    /// read that finds it past its TTL (`StagedCredentialObligation::is_expired`),
+    /// which removes it before deciding. A key's set is removed from the
+    /// outer map the moment it becomes empty by either path — the outer map
+    /// never accumulates an empty entry. There is no size cap and no
+    /// periodic sweep: the key space is `(TenantId, UserId)` pairs, which an
+    /// attacker cannot cheaply mint, and the inner set is bounded by the
+    /// per-user sandbox concurrency ceiling, so the only failure mode
+    /// without lazy removal is a slow leak from callers who stage once and
+    /// never return — not an unbounded-growth attack surface.
+    staged: Mutex<HashMap<StagingKey, HashMap<u64, StagedCredentialObligation>>>,
+    /// Monotonic source of each entry's id. A plain `u64` counter (not a
+    /// random nonce): uniqueness only needs to hold within this one
+    /// process's lifetime — the same scope `staged` itself lives in — and a
+    /// counter is cheaper and trivially testable (no collision-probability
+    /// argument needed). `Relaxed` ordering is enough because the counter's
+    /// only job is producing distinct values; the `staged` mutex is what
+    /// actually orders the insert each id guards.
+    next_entry_id: AtomicU64,
 }
 
 impl SandboxCredentialFirewall {
@@ -233,14 +254,17 @@ impl SandboxCredentialFirewall {
     /// Stages an obligation at capability-dispatch prepare time, before the
     /// invocation's shell command ever runs — mirrors
     /// `BuiltinObligationHandler::finish_prepare` staging network policy and
-    /// secret injections ahead of dispatch in `obligations.rs`. Overwrites
-    /// any existing obligation staged for the same `(tenant_id, user_id)`.
+    /// secret injections ahead of dispatch in `obligations.rs`. Adds a new
+    /// entry to the (possibly already non-empty) set staged for this
+    /// `(tenant_id, user_id)`; does not replace or disturb any existing
+    /// entry for the same key — see the struct doc for why a single slot is
+    /// wrong once concurrency >1 is the normal case.
     ///
-    /// Returns a [`StagedObligationLease`]: holding it keeps the obligation
-    /// staged, dropping it revokes. Takes `self: &Arc<Self>` (mirroring
-    /// `InMemoryCredentialBroker::mint_on_first_use`) because the returned
-    /// lease needs to outlive this call and revoke through its own `Arc`
-    /// clone of the firewall.
+    /// Returns a [`StagedObligationLease`]: holding it keeps this specific
+    /// obligation staged, dropping it revokes only this one. Takes
+    /// `self: &Arc<Self>` (mirroring `InMemoryCredentialBroker::mint_on_first_use`)
+    /// because the returned lease needs to outlive this call and revoke
+    /// through its own `Arc` clone of the firewall.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn stage(
         self: &Arc<Self>,
@@ -248,22 +272,16 @@ impl SandboxCredentialFirewall {
         user_id: &UserId,
         obligation: StagedCredentialObligation,
     ) -> StagedObligationLease {
-        // `fetch_add` hands out a fresh token to every `stage()` call,
-        // including one that overwrites an existing entry for the same key —
-        // that is exactly the case this token exists to disambiguate later.
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        self.lock().insert(
-            StagingKey::new(tenant_id, user_id),
-            StagedEntry {
-                generation,
-                obligation,
-            },
-        );
+        let entry_id = self.next_entry_id.fetch_add(1, Ordering::Relaxed);
+        self.lock()
+            .entry(StagingKey::new(tenant_id, user_id))
+            .or_default()
+            .insert(entry_id, obligation);
         StagedObligationLease {
             firewall: Arc::clone(self),
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
-            generation,
+            entry_id,
             revoked: false,
         }
     }
@@ -271,22 +289,21 @@ impl SandboxCredentialFirewall {
     /// Explicit revoke — D4's primary bound ("explicit revoke on invocation
     /// completion"), independent of the obligation's own TTL backstop.
     ///
-    /// Compare-and-delete, not an unconditional remove: `generation` must
-    /// match the token the map currently holds for this key. A no-op if
-    /// nothing is staged, *or* if something is staged but it was staged by a
-    /// later `stage()` call for the same `(tenant_id, user_id)` — i.e. a
-    /// stale lease's revoke can never delete a newer, still-live grant that
-    /// replaced it. See [`StagedEntry`]'s doc for the bug this guards
-    /// against.
+    /// Removes only the entry identified by `entry_id` from this key's set —
+    /// never the whole key, never another invocation's entry — and drops
+    /// the key's set from the outer map once it is empty. A no-op if
+    /// nothing is staged for the key, or if `entry_id` is not (or no longer)
+    /// present in it (already revoked, or reclaimed by `authorize` after
+    /// expiry).
     #[allow(dead_code)] // consumed by W6; not wired yet
-    pub(crate) fn revoke(&self, tenant_id: &TenantId, user_id: &UserId, generation: u64) {
+    pub(crate) fn revoke(&self, tenant_id: &TenantId, user_id: &UserId, entry_id: u64) {
         let key = StagingKey::new(tenant_id, user_id);
         let mut staged = self.lock();
-        if staged
-            .get(&key)
-            .is_some_and(|entry| entry.generation == generation)
-        {
-            staged.remove(&key);
+        if let Some(entries) = staged.get_mut(&key) {
+            entries.remove(&entry_id);
+            if entries.is_empty() {
+                staged.remove(&key);
+            }
         }
     }
 
@@ -299,6 +316,10 @@ impl SandboxCredentialFirewall {
     /// bounds the whole call: if it has already passed by the time this
     /// runs, the lookup is treated as timed out — CONNECTION-DENIAL, never
     /// forwarded — exactly like a hung callback into policy per §3.4.
+    ///
+    /// Returns every currently-live obligation for this `(tenant_id,
+    /// user_id)` as one [`SandboxCredentialDecision::Grant`] — see that
+    /// variant's doc for why the firewall does not pick one itself.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn authorize(
         &self,
@@ -315,35 +336,39 @@ impl SandboxCredentialFirewall {
         let now = Instant::now();
         let key = StagingKey::new(tenant_id, user_id);
         let mut staged = self.lock();
-        match staged.get(&key) {
-            Some(entry) if !entry.obligation.is_expired(now) => {
-                Ok(SandboxCredentialDecision::Grant(entry.obligation.clone()))
-            }
-            Some(_expired) => {
-                // Lazy reclamation on read (see the struct doc on `staged`):
-                // an expired obligation is dead weight the caller will never
-                // return for, so remove it here rather than leaving it to
-                // accumulate until an explicit `revoke` that may never come.
-                staged.remove(&key);
-                Ok(SandboxCredentialDecision::NoGrant)
-            }
-            None => Ok(SandboxCredentialDecision::NoGrant),
+        let Some(entries) = staged.get_mut(&key) else {
+            return Ok(SandboxCredentialDecision::NoGrant);
+        };
+        // Lazy reclamation on read (see the struct doc on `staged`): an
+        // expired entry is dead weight the caller will never return for, so
+        // remove it here rather than leaving it to accumulate until an
+        // explicit `revoke` that may never come — reclaimed one entry at a
+        // time so still-live siblings staged under the same key survive.
+        entries.retain(|_entry_id, obligation| !obligation.is_expired(now));
+        if entries.is_empty() {
+            staged.remove(&key);
+            return Ok(SandboxCredentialDecision::NoGrant);
         }
+        let live: Vec<StagedCredentialObligation> = entries.values().cloned().collect();
+        Ok(SandboxCredentialDecision::Grant(live))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<StagingKey, StagedEntry>> {
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<StagingKey, HashMap<u64, StagedCredentialObligation>>>
+    {
         self.staged
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    /// Test-only observability into the staging map's size, so a test can
-    /// pin *reclamation* (the entry is gone) rather than only the decision
-    /// returned to the caller (which looks identical whether the entry was
-    /// removed or merely skipped).
+    /// Test-only observability into the total number of staged obligation
+    /// entries across all keys, so a test can pin *reclamation* (the entry
+    /// is gone) rather than only the decision returned to the caller (which
+    /// looks identical whether an entry was removed or merely skipped).
     #[cfg(test)]
     fn staged_len(&self) -> usize {
-        self.lock().len()
+        self.lock().values().map(|entries| entries.len()).sum()
     }
 }
 
@@ -377,11 +402,12 @@ pub(crate) struct StagedObligationLease {
     firewall: Arc<SandboxCredentialFirewall>,
     tenant_id: TenantId,
     user_id: UserId,
-    /// The generation token this lease's `stage()` call was assigned (see
-    /// [`StagedEntry`]). Carried so this lease's revoke can only ever delete
-    /// *its own* staged entry, never one that a later `stage()` call for the
-    /// same `(tenant_id, user_id)` installed after it.
-    generation: u64,
+    /// The id this lease's `stage()` call assigned its entry in the
+    /// key's set. Carried so this lease's revoke can only ever delete *its
+    /// own* entry — never the whole key, and never a sibling entry that a
+    /// concurrent or later `stage()` call for the same `(tenant_id,
+    /// user_id)` added alongside it.
+    entry_id: u64,
     revoked: bool,
 }
 
@@ -398,7 +424,7 @@ impl StagedObligationLease {
         if !self.revoked {
             self.revoked = true;
             self.firewall
-                .revoke(&self.tenant_id, &self.user_id, self.generation);
+                .revoke(&self.tenant_id, &self.user_id, self.entry_id);
         }
     }
 }
@@ -455,8 +481,9 @@ mod tests {
             .expect("attributed lookup within deadline must not error");
 
         match decision {
-            SandboxCredentialDecision::Grant(obligation) => {
-                assert_eq!(obligation.secret_handle, handle("github-token"));
+            SandboxCredentialDecision::Grant(obligations) => {
+                assert_eq!(obligations.len(), 1);
+                assert_eq!(obligations[0].secret_handle, handle("github-token"));
             }
             SandboxCredentialDecision::NoGrant => {
                 panic!("expected a grant for the exact (tenant, user) that staged it")
@@ -685,11 +712,18 @@ mod tests {
         assert_eq!(decision, SandboxCredentialDecision::NoGrant);
     }
 
-    /// Restaging for the same key replaces the prior obligation rather than
-    /// accumulating — the design's placeholder/grant model has exactly one
-    /// live grant per `(tenant_id, user_id)` at a time.
+    /// Staging twice for the same `(tenant_id, user_id)` key adds a second
+    /// live entry — it does NOT replace the first. The per-user sandbox
+    /// concurrency ceiling is >1 (`sandbox_quota.rs`), so two invocations
+    /// staging for the same principal at once is the normal path, and both
+    /// obligations must stay live until each is independently revoked.
+    ///
+    /// This supersedes an earlier version of this test (single-slot design,
+    /// concurrency ceiling of 1) that asserted restaging *replaced* the
+    /// prior obligation — that assertion is no longer correct now that the
+    /// map holds a set per key rather than one slot.
     #[test]
-    fn restaging_the_same_key_replaces_the_previous_obligation() {
+    fn staging_the_same_key_twice_keeps_both_obligations_live() {
         let firewall = Arc::new(SandboxCredentialFirewall::new());
         let tenant_a = tenant("tenant-a");
         let user_a = user("user-a");
@@ -704,16 +738,12 @@ mod tests {
             StagedCredentialObligation::new(handle("new-token"), allow_all_targets(), FAR_FUTURE),
         );
 
-        let decision = firewall
-            .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
-            .expect("attributed lookup within deadline must not error");
-
-        match decision {
-            SandboxCredentialDecision::Grant(obligation) => {
-                assert_eq!(obligation.secret_handle, handle("new-token"));
-            }
-            SandboxCredentialDecision::NoGrant => panic!("expected the replaced grant"),
-        }
+        assert_grant_contains(
+            &firewall,
+            &tenant_a,
+            &user_a,
+            &[handle("old-token"), handle("new-token")],
+        );
     }
 
     /// HIGH-severity regression: a stale lease dropped *after* a newer
@@ -750,26 +780,12 @@ mod tests {
         // still alive.
         drop(lease_old);
 
-        let decision = firewall
-            .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
-            .expect("attributed lookup within deadline must not error");
-        match decision {
-            SandboxCredentialDecision::Grant(obligation) => {
-                assert_eq!(
-                    obligation.secret_handle,
-                    handle("new-token"),
-                    "the stale lease's drop must not strip the newer, still-live grant"
-                );
-            }
-            SandboxCredentialDecision::NoGrant => panic!(
-                "stale lease revoked the newer invocation's live grant \
-                 (the bug this test pins)"
-            ),
-        }
+        assert_grant_contains(&firewall, &tenant_a, &user_a, &[handle("new-token")]);
 
         // Overshoot guard: the fix must not go so far that dropping the
-        // *newest* lease stops revoking. `lease_new` is still the current
-        // occupant of the key, so dropping it must still remove the entry.
+        // *newest* lease stops revoking. `lease_new` is still live, so
+        // dropping it must still remove its own entry — and since it was
+        // the last entry left for this key, the key itself must be gone.
         drop(lease_new);
         let decision_after_newest_drop = firewall
             .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
@@ -892,16 +908,201 @@ mod tests {
         let decision = firewall
             .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
             .expect("attributed lookup within deadline must not error");
-        let obligation = match decision {
-            SandboxCredentialDecision::Grant(obligation) => obligation,
+        let obligations = match decision {
+            SandboxCredentialDecision::Grant(obligations) => obligations,
             SandboxCredentialDecision::NoGrant => panic!("expected a grant"),
         };
+        assert_eq!(obligations.len(), 1);
 
         assert!(
-            obligation.expires_at <= after_staging + MAX_GRANT_TTL,
+            obligations[0].expires_at <= after_staging + MAX_GRANT_TTL,
             "a 24h TTL must be clamped to MAX_GRANT_TTL, not honored verbatim"
         );
 
         lease.revoke();
+    }
+
+    /// Helper: assert that `authorize` currently returns a live grant whose
+    /// obligation secret handles are exactly `expected` (order-independent —
+    /// the staging map is a `HashMap`, so iteration order over a key's set
+    /// is not guaranteed).
+    fn assert_grant_contains(
+        firewall: &Arc<SandboxCredentialFirewall>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        expected: &[SecretHandle],
+    ) {
+        let decision = firewall
+            .authorize(Some((tenant_id, user_id)), far_future_deadline())
+            .expect("attributed lookup within deadline must not error");
+        match decision {
+            SandboxCredentialDecision::Grant(obligations) => {
+                let actual: std::collections::HashSet<_> = obligations
+                    .iter()
+                    .map(|o| o.secret_handle.clone())
+                    .collect();
+                let expected_set: std::collections::HashSet<_> = expected.iter().cloned().collect();
+                assert_eq!(
+                    actual, expected_set,
+                    "live grant set did not match the expected staged obligations"
+                );
+            }
+            SandboxCredentialDecision::NoGrant => {
+                panic!("expected a live grant set containing {expected:?}, got NoGrant")
+            }
+        }
+    }
+
+    /// N-safety: with the per-user sandbox concurrency ceiling now >1
+    /// (`sandbox_quota.rs`), 4 concurrent invocations staging for the same
+    /// `(tenant_id, user_id)` is the normal case. Dropping their leases in a
+    /// SHUFFLED order (neither LIFO nor FIFO — the order most likely to
+    /// defeat an implementation that only happens to work for stack- or
+    /// queue-shaped drop patterns) must revoke only each dropped lease's own
+    /// entry; every remaining sibling grant must survive until its own
+    /// lease drops, and the key must disappear only once the last one does.
+    #[test]
+    fn dropping_four_concurrent_leases_in_shuffled_order_only_revokes_each_ones_own_entry() {
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let tenant_a = tenant("tenant-a");
+        let user_a = user("user-a");
+
+        let lease_a = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-a"), allow_all_targets(), FAR_FUTURE),
+        );
+        let lease_b = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-b"), allow_all_targets(), FAR_FUTURE),
+        );
+        let lease_c = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-c"), allow_all_targets(), FAR_FUTURE),
+        );
+        let lease_d = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-d"), allow_all_targets(), FAR_FUTURE),
+        );
+
+        assert_eq!(
+            firewall.staged_len(),
+            4,
+            "sanity: all four concurrent obligations must be staged before any drop"
+        );
+
+        // Shuffled order: c, a, d, b.
+        drop(lease_c);
+        assert_eq!(firewall.staged_len(), 3);
+        assert_grant_contains(
+            &firewall,
+            &tenant_a,
+            &user_a,
+            &[handle("token-a"), handle("token-b"), handle("token-d")],
+        );
+
+        drop(lease_a);
+        assert_eq!(firewall.staged_len(), 2);
+        assert_grant_contains(
+            &firewall,
+            &tenant_a,
+            &user_a,
+            &[handle("token-b"), handle("token-d")],
+        );
+
+        drop(lease_d);
+        assert_eq!(firewall.staged_len(), 1);
+        assert_grant_contains(&firewall, &tenant_a, &user_a, &[handle("token-b")]);
+
+        drop(lease_b);
+        assert_eq!(
+            firewall.staged_len(),
+            0,
+            "the key's set must be gone once its last entry drops"
+        );
+        let decision = firewall
+            .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+            .expect("attributed lookup within deadline must not error");
+        assert_eq!(
+            decision,
+            SandboxCredentialDecision::NoGrant,
+            "no entries remain staged for this key after the last lease drops"
+        );
+    }
+
+    /// Expiry reclamation on read must remove only the expired entry from a
+    /// key's set, not the whole key — live siblings staged under the same
+    /// `(tenant_id, user_id)` must survive the reclaim.
+    #[test]
+    fn expiry_reclaims_one_entry_without_disturbing_live_siblings() {
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let tenant_a = tenant("tenant-a");
+        let user_a = user("user-a");
+
+        let _short_lived = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(
+                handle("expiring-token"),
+                allow_all_targets(),
+                Duration::ZERO,
+            ),
+        );
+        let _long_lived = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("live-token"), allow_all_targets(), FAR_FUTURE),
+        );
+        std::thread::sleep(Duration::from_millis(2));
+
+        assert_eq!(
+            firewall.staged_len(),
+            2,
+            "sanity: both obligations staged before the expired one is reclaimed"
+        );
+
+        assert_grant_contains(&firewall, &tenant_a, &user_a, &[handle("live-token")]);
+        assert_eq!(
+            firewall.staged_len(),
+            1,
+            "the expired sibling must be reclaimed, the live one must remain"
+        );
+    }
+
+    /// Cross-user isolation must still hold when a key has multiple staged
+    /// entries: user B must never see any of user A's entries, even under
+    /// the same tenant.
+    #[test]
+    fn user_b_cannot_retrieve_any_of_user_a_multiple_staged_obligations() {
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let tenant_a = tenant("tenant-a");
+        let user_a = user("user-a");
+        let user_b = user("user-b");
+        let _lease_1 = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-1"), allow_all_targets(), FAR_FUTURE),
+        );
+        let _lease_2 = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("token-2"), allow_all_targets(), FAR_FUTURE),
+        );
+
+        let decision_for_b = firewall
+            .authorize(Some((&tenant_a, &user_b)), far_future_deadline())
+            .expect("an unstaged (tenant, user) is a decision, not a firewall error");
+        assert_eq!(decision_for_b, SandboxCredentialDecision::NoGrant);
+
+        // Sanity: user A's own lookup still resolves both entries.
+        assert_grant_contains(
+            &firewall,
+            &tenant_a,
+            &user_a,
+            &[handle("token-1"), handle("token-2")],
+        );
     }
 }
