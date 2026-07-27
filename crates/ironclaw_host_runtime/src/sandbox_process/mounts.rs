@@ -98,6 +98,24 @@ impl RebornSandboxMountSources {
         Ok(binds)
     }
 
+    /// Joins `source.host_root` with a tail derived from `grant.target`, then
+    /// checks `canonical.starts_with(&source.host_root)` at line ~148. That is
+    /// shared-parent containment, not leaf-scoped: it does not pin the check
+    /// to the grant's own leaf, so a symlink planted under a `host_root`
+    /// shared by multiple callers can canonicalize into a sibling subtree and
+    /// still pass `starts_with`.
+    ///
+    /// This is safe today only because no production caller registers a
+    /// shared, multi-tenant `host_root` here — `with_local_mount_source` (the
+    /// only way to populate [`RebornSandboxMountSources`]) has zero
+    /// production call sites; `prepare_container_binds` is always invoked
+    /// with `mounts=None` in production. If a future caller ever wires a
+    /// shared `host_root` through `with_local_mount_source`, this reproduces
+    /// the exact cross-tenant escape class fixed in
+    /// `ironclaw_filesystem::local` and MUST be leaf-scoped first — see
+    /// `LocalMount::leaf_scoped` / `DiskFilesystem::mount_local_per_leaf` and
+    /// `resolve_joined`'s `containment_root` for the worked fix (pin
+    /// containment to `host_root/<leaf>`, not the shared `host_root`).
     async fn resolve_grant(
         &self,
         grant: &MountGrant,
