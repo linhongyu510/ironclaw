@@ -267,9 +267,13 @@ impl SandboxCredentialSwap {
             })
             .collect();
         let mut report = SandboxCredentialSwapReport::default();
+        // `saturating_sub`, not `-`: candidates are non-overlapping slices of
+        // `head`, so this cannot underflow today — but a wrapping usize here
+        // would become a colossal `with_capacity` and abort the process, which
+        // is a bad way to learn that the scanner's invariant broke.
         let mut output_len = head.len();
         for substitution in &substitutions {
-            output_len -= PLACEHOLDER_TOKEN_LEN;
+            output_len = output_len.saturating_sub(PLACEHOLDER_TOKEN_LEN);
             match substitution {
                 Some(material) => {
                     output_len += material.expose_secret().len();
@@ -289,7 +293,12 @@ impl SandboxCredentialSwap {
             }
         }
         output.extend_from_slice(&head[cursor..]);
-        debug_assert_eq!(output.len(), output.capacity());
+        // Pins the length computation above against the splice below: if they
+        // ever disagree, `with_capacity` was wrong and the buffer grew
+        // mid-splice, which is exactly the un-zeroized-copy hazard the two
+        // passes exist to avoid. (Asserting against `capacity()` instead would
+        // be wrong — `with_capacity` may legitimately over-allocate.)
+        debug_assert_eq!(output.len(), output_len);
 
         if report.stripped > 0 {
             report.annotation = Some(scrub_for_model_visibility(&format!(
@@ -419,7 +428,7 @@ impl SandboxCredentialSwap {
     /// the rest to be scrubbed later, letting a mangled-but-recognizable
     /// token cross the boundary. Any candidate straddling the boundary
     /// therefore *extends* the consumed prefix to cover it whole.
-    fn scrub_prefix(&self, buffer: &[u8], min_hold_back: usize) -> (Cow<'_, [u8]>, usize) {
+    fn scrub_prefix<'a>(&self, buffer: &'a [u8], min_hold_back: usize) -> (Cow<'a, [u8]>, usize) {
         let candidates = self.resolvable_candidates(buffer);
         let mut boundary = buffer.len().saturating_sub(min_hold_back);
         for candidate in &candidates {
@@ -433,7 +442,9 @@ impl SandboxCredentialSwap {
             .filter(|candidate| candidate.offset + PLACEHOLDER_TOKEN_LEN <= boundary)
             .collect();
         if inside.is_empty() {
-            return (Cow::Owned(buffer[..boundary].to_vec()), boundary);
+            // The overwhelmingly common case on the relay path: borrow rather
+            // than copy every chunk of an upload just to pass it through.
+            return (Cow::Borrowed(&buffer[..boundary]), boundary);
         }
         let mut output = Vec::with_capacity(boundary);
         let mut cursor = 0usize;
@@ -452,8 +463,14 @@ impl SandboxCredentialSwap {
     /// bytes read are held back rather than written immediately; the carry is
     /// bounded by that constant plus one read, so a container cannot grow it.
     /// Flushed in full at EOF.
+    /// `initial` is any byte the caller already read off the client but has
+    /// not forwarded — in practice whatever arrived behind the first request
+    /// head in the same segment. It is scrubbed like everything else rather
+    /// than written through, which is what stops a pipelined request from
+    /// carrying a placeholder past the boundary.
     pub(crate) async fn relay_scrubbing_placeholders<R, W>(
         &self,
+        initial: Vec<u8>,
         reader: &mut R,
         writer: &mut W,
     ) -> std::io::Result<()>
@@ -461,7 +478,7 @@ impl SandboxCredentialSwap {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
     {
-        let mut carry: Vec<u8> = Vec::new();
+        let mut carry: Vec<u8> = initial;
         let mut chunk = vec![0u8; 16 * 1024];
         loop {
             let read = reader.read(&mut chunk).await?;
@@ -469,15 +486,16 @@ impl SandboxCredentialSwap {
                 break;
             }
             carry.extend_from_slice(&chunk[..read]);
-            let (scrubbed, consumed) =
-                self.scrub_prefix(&carry, PLACEHOLDER_TOKEN_LEN.saturating_sub(1));
-            let scrubbed = scrubbed.into_owned();
-            writer.write_all(&scrubbed).await?;
+            let consumed = {
+                let (scrubbed, consumed) =
+                    self.scrub_prefix(&carry, PLACEHOLDER_TOKEN_LEN.saturating_sub(1));
+                writer.write_all(&scrubbed).await?;
+                consumed
+            };
             carry.drain(..consumed);
         }
         if !carry.is_empty() {
             let (scrubbed, _) = self.scrub_prefix(&carry, 0);
-            let scrubbed = scrubbed.into_owned();
             writer.write_all(&scrubbed).await?;
         }
         writer.flush().await?;

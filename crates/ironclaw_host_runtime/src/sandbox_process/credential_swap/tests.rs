@@ -363,7 +363,7 @@ async fn the_relay_scrubber_removes_a_placeholder_split_across_two_reads() {
     let mut out: Vec<u8> = Vec::new();
     fixture
         .swap
-        .relay_scrubbing_placeholders(&mut client, &mut out)
+        .relay_scrubbing_placeholders(Vec::new(), &mut client, &mut out)
         .await
         .expect("scrubbing relay completes");
     writer_task.await.unwrap();

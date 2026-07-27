@@ -295,17 +295,15 @@ pub(crate) async fn terminate_and_forward(
     let rewritten_head = match &config.credential_swap {
         None => None,
         Some(swap) => {
-            let Some(head) = read_request_head(&mut client_tls).await? else {
+            let Some((head, trailing)) = read_request_head(&mut client_tls).await? else {
                 // The client closed without sending anything. Nothing to
                 // forward, and no reason to dial the origin.
                 return Ok(());
             };
-            Some(swap.rewrite_request_head(
-                &head,
-                host,
-                connection.identity,
-                connection.deadline,
-            )?)
+            Some((
+                swap.rewrite_request_head(&head, host, connection.identity, connection.deadline)?,
+                trailing,
+            ))
         }
     };
 
@@ -331,7 +329,8 @@ pub(crate) async fn terminate_and_forward(
         .await
         .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
 
-    let (Some(swap), Some(rewritten_head)) = (&config.credential_swap, rewritten_head) else {
+    let (Some(swap), Some((rewritten_head, trailing))) = (&config.credential_swap, rewritten_head)
+    else {
         copy_bidirectional(&mut client_tls, &mut origin_tls)
             .await
             .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
@@ -348,7 +347,9 @@ pub(crate) async fn terminate_and_forward(
     // secret, and `SecretSlice`'s `Drop` zeroizes it.
     drop(rewritten_head);
 
-    let upstream = swap.relay_scrubbing_placeholders(&mut client_read, &mut origin_write);
+    // `trailing` seeds the scrubbing relay so a request pipelined behind the
+    // first one is scrubbed, never swapped — see `read_request_head`'s doc.
+    let upstream = swap.relay_scrubbing_placeholders(trailing, &mut client_read, &mut origin_write);
     let downstream = async {
         tokio::io::copy(&mut origin_read, &mut client_write).await?;
         client_write.shutdown().await
@@ -371,8 +372,17 @@ pub(crate) struct InterceptedConnection<'a> {
     pub(crate) deadline: std::time::Instant,
 }
 
-/// Reads one HTTP request head (through `\r\n\r\n`) off the decrypted client
-/// stream, bounded by [`MAX_REQUEST_HEAD_BYTES`].
+/// Reads one HTTP request head off the decrypted client stream, framed at the
+/// FIRST `\r\n\r\n` and bounded by [`MAX_REQUEST_HEAD_BYTES`]. Returns the
+/// head and any bytes that arrived behind it in the same read.
+///
+/// Framing at the first terminator is a security boundary, not tidiness: two
+/// requests can arrive in one TCP segment, and a head that ran past the
+/// terminator would let a pipelined second request's placeholder be evaluated
+/// against the FIRST request's method and path — a credential-scope bypass
+/// (`a_pipelined_second_request_cannot_borrow_the_first_requests_authorization`
+/// pins it). The trailing bytes are handed to the scrubbing relay instead, so
+/// a placeholder in them is stripped, never swapped.
 ///
 /// `Ok(None)` means the client closed without sending a byte. Anything else
 /// that fails to frame — EOF mid-head, a non-HTTP protocol, or exceeding the
@@ -381,8 +391,8 @@ pub(crate) struct InterceptedConnection<'a> {
 /// placeholder this seam never got to inspect.
 async fn read_request_head(
     client: &mut (impl AsyncRead + Unpin),
-) -> Result<Option<Vec<u8>>, TlsInterceptError> {
-    let mut head = Vec::new();
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, TlsInterceptError> {
+    let mut buffered = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
         let read = client
@@ -390,19 +400,20 @@ async fn read_request_head(
             .await
             .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
         if read == 0 {
-            if head.is_empty() {
+            if buffered.is_empty() {
                 return Ok(None);
             }
             return Err(TlsInterceptError::MalformedRequestHead);
         }
-        head.extend_from_slice(&chunk[..read]);
-        if head
+        buffered.extend_from_slice(&chunk[..read]);
+        if let Some(start) = buffered
             .windows(REQUEST_HEAD_TERMINATOR.len())
-            .any(|window| window == REQUEST_HEAD_TERMINATOR)
+            .position(|window| window == REQUEST_HEAD_TERMINATOR)
         {
-            return Ok(Some(head));
+            let rest = buffered.split_off(start + REQUEST_HEAD_TERMINATOR.len());
+            return Ok(Some((buffered, rest)));
         }
-        if head.len() > MAX_REQUEST_HEAD_BYTES {
+        if buffered.len() > MAX_REQUEST_HEAD_BYTES {
             return Err(TlsInterceptError::RequestHeadTooLarge {
                 limit_bytes: MAX_REQUEST_HEAD_BYTES,
             });
@@ -1335,6 +1346,64 @@ mod tests {
             1,
             "only the first request's placeholder is swapped; the second is stripped — got: \
              {origin_text:?}"
+        );
+    }
+
+    /// Request smuggling: two requests arriving in the SAME segment must not
+    /// let the second one borrow the first one's authorization. The head is
+    /// framed at the first `\r\n\r\n`, so the placeholder sitting in the
+    /// pipelined `DELETE /admin/keys` is evaluated against nothing — it is
+    /// stripped, not swapped against the covered `GET /repos/x` that precedes
+    /// it. Without the framing this test fails by handing the real secret to
+    /// a method and path the grant never covered.
+    #[tokio::test]
+    async fn a_pipelined_second_request_cannot_borrow_the_first_requests_authorization() {
+        let (origin_addr, origin_root_pem, origin_received) =
+            spawn_recording_tls_origin(BOUND_HOST, 2).await;
+        let (swap, token, _lease) = swap_fixture(true, get_policy("/repos"));
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([BOUND_HOST.to_string()]),
+            connector_trusting_only(&origin_root_pem),
+        )
+        .with_credential_swap(swap);
+
+        // One write, two requests. The FIRST carries no placeholder and is
+        // covered by the grant; the SECOND carries the placeholder and is
+        // not covered (wrong method AND wrong path).
+        let smuggled = format!(
+            "GET /repos/x HTTP/1.1\r\nHost: {BOUND_HOST}\r\n\r\n\
+             DELETE /admin/keys HTTP/1.1\r\nHost: {BOUND_HOST}\r\n\
+             Authorization: token {token}\r\n\r\n"
+        )
+        .into_bytes();
+
+        let (result, _) = drive_intercepted_connection(
+            config,
+            our_root_pem,
+            origin_addr,
+            true,
+            Instant::now() + Duration::from_secs(3600),
+            vec![smuggled],
+        )
+        .await;
+        assert!(result.is_ok(), "unexpected failure: {result:?}");
+
+        let origin_text = String::from_utf8_lossy(&origin_received.lock().unwrap()).to_string();
+        assert!(
+            !origin_text.contains(REAL_SECRET),
+            "a pipelined request must not inherit the first request's grant — got: \
+             {origin_text:?}"
+        );
+        assert!(
+            !origin_text.contains(&token),
+            "the placeholder must still never cross the boundary — got: {origin_text:?}"
+        );
+        assert!(
+            origin_text.contains("DELETE /admin/keys"),
+            "the pipelined request itself is still forwarded (bare) — got: {origin_text:?}"
         );
     }
 }

@@ -771,8 +771,21 @@ fn staged_obligation_debug_output_never_contains_secret_handle() {
     let debug_output = format!("{obligation:?}");
 
     // Regression: `StagedCredentialObligation`'s manual `Debug` must omit
-    // `secret_handle` — only `allowed_targets`/`expires_at` are safe to print.
-    assert!(!debug_output.contains("github-token"));
+    // the secret handle — only `allowed_targets`/`expires_at` and the
+    // source's non-secret routing metadata are safe to print.
+    assert!(!debug_output.contains("github-token"), "{debug_output}");
+    // The obligation now carries a `ResourceScope`, whose derived `Debug`
+    // would print tenant/user identity (compliance-sensitive) if
+    // `StagedCredentialObligationSource`'s manual `Debug` ever regressed to a
+    // derive.
+    assert!(!debug_output.contains("tenant-a"), "{debug_output}");
+    assert!(!debug_output.contains("user-a"), "{debug_output}");
+    // Non-secret routing metadata IS expected — otherwise this test would
+    // also pass against a `Debug` that printed nothing at all.
+    assert!(
+        debug_output.contains("github") && debug_output.contains("sandbox.shell"),
+        "{debug_output}"
+    );
 }
 
 #[test]
