@@ -36,6 +36,7 @@ mod credential_firewall;
 mod key_codec;
 mod mounts;
 mod scope_key;
+mod tls_intercept;
 
 // `attribution`, `registry`, and `user_key` are the persistent per-user
 // sandbox container model's identity/registry primitives: container naming,

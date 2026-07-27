@@ -88,6 +88,15 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
         count: 5,
     },
+    // W6 phase 1's TLS-termination seam: `egress_proxy` (a separate slice,
+    // not yet landed) is the only production caller. Same retirement
+    // trigger as the `ca.rs`/`credential_firewall.rs` entries above.
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        count: 4,
+    },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
@@ -266,6 +275,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
         count: 1,
     },
     FrozenPathCount {
