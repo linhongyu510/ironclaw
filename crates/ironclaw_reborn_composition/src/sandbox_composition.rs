@@ -17,7 +17,7 @@ use ironclaw_host_runtime::SandboxActivityRegistry;
 use ironclaw_resources::ResourceGovernor;
 
 use crate::RebornBuildError;
-use crate::input::RuntimeOwnerIdentity;
+use crate::input::RebornLocalRuntimeIdentity;
 
 /// Owned handle to a spawned [`ironclaw_host_runtime::BoundEgressAllowlistProxy::serve`]
 /// task. Declared canonically here (not in `sandbox_egress_proxy_task.rs`)
@@ -86,7 +86,7 @@ impl SandboxEgressProxyRuntimeHandle {
 /// every call site.
 pub(crate) struct SandboxProfileBindingInputs<'a> {
     pub(crate) is_sandboxed_profile: bool,
-    pub(crate) local_runtime_identity: Option<&'a RuntimeOwnerIdentity>,
+    pub(crate) local_runtime_identity: Option<&'a RebornLocalRuntimeIdentity>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     /// The activity registry the transport (`sandbox_boot::tenant_sandbox_process_binding`)
     /// already constructed and injected into the exec transport — the reaper

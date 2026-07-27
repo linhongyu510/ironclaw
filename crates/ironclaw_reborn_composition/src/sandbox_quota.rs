@@ -99,7 +99,7 @@ pub(crate) fn apply_sandbox_user_ceiling(
 /// back to (mirrors `local_dev_extension_lifecycle_surface_context` in
 /// `factory.rs`).
 pub(crate) fn resolve_local_runtime_tenant_id(
-    local_runtime_identity: Option<&crate::input::RuntimeOwnerIdentity>,
+    local_runtime_identity: Option<&crate::input::RebornLocalRuntimeIdentity>,
 ) -> Result<TenantId, crate::RebornBuildError> {
     if let Some(identity) = local_runtime_identity {
         return Ok(identity.tenant_id.clone());
