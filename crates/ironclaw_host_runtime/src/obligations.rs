@@ -27,7 +27,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStorePort};
-use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits};
+#[cfg(test)]
+use ironclaw_resources::ResourceLimits;
+use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort,
@@ -1129,6 +1131,12 @@ impl SandboxPerUserCeiling {
     /// `max_concurrent`, unless it was already registered by a prior
     /// dispatch. Cheap on the common (already-registered) path: a single
     /// lock + `HashSet` lookup, no governor call.
+    ///
+    /// Read-modify-write: this loads the account's current limits (if any)
+    /// and only overwrites `max_concurrency_slots`, so any other limit
+    /// dimension (spend, tokens, wall-clock, …) a different caller set on the
+    /// same account is preserved rather than reset to
+    /// `ResourceLimits::default()`.
     fn ensure_registered(
         &self,
         governor: &Arc<dyn ResourceGovernor>,
@@ -1144,9 +1152,14 @@ impl SandboxPerUserCeiling {
                 return Ok(());
             }
         }
+        let account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+        let existing_limits = governor
+            .account_snapshot(&account)?
+            .and_then(|snapshot| snapshot.limits)
+            .unwrap_or_default();
         governor.set_limit(
-            ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone()),
-            ResourceLimits::default().set_max_concurrency_slots(self.max_concurrent),
+            account,
+            existing_limits.set_max_concurrency_slots(self.max_concurrent),
         )?;
         let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
         registered.insert(key);
@@ -1487,12 +1500,11 @@ impl BuiltinObligationHandler {
         let Some(governor) = &self.resource_governor else {
             return Err(resource_obligation_failed());
         };
-        // Lazy per-user registration (W8's credential-attribution staging
-        // depends on the serialization this gives: attribution keyed by
-        // (tenant, user) can never recover an invocation id from a
-        // container's source IP alone, so at most one sandbox invocation in
-        // flight per user is required, not just nice-to-have). Only set on
-        // the sandboxed profile's handler — see `with_sandbox_per_user_ceiling`.
+        // Lazy per-user registration: bounds how many concurrent sandbox
+        // invocations a single user can hold at once, as a capacity /
+        // fair-share ceiling (see `SANDBOX_PER_USER_MAX_CONCURRENT` in
+        // `ironclaw_reborn_composition::sandbox_quota`). Only set on the
+        // sandboxed profile's handler — see `with_sandbox_per_user_ceiling`.
         if let Some(per_user_ceiling) = &self.sandbox_per_user_ceiling {
             per_user_ceiling
                 .ensure_registered(governor, &request.context.resource_scope)
@@ -2808,6 +2820,61 @@ mod tests {
                 })
             ),
             "idempotent re-registration must not disturb the outstanding reservation, got {second:?}"
+        );
+
+        release_sandbox_spawn(&handler, &context, &first).await;
+    }
+
+    /// Regression: `ensure_registered` used to call
+    /// `governor.set_limit(account, ResourceLimits::default().set_max_concurrency_slots(n))`,
+    /// which writes a WHOLE fresh `ResourceLimits` and silently resets any
+    /// other limit dimension (spend, tokens, wall-clock, …) a different
+    /// caller previously set on the same account. Nothing sets user-level
+    /// limits in production today, so this was latent — but the fix must be
+    /// read-modify-write, not a fresh default, or the day something DOES set
+    /// a user-level spend limit, the first sandbox dispatch for that user
+    /// would silently erase it.
+    #[tokio::test]
+    async fn sandbox_per_user_ceiling_registration_preserves_unrelated_pre_existing_limit() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let account = ResourceAccount::user(
+            TenantId::new("tenant1".to_string()).unwrap(),
+            UserId::new("user1".to_string()).unwrap(),
+        );
+        let pre_existing_max_usd = rust_decimal::Decimal::from(5);
+        governor
+            .set_limit(
+                account.clone(),
+                ResourceLimits::default().set_max_usd(pre_existing_max_usd),
+            )
+            .expect("setting an unrelated pre-existing limit on the account succeeds");
+
+        let handler = BuiltinObligationHandler::new()
+            .with_resource_governor_dyn(Arc::clone(&governor))
+            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
+        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
+
+        let first = prepare_sandbox_spawn(&handler, &context)
+            .await
+            .expect("first sandbox reservation registers the per-user ceiling");
+
+        let snapshot = governor
+            .account_snapshot(&account)
+            .expect("reading the account snapshot succeeds")
+            .expect("the account has limits after ceiling registration");
+        let limits = snapshot
+            .limits
+            .expect("ceiling registration must have set limits on the account");
+        assert_eq!(
+            limits.max_usd,
+            Some(pre_existing_max_usd),
+            "ceiling registration must preserve an unrelated pre-existing limit dimension \
+             instead of resetting the whole ResourceLimits to default, got {limits:?}"
+        );
+        assert_eq!(
+            limits.max_concurrency_slots,
+            Some(1),
+            "ceiling registration must still set the per-user concurrency ceiling, got {limits:?}"
         );
 
         release_sandbox_spawn(&handler, &context, &first).await;

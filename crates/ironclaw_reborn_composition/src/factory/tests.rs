@@ -3273,3 +3273,234 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
         "removed telegram must have no visible membership for its former member: {extensions:?}",
     );
 }
+
+/// Regression for the code-review finding that
+/// `build_libsql_production_host_runtime_services` /
+/// `build_postgres_production_host_runtime_services` never wired the D3-2
+/// per-user sandbox concurrency ceiling: those two public substrate builders
+/// route through `build_filesystem_production_host_runtime_services`, which
+/// (unlike `build_backend_production`) never called
+/// `with_sandbox_per_user_ceiling`. A `TenantSandbox`-resolved profile built
+/// through either builder therefore had NO per-user concurrency limit at all
+/// — silently unlimited, not merely defaulted.
+///
+/// The fix moves the ceiling wiring into `apply_production_runtime_process_binding`
+/// itself: the single chokepoint, shared by every production builder, where a
+/// `RebornRuntimeProcessBinding::TenantSandbox` becomes a real sandbox process
+/// port on the services. Any caller that reaches a tenant-sandbox binding
+/// necessarily gets the ceiling too — there is no second call site left to
+/// forget.
+///
+/// This test drives the chokepoint directly and dispatches
+/// `SANDBOX_PER_USER_MAX_CONCURRENT + 1` concurrent `ReserveResources`
+/// obligations for the SAME (tenant, user) through the resulting
+/// `services.obligation_handler()`. If the ceiling is not wired, every
+/// dispatch wrongly succeeds (unlimited concurrency); with the fix, the
+/// `N`th is the last to succeed and the `(N+1)`th is denied as
+/// `CapabilityObligationError::Failed { kind: Resource }`. A different user
+/// in the SAME tenant is asserted unaffected, so the test cannot pass merely
+/// because the ceiling happens to be roomy — it discriminates per-user vs
+/// per-tenant. Mirrors
+/// `sandbox_per_user_ceiling_denies_second_concurrent_reservation_for_same_user`
+/// in `ironclaw_host_runtime::obligations` but asserted at the composition
+/// chokepoint those unit tests cannot reach, and at the real production
+/// ceiling value rather than an arbitrary test value.
+#[tokio::test]
+async fn apply_production_runtime_process_binding_wires_sandbox_per_user_ceiling() {
+    use ironclaw_capabilities::{
+        CapabilityObligationAbortRequest, CapabilityObligationError,
+        CapabilityObligationFailureKind, CapabilityObligationOutcome, CapabilityObligationPhase,
+        CapabilityObligationRequest,
+    };
+    use ironclaw_host_api::{Obligation, ResourceReservationId};
+    use ironclaw_host_runtime::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
+        SandboxCommandTransport, TenantSandboxProcessPort,
+    };
+
+    #[derive(Debug)]
+    struct NoopSandboxTransport;
+
+    #[async_trait::async_trait]
+    impl SandboxCommandTransport for NoopSandboxTransport {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Ok(CommandExecutionOutput {
+                output: String::new(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: true,
+                duration: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    fn context_for(tenant_id: &str, user_id: &str) -> ExecutionContext {
+        let tenant_id = TenantId::new(tenant_id.to_string()).unwrap();
+        let user_id = UserId::new(user_id.to_string()).unwrap();
+        ExecutionContext {
+            run_id: None,
+            origin: None,
+            invocation_id: InvocationId::new(),
+            correlation_id: ironclaw_host_api::CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            authenticated_actor_user_id: None,
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            extension_id: ExtensionId::new("caller").unwrap(),
+            runtime: ironclaw_host_api::RuntimeKind::Wasm,
+            trust: ironclaw_host_api::TrustClass::Sandbox,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            resource_scope: ResourceScope {
+                tenant_id,
+                user_id,
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+        }
+    }
+
+    fn fresh_obligations() -> Vec<Obligation> {
+        vec![Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
+        }]
+    }
+
+    async fn prepare(
+        handler: &dyn ironclaw_capabilities::CapabilityObligationHandler,
+        context: &ExecutionContext,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        obligations: &[Obligation],
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Spawn,
+                context,
+                capability_id,
+                estimate,
+                obligations,
+            })
+            .await
+    }
+
+    let services = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+    let process_port = Arc::new(TenantSandboxProcessPort::new(Arc::new(
+        NoopSandboxTransport,
+    )));
+    let services = apply_production_runtime_process_binding(
+        services,
+        RebornRuntimeProcessBinding::tenant_sandbox(process_port),
+    );
+
+    let handler = services.obligation_handler();
+    let capability_id = CapabilityId::new("shell.exec").unwrap();
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+    let ceiling = crate::sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT;
+    let user1_context = context_for("tenant1", "user1");
+
+    // The Nth concurrent reservation for user1 must all succeed.
+    let mut user1_outstanding = Vec::new();
+    for slot in 0..ceiling {
+        let obligations = fresh_obligations();
+        let outcome = prepare(
+            handler.as_ref(),
+            &user1_context,
+            &capability_id,
+            &estimate,
+            &obligations,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "reservation {slot} of {ceiling} for user1 is within the per-user ceiling, got {error:?}"
+            )
+        });
+        user1_outstanding.push((obligations, outcome));
+    }
+
+    // The (N+1)th concurrent reservation for the SAME user must be denied.
+    let overflow_obligations = fresh_obligations();
+    let overflow = prepare(
+        handler.as_ref(),
+        &user1_context,
+        &capability_id,
+        &estimate,
+        &overflow_obligations,
+    )
+    .await;
+    assert!(
+        matches!(
+            overflow,
+            Err(CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Resource
+            })
+        ),
+        "a TenantSandbox binding applied through apply_production_runtime_process_binding must \
+         wire the per-user sandbox ceiling, so the (N+1)th concurrent sandbox reservation for \
+         the SAME user (N = SANDBOX_PER_USER_MAX_CONCURRENT = {ceiling}) is denied while the \
+         first {ceiling} are outstanding; got {overflow:?}"
+    );
+
+    // A different user in the SAME tenant must be unaffected by user1's
+    // per-user ceiling — the per-user vs per-tenant discriminator. Without
+    // this, a test that merely checks "some Nth reservation is denied" could
+    // pass even if the ceiling were wrongly applied at the tenant level.
+    let user2_context = context_for("tenant1", "user2");
+    let user2_obligations = fresh_obligations();
+    let user2_outcome = prepare(
+        handler.as_ref(),
+        &user2_context,
+        &capability_id,
+        &estimate,
+        &user2_obligations,
+    )
+    .await
+    .expect(
+        "a different user in the same tenant must not be blocked by user1's exhausted \
+         per-user ceiling",
+    );
+
+    for (obligations, outcome) in user1_outstanding {
+        handler
+            .abort(CapabilityObligationAbortRequest {
+                phase: CapabilityObligationPhase::Spawn,
+                context: &user1_context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                outcome: &outcome,
+            })
+            .await
+            .expect("releasing an outstanding user1 sandbox reservation succeeds");
+    }
+    handler
+        .abort(CapabilityObligationAbortRequest {
+            phase: CapabilityObligationPhase::Spawn,
+            context: &user2_context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &user2_obligations,
+            outcome: &user2_outcome,
+        })
+        .await
+        .expect("releasing the outstanding user2 sandbox reservation succeeds");
+}
