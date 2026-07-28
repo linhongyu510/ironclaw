@@ -302,8 +302,9 @@ fn local_dev_selector_config_uses_large_skill_context_budget() {
 /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
 /// parsed injection mode must reach
 /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
-/// clobbered by the `..default()` spread), and the parser must default to
-/// `listing` while still accepting the `full` legacy escape hatch.
+/// clobbered by the `..default()` spread). The parser still maps an explicit
+/// empty value to `listing`; the ENV-ABSENT default is `full` (see
+/// `DEFAULT_SKILL_INJECTION_MODE`).
 #[test]
 fn local_dev_selector_config_propagates_injection_mode() {
     for mode in [
@@ -313,6 +314,23 @@ fn local_dev_selector_config_propagates_injection_mode() {
         let cfg = super::local_dev_selector_config(true, mode);
         assert_eq!(cfg.injection_mode, mode);
     }
+}
+
+/// Reborn must inject skill BODIES by default. With `Listing`, benchmarking
+/// showed the model read the one-line menu and then never opened a skill
+/// (`skill_list` 30/30 runs, body actually read 0/30), leaving installed skills
+/// inert: 79.8% vs 85.6% with `Full` on the same 31 tasks and same skills
+/// (nearai/benchmarks#287). Guard the default so a revert is deliberate.
+#[test]
+fn skill_injection_mode_defaults_to_full_when_env_absent() {
+    // Assert the constant directly: this crate is `#![forbid(unsafe_code)]`, so
+    // the test cannot mutate the process env to exercise the VarError::NotPresent
+    // arm. `skill_injection_mode_env` returns this same constant on that arm.
+    assert_eq!(
+        super::DEFAULT_SKILL_INJECTION_MODE,
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
+        "Reborn must inject skill bodies by default; `Listing` leaves skills unread"
+    );
 }
 
 #[test]

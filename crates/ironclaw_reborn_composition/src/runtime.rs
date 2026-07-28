@@ -4983,7 +4983,7 @@ fn local_dev_selector_config(
 fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
     match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
         Ok(value) => skill_injection_mode_from(&value),
-        Err(std::env::VarError::NotPresent) => Ok(SkillInjectionMode::Listing),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_INJECTION_MODE),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {
             reason: format!("could not read {SKILL_INJECTION_MODE_ENV_KEY}: {error}"),
         }),
@@ -4991,6 +4991,40 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
 }
 
 const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+/// Default skill-injection mode for Reborn.
+///
+/// `Full` (the library default in
+/// [`SkillActivationSelectorConfig::default`]) injects keyword-scored skill
+/// bodies into model context. `Listing` instead shows a one-line
+/// `- name: description` menu and loads a body only on an explicit `$name`
+/// mention or a `builtin.skill_activate` call.
+///
+/// Reborn previously defaulted to `Listing` to save context. Benchmarking shows
+/// that trade is badly priced: the model reads the menu and then does not open
+/// the skill. Over 30 human-curated-skill runs of the SkillsBench/SkillLearnBench
+/// subset in nearai/benchmarks#287 (`deepseek-v4-flash`):
+///
+/// * `builtin.skill_list`      — called in 30/30 runs
+/// * `builtin.skill_activate`  — called in  3/30 runs
+/// * a skill body actually read —          0/30 runs
+///
+/// So installed skills were inert. Scores over those 31 tasks, same skills and
+/// same model, differing only in this constant:
+///
+/// | condition                | score |
+/// |--------------------------|-------|
+/// | no skills                | 78.5% |
+/// | curated skills, `Listing`| 79.8% |
+/// | curated skills, `Full`   | 85.6% |
+///
+/// `Listing` bought +1.3pp over having no skills at all; `Full` buys +7.1pp. For
+/// reference, harnesses that inject skill bodies unconditionally (Hermes, Claude
+/// Code) score 91.5% on the same tasks with the same skills.
+///
+/// Set `IRONCLAW_REBORN_SKILL_INJECTION=listing` to restore the previous
+/// behavior where context budget matters more than skill usage.
+const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Full;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
     match value.trim().to_ascii_lowercase().as_str() {
