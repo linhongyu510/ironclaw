@@ -225,3 +225,383 @@ async fn sandbox_egress_proxy_enforces_allowlist_through_composition() {
         metadata_ssrf.output
     );
 }
+
+/// Sidecar dual-homed topology, ADDITIONAL to
+/// `sandbox_egress_proxy_enforces_allowlist_through_composition` above (does
+/// NOT replace it — that test targets the production gateway-IP topology,
+/// which genuinely cannot work under colima on macOS: the sandbox network is
+/// `internal: true` with no route off its own bridge, so
+/// `host.docker.internal` can never reach a proxy bound on the macOS host.
+/// This module builds a topology that is fully hermetic and reachable from a
+/// local colima/Docker Desktop dev machine, proving the SAME isolation claim
+/// (allowed-through / denied-by-proxy / no-bypass-route / origin-observed)
+/// with the real `EgressAllowlistProxy` binary (built unmodified from
+/// production code via `docker/sandbox-egress-proxy.Dockerfile`), a
+/// dual-homed proxy container, and two recording HTTP origins — no
+/// `tenant_sandbox_process_binding` / Docker host-gateway wiring involved, so
+/// it is a genuinely different (complementary) code path from the test
+/// above, not a weakened duplicate of it.
+mod dual_homed_topology {
+    use std::path::PathBuf;
+    use std::process::{Command, Output};
+
+    pub const NET_INTERNAL: &str = "ironclaw-egress-test-internal";
+    pub const NET_EGRESS: &str = "ironclaw-egress-test-egress";
+    pub const PROXY_IMAGE: &str = "ironclaw-egress-proxy-standalone:test";
+    pub const PROXY_NAME: &str = "ironclaw-egress-test-proxy";
+    pub const ORIGIN_ALLOWED_NAME: &str = "ironclaw-egress-test-origin-allowed";
+    pub const ORIGIN_DENIED_NAME: &str = "ironclaw-egress-test-origin-denied";
+    pub const WORKER_NAME: &str = "ironclaw-egress-test-worker";
+    pub const ORIGIN_ALLOWED_BODY: &str = "allowed-origin-response-body";
+    pub const ORIGIN_DENIED_BODY: &str = "denied-origin-response-body";
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn docker(args: &[&str]) -> Output {
+        Command::new("docker")
+            .args(args)
+            .output()
+            .expect("docker CLI invocation should spawn")
+    }
+
+    /// Best-effort teardown of every resource this module creates; safe to
+    /// call before setup (idempotent against a leftover run) and is always
+    /// called at the end via `TopologyGuard`'s `Drop`, so a panicking
+    /// assertion still cleans up.
+    pub fn cleanup() {
+        for name in [
+            WORKER_NAME,
+            PROXY_NAME,
+            ORIGIN_ALLOWED_NAME,
+            ORIGIN_DENIED_NAME,
+        ] {
+            let _ = docker(&["rm", "-f", name]);
+        }
+        for net in [NET_INTERNAL, NET_EGRESS] {
+            let _ = docker(&["network", "rm", net]);
+        }
+    }
+
+    pub struct TopologyGuard;
+
+    impl Drop for TopologyGuard {
+        fn drop(&mut self) {
+            cleanup();
+        }
+    }
+
+    /// Builds the proxy image (from the REAL `EgressAllowlistProxy`, see
+    /// `crates/ironclaw_host_runtime/examples/egress_proxy_standalone.rs`)
+    /// if it isn't already present locally, so repeat local runs don't pay
+    /// the full workspace compile every time.
+    pub fn ensure_proxy_image_built() {
+        let inspect = docker(&["image", "inspect", PROXY_IMAGE]);
+        if inspect.status.success() {
+            return;
+        }
+        let dockerfile = repo_root().join("docker/sandbox-egress-proxy.Dockerfile");
+        let output = Command::new("docker")
+            .args([
+                "build",
+                "-f",
+                dockerfile.to_str().expect("valid utf8 path"),
+                "-t",
+                PROXY_IMAGE,
+                ".",
+            ])
+            .current_dir(repo_root())
+            .output()
+            .expect("docker build should spawn");
+        assert!(
+            output.status.success(),
+            "building the egress proxy standalone image failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    pub fn setup(worker_image: &str) -> TopologyGuard {
+        cleanup();
+        let guard = TopologyGuard;
+
+        assert!(
+            docker(&["network", "create", "--internal", NET_INTERNAL])
+                .status
+                .success(),
+            "creating the internal (no-route-off-host) network should succeed"
+        );
+        // `EgressAllowlistProxy::new` (the only public constructor) always
+        // sets `deny_private_ips: true` with no builder to override it — by
+        // design, the proxy refuses to dial ANY resolved RFC1918/loopback/
+        // link-local/CGNAT/documentation address regardless of hostname
+        // allowlisting (`ironclaw_network::network_denies_resolved_ip`).
+        // Docker's normal auto-assigned bridge subnets (172.17-31.0.0/16,
+        // 192.168.x) all fall inside that deny set, so an origin container
+        // on a default-subnet bridge network would be denied even though
+        // its hostname is allowlisted. Pin this network's subnet to
+        // 198.18.0.0/15 (IANA's benchmarking-methodology range, RFC 2544) —
+        // not private/loopback/link-local/CGNAT/documentation/multicast, so
+        // it passes the SSRF guard — while still being a purely local Docker
+        // bridge with no real route to the internet.
+        assert!(
+            docker(&["network", "create", "--subnet=198.18.0.0/24", NET_EGRESS,])
+                .status
+                .success(),
+            "creating the normal-bridge egress network should succeed"
+        );
+
+        let origin_script = repo_root()
+            .join("tests/integration/support/sandbox_egress_topology/recording_origin.py");
+        let origin_script = origin_script.to_str().expect("valid utf8 path");
+
+        for (name, body) in [
+            (ORIGIN_ALLOWED_NAME, ORIGIN_ALLOWED_BODY),
+            (ORIGIN_DENIED_NAME, ORIGIN_DENIED_BODY),
+        ] {
+            let run = docker(&[
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                name,
+                "--network",
+                NET_EGRESS,
+                "-v",
+                &format!("{origin_script}:/recording_origin.py:ro"),
+                "-e",
+                &format!("ORIGIN_RESPONSE_BODY={body}"),
+                "python:3.11-alpine",
+                "python3",
+                "/recording_origin.py",
+                "80",
+            ]);
+            assert!(
+                run.status.success(),
+                "starting origin container {name} should succeed: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+        }
+
+        // Dual-homed proxy: created on net-internal (so it's reachable from
+        // the internal-only worker), then additionally connected to
+        // net-egress (so it can reach the origins) — mirrors production's
+        // "worker has no direct route out; the proxy is its only path"
+        // semantics.
+        let run_proxy = docker(&[
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            PROXY_NAME,
+            "--network",
+            NET_INTERNAL,
+            "-e",
+            "EGRESS_PROXY_BIND_ADDR=0.0.0.0:8080",
+            "-e",
+            &format!("EGRESS_PROXY_ALLOWED_HOSTS={ORIGIN_ALLOWED_NAME}"),
+            PROXY_IMAGE,
+        ]);
+        assert!(
+            run_proxy.status.success(),
+            "starting the proxy container should succeed: {}",
+            String::from_utf8_lossy(&run_proxy.stderr)
+        );
+        let connect_proxy_to_egress = docker(&["network", "connect", NET_EGRESS, PROXY_NAME]);
+        assert!(
+            connect_proxy_to_egress.status.success(),
+            "dual-homing the proxy onto the egress network should succeed: {}",
+            String::from_utf8_lossy(&connect_proxy_to_egress.stderr)
+        );
+
+        // Worker: internal network ONLY — no route to net-egress at all.
+        let run_worker = docker(&[
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            WORKER_NAME,
+            "--network",
+            NET_INTERNAL,
+            "--entrypoint",
+            "sh",
+            worker_image,
+            "-c",
+            "sleep 600",
+        ]);
+        assert!(
+            run_worker.status.success(),
+            "starting the worker container should succeed: {}",
+            String::from_utf8_lossy(&run_worker.stderr)
+        );
+
+        guard
+    }
+
+    /// Runs `command` inside the worker container via `docker exec`.
+    pub fn exec_worker(command: &str) -> Output {
+        docker(&["exec", WORKER_NAME, "sh", "-c", command])
+    }
+
+    /// Reads the recording origin's structured request log back out of its
+    /// container (proves the origin observed real bytes, not asserted
+    /// state).
+    pub fn read_origin_log(container_name: &str) -> String {
+        let output = docker(&[
+            "exec",
+            container_name,
+            "cat",
+            "/var/log/origin_requests.log",
+        ]);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The container's IPv4 address on `NET_EGRESS`, for the raw-IP bypass
+    /// assertion (rules out a DNS-only enforcement gap: even with no
+    /// hostname to resolve, the internal network still must not route to
+    /// this address).
+    pub fn ip_on_egress_network(container_name: &str) -> String {
+        // `NET_EGRESS` contains hyphens, which the Go template parser cannot
+        // traverse via plain dot-field access (`.Networks.foo-bar` fails to
+        // parse) — `index` looks the key up as a map access instead.
+        let output = docker(&[
+            "inspect",
+            "-f",
+            &format!("{{{{index .NetworkSettings.Networks \"{NET_EGRESS}\" \"IPAddress\"}}}}"),
+            container_name,
+        ]);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+}
+
+#[tokio::test]
+async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
+    use dual_homed_topology as topo;
+
+    if !docker_gate::docker_available() {
+        eprintln!(
+            "SKIP: no docker daemon reachable — sandbox_egress_proxy_dual_homed_isolation_topology requires a real Docker daemon (CI/hosted Docker lane only)"
+        );
+        return;
+    }
+    let worker_image = docker_gate::configured_sandbox_image();
+    if !docker_gate::docker_image_available(&worker_image) {
+        eprintln!(
+            "SKIP: sandbox worker image {worker_image:?} is not built locally — sandbox_egress_proxy_dual_homed_isolation_topology requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+        );
+        return;
+    }
+
+    topo::ensure_proxy_image_built();
+    let _guard = topo::setup(&worker_image);
+
+    // Assertion 1: allowed host succeeds THROUGH the proxy, and the exact
+    // response body the origin sent comes back byte-for-byte.
+    let allowed = topo::exec_worker(&format!(
+        "curl -sS -x http://{}:8080 http://{}/hello",
+        topo::PROXY_NAME,
+        topo::ORIGIN_ALLOWED_NAME
+    ));
+    let allowed_body = String::from_utf8_lossy(&allowed.stdout);
+    assert!(
+        allowed.status.success() && allowed_body.contains(topo::ORIGIN_ALLOWED_BODY),
+        "curl through the proxy to the allowed origin should return its exact response body; \
+         status={:?} stdout={allowed_body} stderr={}",
+        allowed.status,
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+
+    // Assertion 2: denied host is refused BY THE PROXY — assert on the
+    // proxy's own 403 response shape (`write_denied_response`'s exact body
+    // format), not merely a failed connection, so this could only have come
+    // from the proxy's allowlist check, never a network hiccup or the
+    // (never-dialed) origin.
+    let denied = topo::exec_worker(&format!(
+        "curl -sS -o /dev/null -w '%{{http_code}}' -x http://{}:8080 http://{}/",
+        topo::PROXY_NAME,
+        topo::ORIGIN_DENIED_NAME
+    ));
+    let denied_status_code = String::from_utf8_lossy(&denied.stdout).into_owned();
+    assert_eq!(
+        denied_status_code,
+        "403",
+        "the proxy should reply 403 for a non-allowlisted host: stderr={}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    let denied_body = topo::exec_worker(&format!(
+        "curl -sS -x http://{}:8080 http://{}/",
+        topo::PROXY_NAME,
+        topo::ORIGIN_DENIED_NAME
+    ));
+    let denied_body_text = String::from_utf8_lossy(&denied_body.stdout);
+    assert!(
+        denied_body_text.contains("egress denied: host not in allowlist"),
+        "the denial body must be the proxy's own denial text (proves the 403 came from the \
+         proxy's allowlist check, not the origin or a transport error): {denied_body_text}"
+    );
+
+    // Assertion 3 (THE ISOLATION PROOF): the worker, on the internal-only
+    // network, attempts to reach the allowed origin DIRECTLY, bypassing the
+    // proxy entirely (no `-x`). No DNS entry for the origin's name exists on
+    // the worker's network, and the internal network has no route off its
+    // own bridge — this must fail, or the sandbox's whole isolation claim is
+    // false.
+    let bypass_by_name = topo::exec_worker(&format!(
+        "curl -sf --max-time 5 http://{}/hello",
+        topo::ORIGIN_ALLOWED_NAME
+    ));
+    assert!(
+        !bypass_by_name.status.success(),
+        "a direct (non-proxied) curl from the internal-only worker to the allowed origin's \
+         NAME must fail — success here means the isolation claim is false: stdout={} stderr={}",
+        String::from_utf8_lossy(&bypass_by_name.stdout),
+        String::from_utf8_lossy(&bypass_by_name.stderr)
+    );
+
+    // Same bypass attempt against the origin's raw IP literal on
+    // `NET_EGRESS`, ruling out a DNS-only enforcement mechanism (worker has
+    // no name to resolve here at all, only a route to prove or disprove).
+    let allowed_origin_ip = topo::ip_on_egress_network(topo::ORIGIN_ALLOWED_NAME);
+    assert!(
+        !allowed_origin_ip.is_empty(),
+        "should be able to read the allowed origin's IP on the egress network"
+    );
+    let bypass_by_ip = topo::exec_worker(&format!(
+        "curl -sf --max-time 5 http://{allowed_origin_ip}/hello"
+    ));
+    assert!(
+        !bypass_by_ip.status.success(),
+        "a direct (non-proxied) curl from the internal-only worker to the allowed origin's RAW \
+         IP must also fail — success here would mean enforcement is DNS-only and a route-level \
+         bypass is open for anything not resolved by name: stdout={} stderr={}",
+        String::from_utf8_lossy(&bypass_by_ip.stdout),
+        String::from_utf8_lossy(&bypass_by_ip.stderr)
+    );
+
+    // Assertion 4: the origin observed the request — read back its
+    // structured request log (real bytes it received, not asserted state)
+    // and confirm the allowed-origin request that assertion 1 sent actually
+    // arrived, addressed to the expected host.
+    let allowed_origin_log = topo::read_origin_log(topo::ORIGIN_ALLOWED_NAME);
+    assert!(
+        allowed_origin_log.contains("\"method\": \"GET\"")
+            && allowed_origin_log.contains("/hello")
+            && allowed_origin_log.contains(topo::ORIGIN_ALLOWED_NAME),
+        "the allowed origin's own request log should show the GET /hello request the proxy \
+         forwarded, addressed to its own host — proving the request reached the origin for \
+         real: {allowed_origin_log}"
+    );
+
+    // The denied origin must NEVER have been dialed — its log must stay
+    // empty, proving the proxy's allowlist check ran strictly before any
+    // connection attempt (mirrors the composition-path test's
+    // `origin_saw_a_connection` proof, read back through the real log
+    // instead of a probe future).
+    let denied_origin_log = topo::read_origin_log(topo::ORIGIN_DENIED_NAME);
+    assert!(
+        denied_origin_log.trim().is_empty(),
+        "the denied origin must never have been dialed by the proxy; found log entries: \
+         {denied_origin_log}"
+    );
+}
