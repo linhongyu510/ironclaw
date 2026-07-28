@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webui-v2-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd crates/ironclaw_webui/frontend && exec npm run dev"
+      ],
+      "port": 5173,
+      "url": "http://127.0.0.1:5173"
+    }
+  ]
+}
