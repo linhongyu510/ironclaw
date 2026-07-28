@@ -248,33 +248,87 @@ fn sandbox_process_never_hand_rolls_a_permissive_origin_connector() {
     );
 }
 
-/// Proves the test-code exclusion is real, not just claimed: `tls_intercept`'s
-/// own `connector_trusting_nothing` test helper — pure test code, unique to
-/// `mod tests` — must disappear once the scan truncates at the inline test
-/// module marker. (`RootCertStore::empty()` itself is *not* a safe marker
-/// for this any more: `VerifiedOriginConnector::from_system_roots`, real
-/// production code, legitimately calls it too — see the module doc's "one
-/// sanctioned call site" — so this test pins truncation against a marker
-/// that only ever appears in test code.) If this assertion ever fails, the
-/// gate above is either scanning test code (false positives waiting to
-/// force someone to weaken it) or not truncating correctly.
+/// Proves the test-code exclusion is real, not just claimed, for the
+/// `truncate_at_inline_test_module` path — the mechanism this test pins is
+/// still exercised by other `sandbox_process/` files that keep their tests
+/// inline (`scope_key.rs`, `container_identity.rs`, `mounts.rs`); this test
+/// uses `scope_key.rs`'s `mod tests`-only `fn scope(` fixture, pure test
+/// code unique to its `mod tests` block, which must disappear once the scan
+/// truncates at the inline test module marker.
+///
+/// `tls_intercept.rs` itself no longer has an inline test module — its
+/// tests were extracted to the standalone `tls_intercept/tests.rs`, matching
+/// `ca.rs`/`credential_firewall.rs`'s convention, and `is_standalone_test_file`
+/// excludes `/tests.rs` files wholesale rather than by truncation (see
+/// `the_scan_still_exempts_tls_intercepts_extracted_test_file` below) — so
+/// this test no longer targets `tls_intercept.rs`.
+///
+/// (`RootCertStore::empty()` itself is *not* a safe marker for this: real
+/// production code — `VerifiedOriginConnector::from_system_roots` —
+/// legitimately calls it too, see the module doc's "one sanctioned call
+/// site" — so this test pins truncation against a marker that only ever
+/// appears in test code.) If this assertion ever fails, the gate above is
+/// either scanning test code (false positives waiting to force someone to
+/// weaken it) or not truncating correctly.
 #[test]
-fn the_scan_exempts_tls_intercepts_own_test_module() {
+fn the_scan_exempts_an_inline_test_module() {
     let root = workspace_root();
-    let path = sandbox_process_dir(&root).join("tls_intercept.rs");
+    let path = sandbox_process_dir(&root).join("scope_key.rs");
     let contents = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     assert!(
-        contents.contains("fn connector_trusting_nothing"),
-        "expected tls_intercept.rs's own tests to still define \
-         `connector_trusting_nothing` — if this changed, this test needs a \
-         different test-only fixture, not deletion"
+        contents.contains("fn scope("),
+        "expected scope_key.rs's own tests to still define the `fn scope(` \
+         test fixture — if this changed, this test needs a different \
+         test-only fixture, not deletion"
     );
     let production_only = truncate_at_inline_test_module(&contents);
     assert!(
-        !production_only.contains("connector_trusting_nothing"),
+        !production_only.contains("fn scope("),
         "truncate_at_inline_test_module let test-only content leak into the \
          scanned production prefix"
+    );
+}
+
+/// Proves `tls_intercept.rs`'s own extracted test file
+/// (`tls_intercept/tests.rs`) is excluded from the scan via
+/// `is_standalone_test_file`, not via truncation — `tls_intercept.rs`
+/// itself has no inline `mod tests` left to truncate at, so if this
+/// exclusion regressed, the scan would either miss the file's test-only
+/// `connector_trusting_nothing` fixture (a false negative for the gate,
+/// meaning it isn't actually looking) or, worse, wrongly flag test-only
+/// fixtures like `connector_trusting_nothing` as production code.
+#[test]
+fn the_scan_still_exempts_tls_intercepts_extracted_test_file() {
+    let root = workspace_root();
+    let tests_path = sandbox_process_dir(&root).join("tls_intercept/tests.rs");
+    let contents = std::fs::read_to_string(&tests_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", tests_path.display()));
+    assert!(
+        contents.contains("fn connector_trusting_nothing"),
+        "expected tls_intercept/tests.rs to still define \
+         `connector_trusting_nothing` — if this changed, this test needs a \
+         different test-only fixture, not deletion"
+    );
+    let relative = tests_path
+        .strip_prefix(&root)
+        .unwrap_or(&tests_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    assert!(
+        is_standalone_test_file(&relative),
+        "tls_intercept/tests.rs must be recognized as a standalone test file \
+         so the scan excludes it wholesale, not by truncation"
+    );
+
+    let main_path = sandbox_process_dir(&root).join("tls_intercept.rs");
+    let main_contents = std::fs::read_to_string(&main_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", main_path.display()));
+    assert!(
+        !main_contents.contains("mod tests {"),
+        "tls_intercept.rs should declare its extracted tests via `mod tests;`, \
+         not keep an inline `mod tests {{ ... }}` block alongside the \
+         extracted file"
     );
 }
 
