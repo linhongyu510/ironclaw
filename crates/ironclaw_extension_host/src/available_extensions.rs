@@ -1024,19 +1024,23 @@ where
         if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
             continue;
         }
-        let stamp = match manifest_sources.get(extension_id.as_str()) {
+        let package = match manifest_sources.get(extension_id.as_str()) {
             Some(ManifestSource::HostBundled) => {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                Err(ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!(
                         "persisted manifest source for materialized extension '{}' cannot be host-bundled",
                         extension_id.as_str()
                     ),
-                });
+                })
             }
-            Some(source) => *source,
-            None => default_stamp,
+            Some(source) => {
+                load_filesystem_package(fs, entry, &host_ports, &contracts, *source).await
+            }
+            None => {
+                load_filesystem_package(fs, entry, &host_ports, &contracts, default_stamp).await
+            }
         };
-        match load_filesystem_package(fs, entry, &host_ports, &contracts, stamp).await {
+        match package {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
             // Per-entry validation failure is fail-open: a stale materialized
@@ -2413,32 +2417,32 @@ handle = "web_token"
     }
 
     #[tokio::test]
-    async fn filesystem_catalog_rejects_persisted_host_bundled_source_before_parsing() {
+    async fn filesystem_catalog_skips_persisted_host_bundled_source_per_entry() {
         let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/fixture/manifest.toml").unwrap(),
-            b"this is deliberately not a manifest",
-        )
-        .await
-        .unwrap();
+        write_valid_filesystem_extension(&fs, "forged-bundled").await;
+        write_valid_filesystem_extension(&fs, "valid-installed").await;
         let manifest_sources =
-            BTreeMap::from([("fixture".to_string(), ManifestSource::HostBundled)]);
+            BTreeMap::from([("forged-bundled".to_string(), ManifestSource::HostBundled)]);
 
-        let error = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+        let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
             &[],
             &manifest_sources,
         )
         .await
-        .expect_err("persisted host-bundled provenance must fail closed");
+        .expect("one rejected entry must not abort the catalog");
 
-        assert!(matches!(
-            error,
-            ProductSurfaceFailure::InvalidBindingRequest { reason }
-                if reason.contains("persisted manifest source")
-                    && reason.contains("cannot be host-bundled")
-        ));
+        assert_eq!(
+            catalog.search("forged-bundled").count(),
+            0,
+            "persisted host-bundled provenance must remain fail-closed"
+        );
+        assert_eq!(
+            catalog.search("valid-installed").count(),
+            1,
+            "unrelated valid extensions must remain available"
+        );
     }
 
     #[tokio::test]

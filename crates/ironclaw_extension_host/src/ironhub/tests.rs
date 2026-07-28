@@ -372,11 +372,12 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
     let skill_bytes =
         b"---\nname: artifact-skill\ndescription: Artifact checks\n---\n# Skill\n".to_vec();
 
-    let size_manifest_url = "https://hub.ironclaw.com/tests/artifacts/size-manifest.json";
-    let size_skill_url = "https://hub.ironclaw.com/tests/artifacts/size-SKILL.md";
+    let size_skill_name = "ironhub-lock-eviction-size-artifact-skill";
+    let size_manifest_url = "https://hub.ironclaw.com/tests/lock-eviction-size/size-manifest.json";
+    let size_skill_url = "https://hub.ironclaw.com/tests/lock-eviction-size/size-SKILL.md";
     let size_manifest = signed_manifest(
         skill_manifest_json(
-            "artifact-skill",
+            size_skill_name,
             "2026-01-05T00:00:00Z",
             "0.1.0",
             size_skill_url,
@@ -396,7 +397,7 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         size_manifest_url,
     )
     .execute(install_named_command(
-        "artifact-skill",
+        size_skill_name,
         IronHubEntryKind::Skill,
         false,
     ))
@@ -407,13 +408,16 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         IronHubCommandError::Install { reason } if reason.contains("size mismatch")
     ));
     assert!(!test_manifest_fetch_lock_exists(size_manifest_url));
-    assert!(!test_install_lock_exists("skill:artifact-skill"));
+    assert!(!test_install_lock_exists(
+        "skill:ironhub-lock-eviction-size-artifact-skill"
+    ));
 
-    let sha_manifest_url = "https://hub.ironclaw.com/tests/artifacts/sha-manifest.json";
-    let sha_skill_url = "https://hub.ironclaw.com/tests/artifacts/sha-SKILL.md";
+    let sha_skill_name = "ironhub-lock-eviction-sha-artifact-skill";
+    let sha_manifest_url = "https://hub.ironclaw.com/tests/lock-eviction-sha/sha-manifest.json";
+    let sha_skill_url = "https://hub.ironclaw.com/tests/lock-eviction-sha/sha-SKILL.md";
     let sha_manifest = signed_manifest(
         skill_manifest_json(
-            "artifact-skill",
+            sha_skill_name,
             "2026-01-06T00:00:00Z",
             "0.1.0",
             sha_skill_url,
@@ -433,7 +437,7 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         sha_manifest_url,
     )
     .execute(install_named_command(
-        "artifact-skill",
+        sha_skill_name,
         IronHubEntryKind::Skill,
         false,
     ))
@@ -444,7 +448,9 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         IronHubCommandError::Install { reason } if reason.contains("checksum mismatch")
     ));
     assert!(!test_manifest_fetch_lock_exists(sha_manifest_url));
-    assert!(!test_install_lock_exists("skill:artifact-skill"));
+    assert!(!test_install_lock_exists(
+        "skill:ironhub-lock-eviction-sha-artifact-skill"
+    ));
 }
 
 #[tokio::test]
@@ -516,16 +522,16 @@ async fn fail_forced_tool_replacement(
     let old_capabilities_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/old-capabilities.json");
     let old_manifest = signed_manifest(
-        tool_manifest_json(
-            "2026-01-03T00:00:00Z",
-            "0.1.0",
-            &old_tool_url,
-            tool_bytes.len(),
-            &sha256_hex(&tool_bytes),
-            &old_capabilities_url,
-            capabilities_bytes.len(),
-            &sha256_hex(&capabilities_bytes),
-        ),
+        tool_manifest_json(ToolManifestFixture {
+            generated_at: "2026-01-03T00:00:00Z",
+            version: "0.1.0",
+            tool_url: &old_tool_url,
+            tool_size: tool_bytes.len(),
+            tool_sha: &sha256_hex(&tool_bytes),
+            capabilities_url: &old_capabilities_url,
+            capabilities_size: capabilities_bytes.len(),
+            capabilities_sha: &sha256_hex(&capabilities_bytes),
+        }),
         &test_signing_key(),
     );
     configured_service(
@@ -569,16 +575,16 @@ async fn fail_forced_tool_replacement(
     let new_capabilities_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/new-capabilities.json");
     let new_manifest = signed_manifest(
-        tool_manifest_json(
-            "2026-01-04T00:00:00Z",
-            "0.2.0",
-            &new_tool_url,
-            tool_bytes.len(),
-            &sha256_hex(&tool_bytes),
-            &new_capabilities_url,
-            capabilities_bytes.len(),
-            &sha256_hex(&capabilities_bytes),
-        ),
+        tool_manifest_json(ToolManifestFixture {
+            generated_at: "2026-01-04T00:00:00Z",
+            version: "0.2.0",
+            tool_url: &new_tool_url,
+            tool_size: tool_bytes.len(),
+            tool_sha: &sha256_hex(&tool_bytes),
+            capabilities_url: &new_capabilities_url,
+            capabilities_size: capabilities_bytes.len(),
+            capabilities_sha: &sha256_hex(&capabilities_bytes),
+        }),
         &test_signing_key(),
     );
     let error = configured_service(
@@ -724,17 +730,28 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
     .to_string()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tool_manifest_json(
-    generated_at: &str,
-    version: &str,
-    tool_url: &str,
+struct ToolManifestFixture<'a> {
+    generated_at: &'a str,
+    version: &'a str,
+    tool_url: &'a str,
     tool_size: usize,
-    tool_sha: &str,
-    capabilities_url: &str,
+    tool_sha: &'a str,
+    capabilities_url: &'a str,
     capabilities_size: usize,
-    capabilities_sha: &str,
-) -> String {
+    capabilities_sha: &'a str,
+}
+
+fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
+    let ToolManifestFixture {
+        generated_at,
+        version,
+        tool_url,
+        tool_size,
+        tool_sha,
+        capabilities_url,
+        capabilities_size,
+        capabilities_sha,
+    } = fixture;
     serde_json::json!({
         "version": "1",
         "generated_at": generated_at,
