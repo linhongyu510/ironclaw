@@ -790,18 +790,48 @@ fn descend_creating(
     Ok(cur)
 }
 
+/// Maximum nesting depth [`remove_dir_all_fd`] will descend into before
+/// failing closed, rather than recursing without limit.
+///
+/// This is genuinely recursive Rust code running on a tokio blocking-pool
+/// thread — not a regression (`std::fs::remove_dir_all` is also recursive
+/// and has no cap of its own), but a deep tree can now be created entirely
+/// inside a sandboxed shell's own writable mount, i.e. by someone who will
+/// deliberately try to break it. 512 levels comfortably survives on a
+/// default thread stack (each frame here is a handful of small locals, no
+/// large stack arrays) while still failing far short of any real stack
+/// limit if a caller does manage to create a tree this deep. `remove_dir_contents`
+/// only `unlinkat`s a symlink entry directly (`AtFlags::empty()`, never
+/// following it) and never recurses through one, so cycles via symlinks are
+/// not a concern here — depth is bounded purely by real, non-symlink
+/// directory nesting.
+const MAX_REMOVE_DIR_DEPTH: usize = 512;
+
 /// Recursively removes `name` (found directly under `parent`) and everything
 /// beneath it, never following a symlink into whatever it points at — a
 /// symlinked child is unlinked as itself, exactly like `std::fs::remove_dir_all`,
 /// never traversed into.
 fn remove_dir_all_fd(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), std::io::Error> {
+    remove_dir_all_fd_bounded(parent, name, 0)
+}
+
+fn remove_dir_all_fd_bounded(
+    parent: BorrowedFd<'_>,
+    name: &OsStr,
+    depth: usize,
+) -> Result<(), std::io::Error> {
+    if depth >= MAX_REMOVE_DIR_DEPTH {
+        return Err(std::io::Error::other(format!(
+            "directory tree exceeds maximum removal depth of {MAX_REMOVE_DIR_DEPTH} levels; refusing to delete"
+        )));
+    }
     let dir_fd =
         open_one(parent, name, OFlags::DIRECTORY, Mode::empty()).map_err(resolve_error_to_io)?;
-    remove_dir_contents(dir_fd.as_fd())?;
+    remove_dir_contents(dir_fd.as_fd(), depth + 1)?;
     rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)
 }
 
-fn remove_dir_contents(dir: BorrowedFd<'_>) -> Result<(), std::io::Error> {
+fn remove_dir_contents(dir: BorrowedFd<'_>, depth: usize) -> Result<(), std::io::Error> {
     let mut entries = Vec::new();
     {
         let listing = rustix::fs::Dir::read_from(dir)?;
@@ -820,7 +850,7 @@ fn remove_dir_contents(dir: BorrowedFd<'_>) -> Result<(), std::io::Error> {
     }
     for (name, is_dir) in entries {
         if is_dir {
-            remove_dir_all_fd(dir, &name)?;
+            remove_dir_all_fd_bounded(dir, &name, depth)?;
         } else {
             rustix::fs::unlinkat(dir, &name, AtFlags::empty())?;
         }

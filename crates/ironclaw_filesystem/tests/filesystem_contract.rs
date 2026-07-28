@@ -766,6 +766,84 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     assert!(!outside.path().join("new.txt").exists());
 }
 
+/// Builds a virtual path with `depth` synthetic single-directory-name
+/// segments under `/projects/project1`. Deliberately built and walked
+/// through the fd-rooted `DiskFilesystem` API end to end (`create_dir_all`,
+/// then `write_file`) rather than via a single joined `std::fs` host path:
+/// a several-thousand-character joined path string would hit the *host
+/// OS's* `PATH_MAX` on a single syscall (unrelated to anything under test
+/// here), whereas the fd-rooted resolver never constructs a joined path at
+/// all — it walks one component per `openat` call — so it has no such
+/// limit and is exactly the code path these tests exist to exercise.
+fn deep_virtual_path(depth: usize, leaf: &str) -> VirtualPath {
+    let mut raw = String::from("/projects/project1");
+    for level in 0..depth {
+        raw.push_str(&format!("/d{level}"));
+    }
+    raw.push('/');
+    raw.push_str(leaf);
+    VirtualPath::new(raw).unwrap()
+}
+
+fn deep_virtual_dir(depth: usize) -> VirtualPath {
+    let mut raw = String::from("/projects/project1");
+    for level in 0..depth {
+        raw.push_str(&format!("/d{level}"));
+    }
+    VirtualPath::new(raw).unwrap()
+}
+
+/// `remove_dir_all_fd` is genuinely recursive Rust code on the blocking
+/// pool; a tree deep enough would stack-overflow a naive implementation.
+/// This pins two things at once: a tree comfortably within the depth cap
+/// (`local.rs::MAX_REMOVE_DIR_DEPTH`, currently 512) still deletes
+/// successfully end to end, and a tree that exceeds the cap fails cleanly
+/// — a `Backend` error, not a crash — rather than being silently truncated
+/// or panicking the blocking-pool thread.
+#[tokio::test]
+async fn local_backend_delete_of_deep_but_in_bounds_tree_succeeds() {
+    let storage = tempdir().unwrap();
+    let root = local_root_with_projects_mount(storage.path());
+
+    // Comfortably within MAX_REMOVE_DIR_DEPTH (512).
+    let deep_dir = deep_virtual_dir(300);
+    let leaf = deep_virtual_path(300, "leaf.txt");
+    root.create_dir_all(&deep_dir).await.unwrap();
+    root.write_file(&leaf, b"deep file").await.unwrap();
+
+    root.delete(&VirtualPath::new("/projects/project1").unwrap())
+        .await
+        .unwrap();
+
+    let err = root
+        .stat(&VirtualPath::new("/projects/project1").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn local_backend_delete_of_tree_exceeding_max_depth_fails_cleanly() {
+    let storage = tempdir().unwrap();
+    let root = local_root_with_projects_mount(storage.path());
+
+    // One level deeper than MAX_REMOVE_DIR_DEPTH (512): the deletion walk
+    // must refuse to descend that far rather than overflowing the
+    // blocking-pool thread's stack.
+    let deep_dir = deep_virtual_dir(600);
+    root.create_dir_all(&deep_dir).await.unwrap();
+
+    let err = root
+        .delete(&VirtualPath::new("/projects/project1").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::Backend { .. }),
+        "expected a clean Backend error for a too-deep tree, got: {err:?}"
+    );
+}
+
 fn local_root_with_projects_mount(path: &std::path::Path) -> DiskFilesystem {
     let mut root = DiskFilesystem::new();
     root.mount_local(
