@@ -766,6 +766,122 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     assert!(!outside.path().join("new.txt").exists());
 }
 
+/// Every existing symlink-at-write-target test plants an *escaping*
+/// symlink (pointing outside the mount) and asserts `SymlinkEscape`. This
+/// pins the distinct, narrower case: a symlink that is fully *in-bounds* —
+/// its target lives inside the same mount, reachable on its own — planted
+/// at a write target. `atomic_write_file`'s pre-install probe
+/// (`local.rs:877-892`) rejects a pre-existing symlink at the leaf
+/// regardless of where it points, because silently clobbering *any*
+/// existing symlink entry is a real content-loss surprise for whatever
+/// legitimately created it — this crate's contract is "reject a
+/// pre-existing symlink at a write target", not "clobber it if it happens
+/// to be safe". Without this test, a future change that narrowed the probe
+/// to only reject *escaping* symlinks (a plausible-looking "fix" for an
+/// in-bounds false positive) would land with zero coverage catching it.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_denies_write_through_benign_in_bounds_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/real.txt"), b"original").unwrap();
+    // In-bounds: points at another file inside the very same mount, not
+    // outside it.
+    symlink(
+        storage.path().join("project1/real.txt"),
+        storage.path().join("project1/alias.txt"),
+    )
+    .unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    let err = scoped
+        .write_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/alias.txt").unwrap(),
+            b"changed",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::SymlinkEscape { .. }),
+        "a benign, fully in-bounds symlink at a write target must still be \
+         rejected, not just an escaping one: got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read(storage.path().join("project1/real.txt")).unwrap(),
+        b"original",
+        "the symlink's real target must be untouched — the write must never \
+         have followed through"
+    );
+}
+
+/// Deleting the bare root of an *ordinary* mount (no leaf segment, no
+/// sub-path) must fail closed rather than silently deleting the mount's
+/// entire on-disk tree. `DiskFilesystem::delete` (`local.rs:474-485`) has no
+/// fd-relative parent for the mount root itself by design — `resolve_walk`
+/// only ever hands back `parent: None` for an empty component list — so this
+/// pins that the bare-root case is rejected with `PathOutsideMount`, not
+/// merely "would panic on the `None` parent" or (worse) silently succeed via
+/// some other code path.
+#[tokio::test]
+async fn local_backend_delete_of_bare_ordinary_mount_root_fails_closed() {
+    let storage = tempdir().unwrap();
+    std::fs::write(storage.path().join("keep-me.txt"), b"still here").unwrap();
+
+    let root = local_root_with_projects_mount(storage.path());
+
+    let err = root
+        .delete(&VirtualPath::new("/projects").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::PathOutsideMount { .. }),
+        "expected PathOutsideMount, got: {err:?}"
+    );
+    assert!(
+        storage.path().join("keep-me.txt").exists(),
+        "the mount root's contents must survive a rejected bare-root delete"
+    );
+}
+
+/// Same fail-closed contract for a `mount_local_per_leaf` mount: deleting
+/// the bare mount path (no leaf segment at all) is not just "unsafe for this
+/// caller's leaf" but has no well-defined target — it would mean "every
+/// caller's leaf" — so it must be rejected exactly like the bare-root
+/// `read_file` case `leaf_scoped_mount_rejects_bare_mount_root_request`
+/// already pins in `local.rs`, but for `delete`.
+#[tokio::test]
+async fn local_backend_delete_of_bare_leaf_scoped_mount_root_fails_closed() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("leaf-a")).unwrap();
+    std::fs::write(storage.path().join("leaf-a/file.txt"), b"leaf-a data").unwrap();
+
+    let mut root = DiskFilesystem::new();
+    root.mount_local_per_leaf(
+        VirtualPath::new("/tmp").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let err = root
+        .delete(&VirtualPath::new("/tmp").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::PathOutsideMount { .. }),
+        "expected PathOutsideMount, got: {err:?}"
+    );
+    assert!(
+        storage.path().join("leaf-a/file.txt").exists(),
+        "no caller's leaf may be wiped by a rejected bare-root delete"
+    );
+}
+
 /// Builds a virtual path with `depth` synthetic single-directory-name
 /// segments under `/projects/project1`. Deliberately built and walked
 /// through the fd-rooted `DiskFilesystem` API end to end (`create_dir_all`,
