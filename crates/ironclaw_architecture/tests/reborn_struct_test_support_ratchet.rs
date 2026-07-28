@@ -92,12 +92,15 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     // not yet landed) is the only production caller. Same retirement
     // trigger as the `ca.rs`/`credential_firewall.rs` entries above. Bumped
     // 4 -> 5 for `VerifiedOriginConnector::from_system_roots`, the type's
-    // only production constructor — unwired for the same reason.
+    // only production constructor, then 5 -> 6 for `from_root_store`, the
+    // fail-closed empty-store core it delegates to (split out so that
+    // branch is unit-testable without faking the OS trust store) —
+    // unwired for the same reason.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 5,
+        count: 6,
     },
     FrozenPathCount {
         category: "dead-code",

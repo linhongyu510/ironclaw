@@ -149,6 +149,17 @@ impl VerifiedOriginConnector {
                 tracing::warn!("sandbox tls intercept: skipping invalid system root cert: {error}");
             }
         }
+        Self::from_root_store(root_store)
+    }
+
+    /// The fail-closed core `from_system_roots` delegates to: an empty root
+    /// store — whether a genuinely bare system trust store or, in tests, a
+    /// synthetic one — must never produce a connector that verifies against
+    /// nothing. Split out so this branch is deterministically unit-testable
+    /// without needing to fake `rustls_native_certs::load_native_certs`'s
+    /// OS-level behavior.
+    #[allow(dead_code)] // consumed by W6; not wired to a production caller yet
+    fn from_root_store(root_store: rustls::RootCertStore) -> Result<Self, TlsInterceptError> {
         if root_store.is_empty() {
             return Err(TlsInterceptError::TrustRootsUnavailable(
                 "system trust store yielded zero usable root certificates".to_string(),
@@ -169,6 +180,14 @@ impl VerifiedOriginConnector {
     #[cfg(test)]
     pub(crate) fn for_test(connector: TlsConnector) -> Self {
         Self(connector)
+    }
+
+    /// Named accessor for the wrapped connector, matching the crate's other
+    /// newtypes (e.g. `IdempotencyKey::as_str`) instead of letting callers
+    /// reach past the type via `.0` — the one call site
+    /// ([`terminate_and_forward`]) goes through this, not the tuple field.
+    fn connector(&self) -> &TlsConnector {
+        &self.0
     }
 }
 
@@ -307,7 +326,7 @@ pub(crate) async fn terminate_and_forward(
     })?;
     let mut origin_tls = config
         .origin_connector
-        .0
+        .connector()
         .connect(server_name, origin_stream)
         .await
         .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
@@ -698,7 +717,7 @@ mod tests {
         let server_name = ServerName::try_from(host.to_string()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            connector.0.connect(server_name, origin_stream),
+            connector.connector().connect(server_name, origin_stream),
         )
         .await
         .expect("handshake must not hang");
@@ -710,5 +729,27 @@ mod tests {
              connector verifies against nothing, which is exactly the MITM \
              this type exists to prevent"
         );
+    }
+
+    /// `from_system_roots`'s fail-closed empty-store branch lives in
+    /// `from_root_store` precisely so it is deterministically testable
+    /// without depending on — or faking — the real OS trust store being
+    /// empty. An empty `RootCertStore` reaching this point must always be
+    /// `Err(TrustRootsUnavailable)`, never a silent `Ok` connector that
+    /// verifies against nothing.
+    #[test]
+    fn from_root_store_fails_closed_on_an_empty_store() {
+        let result = VerifiedOriginConnector::from_root_store(rustls::RootCertStore::empty());
+        match result {
+            Err(TlsInterceptError::TrustRootsUnavailable(_)) => {}
+            Err(other) => {
+                panic!("expected Err(TrustRootsUnavailable), got a different Err: {other}")
+            }
+            Ok(_) => panic!(
+                "expected Err(TrustRootsUnavailable) for an empty root store, got Ok — an \
+                 empty store must never silently produce a connector that verifies against \
+                 nothing"
+            ),
+        }
     }
 }

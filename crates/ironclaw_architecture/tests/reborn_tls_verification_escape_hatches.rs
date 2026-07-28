@@ -29,11 +29,18 @@
 //! `tests.rs` files and truncates any file at its own `#[cfg(test)] mod
 //! tests` marker, scanning only what precedes it.
 //!
-//! **Comments are exempt too**, same rule and same rationale as
-//! `reborn_retired_failure_vocabulary.rs`: this module's own doc comments
-//! (including this one) explain the ban by naming the exact escape-hatch
-//! spellings, and prose explaining what is banned is worth keeping — only
-//! live code is policed.
+//! **Comments (and string literals) are exempt too**, same rule and same
+//! rationale as `reborn_retired_failure_vocabulary.rs`: this module's own
+//! doc comments (including this one) explain the ban by naming the exact
+//! escape-hatch spellings, and prose explaining what is banned is worth
+//! keeping — only live code is policed. Stripping uses the crate's shared
+//! `ratchet_support::strip_comments_and_strings`, the same lexer two
+//! sibling ratchets already use, rather than a hand-rolled comment-only
+//! stripper: a comment-only stripper would treat `//` inside a string
+//! literal (e.g. a `"http://..."` URL, which already exists in this very
+//! directory) as a real line-comment start and blank everything after it on
+//! that line — hiding a banned spelling that happened to share a line with
+//! such a string.
 //!
 //! **One sanctioned call site.** `RootCertStore::empty()` is also the
 //! correct, ordinary way to *start* building any root store — including the
@@ -45,8 +52,17 @@
 //! `with_custom_certificate_verifier` are never sanctioned anywhere, not
 //! even inside `from_system_roots`.
 
+// Each ratchet binary gets its own copy of this shared module; this
+// binary uses only the comment/string stripper and workspace_root, so the
+// other shared helpers are dead code HERE (and live in the sibling ratchet
+// binaries) — same convention as `reborn_authorized_seal_ratchet.rs`.
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use ratchet_support::{strip_comments_and_strings, workspace_root};
 
 /// Escape-hatch spellings that would turn `origin_connector` permissive.
 /// Any hit in non-test `sandbox_process/` code is a regression against the
@@ -57,68 +73,8 @@ const BANNED_PATTERNS: &[&str] = &[
     "RootCertStore::empty()",
 ];
 
-fn workspace_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/ironclaw_architecture -> crates -> workspace root
-    path.pop();
-    path.pop();
-    path
-}
-
 fn sandbox_process_dir(root: &Path) -> PathBuf {
     root.join("crates/ironclaw_host_runtime/src/sandbox_process")
-}
-
-/// Blank out comment spans so prose about the banned spellings (this
-/// module's own doc comments, and `tls_intercept`'s `# WARNING` block) stays
-/// legal while code that actually calls them does not. Same algorithm as
-/// `reborn_retired_failure_vocabulary.rs::strip_comments` — handles `//`
-/// line comments and nested `/* … */` block comments, preserving line
-/// numbers by replacing stripped bytes with spaces rather than deleting them.
-fn strip_comments(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut index = 0usize;
-    let mut depth = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if depth > 0 {
-            if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-                depth += 1;
-                out.push(' ');
-                out.push(' ');
-                index += 2;
-                continue;
-            }
-            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                depth -= 1;
-                out.push(' ');
-                out.push(' ');
-                index += 2;
-                continue;
-            }
-            out.push(if byte == b'\n' { '\n' } else { ' ' });
-            index += 1;
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            depth = 1;
-            out.push(' ');
-            out.push(' ');
-            index += 2;
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                out.push(' ');
-                index += 1;
-            }
-            continue;
-        }
-        out.push(byte as char);
-        index += 1;
-    }
-    out
 }
 
 /// A standalone test file (`ca/tests.rs`, `credential_firewall/tests.rs`) is
@@ -157,9 +113,9 @@ fn truncate_at_inline_test_module(contents: &str) -> &str {
 ///
 /// Uses simple brace-depth tracking from the `fn from_system_roots` line to
 /// wherever that depth returns to zero. `code_only` has already had comments
-/// blanked out, and the only braces inside the real function body are
-/// balanced on the same line as the format strings that contain them (e.g.
-/// `"...: {error}"`), so naive per-character counting does not desync.
+/// *and string literal contents* stripped (`strip_comments_and_strings`), so
+/// a format string like `"...: {error}"` contributes no stray braces to the
+/// count — only real code braces are left to track.
 fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSet<usize> {
     let mut sanctioned = HashSet::new();
     if !relative.ends_with("sandbox_process/tls_intercept.rs") {
@@ -217,7 +173,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             continue;
         };
         let production_only = truncate_at_inline_test_module(&contents);
-        let code_only = strip_comments(production_only);
+        let code_only = strip_comments_and_strings(production_only);
         let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
         for (number, line) in code_only.lines().enumerate() {
             if line.trim().is_empty() {
@@ -305,7 +261,7 @@ fn sanctioned_call_site_is_scoped_to_the_one_function_not_the_whole_file() {
     let contents = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let production_only = truncate_at_inline_test_module(&contents);
-    let code_only = strip_comments(production_only);
+    let code_only = strip_comments_and_strings(production_only);
     let sanctioned_lines = sanctioned_from_system_roots_lines(relative, &code_only);
     let real_occurrences = code_only
         .lines()
@@ -331,4 +287,29 @@ fn sanctioned_call_site_is_scoped_to_the_one_function_not_the_whole_file() {
         "the sanctioned line span should cover exactly the one \
          `RootCertStore::empty()` call inside `from_system_roots`"
     );
+}
+
+/// Proves the standalone-test-file exclusion (`is_standalone_test_file`) is
+/// real, the same way the two tests above prove it for the inline-test-module
+/// and sanctioned-call-site exclusions: `scan_dir`'s real run against
+/// `ca/tests.rs` and `credential_firewall/tests.rs` currently reports zero
+/// hits regardless of whether this exclusion fires, because neither file
+/// happens to contain a banned pattern today — so without a direct check,
+/// this predicate could be inverted or deleted and the main gate test would
+/// still pass. Exercised directly against both its true positive and true
+/// negative shapes, plus both path separators.
+#[test]
+fn is_standalone_test_file_recognizes_both_path_separators_and_only_tests_rs() {
+    assert!(is_standalone_test_file(
+        "crates/ironclaw_host_runtime/src/sandbox_process/ca/tests.rs"
+    ));
+    assert!(is_standalone_test_file(
+        "crates\\ironclaw_host_runtime\\src\\sandbox_process\\ca\\tests.rs"
+    ));
+    assert!(!is_standalone_test_file(
+        "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs"
+    ));
+    assert!(!is_standalone_test_file(
+        "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs"
+    ));
 }
