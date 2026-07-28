@@ -280,6 +280,19 @@ async fn execute_search_marks_an_oversized_catalog_as_incomplete_with_the_true_t
     assert_eq!(response.returned_entries, response.entries.len());
     assert!(response.returned_entries < response.total_entries);
     assert!(response.truncated);
+    // The truncated path must carry catalog_total too, and it must be part of the
+    // shape the byte budget was measured against — assigning it after the
+    // size loop made the emitted payload larger than the budget that admitted it.
+    assert_eq!(
+        response.catalog_total,
+        Some(expected_names.len()),
+        "a truncated result must still report the full catalog size"
+    );
+    assert_eq!(
+        serde_json::to_value(&response).expect("response serializes")["catalog_total"],
+        serde_json::json!(expected_names.len()),
+        "catalog_total must be present in the measured, emitted payload"
+    );
     assert!(
         message.contains("INCOMPLETE") && message.contains(&expected_names.len().to_string()),
         "warning must state that the result is incomplete and report the true total: {message}"

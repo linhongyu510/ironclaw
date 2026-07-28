@@ -223,6 +223,7 @@ impl IronHubResponse {
             let base_bytes = serialized_len(&Self::incomplete(
                 total_entries,
                 candidate_count,
+                catalog_total,
                 Vec::new(),
             ))?;
             let separator_bytes = candidate_count.saturating_sub(1);
@@ -235,14 +236,21 @@ impl IronHubResponse {
             returned_entries.push(entry);
         }
 
-        let mut bounded = Self::incomplete(total_entries, returned_entries.len(), returned_entries);
-        bounded.catalog_total = Some(catalog_total);
-        Ok(bounded)
+        Ok(Self::incomplete(
+            total_entries,
+            returned_entries.len(),
+            catalog_total,
+            returned_entries,
+        ))
     }
 
+    /// `catalog_total` is taken here rather than assigned afterwards so the shape
+    /// measured against `MAX_SEARCH_RESPONSE_BYTES` is exactly the shape emitted —
+    /// assigning it later made the payload larger than the budget that admitted it.
     fn incomplete(
         total_entries: usize,
         returned_entries: usize,
+        catalog_total: usize,
         entries: Vec<IronHubEntrySummary>,
     ) -> Self {
         Self {
@@ -250,7 +258,7 @@ impl IronHubResponse {
             total_entries,
             returned_entries,
             truncated: true,
-            catalog_total: None,
+            catalog_total: Some(catalog_total),
             message: Some(format!(
                 "INCOMPLETE IRONHUB RESULTS: returned {returned_entries} of {total_entries} matching catalog entries. Do not claim an unreturned package is absent; narrow the search query or call ironhub_info with its exact name."
             )),
