@@ -610,6 +610,41 @@ mod tests {
         assert_eq!(config.ca.cached_entry_count(), 0);
     }
 
+    /// `is_bound`'s doc comment claims case-insensitive matching "to match
+    /// `egress_proxy::host_allowed`'s own normalization" — this pins that
+    /// the *implementation* actually delivers it, not just the comment.
+    /// `TlsInterceptConfig::new` lowercases every host it's constructed
+    /// with, and `is_bound` lowercases its query argument, so a
+    /// lowercase-configured allowlist must still match a mixed-case query —
+    /// exactly what a real CONNECT host (whose casing a client controls)
+    /// can look like on the wire. A case-sensitive allowlist here would be
+    /// a security bug: it would let a client dodge interception (or, if
+    /// the allowlist federated a broader policy, dodge a security control)
+    /// just by changing the request's casing.
+    #[test]
+    fn is_bound_matches_a_mixed_case_query_against_a_lowercase_allowlist() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let bound_hosts = HashSet::from(["bound.example.com".to_string()]);
+        let config = TlsInterceptConfig::new(ca, bound_hosts, connector_trusting_nothing());
+
+        assert!(config.is_bound("BOUND.EXAMPLE.COM"));
+        assert!(config.is_bound("Bound.Example.Com"));
+        assert_eq!(config.ca.cached_entry_count(), 0);
+    }
+
+    /// An empty allowlist must reject every host, including one that would
+    /// otherwise look plausible — the degenerate case of D1's "unbound
+    /// stays an opaque tunnel" invariant with no bound hosts configured at
+    /// all (e.g. before W12's binding model has bound anything yet).
+    #[test]
+    fn is_bound_is_false_for_any_host_when_bound_hosts_is_empty() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let config = TlsInterceptConfig::new(ca, HashSet::new(), connector_trusting_nothing());
+
+        assert!(!config.is_bound("bound.example.com"));
+        assert!(!config.is_bound(""));
+    }
+
     /// A BOUND host is genuinely intercepted end to end: a real rustls
     /// client dialing through `terminate_and_forward` completes its TLS
     /// handshake against a certificate chaining to OUR CA (not the fake
@@ -962,6 +997,155 @@ mod tests {
             matches!(source, Some(rustls::Error::InvalidCertificate(_))),
             "expected a certificate-verification rejection (rustls::Error::InvalidCertificate), \
              got: {error:?}"
+        );
+    }
+
+    /// `build_server_config` must fail closed — `ServerConfigFailed`, never
+    /// a panic or a silently-accepted config — when the cert PEM it's
+    /// handed doesn't parse. Covers both "not PEM at all" (garbage bytes)
+    /// and "syntactically PEM-shaped but empty" (no cert blocks), since
+    /// `CertificateDer::pem_slice_iter` can fail on either. Nothing at the
+    /// call site (`terminate_and_forward_with_timeout`) touches the origin
+    /// before this returns, so a malformed leaf can never reach the dial
+    /// step either.
+    #[test]
+    fn build_server_config_fails_closed_on_garbage_cert_pem() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let mut leaf = ca
+            .issue_leaf_for_host("bound.example.com")
+            .unwrap()
+            .certificate;
+        leaf.cert_pem = "this is not pem at all".to_string();
+
+        let result = build_server_config(&leaf);
+        assert!(
+            matches!(result, Err(TlsInterceptError::ServerConfigFailed(_))),
+            "expected Err(ServerConfigFailed) for garbage cert pem, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_server_config_fails_closed_on_empty_cert_pem() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let mut leaf = ca
+            .issue_leaf_for_host("bound.example.com")
+            .unwrap()
+            .certificate;
+        leaf.cert_pem = String::new();
+
+        let result = build_server_config(&leaf);
+        assert!(
+            matches!(result, Err(TlsInterceptError::ServerConfigFailed(_))),
+            "expected Err(ServerConfigFailed) for empty cert pem, got: {result:?}"
+        );
+    }
+
+    /// Same fail-closed contract, the key-parsing leg: `build_server_config`
+    /// parses `leaf.key_pem` via `PrivateKeyDer::from_pem_slice` *after* the
+    /// cert PEM already parsed successfully, so this exercises a different
+    /// branch than the cert-PEM tests above — a valid cert paired with a
+    /// broken key must still fail closed rather than build a config with
+    /// no usable private key.
+    #[test]
+    fn build_server_config_fails_closed_on_garbage_key_pem() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let mut leaf = ca
+            .issue_leaf_for_host("bound.example.com")
+            .unwrap()
+            .certificate;
+        leaf.key_pem = "this is not pem at all".to_string();
+
+        let result = build_server_config(&leaf);
+        assert!(
+            matches!(result, Err(TlsInterceptError::ServerConfigFailed(_))),
+            "expected Err(ServerConfigFailed) for garbage key pem, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_server_config_fails_closed_on_empty_key_pem() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let mut leaf = ca
+            .issue_leaf_for_host("bound.example.com")
+            .unwrap()
+            .certificate;
+        leaf.key_pem = String::new();
+
+        let result = build_server_config(&leaf);
+        assert!(
+            matches!(result, Err(TlsInterceptError::ServerConfigFailed(_))),
+            "expected Err(ServerConfigFailed) for empty key pem, got: {result:?}"
+        );
+    }
+
+    /// "Test through the caller, not just the helper": an invalid host
+    /// (here, empty) must make `terminate_and_forward` itself fail — before
+    /// the origin is ever dialed, and before a leaf is even minted — not
+    /// merely make some inner helper return an error in isolation. A unit
+    /// test on `SandboxCertificateAuthority::issue_leaf_for_host` alone
+    /// would not prove the *caller* (`terminate_and_forward`) actually
+    /// surfaces that failure fail-closed instead of, say, dialing the
+    /// origin first. Mirrors `client_handshake_failure_never_dials_the_
+    /// origin`'s fake-origin/timeout-probe machinery so "no dial happened"
+    /// is observed directly, not inferred from the `Err` return alone.
+    ///
+    /// The empty host is rejected at `issue_leaf_for_host` itself (`ca.rs`'s
+    /// `host.is_empty()` check), the very first fallible step in
+    /// `terminate_and_forward_with_timeout` — so this test additionally
+    /// pins the strongest form of "before": no leaf is minted at all, not
+    /// just "minted but never sent to the origin."
+    #[tokio::test]
+    async fn invalid_host_fails_before_the_origin_is_dialed() {
+        let host = "";
+
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let origin_saw_a_connection = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
+        });
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([host.to_string()]),
+            connector_trusting_nothing(),
+        );
+        let cached_leaf_count_before = config.cached_leaf_count();
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = proxy_listener.accept().await.unwrap();
+            let result =
+                terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await;
+            (result, config.cached_leaf_count())
+        });
+
+        // Connects but never sends a byte — irrelevant here, since the
+        // invalid-host failure happens before the server task ever reads
+        // from this socket.
+        let _raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+
+        let (result, cached_leaf_count_after) =
+            tokio::time::timeout(Duration::from_secs(5), server_task)
+                .await
+                .expect("server task must finish")
+                .expect("server task did not panic");
+        assert!(
+            matches!(result, Err(TlsInterceptError::LeafMintFailed { .. })),
+            "expected Err(LeafMintFailed) for an empty host, got: {result:?}"
+        );
+        assert_eq!(
+            cached_leaf_count_after, cached_leaf_count_before,
+            "an invalid host must never mint a leaf certificate"
+        );
+
+        let origin_result = origin_saw_a_connection
+            .await
+            .expect("origin probe task did not panic");
+        assert!(
+            origin_result.is_err(),
+            "origin must never be dialed when the host is invalid (fail-closed before dial)"
         );
     }
 
