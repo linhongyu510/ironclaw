@@ -28,6 +28,7 @@
 //! path-based filesystem API): its whole job is to be the fd-relative
 //! alternative to one.
 
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,6 +52,55 @@ static LOCAL_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// pathological chain worth failing closed on rather than resolving), never
 /// a benign deep structure.
 const MAX_SYMLINK_DEPTH: u8 = 32;
+
+/// A single-resolution symlink-hop budget, shared across every `open_one`
+/// call [`resolve_walk`]/[`descend_creating`]/[`resolve_write_leaf`] make
+/// while walking their (possibly multi-component) path — never reset
+/// per-component.
+///
+/// Before this type existed, [`open_one`] always started a fresh
+/// [`MAX_SYMLINK_DEPTH`]-hop budget (`open_one_depth(..., 0)`), and
+/// `resolve_walk`/`descend_creating` called `open_one` once per path
+/// component in a loop. That let a 10-component path with a
+/// `MAX_SYMLINK_DEPTH`-hop chain planted at *each* component accumulate
+/// roughly `10 * MAX_SYMLINK_DEPTH` total hops in one resolution — looser
+/// than the real `openat2(RESOLVE_BENEATH)` kernel fast path, which applies
+/// its own internal cap (Linux's `SYMLOOP_MAX`, effectively ~40) *once per
+/// whole resolution*, not per path component. Still bounded (no DoS) either
+/// way, but this type makes the portable fallback match that per-resolution
+/// semantics instead of a looser per-component one: one `SymlinkBudget` is
+/// constructed at the top of each of those three functions and threaded by
+/// reference through every `open_one`/symlink-following call the walk makes,
+/// so the whole resolution shares one `MAX_SYMLINK_DEPTH`-hop ceiling.
+///
+/// The Linux `openat2` fast path is unaffected: it is a single syscall per
+/// component and the kernel enforces its own bound *inside* that syscall,
+/// with no dependency on this type at all.
+///
+/// A `Cell`, not an `AtomicU8`: every caller of these functions runs the
+/// whole walk synchronously on one blocking-pool thread with no `.await` in
+/// between (see the module doc's TOCTOU invariant) and never shares a
+/// `SymlinkBudget` across threads, so plain interior mutability is
+/// sufficient and avoids the unnecessary atomic-ordering ceremony.
+pub(super) struct SymlinkBudget(Cell<u8>);
+
+impl SymlinkBudget {
+    pub(super) fn new() -> Self {
+        Self(Cell::new(MAX_SYMLINK_DEPTH))
+    }
+
+    /// Consumes one hop of the remaining budget; fails closed
+    /// (`ResolveError::Escape`) once it is exhausted, exactly like the old
+    /// `depth >= MAX_SYMLINK_DEPTH` check it replaces.
+    fn consume(&self) -> Result<(), ResolveError> {
+        let remaining = self.0.get();
+        if remaining == 0 {
+            return Err(ResolveError::Escape);
+        }
+        self.0.set(remaining - 1);
+        Ok(())
+    }
+}
 
 /// The outcome of a failed fd-relative resolution step: either a genuine I/O
 /// error (propagated as-is), or a symlink/`..`-past-root escape attempt (or
@@ -96,23 +146,30 @@ fn io_err(errno: Errno) -> ResolveError {
 /// per-component `openat` with `O_NOFOLLOW` detects a symlink and this
 /// module's own bounded walk ([`follow_symlink_component`]) resolves it —
 /// fd-anchored at every step, per the module invariant.
+/// Opens a single path component, following an in-bounds symlink against the
+/// shared per-resolution `budget` (see [`SymlinkBudget`]). Callers resolving
+/// a single, standalone component (not part of a multi-component walk) may
+/// pass a fresh `&SymlinkBudget::new()` — [`resolve_walk`]/
+/// [`descend_creating`] construct one `SymlinkBudget` and pass the *same*
+/// reference to every component's `open_one` call instead.
 pub(super) fn open_one(
     root: BorrowedFd<'_>,
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
+    budget: &SymlinkBudget,
 ) -> Result<OwnedFd, ResolveError> {
-    open_one_depth(root, dir, name, oflags, mode, 0)
+    open_one_inner(root, dir, name, oflags, mode, budget)
 }
 
-fn open_one_depth(
+fn open_one_inner(
     root: BorrowedFd<'_>,
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
-    depth: u8,
+    budget: &SymlinkBudget,
 ) -> Result<OwnedFd, ResolveError> {
     #[cfg(target_os = "linux")]
     {
@@ -186,17 +243,13 @@ fn open_one_depth(
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = depth;
-    }
     match rustix::fs::openat(dir, name, oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC, mode) {
         Ok(fd) => Ok(fd),
         // With `O_NOFOLLOW` set, `ELOOP` from a single-component open
         // unambiguously means "this entry is a symlink" (the kernel never
         // attempts to expand it, so a genuine cycle cannot be observed
-        // here) — follow it ourselves, fd-anchored and depth-bounded.
-        Err(Errno::LOOP) => follow_symlink_component(root, dir, name, oflags, mode, depth),
+        // here) — follow it ourselves, fd-anchored and budget-bounded.
+        Err(Errno::LOOP) => follow_symlink_component(root, dir, name, oflags, mode, budget),
         // Some platforms (observed on macOS) report `ENOTDIR` rather than
         // `ELOOP` when `O_DIRECTORY | O_NOFOLLOW` hits a symlink — the
         // kernel checks "is this a directory" before "did NOFOLLOW block
@@ -210,7 +263,7 @@ fn open_one_depth(
                     if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                         == rustix::fs::FileType::Symlink =>
                 {
-                    follow_symlink_component(root, dir, name, oflags, mode, depth)
+                    follow_symlink_component(root, dir, name, oflags, mode, budget)
                 }
                 _ => Err(io_err(Errno::NOTDIR)),
             }
@@ -220,28 +273,24 @@ fn open_one_depth(
 }
 
 /// Follows the symlink at `name` (found directly under `dir`), fd-anchored
-/// and depth-bounded, and finishes opening its ultimate target with the
-/// caller's original `oflags`/`mode`. Used only by the portable fallback
-/// (macOS, or a Linux host whose `openat2` is unavailable) — on Linux with
-/// `openat2`, the kernel does this same job for us inside a single
-/// `RESOLVE_BENEATH` call.
+/// and budget-bounded (see [`SymlinkBudget`]), and finishes opening its
+/// ultimate target with the caller's original `oflags`/`mode`. Used only by
+/// the portable fallback (macOS, or a Linux host whose `openat2` is
+/// unavailable) — on Linux with `openat2`, the kernel does this same job for
+/// us inside a single `RESOLVE_BENEATH` call.
 fn follow_symlink_component(
     root: BorrowedFd<'_>,
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
-    depth: u8,
+    budget: &SymlinkBudget,
 ) -> Result<OwnedFd, ResolveError> {
-    if depth >= MAX_SYMLINK_DEPTH {
-        return Err(ResolveError::Escape);
-    }
+    budget.consume()?;
     let target = rustix::fs::readlinkat(dir, name, Vec::new()).map_err(io_err)?;
-    let (anchor, last) = walk_symlink_target(root, dir, target.as_bytes(), depth + 1)?;
+    let (anchor, last) = walk_symlink_target(root, dir, target.as_bytes(), budget)?;
     match last {
-        Some(final_name) => {
-            open_one_depth(root, anchor.as_fd(), &final_name, oflags, mode, depth + 1)
-        }
+        Some(final_name) => open_one_inner(root, anchor.as_fd(), &final_name, oflags, mode, budget),
         // Target had no final component (e.g. "/" or ""): it resolves to
         // the anchor directory itself.
         None => Ok(anchor),
@@ -277,14 +326,15 @@ fn follow_symlink_component(
 /// `openat(root_fd, "..", …)` would happily open the real host parent of
 /// the mount, so a `..` that would step above `root` is refused (`Escape`)
 /// instead. Every forward (non-`.`/`..`) component goes back through
-/// [`open_one_depth`], so a symlink nested inside another symlink's target
-/// is itself resolved through this exact same escape/depth-bounded
-/// machinery, never treated as plain text.
+/// [`open_one_inner`], so a symlink nested inside another symlink's target
+/// is itself resolved through this exact same escape/budget-bounded
+/// machinery, never treated as plain text — and consumes budget from the
+/// same shared [`SymlinkBudget`] as everything else in the resolution.
 fn walk_symlink_target(
     root: BorrowedFd<'_>,
     dir: BorrowedFd<'_>,
     target: &[u8],
-    depth: u8,
+    budget: &SymlinkBudget,
 ) -> Result<(OwnedFd, Option<OsString>), ResolveError> {
     if target.starts_with(b"/") {
         return Err(ResolveError::Escape);
@@ -318,13 +368,13 @@ fn walk_symlink_target(
         if is_last {
             return Ok((cur, Some(component.to_os_string())));
         }
-        cur = open_one_depth(
+        cur = open_one_inner(
             root,
             cur.as_fd(),
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
-            depth,
+            budget,
         )?;
     }
     Ok((cur, None))
@@ -353,6 +403,11 @@ fn dup_fd(fd: BorrowedFd<'_>) -> Result<OwnedFd, ResolveError> {
 /// `components` empty resolves to the mount root itself (`root` duplicated),
 /// with no parent — the mount root has no fd-relative parent inside this
 /// mount's sandbox, by design (see `DiskFilesystem::delete`).
+///
+/// One [`SymlinkBudget`] is constructed here and shared across every
+/// component's `open_one` call — the whole multi-component walk shares one
+/// [`MAX_SYMLINK_DEPTH`]-hop ceiling, not a fresh one per component (see
+/// `SymlinkBudget`'s doc for why that distinction matters).
 pub(super) fn resolve_walk(
     root: BorrowedFd<'_>,
     components: &[OsString],
@@ -361,6 +416,7 @@ pub(super) fn resolve_walk(
     let Some((leaf, ancestors)) = components.split_last() else {
         return Ok((dup_fd(root)?, None));
     };
+    let budget = SymlinkBudget::new();
     let mut cur = dup_fd(root)?;
     for component in ancestors {
         cur = open_one(
@@ -369,9 +425,10 @@ pub(super) fn resolve_walk(
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
+            &budget,
         )?;
     }
-    let fd = open_one(root, cur.as_fd(), leaf, final_oflags, Mode::empty())?;
+    let fd = open_one(root, cur.as_fd(), leaf, final_oflags, Mode::empty(), &budget)?;
     Ok((fd, Some((cur, leaf.clone()))))
 }
 
@@ -388,10 +445,14 @@ pub(super) fn resolve_walk(
 /// then check again" gap here, because creation and the next level's
 /// containment check are the same `open_one` call the next loop iteration
 /// makes.
+///
+/// Like [`resolve_walk`], one [`SymlinkBudget`] is shared across the whole
+/// multi-component walk rather than reset per component.
 pub(super) fn descend_creating(
     root: BorrowedFd<'_>,
     components: &[OsString],
 ) -> Result<OwnedFd, ResolveError> {
+    let budget = SymlinkBudget::new();
     let mut cur = dup_fd(root)?;
     for component in components {
         cur = match open_one(
@@ -400,6 +461,7 @@ pub(super) fn descend_creating(
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
+            &budget,
         ) {
             Ok(fd) => fd,
             Err(ResolveError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::NotFound => {
@@ -414,6 +476,7 @@ pub(super) fn descend_creating(
                     component,
                     OFlags::DIRECTORY,
                     Mode::empty(),
+                    &budget,
                 )?
             }
             Err(other) => return Err(other),
@@ -448,9 +511,10 @@ pub(super) fn resolve_write_leaf(
     parent: BorrowedFd<'_>,
     leaf: &OsStr,
 ) -> Result<(OwnedFd, OsString), ResolveError> {
+    let budget = SymlinkBudget::new();
     let mut cur_parent = dup_fd(parent)?;
     let mut cur_leaf = leaf.to_os_string();
-    for depth in 0..MAX_SYMLINK_DEPTH {
+    loop {
         let is_symlink =
             match rustix::fs::statat(cur_parent.as_fd(), &cur_leaf, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => {
@@ -465,10 +529,15 @@ pub(super) fn resolve_write_leaf(
         if !is_symlink {
             return Ok((cur_parent, cur_leaf));
         }
+        // Consumes from the same shared budget `walk_symlink_target` below
+        // draws on for any non-final components of this hop's target text —
+        // one ceiling for the whole chase, matching `resolve_walk`/
+        // `descend_creating`'s per-resolution (not per-hop) budget.
+        budget.consume()?;
         let target =
             rustix::fs::readlinkat(cur_parent.as_fd(), &cur_leaf, Vec::new()).map_err(io_err)?;
         let (new_parent, new_leaf) =
-            walk_symlink_target(root, cur_parent.as_fd(), target.as_bytes(), depth)?;
+            walk_symlink_target(root, cur_parent.as_fd(), target.as_bytes(), &budget)?;
         let Some(new_leaf) = new_leaf else {
             // Symlink target has no final path component (e.g. "/" or ""):
             // there is no meaningful write-target name. Fail closed rather
@@ -478,7 +547,6 @@ pub(super) fn resolve_write_leaf(
         cur_parent = new_parent;
         cur_leaf = new_leaf;
     }
-    Err(ResolveError::Escape)
 }
 
 /// Maximum nesting depth [`remove_dir_all_fd`] will descend into before
@@ -529,8 +597,15 @@ fn remove_dir_all_fd_bounded(
             "directory tree exceeds maximum removal depth of {MAX_REMOVE_DIR_DEPTH} levels; refusing to delete"
         )));
     }
-    let dir_fd = open_one(root, parent, name, OFlags::DIRECTORY, Mode::empty())
-        .map_err(resolve_error_to_io)?;
+    let dir_fd = open_one(
+        root,
+        parent,
+        name,
+        OFlags::DIRECTORY,
+        Mode::empty(),
+        &SymlinkBudget::new(),
+    )
+    .map_err(resolve_error_to_io)?;
     remove_dir_contents(root, dir_fd.as_fd(), depth + 1)?;
     rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)
 }

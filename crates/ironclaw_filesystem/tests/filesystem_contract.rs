@@ -953,6 +953,72 @@ async fn local_backend_resolves_symlink_chain_within_cap_and_fails_cycle_cleanly
     );
 }
 
+/// FIX 3 regression: the symlink-hop budget is per-*resolution*, not
+/// per-*component*. Builds a 4-component path where each individual
+/// component resolves through its own 10-hop symlink chain (well under
+/// `MAX_SYMLINK_DEPTH = 32` on its own), but the combined total across all
+/// four components is 40 hops — over the cap.
+///
+/// Before this fix, `open_one` reset to a fresh `MAX_SYMLINK_DEPTH`-hop
+/// budget for every component `resolve_walk` called it on, so a 10-hop
+/// chain at each of 4 components would resolve without ever tripping the
+/// cap (40 total hops, but never more than 10 in any single component's own
+/// budget) — looser than the real `openat2(RESOLVE_BENEATH)` kernel fast
+/// path, which applies its cap once per whole resolution. After this fix, a
+/// single `SymlinkBudget` is shared across the whole `resolve_walk` walk, so
+/// this same path must fail closed once cumulative hops exceed the cap,
+/// matching `SYMLOOP_MAX` semantics.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_rejects_path_whose_combined_per_component_symlink_chains_exceed_global_budget()
+ {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    const LEVELS: usize = 4;
+    const HOPS_PER_LEVEL: usize = 10;
+
+    // Builds a `HOPS_PER_LEVEL`-hop symlink chain inside `dir` terminating at
+    // a real subdirectory of `dir`, and returns (the chain's outermost link
+    // name, the real subdirectory's path) — mirroring the chain-building
+    // pattern `local_backend_resolves_symlink_chain_within_cap_and_fails_cycle_cleanly`
+    // uses, just nested one level deeper per call.
+    fn build_chain_level(dir: &std::path::Path, level: usize) -> (String, std::path::PathBuf) {
+        let real_name = format!("level{level}_real");
+        let real_dir = dir.join(&real_name);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let mut previous = real_name;
+        for hop in 0..HOPS_PER_LEVEL {
+            let name = format!("level{level}_link{hop}");
+            symlink(&previous, dir.join(&name)).unwrap();
+            previous = name;
+        }
+        (previous, real_dir)
+    }
+
+    let mut current_dir = storage.path().to_path_buf();
+    let mut path_components = Vec::new();
+    for level in 0..LEVELS {
+        let (chain_head, real_dir) = build_chain_level(&current_dir, level);
+        path_components.push(chain_head);
+        current_dir = real_dir;
+    }
+    std::fs::write(current_dir.join("file.txt"), b"deep file").unwrap();
+    path_components.push("file.txt".to_string());
+
+    let root = local_root_with_projects_mount(storage.path());
+    let virtual_path =
+        VirtualPath::new(format!("/projects/{}", path_components.join("/"))).unwrap();
+
+    let error = root.read_file(&virtual_path).await.unwrap_err();
+    assert!(
+        matches!(error, FilesystemError::SymlinkEscape { .. }),
+        "a path whose combined per-component symlink chains exceed the \
+         global MAX_SYMLINK_DEPTH budget must fail closed as SymlinkEscape, \
+         got: {error:?}"
+    );
+}
+
 /// Deleting the bare root of an *ordinary* mount (no leaf segment, no
 /// sub-path) must fail closed rather than silently deleting the mount's
 /// entire on-disk tree. `DiskFilesystem::delete` (`local.rs:474-485`) has no

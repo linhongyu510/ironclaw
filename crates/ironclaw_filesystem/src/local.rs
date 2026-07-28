@@ -16,9 +16,9 @@ use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{AtFlags, Mode, OFlags};
 
 use self::fd_resolve::{
-    ResolveError, atomic_write_file, descend_creating, map_file_type, new_file_mode, open_one,
-    read_all, remove_dir_all_fd, resolve_error_to_filesystem_error, resolve_walk,
-    resolve_write_leaf, write_all,
+    ResolveError, SymlinkBudget, atomic_write_file, descend_creating, map_file_type,
+    new_file_mode, open_one, read_all, remove_dir_all_fd, resolve_error_to_filesystem_error,
+    resolve_walk, resolve_write_leaf, write_all,
 };
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, RecordVersion,
@@ -355,6 +355,7 @@ fn anchor_for_target(
             leaf,
             OFlags::DIRECTORY,
             Mode::empty(),
+            &SymlinkBudget::new(),
         )?
     };
     Ok((anchor, rest.to_vec()))
@@ -506,6 +507,7 @@ impl RootFilesystem for DiskFilesystem {
                 &leaf,
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
                 new_file_mode(),
+                &SymlinkBudget::new(),
             )
             .map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
