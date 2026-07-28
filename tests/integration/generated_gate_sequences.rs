@@ -40,6 +40,10 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
+/// The capability the gate guards. Named once so the effect-count assertion
+/// and the scripted call cannot drift apart.
+const GATED_CAPABILITY: &str = "builtin.write_file";
+
 /// One dimension of workstream 9's lifecycle axis: what a client can do to a
 /// run parked on an approval gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +107,7 @@ impl Observed {
     }
 }
 
-async fn run_sequence(sequence: &[GateAction]) {
+async fn run_sequence(sequence: &[GateAction]) -> usize {
     let group = RebornIntegrationGroup::live_approvals()
         .await
         .expect("live-approvals group builds");
@@ -120,7 +124,7 @@ async fn run_sequence(sequence: &[GateAction]) {
         .thread(thread)
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                GATED_CAPABILITY,
                 json!({"path": "/workspace/generated.txt", "content": "generated"}),
             ),
             RebornScriptedReply::text("done"),
@@ -179,6 +183,37 @@ async fn run_sequence(sequence: &[GateAction]) {
         "{sequence:?} settled on {:?}",
         final_state.status
     );
+
+    // (4) no duplicate confirmed effect. The gated capability writes a file;
+    // resolving the same gate twice must not write it twice. This is the
+    // invariant the ApproveAgain action exists to attack, and status alone
+    // cannot express it — a double dispatch still ends Completed.
+    // Counted by RESULTS, not invocations: the gated attempt that raised the
+    // gate is itself recorded as an invocation, so a single approve shows two
+    // invocations and one effect. Counting invocations here reported a
+    // duplicate that never happened — the first version of this assertion did
+    // exactly that, and the run said so.
+    let effects = h
+        .capability_result_count(GATED_CAPABILITY)
+        .await
+        .unwrap_or_else(|err| panic!("{sequence:?}: capability results unreadable: {err:?}"));
+    assert!(
+        effects <= 1,
+        "{sequence:?}: gated capability produced {effects} effects; a \
+         resolved-twice gate must not perform the effect twice"
+    );
+
+    // A sequence that never approves must not perform the effect at all.
+    let approved = sequence
+        .iter()
+        .any(|action| matches!(action, GateAction::Approve | GateAction::ApproveAgain));
+    if !approved {
+        assert_eq!(
+            effects, 0,
+            "{sequence:?}: capability performed its effect without any approval"
+        );
+    }
+    effects
 }
 
 /// How long a sequence to enumerate. Pull requests get depth 2 (20 sequences,
@@ -223,9 +258,20 @@ async fn generated_gate_sequences_preserve_lifecycle_invariants() {
         "generated-gate-sequences: depth {depth}, {} sequences",
         sequences.len()
     );
+    let mut performed = 0usize;
     for sequence in sequences {
-        run_sequence(&sequence).await;
+        performed += run_sequence(&sequence).await;
     }
+
+    // Anti-vacuity: `effects <= 1` is also satisfied by an effect that never
+    // happens, which is what a harness misconfiguration would produce. At
+    // least one ordering must actually approve and perform the write, or the
+    // bound above proves nothing.
+    assert!(
+        performed > 0,
+        "no sequence performed the gated effect; the <=1 bound above would \
+         hold vacuously and this suite would be checking nothing"
+    );
 }
 
 /// The invariant checker is itself checked.
@@ -284,5 +330,128 @@ mod invariant_checker {
             TurnStatus::Running,
             TurnStatus::Completed,
         ]);
+    }
+}
+
+/// Cross-actor isolation under the same generated action alphabet.
+///
+/// The lifecycle sequences above drive one actor. This drives two over one
+/// shared coordinator and asserts the invariant the workstream names as "no
+/// cross-user leakage": whatever happens to A's run, B's is untouched until B
+/// acts on it.
+///
+/// `scenario_multi_actor_gate_isolation` already pins the approve arm. What it
+/// cannot show is that the OTHER actions are equally scoped — a cancel or a
+/// deny that reached across owners would pass every existing test, because no
+/// existing test applies those actions while a second actor is parked.
+#[tokio::test]
+async fn generated_actions_on_one_actor_never_disturb_another() {
+    for action in ALPHABET {
+        let group = RebornIntegrationGroup::multiuser_approvals()
+            .await
+            .expect("multiuser-approvals group builds");
+
+        let a = group
+            .thread(format!("gen-xuser-a-{action:?}").to_lowercase())
+            .script([
+                RebornScriptedReply::tool_call(
+                    GATED_CAPABILITY,
+                    json!({"path": "/workspace/gen-xuser-a.txt", "content": "a"}),
+                ),
+                RebornScriptedReply::text("a done"),
+            ])
+            .build()
+            .await
+            .expect("actor A thread builds");
+        let b = group
+            .thread(format!("gen-xuser-b-{action:?}").to_lowercase())
+            .with_actor_id("reborn-generated-actor-b")
+            .script([
+                RebornScriptedReply::tool_call(
+                    GATED_CAPABILITY,
+                    json!({"path": "/workspace/gen-xuser-b.txt", "content": "b"}),
+                ),
+                RebornScriptedReply::text("b done"),
+            ])
+            .build()
+            .await
+            .expect("actor B thread builds");
+
+        // Each actor's gate is scoped to its own owner, so auto-approve has to
+        // be disabled per owner rather than globally — otherwise the run
+        // dispatches straight through and never parks.
+        let owner_a = a
+            .binding
+            .subject_user_id
+            .as_ref()
+            .expect("actor A binding has a subject user id");
+        let owner_b = b
+            .binding
+            .subject_user_id
+            .as_ref()
+            .expect("actor B binding has a subject user id");
+        assert_ne!(owner_a, owner_b, "the two actors must be distinct owners");
+        group
+            .disable_auto_approve_for_owner(owner_a)
+            .await
+            .expect("auto-approve disabled for A");
+        group
+            .disable_auto_approve_for_owner(owner_b)
+            .await
+            .expect("auto-approve disabled for B");
+
+        let (run_a, gate_a) = a
+            .submit_turn_until_blocked("actor a writes")
+            .await
+            .expect("actor A parks");
+        let (run_b, gate_b) = b
+            .submit_turn_until_blocked("actor b writes")
+            .await
+            .expect("actor B parks");
+        assert_ne!(
+            gate_a, gate_b,
+            "the two actors must raise distinct gates, or this proves nothing"
+        );
+
+        // Act on A only.
+        match action {
+            GateAction::Approve | GateAction::ApproveAgain => {
+                let _ = a.approve_gate(run_a, &gate_a).await;
+            }
+            GateAction::Deny => {
+                let _ = a.deny_gate(run_a, &gate_a).await;
+            }
+            GateAction::Cancel => {
+                let _ = a.cancel_run(run_a).await;
+            }
+        }
+
+        // B is untouched: still parked on its own gate, and its effect has not
+        // been performed. Status alone is not enough — a leak that resolved B's
+        // gate and ran its write would be invisible if only A were inspected.
+        let b_state = b.run_state(run_b).await.expect("actor B state readable");
+        assert_eq!(
+            b_state.status,
+            TurnStatus::BlockedApproval,
+            "{action:?} on actor A moved actor B to {:?}",
+            b_state.status
+        );
+        let b_effects = b
+            .capability_result_count(GATED_CAPABILITY)
+            .await
+            .expect("actor B effect count readable");
+        assert_eq!(
+            b_effects, 0,
+            "{action:?} on actor A performed actor B's gated effect"
+        );
+
+        // ...and B can still resolve its own gate afterwards, so the isolation
+        // is not simply "B was wedged".
+        b.approve_gate(run_b, &gate_b)
+            .await
+            .expect("actor B resolves its own gate after A acted");
+        b.wait_for_terminal(run_b)
+            .await
+            .expect("actor B settles independently");
     }
 }
