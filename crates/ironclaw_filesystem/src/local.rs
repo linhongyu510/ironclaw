@@ -655,21 +655,50 @@ fn open_one(
     #[cfg(target_os = "linux")]
     {
         use rustix::fs::{ResolveFlags, openat2};
-        match openat2(
-            dir,
-            name,
-            oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            mode,
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        ) {
-            Ok(fd) => return Ok(fd),
-            // Kernel predates openat2 (< 5.6), or a seccomp/container policy
-            // denies the syscall outright. Fall through to the portable
-            // per-component path below rather than failing closed on a
-            // syscall the fallback doesn't need.
-            Err(Errno::NOSYS) => {}
-            Err(Errno::LOOP) | Err(Errno::XDEV) => return Err(ResolveError::Escape),
-            Err(errno) => return Err(ResolveError::Io(errno.into())),
+
+        // `openat2(2)` documents `EAGAIN` for "a resolution restart was
+        // necessary, e.g. because of concurrent rename or unlink of a path
+        // component" — a *legitimate* concurrent mutation (an editor's
+        // atomic save, `git checkout`, a parallel build touching the same
+        // subtree), not an attack. Without a retry, a real, benign rename
+        // racing an unrelated open makes `openat2` spuriously fail and the
+        // caller sees an opaque `Backend` error for an operation that would
+        // have succeeded a moment later. Retry a small, fixed number of
+        // times — each retry is a fresh kernel-side resolution, not a busy
+        // spin on our own state, so the bound only needs to outlast one
+        // rename's duration, not any unbounded contention; the loop always
+        // terminates within `MAX_AGAIN_RETRIES + 1` attempts, never spins
+        // unbounded. What happens when the bound is exhausted is documented
+        // at the `Err(Errno::AGAIN) => break` arm below.
+        const MAX_AGAIN_RETRIES: u8 = 4;
+        let mut retries = 0;
+        loop {
+            match openat2(
+                dir,
+                name,
+                oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                mode,
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+            ) {
+                Ok(fd) => return Ok(fd),
+                // Kernel predates openat2 (< 5.6), or a seccomp/container
+                // policy denies the syscall outright. Fall through to the
+                // portable per-component path below rather than failing
+                // closed on a syscall the fallback doesn't need.
+                Err(Errno::NOSYS) => break,
+                Err(Errno::AGAIN) if retries < MAX_AGAIN_RETRIES => {
+                    retries += 1;
+                    continue;
+                }
+                // Retries exhausted (a pathological, sustained-rename case
+                // rather than one atomic swap): fall through to the
+                // portable per-component path below instead of surfacing an
+                // opaque `Backend` error, since that path does not share
+                // `openat2`'s whole-path-restart-on-`EAGAIN` failure mode.
+                Err(Errno::AGAIN) => break,
+                Err(Errno::LOOP) | Err(Errno::XDEV) => return Err(ResolveError::Escape),
+                Err(errno) => return Err(ResolveError::Io(errno.into())),
+            }
         }
     }
     match rustix::fs::openat(dir, name, oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC, mode) {
