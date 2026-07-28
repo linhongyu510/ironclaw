@@ -1630,6 +1630,22 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Read the run's current state once, without waiting for a condition.
+    ///
+    /// The waiting variants above answer "did it get here eventually", which
+    /// cannot express "it never passed through there". Generated sequence
+    /// tests assert after every transition, so they need the instantaneous
+    /// value rather than a settled one.
+    pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
+        Ok(self
+            .turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await?)
+    }
+
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does
     /// NOT fail fast on an unexpected terminal — caller branches on the result.
     pub async fn wait_for_terminal(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
