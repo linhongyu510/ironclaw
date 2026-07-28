@@ -1191,7 +1191,7 @@ mod retry_after_properties {
             let header = reqwest::header::HeaderValue::from_str(&past.to_rfc2822())
                 .expect("rfc2822 dates are legal header values");
             let delay = parse_retry_after_value(&header);
-            prop_assert!(delay <= Duration::from_secs(MAX_RETRY_AFTER_SECS), "{delay:?}");
+            prop_assert_eq!(delay, Duration::ZERO);
         }
     }
 }
