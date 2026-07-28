@@ -189,9 +189,17 @@ pub enum IronHubPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IronHubResponse {
     pub phase: IronHubPhase,
+    /// How many catalog entries MATCHED the request. For a filtered search this
+    /// is the size of the match, not the size of the catalog — compare against
+    /// `catalog_total` before reporting it as "what is available".
     pub total_entries: usize,
     pub returned_entries: usize,
     pub truncated: bool,
+    /// Total entries in the signed catalog, independent of any query filter.
+    /// Set on discovery responses so a filtered page cannot be mistaken for the
+    /// whole catalog; absent on install responses, which are not a listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_total: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     pub entries: Vec<IronHubEntrySummary>,
@@ -207,17 +215,22 @@ impl IronHubResponse {
             total_entries,
             returned_entries: total_entries,
             truncated: false,
+            catalog_total: None,
             message: None,
             entries,
             lifecycle: None,
         }
     }
 
+    /// `catalog_total` is the size of the whole signed catalog, independent of
+    /// any query filter, so a caller can tell a filtered match from the catalog.
     pub(crate) fn discovered_catalog(
         entries: Vec<IronHubEntrySummary>,
+        catalog_total: usize,
     ) -> Result<Self, IronHubCommandError> {
         let total_entries = entries.len();
-        let complete = Self::discovered(entries);
+        let mut complete = Self::discovered(entries);
+        complete.catalog_total = Some(catalog_total);
         if serialized_len(&complete)? <= MAX_SEARCH_RESPONSE_BYTES {
             return Ok(complete);
         }
@@ -230,6 +243,7 @@ impl IronHubResponse {
             let base_bytes = serialized_len(&Self::incomplete(
                 total_entries,
                 candidate_count,
+                catalog_total,
                 Vec::new(),
             ))?;
             let separator_bytes = candidate_count.saturating_sub(1);
@@ -245,13 +259,18 @@ impl IronHubResponse {
         Ok(Self::incomplete(
             total_entries,
             returned_entries.len(),
+            catalog_total,
             returned_entries,
         ))
     }
 
+    /// `catalog_total` is taken here rather than assigned afterwards so the shape
+    /// measured against `MAX_SEARCH_RESPONSE_BYTES` is exactly the shape emitted —
+    /// assigning it later made the payload larger than the budget that admitted it.
     fn incomplete(
         total_entries: usize,
         returned_entries: usize,
+        catalog_total: usize,
         entries: Vec<IronHubEntrySummary>,
     ) -> Self {
         Self {
@@ -259,6 +278,7 @@ impl IronHubResponse {
             total_entries,
             returned_entries,
             truncated: true,
+            catalog_total: Some(catalog_total),
             message: Some(format!(
                 "INCOMPLETE IRONHUB RESULTS: returned {returned_entries} of {total_entries} matching catalog entries. Do not claim an unreturned package is absent; narrow the search query or call ironhub_info with its exact name."
             )),

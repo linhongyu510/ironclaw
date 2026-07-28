@@ -375,7 +375,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/ironhub_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Optional search query for the signed IronHub catalog." }
+                "query": { "type": "string", "description": "Optional free-text filter matched against entry names and descriptions. OMIT IT to return the entire catalog — that is how you list everything available. A query returns only matching entries: compare total_entries against catalog_total before describing the result as what is available." }
             },
             "additionalProperties": false
         }),
@@ -406,8 +406,17 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "phase": { "type": "string", "enum": ["discovered", "installed"] },
-                "total_entries": { "type": "integer", "minimum": 0 },
+                "total_entries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "How many catalog entries MATCHED the request. With a query this is the size of the match, not the catalog."
+                },
                 "returned_entries": { "type": "integer", "minimum": 0 },
+                "catalog_total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total entries in the signed catalog, ignoring any query filter. When it exceeds total_entries the result is a filtered subset — say so rather than presenting it as everything available."
+                },
                 "truncated": {
                     "type": "boolean",
                     "description": "True when entries is an incomplete prefix of the matching signed catalog. Never infer absence from an incomplete result."
