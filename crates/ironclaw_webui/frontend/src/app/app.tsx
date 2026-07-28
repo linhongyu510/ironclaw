@@ -17,6 +17,7 @@ import { ExtensionsPage } from "../pages/extensions/extensions-page";
 import { SettingsPage } from "../pages/settings/settings-page";
 import { AdminPage } from "../pages/admin/admin-page";
 import { LogsPage } from "../pages/logs/logs-page";
+import { DesignPreviewPage } from "../pages/design-preview/design-preview-page";
 
 function AuthLoading() {
   const t = useT();
@@ -103,6 +104,11 @@ export function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* DEV-only design harness for the OOBE/automations concepts — mounted
+            outside the auth-gated layout so it renders with no backend. Never
+            included in a production build. */}
+        {import.meta.env.DEV &&
+          (<Route path="/design-preview" element={(<DesignPreviewPage />)} />)}
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />

@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webui-v2-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "/private/tmp/claude-501/-Users-rons-near-ai-devprojects-GitHub-ironclaw/ac2d607b-bcb2-4ce0-b317-ca72fe8116a8/scratchpad/dev-webui.sh"
+      ],
+      "port": 5173
+    }
+  ]
+}

@@ -89,6 +89,7 @@ function renderChatInput({
   const components = {
     Button() {},
     Icon() {},
+    ModeSelector() {},
   };
   let stateIndex = 0;
   const context = {
@@ -116,6 +117,7 @@ function renderChatInput({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
+    useAgentMode: () => ["suggest", () => {}],
     authScope: authScopeFn,
     stageFiles: async () => ({ staged: [], errors: [] }),
     useAttachmentConfig: () => ({
