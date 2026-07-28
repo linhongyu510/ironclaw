@@ -138,21 +138,19 @@ pub trait RootFilesystem: Send + Sync {
     /// `MountGrant::target` it already holds, so no caller can reach the
     /// backend without first narrowing containment to its own grant.
     ///
-    /// Default impl is a no-op: mirrors the backend-optionality pattern
-    /// [`put`](Self::put)/[`get`](Self::get) use. Only a backend with
+    /// No default impl: this is a security control, not an optional
+    /// capability, so every implementor must make an explicit containment
+    /// decision instead of silently inheriting a no-op. Only a backend with
     /// OS-level directory-fd containment (the local disk backend,
-    /// `DiskFilesystem`) has a wider-than-granted containment root that
-    /// needs narrowing this way. Row/prefix-scoped backends (Postgres,
-    /// libSQL, in-memory) have no OS path to anchor an fd on and enforce
-    /// containment through their own per-row/prefix scoping instead, so
-    /// inheriting the no-op here is correct for them, not a placeholder
-    /// oversight.
-    async fn ensure_scoped_mount(
-        &self,
-        _virtual_root: &VirtualPath,
-    ) -> Result<(), FilesystemError> {
-        Ok(())
-    }
+    /// `DiskFilesystem`) actually narrows anything here. Row/prefix-scoped
+    /// backends (Postgres, libSQL, in-memory) have no OS path to anchor an fd
+    /// on and enforce containment through their own per-row/prefix scoping
+    /// instead — those must still implement this method, returning `Ok(())`
+    /// with a comment explaining why there is nothing to narrow. Any backend
+    /// that wraps or delegates to another `RootFilesystem` MUST forward this
+    /// call to the inner backend rather than no-op, or containment narrowing
+    /// silently stops propagating through the wrapper.
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError>;
 
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
@@ -455,6 +453,14 @@ mod tests {
                     payload: vec![seq as u8],
                 })
                 .collect())
+        }
+
+        async fn ensure_scoped_mount(
+            &self,
+            _virtual_root: &VirtualPath,
+        ) -> Result<(), FilesystemError> {
+            // Unit-struct fixture with no storage to narrow.
+            Ok(())
         }
     }
 

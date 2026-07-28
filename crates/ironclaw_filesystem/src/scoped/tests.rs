@@ -690,6 +690,14 @@ impl RootFilesystem for TxnStubBackend {
     async fn begin(&self, _path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         Ok(Box::new(StubTxn::default()))
     }
+
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        // Stub fixture with no storage to narrow.
+        Ok(())
+    }
 }
 
 #[derive(Default)]
