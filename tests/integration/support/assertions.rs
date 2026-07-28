@@ -208,6 +208,28 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
+    /// was offered to the model on at least one captured request.
+    pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Ok(());
+        }
+        Err(format!("tool {tool_name:?} was not offered to the model; offered: {names:?}").into())
+    }
+
+    /// No captured request offered a tool with this model-facing wire name.
+    pub fn assert_model_tool_not_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Err(format!(
+                "tool {tool_name:?} must NOT be offered to the model; offered: {names:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -230,6 +252,23 @@ impl RebornIntegrationHarness {
             prompts.len()
         )
         .into())
+    }
+
+    /// Inverse of [`assert_system_prompt_contains`]: assert no captured
+    /// model-visible `System`-role prompt contains `text`. Fails rather than
+    /// passing vacuously when no system prompts were captured.
+    pub async fn assert_system_prompt_excludes(&self, text: &str) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.is_empty() {
+            return Err(format!(
+                "vacuous exclusion: no system prompts were captured; cannot prove {text:?} was omitted"
+            )
+            .into());
+        }
+        if prompts.iter().any(|prompt| prompt.contains(text)) {
+            return Err(format!("captured system prompt unexpectedly contained {text:?}").into());
+        }
+        Ok(())
     }
 
     /// Assert that some model request this thread sent to the scripted provider

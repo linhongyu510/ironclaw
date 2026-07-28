@@ -60,6 +60,13 @@ impl RebornIntegrationGroup {
         Self::builder().builtin_tools().await
     }
 
+    /// Group with the core built-in tools but NO memory package registered —
+    /// the `Disabled` memory-binding shape: zero `ironclaw.memory.*` tools
+    /// reach the model's tool surface.
+    pub async fn builtin_tools_without_memory() -> HarnessResult<Self> {
+        Self::builder().builtin_tools_without_memory().await
+    }
+
     /// Group with extension-lifecycle tools
     /// (extension_search/install/remove). Auto-approve is enabled;
     /// registry credentials are seeded.
@@ -103,6 +110,15 @@ impl RebornIntegrationGroup {
         Self::builder().extension_visibility_probe().await
     }
 
+    /// Group with registry-installed and local prompt-description fixtures
+    /// published together, so the real surface derives and enforces each
+    /// package's description trust independently.
+    pub async fn extension_prompt_description_trust_probe() -> HarnessResult<Self> {
+        Self::builder()
+            .extension_prompt_description_trust_probe()
+            .await
+    }
+
     /// Group whose GitHub extension's credential account resolves to
     /// `AuthRequired`, so a scripted `github.*` tool call raises a real
     /// `TurnStatus::BlockedAuth` gate (E-AUTHGATE seam). Drive with
@@ -141,7 +157,7 @@ impl RebornIntegrationGroup {
         Self::builder().project_lifecycle_fault_injected().await
     }
 
-    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Group whose ONLY capability is `ironclaw.memory.profile_set` (E-PROFILE seam).
     /// Auto-approve is enabled. Use `user_profile_source_for_test()` to read
     /// a written profile back through the same adapter the group's planned
     /// runtime resolves user profiles from.
@@ -292,6 +308,19 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
+    /// Build a core built-in tools group whose runtime registry carries NO
+    /// memory package — the `Disabled` memory-binding shape. See
+    /// [`RebornIntegrationGroup::builtin_tools_without_memory`].
+    pub async fn builtin_tools_without_memory(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::core_builtin::core_builtin_tools(
+            super::super::harness::profiles::core_builtin::CoreBuiltinOptions::default()
+                .without_memory_package(),
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
@@ -433,6 +462,18 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
+    /// Build a prompt-description trust probe group. See
+    /// [`RebornIntegrationGroup::extension_prompt_description_trust_probe`].
+    pub async fn extension_prompt_description_trust_probe(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::extension::
+            extension_prompt_description_trust_probe_tools()
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
     /// Build an auth-gate group. See [`RebornIntegrationGroup::live_auth_gate`].
     ///
     /// No auto-approve disable and no approval-gate evidence: auth gates are
@@ -499,7 +540,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Align `builtin.profile_set`'s executor to the canonical subject user
+        // Align `ironclaw.memory.profile_set`'s executor to the canonical subject user
         // (mirrors `live_approvals`) — otherwise a write and its read-back
         // resolve under different users. Needs `base` first, so can't go
         // through `build_with_capability`.
