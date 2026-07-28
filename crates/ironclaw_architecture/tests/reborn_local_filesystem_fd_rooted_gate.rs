@@ -29,9 +29,15 @@
 //! extracted into `local/fd_resolve.rs` — a module with, by design, zero
 //! dependency on `DiskFilesystem`/`LocalMount`, so it has *even less* reason
 //! than `local.rs` to ever reach for `tokio::fs` or a second path-based
-//! lookup. Both files are gated here, each against the same allowlist;
-//! `fd_resolve.rs` has no `#[cfg(test)]` module of its own today, so its
-//! entire contents are scanned as production code (see
+//! lookup — and its mount-registration layer (`mount_local`,
+//! `ensure_scoped_mount`, `resolve_mount_target`, `LocalMount`/
+//! `MountTarget`) was later extracted again into `local/mount_registry.rs`
+//! once the cross-tenant symlink-escape wiring fix and its fd-growth bound
+//! added enough logic to that one area to earn its own file. All three files
+//! are gated here, each against the same allowlist; `fd_resolve.rs` has no
+//! `#[cfg(test)]` module of its own today, so its entire contents are
+//! scanned as production code, while `mount_registry.rs` (like `local.rs`)
+//! does have one, so only its production half is scanned (see
 //! [`GATED_FILES`]/[`GatedFile`]).
 //!
 //! Scoped to these two files, not the whole crate: `postgres.rs`/
@@ -75,6 +81,10 @@ const GATED_FILES: &[GatedFile] = &[
     GatedFile {
         relative_path: "crates/ironclaw_filesystem/src/local/fd_resolve.rs",
         has_test_module: false,
+    },
+    GatedFile {
+        relative_path: "crates/ironclaw_filesystem/src/local/mount_registry.rs",
+        has_test_module: true,
     },
 ];
 
@@ -249,21 +259,30 @@ fn local_backend_never_reintroduces_banned_path_resolution() {
 // violation (proving no false negative against that violation's shape).
 // ---------------------------------------------------------------------
 
-/// Inserts `addition` immediately *before* `local.rs`'s outer `#[cfg(test)]`
-/// module boundary — i.e. into the production half `production_source`
-/// scans — rather than appending to the end of the file, which would land
-/// past that boundary (inside the discarded test half) and prove nothing.
-fn plant_in_local_rs_production(addition: &str) -> String {
-    let source = read_gated_file("crates/ironclaw_filesystem/src/local.rs");
-    let index = source
-        .find("#[cfg(test)]")
-        .expect("expected to find the `#[cfg(test)]` module boundary in local.rs");
+/// Inserts `addition` immediately *before* a gated file's outer
+/// `#[cfg(test)]` module boundary — i.e. into the production half
+/// `production_source` scans — rather than appending to the end of the
+/// file, which would land past that boundary (inside the discarded test
+/// half) and prove nothing. Shared by every gated file that carries its own
+/// test module (`local.rs`, `mount_registry.rs`); `fd_resolve.rs` has none,
+/// so its own proof-of-binding test appends directly instead.
+fn plant_in_production(relative_path: &str, addition: &str) -> String {
+    let source = read_gated_file(relative_path);
+    let index = source.find("#[cfg(test)]").unwrap_or_else(|| {
+        panic!("expected to find the `#[cfg(test)]` module boundary in {relative_path}")
+    });
     let mut planted = String::with_capacity(source.len() + addition.len());
     planted.push_str(&source[..index]);
     planted.push_str(addition);
     planted.push('\n');
     planted.push_str(&source[index..]);
     planted
+}
+
+/// `local.rs`-specific alias retained for the existing tests below; equivalent
+/// to `plant_in_production("crates/ironclaw_filesystem/src/local.rs", ...)`.
+fn plant_in_local_rs_production(addition: &str) -> String {
+    plant_in_production("crates/ironclaw_filesystem/src/local.rs", addition)
 }
 
 /// The exact evasion the pre-fix gate was proven vulnerable to: aliasing
@@ -354,5 +373,26 @@ fn gate_fails_on_planted_tokio_fs_in_fd_resolve_module() {
         "crates/ironclaw_filesystem/src/local/fd_resolve.rs",
         &source,
         false,
+    );
+}
+
+/// Proves the file-scoping extends to the newest gated file,
+/// `mount_registry.rs` (extracted from `local.rs` for FIX 4) — not just
+/// cosmetically listed in `GATED_FILES` — by planting a direct `tokio::fs`
+/// call into its production half (before the `#[cfg(test)]` boundary, via
+/// [`plant_in_production`], since unlike `fd_resolve.rs` this file does have
+/// its own test module) and confirming the gate still catches it there.
+#[test]
+#[should_panic(expected = "must never reference `tokio::fs`")]
+fn gate_fails_on_planted_tokio_fs_in_mount_registry_module() {
+    let source = plant_in_production(
+        "crates/ironclaw_filesystem/src/local/mount_registry.rs",
+        "\nasync fn planted_regression(path: std::path::PathBuf) -> std::io::Result<Vec<u8>> {\n\
+         \x20\x20\x20\x20tokio::fs::read(path).await\n}\n",
+    );
+    assert_fd_rooted_allowlist(
+        "crates/ironclaw_filesystem/src/local/mount_registry.rs",
+        &source,
+        true,
     );
 }

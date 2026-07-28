@@ -428,7 +428,14 @@ pub(super) fn resolve_walk(
             &budget,
         )?;
     }
-    let fd = open_one(root, cur.as_fd(), leaf, final_oflags, Mode::empty(), &budget)?;
+    let fd = open_one(
+        root,
+        cur.as_fd(),
+        leaf,
+        final_oflags,
+        Mode::empty(),
+        &budget,
+    )?;
     Ok((fd, Some((cur, leaf.clone()))))
 }
 

@@ -147,7 +147,10 @@ pub trait RootFilesystem: Send + Sync {
     /// containment through their own per-row/prefix scoping instead, so
     /// inheriting the no-op here is correct for them, not a placeholder
     /// oversight.
-    async fn ensure_scoped_mount(&self, _virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+    async fn ensure_scoped_mount(
+        &self,
+        _virtual_root: &VirtualPath,
+    ) -> Result<(), FilesystemError> {
         Ok(())
     }
 

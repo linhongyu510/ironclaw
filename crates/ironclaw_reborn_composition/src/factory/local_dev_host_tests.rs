@@ -460,11 +460,10 @@ async fn skills_shared_mount_cross_tenant_symlink_read_through_scoped_skill_mana
     std::fs::create_dir_all(root.join("system/extensions")).expect("system extensions root");
     std::fs::create_dir_all(root.join("system/skills")).expect("system skills root");
 
-    let filesystem: std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem> =
-        std::sync::Arc::new(
-            local_dev_project_filesystem(&root, &workspace_root, None)
-                .expect("local-dev project filesystem, production shape"),
-        );
+    let filesystem: std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem> = std::sync::Arc::new(
+        local_dev_project_filesystem(&root, &workspace_root, None)
+            .expect("local-dev project filesystem, production shape"),
+    );
 
     let scope_a = owner_scope_from_runtime_identity(
         ironclaw_host_api::UserId::new("user-a").expect("user id"),
