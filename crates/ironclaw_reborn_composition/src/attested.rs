@@ -80,11 +80,6 @@ pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore,
 pub(crate) type ComposedContinuationDriver<B, G, L> =
     AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
 
-/// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
-/// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
-pub(crate) type InMemoryContinuationDriver =
-    ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
-
 pub type InMemoryAttestedComposition =
     RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
@@ -135,6 +130,48 @@ impl Broadcaster for NoopBroadcaster {
 ///
 /// Generic over the durable-vs-in-memory grant store `G`, ledger `L`, and
 /// broadcaster `B`.
+/// The attested-signing graph, erased over its persistence backends.
+///
+/// [`RebornAttestedComposition`] is generic over broadcaster / grant store /
+/// ledger, so naming it concretely pins a holder to exactly one backend shape.
+/// That is why `RebornRuntime` could only ever hold the in-memory
+/// monomorphization, leaving the durable PostgreSQL and libSQL compositions
+/// assembled-but-unreachable. Holding this trait instead lets the runtime carry
+/// whichever backend the deployment configured.
+///
+/// The surface is the two handles the product layer needs — the authoritative
+/// bindings and the continuation driver — and nothing else. Raise-path methods
+/// stay off it deliberately: the raise hook holds the concrete composition, so
+/// widening this to `register_attested_gate` would hand every holder of the
+/// erased graph the ability to seal grants.
+#[async_trait::async_trait]
+pub trait AttestedComposition: Send + Sync {
+    /// The authoritative gate-binding store. The same store the driver reads,
+    /// so a caller-supplied identity can be checked against what the raiser
+    /// recorded.
+    fn bindings(&self) -> &Arc<dyn AttestedGateBindingStore>;
+
+    /// The signer-continuation driver, itself erased over its backends.
+    fn driver(&self) -> Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver>;
+}
+
+#[async_trait::async_trait]
+impl<B, G, L> AttestedComposition for RebornAttestedComposition<B, G, L>
+where
+    B: Broadcaster + Send + Sync + 'static,
+    G: SealedGrantStore + Send + Sync + 'static,
+    L: SigningLedger + Send + Sync + 'static,
+    ComposedCustodialSigner<G, L>: ironclaw_attested_runtime::CustodialSignerLike,
+{
+    fn bindings(&self) -> &Arc<dyn AttestedGateBindingStore> {
+        &self.bindings
+    }
+
+    fn driver(&self) -> Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver> {
+        Arc::clone(&self.driver) as Arc<dyn ironclaw_attested_runtime::SignerContinuationDriver>
+    }
+}
+
 pub struct RebornAttestedComposition<B, G, L>
 where
     B: Broadcaster + 'static,

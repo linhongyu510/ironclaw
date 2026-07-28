@@ -1008,7 +1008,7 @@ pub(crate) struct RebornRuntimeStores {
     /// binding store plus the assembled driver, dispatched by the gate/resolve
     /// ingress once a turn reaches `AttestedResolved`. `None` on production
     /// profiles until the durable attested backends are wired.
-    pub(crate) attested_signing: Option<Arc<crate::attested::InMemoryAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<dyn crate::attested::AttestedComposition>>,
     /// The intent store the raise hook mints into, shared with the continuation
     /// port so the lifecycle projection settles the very record the raise wrote.
     /// `None` on production until the durable attested backends are wired.
