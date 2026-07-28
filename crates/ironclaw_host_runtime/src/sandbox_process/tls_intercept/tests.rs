@@ -707,41 +707,40 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
     );
 }
 
-/// The empty-host case above never reaches `ServerName::try_from` at all —
-/// `ca.rs`'s `host.is_empty()` check rejects it first, at the leaf-mint
-/// step, so it cannot prove the *ordering* between the origin dial and the
-/// SNI-host validation. This test needs a host that reaches the leaf mint
-/// and client handshake successfully but still fails `ServerName::
-/// try_from`. `ca.rs::validate_dns_host` used to supply one for free (its
-/// hand-rolled charset check accepted a leading/trailing hyphen that
-/// `ServerName::try_from` rejects) — that divergence was closed by
-/// delegating `validate_dns_host` to `rustls_pki_types::DnsName` (see
-/// `ca::tests::leading_hyphen_label_is_rejected`), so a host that is
-/// syntactically a valid DNS name no longer works here.
+/// The empty-host case above never reaches the SNI-conversion step at
+/// all — `ca.rs`'s `host.is_empty()` check rejects it first, at the
+/// leaf-mint step, so it cannot prove the *ordering* between the origin
+/// dial and SNI-host validation specifically. This test needs a host that
+/// reaches the leaf mint and client handshake successfully but still
+/// fails the SNI-conversion step. Two things used to independently supply
+/// one for free: `ca.rs::validate_dns_host`'s hand-rolled charset check
+/// used to accept a leading/trailing hyphen `ServerName::try_from`
+/// rejects (closed by delegating to `rustls_pki_types::DnsName`, see
+/// `ca::tests::leading_hyphen_label_is_rejected`), and this module's SNI
+/// conversion used to run on the raw, un-normalized `host` parameter
+/// while `issue_leaf_for_host` trimmed and lowercased its own copy
+/// (closed by `terminate_and_forward_core` normalizing once and passing
+/// the same canonical host to both the mint and
+/// [`super::build_sni_server_name`]). With both gaps closed, no runtime
+/// input reaches the leaf mint successfully and still fails a *real*
+/// `ServerName::try_from` — `ca.rs::normalize_host`'s doc spells out why:
+/// one canonicalization, shared by every consumer.
 ///
-/// What still diverges — independent of DNS-name *syntax* — is
-/// canonicalization: `SandboxCertificateAuthority::issue_leaf_for_host`
-/// trims and lowercases `host` before validating and minting (so the
-/// leaf's own SAN/CN is the canonical form), but this module's SNI check a
-/// few lines below constructs `ServerName::try_from` from the *original,
-/// untrimmed* `host` parameter. A host with incidental leading/trailing
-/// whitespace — the exact input the trimming was added to tolerate, per
-/// `issue_leaf_for_host`'s own doc comment — is therefore still accepted
-/// at the mint step and still rejected at the SNI-parse step below. That
-/// is a real, separate defect (the SNI value sent toward the origin should
-/// be built from the same canonical host the leaf was minted for, not
-/// re-derived from the raw parameter) that this PR does not fix, but it
-/// keeps this test's premise genuinely true: the leaf mint and client
-/// handshake below succeed and this test still reaches
-/// `terminate_and_forward_with_timeout`'s SNI-validation step. It pins two
-/// things together: `Err(InvalidSniHost)` (correctness) AND that the
-/// origin listener never observed a connection (the ordering fix) — the
-/// exact combination `invalid_host_fails_before_the_origin_is_dialed`
-/// cannot prove, because it short-circuits before either the dial or the
-/// validation is reached.
+/// So this test pins the *ordering* structurally instead of by input
+/// selection: [`terminate_and_forward_with_forced_sni_failure`] drives
+/// the exact same `terminate_and_forward_core` control flow production
+/// uses, substituting only the SNI-builder closure for one that always
+/// fails. Because the leaf mint, client handshake, and dial all run
+/// through the identical shared function, a forced SNI failure here
+/// proves the real ordering — that step runs (and can fail-closed)
+/// strictly before `TcpStream::connect(dial_addr)` — not a
+/// reimplementation of it. See "PROVE it" evidence in the accompanying
+/// commit: swapping the SNI-check and dial statements in
+/// `terminate_and_forward_core` makes this test fail with the origin
+/// listener observing a connection.
 #[tokio::test]
 async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
-    let host = "  padded-sni-host.example.com  ";
+    let host = "sni-host.example.com";
 
     let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin_listener.local_addr().unwrap();
@@ -750,13 +749,6 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     });
 
     let ca = SandboxCertificateAuthority::generate().unwrap();
-    // Confirm the premise: `ca.rs` trims and accepts this host as a
-    // mintable DNS SAN, so the leaf mint and client handshake below
-    // succeed and this test actually reaches the SNI-validation step, not
-    // `LeafMintFailed`.
-    ca.issue_leaf_for_host(host)
-        .expect("ca.rs must accept a padded host (after trimming) as a mintable host");
-
     let config = TlsInterceptConfig::new(
         ca,
         HashSet::from([host.to_string()]),
@@ -767,17 +759,22 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
-        terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+        terminate_and_forward_with_forced_sni_failure(
+            stream,
+            Vec::new(),
+            host,
+            origin_addr,
+            &config,
+            HANDSHAKE_TIMEOUT,
+        )
+        .await
     });
 
     let client = TcpStream::connect(proxy_addr).await.unwrap();
-    // A real rustls client handshake against our CA-signed leaf, using a
-    // verifier that accepts anything (see `NoVerify`'s doc) — the leaf's
-    // SAN is the padded (untrimmed) `host`, which cannot itself be turned into
-    // a `ServerName` for the client to check against, so client-side cert
-    // verification is not what this test is proving. The SNI value passed
-    // here is arbitrary: `build_server_config`'s comment notes the server
-    // side never consults it.
+    // A real rustls client handshake against our CA-signed leaf — a clean,
+    // syntactically and canonically valid host, so the mint and this
+    // handshake succeed exactly like the production path would; only the
+    // forced SNI-builder closure diverges from production.
     ensure_crypto_provider_installed();
     let client_config = rustls::ClientConfig::builder()
         .dangerous()
@@ -793,7 +790,7 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
         .expect("server task did not panic");
     assert!(
         matches!(result, Err(TlsInterceptError::InvalidSniHost { .. })),
-        "expected Err(InvalidSniHost) for a padded (untrimmed) SNI host, got: {result:?}"
+        "expected Err(InvalidSniHost) for a forced SNI-conversion failure, got: {result:?}"
     );
 
     let origin_result = origin_saw_a_connection
@@ -802,9 +799,9 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     assert!(
         origin_result.is_err(),
         "origin must never be dialed when the SNI host fails validation \
-         (fail-closed before dial) — this is the ordering bug: before the \
-         fix, the origin WAS dialed here because `TcpStream::connect` ran \
-         before `ServerName::try_from`"
+         (fail-closed before dial) — this is the ordering this test pins: \
+         the SNI-conversion step must run, and be allowed to fail-closed, \
+         strictly before `TcpStream::connect(dial_addr)`"
     );
 }
 

@@ -61,7 +61,7 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use super::ca::{LeafCertificate, SandboxCertificateAuthority};
+use super::ca::{LeafCertificate, SandboxCertificateAuthority, normalize_host};
 
 /// Installs rustls's default (`ring`) process-level crypto provider exactly
 /// once. rustls 0.23 requires one to be installed before any `ServerConfig`/
@@ -249,19 +249,24 @@ impl TlsInterceptConfig {
             ca,
             bound_hosts: bound_hosts
                 .into_iter()
-                .map(|host| host.to_ascii_lowercase())
+                .map(|host| normalize_host(&host))
                 .collect(),
             origin_connector,
         }
     }
 
     /// D1's predicate: is `host` one this proxy instance terminates TLS for?
-    /// Case-insensitive to match `egress_proxy::host_allowed`'s own
-    /// normalization. Everything not in this set stays an opaque tunnel —
-    /// see the module doc's D1 section.
+    /// Canonicalizes through the same [`normalize_host`] as
+    /// [`super::ca::SandboxCertificateAuthority::issue_leaf_for_host`] and
+    /// this module's own SNI conversion — case-insensitive (to match
+    /// `egress_proxy::host_allowed`'s own normalization) and whitespace-
+    /// insensitive, so this allowlist check, the leaf mint, and the SNI
+    /// value sent to the origin can never disagree about which host is
+    /// meant. Everything not in this set stays an opaque tunnel — see the
+    /// module doc's D1 section.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn is_bound(&self, host: &str) -> bool {
-        self.bound_hosts.contains(&host.to_ascii_lowercase())
+        self.bound_hosts.contains(&normalize_host(host))
     }
 
     /// Test/introspection seam: how many hosts this config's CA currently
@@ -329,14 +334,100 @@ async fn terminate_and_forward_with_timeout(
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
 ) -> Result<(), TlsInterceptError> {
-    let issued =
-        config
-            .ca
-            .issue_leaf_for_host(host)
-            .map_err(|error| TlsInterceptError::LeafMintFailed {
+    terminate_and_forward_core(
+        client,
+        leftover,
+        host,
+        dial_addr,
+        config,
+        handshake_timeout,
+        build_sni_server_name,
+    )
+    .await
+}
+
+/// Test-only entry point that reaches every step of
+/// [`terminate_and_forward_core`] exactly like production — same
+/// normalization, same leaf mint, same client handshake — but forces the
+/// SNI-conversion step to fail instead of calling the real
+/// [`build_sni_server_name`]. This exists to keep
+/// `invalid_sni_host_fails_before_the_origin_is_dialed` honest once the
+/// leaf-mint/SNI-dial canonicalization asymmetry it used to exercise is
+/// fixed: with both steps sharing [`normalize_host`], no input can any
+/// longer pass the leaf mint and still fail a real `ServerName::try_from`
+/// (see `ca.rs::validate_dns_host`'s doc), so there is no remaining runtime
+/// input that reproduces the original bug's *symptom*. This seam instead
+/// pins the *ordering* directly: whatever makes the SNI step return `Err`,
+/// that `Err` must still surface before `TcpStream::connect(dial_addr)`
+/// ever runs, because both this function and production route through the
+/// identical `terminate_and_forward_core` control flow — only the SNI
+/// builder closure differs. `#[cfg(test)]` means this function does not
+/// exist in a production build.
+#[cfg(test)]
+async fn terminate_and_forward_with_forced_sni_failure(
+    client: TcpStream,
+    leftover: Vec<u8>,
+    host: &str,
+    dial_addr: SocketAddr,
+    config: &TlsInterceptConfig,
+    handshake_timeout: Duration,
+) -> Result<(), TlsInterceptError> {
+    terminate_and_forward_core(
+        client,
+        leftover,
+        host,
+        dial_addr,
+        config,
+        handshake_timeout,
+        |host| {
+            Err(TlsInterceptError::InvalidSniHost {
                 host: host.to_string(),
-                reason: error.to_string(),
-            })?;
+                reason: "forced by test to pin the pre-dial ordering".to_string(),
+            })
+        },
+    )
+    .await
+}
+
+/// The shared core both [`terminate_and_forward_with_timeout`] (production,
+/// via the real [`build_sni_server_name`]) and the test-only
+/// [`terminate_and_forward_with_forced_sni_failure`] (a forced-failure
+/// closure) drive. `sni_server_name` is the *only* thing that differs
+/// between the two callers — every other step, and critically the
+/// leaf-mint-then-SNI-then-dial ordering itself, is identical code, so a
+/// test using the forced closure is exercising the real ordering, not a
+/// reimplementation of it.
+async fn terminate_and_forward_core<F>(
+    client: TcpStream,
+    leftover: Vec<u8>,
+    host: &str,
+    dial_addr: SocketAddr,
+    config: &TlsInterceptConfig,
+    handshake_timeout: Duration,
+    sni_server_name: F,
+) -> Result<(), TlsInterceptError>
+where
+    F: FnOnce(&str) -> Result<ServerName<'static>, TlsInterceptError>,
+{
+    // Normalize once, at this seam's entry, and use the SAME canonical
+    // value for both the leaf mint below and the SNI value threaded to the
+    // origin dial further down. This is the fix for the asymmetry
+    // `normalize_host`'s own doc describes: `issue_leaf_for_host` used to
+    // canonicalize its own copy of `host` while this function passed the
+    // original, un-normalized parameter to `ServerName::try_from` — a
+    // padded host could mint a leaf and complete the client handshake,
+    // then fail SNI conversion because whitespace is not a valid DNS byte.
+    // `issue_leaf_for_host` still normalizes again internally (it must
+    // stay safe to call on its own), but that second normalization is now
+    // idempotent on an already-canonical string, not the only
+    // normalization in the whole path.
+    let host = normalize_host(host);
+    let issued = config.ca.issue_leaf_for_host(&host).map_err(|error| {
+        TlsInterceptError::LeafMintFailed {
+            host: host.clone(),
+            reason: error.to_string(),
+        }
+    })?;
     tracing::debug!(
         host = %issued.certificate.host,
         cache_hit = issued.cache_hit,
@@ -360,27 +451,17 @@ async fn terminate_and_forward_with_timeout(
     // handshake — a client-side failure above never gets this far, so an
     // unbound/failed interception never opens an origin socket either.
     //
-    // Validate the SNI host BEFORE dialing the origin. `ca.rs::
-    // validate_dns_host` now delegates to `rustls_pki_types::DnsName` (the
-    // same type `ServerName::try_from` builds internally) so the two
-    // agree on DNS-name syntax — but a host is threaded through this
-    // module and `ca.rs` as two separate `&str` values (this function's
-    // own `host` parameter here, the CA's internally-canonicalized copy
-    // there), so a canonicalization mismatch between them (e.g. `ca.rs`
-    // trims/lowercases before minting; this construction does not) can
-    // still make a minted leaf's host fail here. This check — and its
-    // placement before the dial — is defense in depth against exactly
-    // that class of residual/future divergence, not a symptom of a known
-    // current one: dialing first would open a real outbound TCP
-    // connection to an attacker-influenced host that is about to be
-    // rejected anyway; validating first means an invalid host never
-    // causes any origin-directed network activity at all.
-    let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
-        TlsInterceptError::InvalidSniHost {
-            host: host.to_string(),
-            reason: error.to_string(),
-        }
-    })?;
+    // Validate the SNI host BEFORE dialing the origin. `host` here is the
+    // same canonicalized value the leaf was minted for above (see the
+    // normalization note at the top of this function), constructed via
+    // `sni_server_name` (production: `build_sni_server_name`, delegating to
+    // `ServerName::try_from`; test-only: a forced-failure closure — see
+    // `terminate_and_forward_with_forced_sni_failure`). Validating before
+    // dialing means an invalid host never causes any origin-directed
+    // network activity at all: dialing first would open a real outbound
+    // TCP connection to an attacker-influenced host that is about to be
+    // rejected anyway.
+    let server_name = sni_server_name(&host)?;
     let origin_stream = tokio::time::timeout(handshake_timeout, TcpStream::connect(dial_addr))
         .await
         .map_err(|_| TlsInterceptError::OriginDialFailed {
@@ -410,6 +491,23 @@ async fn terminate_and_forward_with_timeout(
         .await
         .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
     Ok(())
+}
+
+/// Builds the `ServerName` used for the origin TLS handshake from the
+/// already-canonicalized `host` (see [`terminate_and_forward_core`]'s
+/// normalization note). The only production implementation of the
+/// `sni_server_name` step `terminate_and_forward_core` takes as a
+/// parameter — split out to a named function (rather than an inline
+/// closure at the one production call site) purely so its doc comment has
+/// somewhere to live and so the test-only forced-failure variant in
+/// `terminate_and_forward_with_forced_sni_failure` reads as an obvious,
+/// deliberate substitution for this specific function, not a divergent
+/// reimplementation.
+fn build_sni_server_name(host: &str) -> Result<ServerName<'static>, TlsInterceptError> {
+    ServerName::try_from(host.to_string()).map_err(|error| TlsInterceptError::InvalidSniHost {
+        host: host.to_string(),
+        reason: error.to_string(),
+    })
 }
 
 /// Builds a single-host rustls server config serving exactly the leaf

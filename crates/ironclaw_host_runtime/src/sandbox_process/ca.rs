@@ -244,8 +244,14 @@ impl SandboxCertificateAuthority {
         // variants of the same host multiply cache entries — on a
         // bounded, oldest-first-eviction cache, that lets a peer choosing
         // SNI case variants evict unrelated live entries. Every downstream
-        // use (cache key, SAN, CN) shares this one canonical form.
-        let host = host.trim().to_ascii_lowercase();
+        // use (cache key, SAN, CN) shares this one canonical form. This is
+        // the same [`normalize_host`] callers upstream of this CA (e.g.
+        // `tls_intercept::terminate_and_forward_with_timeout`) apply before
+        // they ever call here — see that function's doc for why a *second*
+        // independent normalization here still matters even once callers
+        // normalize first: this method must stay safe to call with a raw,
+        // unnormalized host on its own.
+        let host = normalize_host(host);
         if host.is_empty() {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox CA: host must not be empty".to_string(),
@@ -416,6 +422,25 @@ impl SandboxCertificateAuthority {
     }
 }
 
+/// The one definition of "the host" for the sandbox TLS-interception seam:
+/// trimmed and lowercased. DNS names are case-insensitive, and an
+/// intercepted CONNECT's host/SNI can carry incidental whitespace, so every
+/// consumer that decides identity from a host string — leaf-cert
+/// mint/cache key ([`SandboxCertificateAuthority::issue_leaf_for_host`]),
+/// the bound-hosts allowlist check (`tls_intercept::TlsInterceptConfig::
+/// is_bound`), and the SNI value threaded to the origin dial
+/// (`tls_intercept::terminate_and_forward_with_timeout`) — must canonicalize
+/// through this exact function. Two independently-normalizing call sites is
+/// precisely how the leaf-mint/SNI-dial asymmetry this function replaces
+/// came to exist: `issue_leaf_for_host` trimmed and lowercased, the SNI
+/// conversion did neither, so a padded host could mint a leaf and pass the
+/// client handshake, then fail `ServerName::try_from` — after the origin
+/// was one step from being dialed. One chokepoint removes the class, not
+/// just this instance of it.
+pub(crate) fn normalize_host(host: &str) -> String {
+    host.trim().to_ascii_lowercase()
+}
+
 fn ca_error(error: rcgen::Error) -> RuntimeProcessError {
     RuntimeProcessError::ExecutionFailed(format!("sandbox CA: {error}"))
 }
@@ -447,8 +472,11 @@ const MAX_DNS_HOST_LEN: usize = 253;
 /// function accepted that `ServerName::try_from` then rejected would burn
 /// a mint on a host that can never complete interception. Delegating means
 /// a host this function accepts is *by construction* one `ServerName::
-/// try_from` also accepts. `host` is expected to already be trimmed and
-/// lowercased by the caller.
+/// try_from` also accepts — including case and padding, since both this
+/// function's caller and `terminate_and_forward_with_timeout` canonicalize
+/// through the same [`normalize_host`] before either the mint or the SNI
+/// conversion runs. `host` is expected to already be trimmed and lowercased
+/// by the caller.
 fn validate_dns_host(host: &str) -> Result<(), RuntimeProcessError> {
     if host.len() > MAX_DNS_HOST_LEN {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
