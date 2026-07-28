@@ -1,4 +1,7 @@
 use super::*;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::UnixTime;
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -8,6 +11,57 @@ use tokio::{
     net::TcpListener,
 };
 use x509_parser::prelude::*;
+
+/// Test-only certificate verifier that accepts anything — used by
+/// [`invalid_sni_host_fails_before_the_origin_is_dialed`] purely to let a
+/// real rustls client complete its handshake against a leaf certificate
+/// whose SAN (a hyphen-prefixed host) cannot itself be turned into a
+/// `ServerName` to check against; the property under test is the *server*
+/// side's dial-vs-validate ordering, not client-side certificate
+/// verification, so skipping verification here does not weaken the
+/// assertion. `dangerous()`/`with_custom_certificate_verifier` are banned
+/// in production `sandbox_process/` code by
+/// `reborn_tls_verification_escape_hatches.rs`, which exempts standalone
+/// `tests.rs` files precisely for cases like this one.
+#[derive(Debug)]
+struct NoVerify;
+
+impl ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 /// Builds a [`VerifiedOriginConnector`] (via the `#[cfg(test)]`-only
 /// [`VerifiedOriginConnector::for_test`] escape hatch) that trusts
@@ -650,6 +704,89 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
     assert!(
         origin_result.is_err(),
         "origin must never be dialed when the host is invalid (fail-closed before dial)"
+    );
+}
+
+/// The empty-host case above never reaches `ServerName::try_from` at all —
+/// `ca.rs`'s `host.is_empty()` check rejects it first, at the leaf-mint
+/// step, so it cannot prove the *ordering* between the origin dial and the
+/// SNI-host validation. This test uses a host that `ca.rs::validate_dns_host`
+/// accepts (its charset/length checks only reject the byte outside
+/// `[a-z0-9-.]`, not the position of a hyphen) but that rustls's
+/// `ServerName::try_from` rejects as an invalid DNS name (a label may not
+/// start or end with a hyphen) — so the leaf mint and client handshake
+/// succeed and this test genuinely reaches
+/// `terminate_and_forward_with_timeout`'s SNI-validation step. It pins two
+/// things together: `Err(InvalidSniHost)` (correctness) AND that the origin
+/// listener never observed a connection (the ordering fix) — the exact
+/// combination `invalid_host_fails_before_the_origin_is_dialed` cannot
+/// prove, because it short-circuits before either the dial or the
+/// validation is reached.
+#[tokio::test]
+async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
+    let host = "-hyphen-prefixed-label-is-not-a-valid-sni-host.example.com";
+
+    let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin_listener.local_addr().unwrap();
+    let origin_saw_a_connection = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
+    });
+
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+    // Confirm the premise: `ca.rs` accepts this host as a mintable DNS SAN,
+    // so the leaf mint and client handshake below succeed and this test
+    // actually reaches the SNI-validation step, not `LeafMintFailed`.
+    ca.issue_leaf_for_host(host)
+        .expect("ca.rs must accept a hyphen-prefixed label as a mintable host");
+
+    let config = TlsInterceptConfig::new(
+        ca,
+        HashSet::from([host.to_string()]),
+        connector_trusting_nothing(),
+    );
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+    });
+
+    let client = TcpStream::connect(proxy_addr).await.unwrap();
+    // A real rustls client handshake against our CA-signed leaf, using a
+    // verifier that accepts anything (see `NoVerify`'s doc) — the leaf's
+    // SAN is the hyphen-prefixed `host`, which cannot itself be turned into
+    // a `ServerName` for the client to check against, so client-side cert
+    // verification is not what this test is proving. The SNI value passed
+    // here is arbitrary: `build_server_config`'s comment notes the server
+    // side never consults it.
+    ensure_crypto_provider_installed();
+    let client_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let server_name = ServerName::try_from("localhost").unwrap();
+    let _ = connector.connect(server_name, client).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server task must finish")
+        .expect("server task did not panic");
+    assert!(
+        matches!(result, Err(TlsInterceptError::InvalidSniHost { .. })),
+        "expected Err(InvalidSniHost) for a hyphen-prefixed label, got: {result:?}"
+    );
+
+    let origin_result = origin_saw_a_connection
+        .await
+        .expect("origin probe task did not panic");
+    assert!(
+        origin_result.is_err(),
+        "origin must never be dialed when the SNI host fails validation \
+         (fail-closed before dial) — this is the ordering bug: before the \
+         fix, the origin WAS dialed here because `TcpStream::connect` ran \
+         before `ServerName::try_from`"
     );
 }
 

@@ -359,6 +359,21 @@ async fn terminate_and_forward_with_timeout(
     // Only reachable once the client trusts our leaf and completed its
     // handshake — a client-side failure above never gets this far, so an
     // unbound/failed interception never opens an origin socket either.
+    //
+    // Validate the SNI host BEFORE dialing the origin. `ca.rs::
+    // validate_dns_host` is a charset/length plausibility filter, not full
+    // RFC 1035 label-syntax enforcement (its own doc comment says so) — it
+    // accepts hosts (e.g. a hyphen-prefixed label) that `ServerName::
+    // try_from` rejects as an invalid DNS name. Dialing first would open a
+    // real outbound TCP connection to an attacker-influenced host that is
+    // about to be rejected anyway; validating first means an invalid host
+    // never causes any origin-directed network activity at all.
+    let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
+        TlsInterceptError::InvalidSniHost {
+            host: host.to_string(),
+            reason: error.to_string(),
+        }
+    })?;
     let origin_stream = tokio::time::timeout(handshake_timeout, TcpStream::connect(dial_addr))
         .await
         .map_err(|_| TlsInterceptError::OriginDialFailed {
@@ -369,12 +384,6 @@ async fn terminate_and_forward_with_timeout(
             dial_addr,
             reason: error.to_string(),
         })?;
-    let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
-        TlsInterceptError::InvalidSniHost {
-            host: host.to_string(),
-            reason: error.to_string(),
-        }
-    })?;
     let mut origin_tls = tokio::time::timeout(
         handshake_timeout,
         config
