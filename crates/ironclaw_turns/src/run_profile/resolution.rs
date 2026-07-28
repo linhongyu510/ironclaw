@@ -572,11 +572,14 @@ fn result_preview_parts(
     else {
         return empty;
     };
-    // `.ok()` intentionally degrades content that fails the credential redaction
-    // contract to an absent preview (a pure text-to-redacted-content conversion);
-    // the full output stays reachable through the result ref, and without inline
-    // content the continuation metadata is useless, so drop both.
-    let Some(preview) = ModelResultPreview::new(text).ok() else {
+    // Content that trips the credential contract is MASKED, not discarded.
+    // Dropping it used to take the continuation metadata with it (see the
+    // `empty` arm), leaving the model an opaque reference it could neither read
+    // nor page — observed in production when one catalog entry's summary said
+    // "no API key required" and the whole 13.7 KB catalog preview vanished.
+    // Masking shows the rest of the payload; the full output remains reachable
+    // through the result ref either way.
+    let Some(preview) = ModelResultPreview::redacted(text).ok() else {
         return empty;
     };
     let referenced_result_ref = if result_ref == own_result_ref.as_str() {
@@ -1608,7 +1611,22 @@ mod tests {
         // Structured content with delimiters + "Secretary" retained verbatim.
         let content = "{\"office\": \"Secretary of the Treasury\", \"rows\": [1, 2, 3]}";
         assert_eq!(refs_preview(content).as_deref(), Some(content));
-        // A genuine credential in the content drops the inline preview to None.
-        assert_eq!(refs_preview("token sk-ant-abc123def456").as_deref(), None);
+
+        // A genuine credential is MASKED, not allowed through — the security
+        // property is unchanged. What changed is the disposal: the preview used
+        // to be dropped entirely, which also dropped the continuation metadata
+        // and left the model an unreadable, unpageable reference. Masking keeps
+        // the surrounding output visible while the secret still never reaches
+        // the model.
+        let masked =
+            refs_preview("token sk-ant-abc123def456").expect("preview is masked, not dropped");
+        assert!(
+            !masked.contains("sk-ant-abc123def456"),
+            "credential material must never reach the model: {masked}"
+        );
+        assert!(
+            masked.contains("token"),
+            "surrounding content must survive redaction: {masked}"
+        );
     }
 }

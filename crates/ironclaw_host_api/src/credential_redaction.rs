@@ -74,6 +74,98 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     false
 }
 
+pub(crate) const CREDENTIAL_REDACTION_PLACEHOLDER: &str = "[redacted]";
+
+/// Mask credential markers and credential-shaped tokens in `value`, preserving
+/// the surrounding content.
+///
+/// This is the redacting counterpart to [`contains_credential_marker`] /
+/// [`contains_secret_like_token`]: where those answer "should this be refused",
+/// this answers "what can safely be shown". A caller holding model-visible
+/// content should prefer masking the offending span over discarding the whole
+/// payload — dropping it loses legitimate output and, on the preview path, the
+/// continuation metadata that travels with it.
+///
+/// NOTE (revisit): the marker list is credential *vocabulary*, so a description
+/// that merely mentions "no API key required" is masked even though it contains
+/// no credential. `contains_unredacted_credential_value` already models the
+/// sharper "label followed by an actual value" rule; moving this to that
+/// predicate would stop masking harmless prose. Deliberately not changed here —
+/// masking is strictly better than today's wholesale refusal, and narrowing the
+/// rule is a separate decision about a shared credential boundary.
+pub(crate) fn redact_credential_text(value: &str) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    let mut rest = value;
+    // Markers are matched case-insensitively at a word boundary, mirroring
+    // `contains_credential_marker`, so "Secretary" is left alone.
+    'outer: while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        let mut best: Option<(usize, usize)> = None;
+        for marker in CREDENTIAL_MARKERS {
+            let mut from = 0;
+            while let Some(found) = lower[from..].find(marker) {
+                let start = from + found;
+                let end = start + marker.len();
+                if marker_at_word_boundary(&lower, start, end) {
+                    if best.is_none_or(|(best_start, _)| start < best_start) {
+                        best = Some((start, end));
+                    }
+                    break;
+                }
+                from = start + 1;
+            }
+        }
+        match best {
+            Some((start, end)) => {
+                redacted.push_str(&rest[..start]);
+                redacted.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+                rest = &rest[end..];
+            }
+            None => {
+                redacted.push_str(rest);
+                break 'outer;
+            }
+        }
+    }
+    redact_secret_like_tokens(&redacted)
+}
+
+/// Replace whole tokens with a credential-shaped prefix (`sk-`, `ghp_`, `AKIA…`).
+fn redact_secret_like_tokens(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut token = String::new();
+    let flush = |out: &mut String, token: &mut String| {
+        if !token.is_empty() {
+            if has_secret_like_prefix(&token.to_ascii_lowercase()) {
+                out.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+            } else {
+                out.push_str(token);
+            }
+            token.clear();
+        }
+    };
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            token.push(character);
+        } else {
+            flush(&mut out, &mut token);
+            out.push(character);
+        }
+    }
+    flush(&mut out, &mut token);
+    out
+}
+
+fn marker_at_word_boundary(lower: &str, start: usize, end: usize) -> bool {
+    let before_ok = lower
+        .get(..start)
+        .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
+    let after_ok = lower
+        .get(end..)
+        .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
+    before_ok && after_ok
+}
+
 /// True when any whitespace/punctuation-delimited token in `lower` (already
 /// lowercased) begins with a credential-shaped prefix (`sk-`, `ghp_`, `AKIA…`).
 pub(crate) fn contains_secret_like_token(lower: &str) -> bool {
