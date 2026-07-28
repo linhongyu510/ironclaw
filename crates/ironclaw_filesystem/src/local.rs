@@ -31,7 +31,7 @@ use crate::{
 /// (arch-simplification §4.4 Bucket 2).
 #[derive(Debug, Default)]
 pub struct DiskFilesystem {
-    mounts: Vec<LocalMount>,
+    mounts: std::sync::RwLock<Vec<LocalMount>>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,47 +128,110 @@ impl DiskFilesystem {
         host_root: HostPath,
         leaf_scoped: bool,
     ) -> Result<(), FilesystemError> {
-        if self
+        // `&mut self`, so `get_mut` never actually contends a lock — this
+        // still goes through the same `RwLock<Vec<LocalMount>>` storage
+        // `ensure_scoped_mount` uses for its `&self` dynamic registration,
+        // rather than keeping two separate storage shapes in sync.
+        let mounts = self
             .mounts
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if mounts
             .iter()
             .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
         {
             return Err(FilesystemError::MountConflict { path: virtual_root });
         }
 
-        let canonical_root = std::fs::canonicalize(host_root.as_path()).map_err(|error| {
-            FilesystemError::Backend {
-                path: virtual_root.clone(),
-                operation: FilesystemOperation::MountLocal,
-                reason: io_reason(error),
-            }
-        })?;
+        let (canonical_root, root_fd) = open_mount_root(&virtual_root, &host_root)?;
+        let _ = canonical_root;
 
-        if !canonical_root.is_dir() {
-            return Err(FilesystemError::Backend {
-                path: virtual_root,
-                operation: FilesystemOperation::MountLocal,
-                reason: "host root is not a directory".to_string(),
-            });
-        }
-
-        let root_fd = rustix::fs::open(
-            &canonical_root,
-            OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )
-        .map_err(|errno| FilesystemError::Backend {
-            path: virtual_root.clone(),
-            operation: FilesystemOperation::MountLocal,
-            reason: io_reason(errno.into()),
-        })?;
-
-        self.mounts.push(LocalMount {
+        mounts.push(LocalMount {
             virtual_root,
             root_fd: Arc::new(root_fd),
             leaf_scoped,
         });
         Ok(())
+    }
+
+    /// Dynamically registers a mount rooted exactly *at* `virtual_root`, if
+    /// one is not already registered there — idempotent, so a repeated call
+    /// for the same `virtual_root` (the usual shape: called on every request
+    /// for a given scope) is a cheap no-op after the first. Unlike
+    /// [`mount_local`](Self::mount_local) (boot-time only, exclusive
+    /// `&mut self`), this takes `&self` so it can be called per request from
+    /// behind a shared `Arc<DiskFilesystem>`.
+    ///
+    /// This is the mechanism that closes a same-storage-root cross-tenant/
+    /// cross-user symlink escape for a mount whose containment root is wider
+    /// than the subtree a specific caller is actually granted (e.g. `/projects`
+    /// mounted once over the whole local-dev storage root, while a caller's
+    /// `/skills` grant only authorizes `/projects/tenants/<t>/users/<u>/skills`).
+    /// The composition layer already knows that exact boundary — it is the
+    /// `MountGrant::target` a scope-aware `MountView` builder computes from
+    /// typed `ResourceScope` fields, not something this crate derives by
+    /// counting path segments. Registering a *second*, narrower mount at that
+    /// literal target makes [`resolve_mount_target`]'s existing
+    /// longest-prefix-wins matching pick it over the wide mount for anything
+    /// under it, so `RESOLVE_BENEATH` (or the portable fallback) enforces
+    /// containment against the caller's own subtree — exactly that subtree,
+    /// no more — rather than the shared parent every caller's subtree lives
+    /// under.
+    ///
+    /// No host path is taken as input: `virtual_root` is resolved through the
+    /// *existing* (necessarily wider) mount that already covers it, via the
+    /// same fd-rooted [`descend_creating`] every other write path in this
+    /// crate uses (creating the directory if this is a brand-new leaf's first
+    /// access, exactly like `descend_creating`'s other callers) — never a
+    /// second, independently-resolved `std::fs` path lookup. The resulting,
+    /// already-open fd becomes the new mount's `root_fd` directly.
+    pub async fn ensure_scoped_mount(
+        &self,
+        virtual_root: VirtualPath,
+    ) -> Result<(), FilesystemError> {
+        if self.has_mount(&virtual_root) {
+            return Ok(());
+        }
+        let target = self.resolve_mount_target(&virtual_root)?;
+        let path = virtual_root.clone();
+        let anchor_fd = run_blocking(path.clone(), FilesystemOperation::MountLocal, move || {
+            descend_creating(target.root_fd.as_fd(), &target.components).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::MountLocal, error)
+            })
+        })
+        .await?;
+
+        let mut mounts = self
+            .mounts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Re-check under the write lock: two concurrent first-callers for
+        // the same scope must not both push a mount for the same
+        // `virtual_root` (that would leave two entries with the same
+        // longest-prefix key — harmless for correctness since both point at
+        // the same host directory, but wasteful and worth avoiding).
+        if mounts
+            .iter()
+            .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
+        {
+            return Ok(());
+        }
+        mounts.push(LocalMount {
+            virtual_root,
+            root_fd: Arc::new(anchor_fd),
+            leaf_scoped: false,
+        });
+        Ok(())
+    }
+
+    fn has_mount(&self, virtual_root: &VirtualPath) -> bool {
+        let mounts = self
+            .mounts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        mounts
+            .iter()
+            .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
     }
 
     /// Routes `path` to its mount and splits the tail into path components
@@ -178,8 +241,11 @@ impl DiskFilesystem {
     /// containment enforcement now happens fd-relatively in [`open_one`] as
     /// each returned component is walked.
     fn resolve_mount_target(&self, path: &VirtualPath) -> Result<MountTarget, FilesystemError> {
-        let mount = self
+        let mounts = self
             .mounts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mount = mounts
             .iter()
             .filter(|mount| path_prefix_matches(mount.virtual_root.as_str(), path.as_str()))
             .max_by_key(|mount| mount.virtual_root.as_str().len())
@@ -735,6 +801,46 @@ pub(super) fn io_error(
 
 fn io_reason(error: std::io::Error) -> String {
     error.kind().to_string()
+}
+
+/// Canonicalizes `host_root` and opens it `O_DIRECTORY | O_NOFOLLOW`, the
+/// shared "turn a host path into a verified mount root fd" step both
+/// `mount_local_impl` (boot-time, static mounts) and `ensure_scoped_mount`
+/// (per-request, dynamic mounts) need. The returned canonical `PathBuf` is
+/// not retained by either caller — only the fd is; this crate never
+/// re-resolves a path string against anything after mount time (see the
+/// `fd_resolve` module doc).
+fn open_mount_root(
+    virtual_root: &VirtualPath,
+    host_root: &HostPath,
+) -> Result<(std::path::PathBuf, OwnedFd), FilesystemError> {
+    let canonical_root =
+        std::fs::canonicalize(host_root.as_path()).map_err(|error| FilesystemError::Backend {
+            path: virtual_root.clone(),
+            operation: FilesystemOperation::MountLocal,
+            reason: io_reason(error),
+        })?;
+
+    if !canonical_root.is_dir() {
+        return Err(FilesystemError::Backend {
+            path: virtual_root.clone(),
+            operation: FilesystemOperation::MountLocal,
+            reason: "host root is not a directory".to_string(),
+        });
+    }
+
+    let root_fd = rustix::fs::open(
+        &canonical_root,
+        OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|errno| FilesystemError::Backend {
+        path: virtual_root.clone(),
+        operation: FilesystemOperation::MountLocal,
+        reason: io_reason(errno.into()),
+    })?;
+
+    Ok((canonical_root, root_fd))
 }
 
 fn stat_modified(secs: i64, nanos: impl TryInto<u32>) -> Option<std::time::SystemTime> {
