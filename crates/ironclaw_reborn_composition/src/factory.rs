@@ -1116,6 +1116,17 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) memory_service_resolver: MemoryServiceResolver,
     pub(crate) workspace_mounts: MountView,
     pub(crate) local_dev_storage_root: Option<PathBuf>,
+    /// `Some(<canonical sandbox workspaces root>)` only for
+    /// `HostedSingleTenantVolumeSandboxed` (a `TenantSandbox` runtime process
+    /// binding) — the SAME root `RebornSandboxConfig::new` rooted the
+    /// container's `/workspace` bind at
+    /// (`sandbox_boot::tenant_sandbox_process_binding`). Distinct from
+    /// `local_dev_storage_root` (the plain, non-sandboxed local-dev storage
+    /// root, always `Some` once local storage builds): `runtime/local_dev.rs`
+    /// must create each invocation's per-user digest-leaf directory under
+    /// THIS root, not the plain one, or the container's bind-mount source
+    /// never gets a leaf directory. `None` for every non-sandboxed build.
+    pub(crate) sandbox_workspaces_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
@@ -3916,6 +3927,18 @@ async fn build_local_storage_production_shaped(
         })?;
         let sandbox_workspaces_root =
             canonicalize_local_dev_path(&sandbox_workspaces_root, "sandbox workspaces root")?;
+        // Carry the CANONICALIZED sandbox workspaces root forward onto
+        // `RebornRuntimeStores` (overwriting `context.sandbox_workspaces_root`'s
+        // pre-canonical input value) so `runtime/local_dev.rs`'s
+        // `RefreshingLoopCapabilityPortFactory` can create each invocation's
+        // per-user digest-leaf directory under the SAME host root the
+        // `TenantSandbox` container's own `/workspace` bind uses
+        // (`WorkspaceRootMode::SandboxUser` above) — not
+        // `local_dev_storage_root` (the plain, non-sandboxed local-dev storage
+        // root), which is a different host tree entirely and left the
+        // container's bind-mount digest leaf never created (first
+        // harness-driven proof of the sandboxed shell path, W6 phase 2).
+        context.sandbox_workspaces_root = Some(sandbox_workspaces_root.clone());
         let users_root = sandbox_workspaces_root.join("users");
         std::fs::create_dir_all(&users_root).map_err(|_| RebornBuildError::InvalidConfig {
             reason: "sandbox user workspace root could not be initialized".to_string(),
@@ -4681,10 +4704,12 @@ async fn build_backend_production(
         sandbox_activity,
         sandbox_egress_proxy,
         sandbox_attribution,
-        // Already consumed above (`workspace_root_mode`'s `is_sandboxed_profile`
-        // branch, computed before this context is passed in here) — not
-        // needed again in this function.
-        sandbox_workspaces_root: _,
+        // Overwritten above (`build_local_storage_production_shaped`'s
+        // `workspace_root_mode`/`is_sandboxed_profile` branch) with the
+        // CANONICALIZED root when this is a sandboxed build; threaded onto
+        // `RebornRuntimeStores` below for `runtime/local_dev.rs` to create
+        // each invocation's per-user digest leaf under the correct root.
+        sandbox_workspaces_root,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -5881,6 +5906,7 @@ async fn build_backend_production(
         memory_service_resolver: memory_resolver,
         workspace_mounts: runtime_workspace_mounts,
         local_dev_storage_root,
+        sandbox_workspaces_root,
         default_system_prompt_path,
         #[cfg(any(test, feature = "test-support"))]
         in_memory_budget_event_sink,

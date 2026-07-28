@@ -117,7 +117,17 @@ pub(super) fn capability_wiring(
         if policy.process_backend
             == ironclaw_host_api::runtime_policy::ProcessBackendKind::TenantSandbox
         {
-            services.local_dev_storage_root.clone()
+            // NOT `local_dev_storage_root`: that is the plain, non-sandboxed
+            // local-dev storage root. The `TenantSandbox` container's own
+            // `/workspace` bind is rooted at `sandbox_workspaces_root`
+            // (`WorkspaceRootMode::SandboxUser`, `factory.rs`) — a distinct
+            // host tree — so the per-invocation digest-leaf directory this
+            // factory creates below must be rooted there too, or the
+            // container's bind-mount source never gets a leaf directory
+            // (surfaced by the first harness-driven sandboxed-shell run,
+            // W6 phase 2: every exec failed `mkdir /workspace/.ironclaw:
+            // No such file or directory`).
+            services.sandbox_workspaces_root.clone()
         } else {
             None
         }
