@@ -58,7 +58,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         capability_manifest(
             IRONHUB_SEARCH_CAPABILITY_ID,
-            "Search the signed IronHub catalog for registry tools and skills.",
+            "Browse or search the signed IronHub catalog of installable tools and skills. Call it with no query to list the whole catalog; pass a query only to filter.",
             vec![EffectKind::Network],
             PermissionMode::Allow,
         )?,

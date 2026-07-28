@@ -21,6 +21,9 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
         &mut output,
         format_args!("returned_entries: {}", response.returned_entries),
     );
+    if let Some(catalog_total) = response.catalog_total {
+        push_line(&mut output, format_args!("catalog_total: {catalog_total}"));
+    }
     push_line(
         &mut output,
         format_args!("truncated: {}", response.truncated),

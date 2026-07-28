@@ -241,7 +241,8 @@ impl IronHubService {
                 .filter(|entry| entry_matches(&entry.name, &entry.description, &query))
                 .map(compact_skill_summary),
         );
-        IronHubResponse::discovered_catalog(entries)
+        let catalog_total = manifest.tools.len() + manifest.skills.len();
+        IronHubResponse::discovered_catalog(entries, catalog_total)
     }
 
     async fn list(
@@ -256,7 +257,8 @@ impl IronHubService {
         if kind != Some(IronHubEntryKind::Tool) {
             entries.extend(manifest.skills.iter().map(compact_skill_summary));
         }
-        IronHubResponse::discovered_catalog(entries)
+        let catalog_total = manifest.tools.len() + manifest.skills.len();
+        IronHubResponse::discovered_catalog(entries, catalog_total)
     }
 
     async fn info(
@@ -373,6 +375,7 @@ impl IronHubService {
                 total_entries: 1,
                 returned_entries: 1,
                 truncated: false,
+                catalog_total: None,
                 message: Some(install_message(
                     kind,
                     name,

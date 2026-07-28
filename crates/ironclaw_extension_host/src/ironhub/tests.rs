@@ -91,6 +91,60 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
     .expect("operator acknowledgement permits install");
 }
 
+/// A query that matches a SUBSET must report the catalog-wide total alongside the
+/// matched count, so a filtered page cannot be read as the whole catalog.
+///
+/// Regression for the live incident behind #6821: asked what was installable, the
+/// agent searched "tool", got back only the entries whose descriptions contain that
+/// word, and reported 3 tools when the signed catalog held 18.
+#[tokio::test]
+async fn execute_search_reports_the_catalog_total_alongside_a_filtered_match_count() {
+    let description = "an integration for records and reports".to_string();
+    let (service, all_names) = catalog_test_service(
+        "filtered-total",
+        "ironhub-filtered-total-owner",
+        18,
+        42,
+        &description,
+    )
+    .await;
+
+    // "zz-final-skill" is the only entry whose name carries this token, so the
+    // match is a strict, non-empty subset of the catalog.
+    let response = service
+        .execute(IronHubCommand::Search {
+            query: "zz-final".to_string(),
+        })
+        .await
+        .expect("filtered catalog search succeeds");
+
+    assert!(
+        response.returned_entries < all_names.len(),
+        "fixture must produce a strict subset, got {} of {}",
+        response.returned_entries,
+        all_names.len()
+    );
+    assert_eq!(
+        response.total_entries, response.returned_entries,
+        "total_entries reports how many entries MATCHED"
+    );
+    assert_eq!(
+        response.catalog_total,
+        Some(all_names.len()),
+        "a filtered result must still report the full catalog size, so the caller \
+         cannot mistake the matched subset for the entire catalog"
+    );
+    assert!(!response.truncated);
+
+    // The wire payload the model sees must carry it too, not just the Rust struct.
+    let payload = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(
+        payload["catalog_total"],
+        serde_json::json!(all_names.len()),
+        "catalog_total must reach the model-visible payload"
+    );
+}
+
 #[tokio::test]
 async fn execute_search_and_list_return_the_complete_catalog_in_a_compact_payload() {
     let description = "long signed catalog description ".repeat(20);
