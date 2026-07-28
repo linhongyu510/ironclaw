@@ -15,7 +15,7 @@ use x509_parser::prelude::*;
 /// Test-only certificate verifier that accepts anything — used by
 /// [`invalid_sni_host_fails_before_the_origin_is_dialed`] purely to let a
 /// real rustls client complete its handshake against a leaf certificate
-/// whose SAN (a hyphen-prefixed host) cannot itself be turned into a
+/// whose SAN (a padded, untrimmed host) cannot itself be turned into a
 /// `ServerName` to check against; the property under test is the *server*
 /// side's dial-vs-validate ordering, not client-side certificate
 /// verification, so skipping verification here does not weaken the
@@ -710,21 +710,38 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
 /// The empty-host case above never reaches `ServerName::try_from` at all —
 /// `ca.rs`'s `host.is_empty()` check rejects it first, at the leaf-mint
 /// step, so it cannot prove the *ordering* between the origin dial and the
-/// SNI-host validation. This test uses a host that `ca.rs::validate_dns_host`
-/// accepts (its charset/length checks only reject the byte outside
-/// `[a-z0-9-.]`, not the position of a hyphen) but that rustls's
-/// `ServerName::try_from` rejects as an invalid DNS name (a label may not
-/// start or end with a hyphen) — so the leaf mint and client handshake
-/// succeed and this test genuinely reaches
+/// SNI-host validation. This test needs a host that reaches the leaf mint
+/// and client handshake successfully but still fails `ServerName::
+/// try_from`. `ca.rs::validate_dns_host` used to supply one for free (its
+/// hand-rolled charset check accepted a leading/trailing hyphen that
+/// `ServerName::try_from` rejects) — that divergence was closed by
+/// delegating `validate_dns_host` to `rustls_pki_types::DnsName` (see
+/// `ca::tests::leading_hyphen_label_is_rejected`), so a host that is
+/// syntactically a valid DNS name no longer works here.
+///
+/// What still diverges — independent of DNS-name *syntax* — is
+/// canonicalization: `SandboxCertificateAuthority::issue_leaf_for_host`
+/// trims and lowercases `host` before validating and minting (so the
+/// leaf's own SAN/CN is the canonical form), but this module's SNI check a
+/// few lines below constructs `ServerName::try_from` from the *original,
+/// untrimmed* `host` parameter. A host with incidental leading/trailing
+/// whitespace — the exact input the trimming was added to tolerate, per
+/// `issue_leaf_for_host`'s own doc comment — is therefore still accepted
+/// at the mint step and still rejected at the SNI-parse step below. That
+/// is a real, separate defect (the SNI value sent toward the origin should
+/// be built from the same canonical host the leaf was minted for, not
+/// re-derived from the raw parameter) that this PR does not fix, but it
+/// keeps this test's premise genuinely true: the leaf mint and client
+/// handshake below succeed and this test still reaches
 /// `terminate_and_forward_with_timeout`'s SNI-validation step. It pins two
-/// things together: `Err(InvalidSniHost)` (correctness) AND that the origin
-/// listener never observed a connection (the ordering fix) — the exact
-/// combination `invalid_host_fails_before_the_origin_is_dialed` cannot
-/// prove, because it short-circuits before either the dial or the
+/// things together: `Err(InvalidSniHost)` (correctness) AND that the
+/// origin listener never observed a connection (the ordering fix) — the
+/// exact combination `invalid_host_fails_before_the_origin_is_dialed`
+/// cannot prove, because it short-circuits before either the dial or the
 /// validation is reached.
 #[tokio::test]
 async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
-    let host = "-hyphen-prefixed-label-is-not-a-valid-sni-host.example.com";
+    let host = "  padded-sni-host.example.com  ";
 
     let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin_listener.local_addr().unwrap();
@@ -733,11 +750,12 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     });
 
     let ca = SandboxCertificateAuthority::generate().unwrap();
-    // Confirm the premise: `ca.rs` accepts this host as a mintable DNS SAN,
-    // so the leaf mint and client handshake below succeed and this test
-    // actually reaches the SNI-validation step, not `LeafMintFailed`.
+    // Confirm the premise: `ca.rs` trims and accepts this host as a
+    // mintable DNS SAN, so the leaf mint and client handshake below
+    // succeed and this test actually reaches the SNI-validation step, not
+    // `LeafMintFailed`.
     ca.issue_leaf_for_host(host)
-        .expect("ca.rs must accept a hyphen-prefixed label as a mintable host");
+        .expect("ca.rs must accept a padded host (after trimming) as a mintable host");
 
     let config = TlsInterceptConfig::new(
         ca,
@@ -755,7 +773,7 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     let client = TcpStream::connect(proxy_addr).await.unwrap();
     // A real rustls client handshake against our CA-signed leaf, using a
     // verifier that accepts anything (see `NoVerify`'s doc) — the leaf's
-    // SAN is the hyphen-prefixed `host`, which cannot itself be turned into
+    // SAN is the padded (untrimmed) `host`, which cannot itself be turned into
     // a `ServerName` for the client to check against, so client-side cert
     // verification is not what this test is proving. The SNI value passed
     // here is arbitrary: `build_server_config`'s comment notes the server
@@ -775,7 +793,7 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
         .expect("server task did not panic");
     assert!(
         matches!(result, Err(TlsInterceptError::InvalidSniHost { .. })),
-        "expected Err(InvalidSniHost) for a hyphen-prefixed label, got: {result:?}"
+        "expected Err(InvalidSniHost) for a padded (untrimmed) SNI host, got: {result:?}"
     );
 
     let origin_result = origin_saw_a_connection

@@ -361,13 +361,20 @@ async fn terminate_and_forward_with_timeout(
     // unbound/failed interception never opens an origin socket either.
     //
     // Validate the SNI host BEFORE dialing the origin. `ca.rs::
-    // validate_dns_host` is a charset/length plausibility filter, not full
-    // RFC 1035 label-syntax enforcement (its own doc comment says so) — it
-    // accepts hosts (e.g. a hyphen-prefixed label) that `ServerName::
-    // try_from` rejects as an invalid DNS name. Dialing first would open a
-    // real outbound TCP connection to an attacker-influenced host that is
-    // about to be rejected anyway; validating first means an invalid host
-    // never causes any origin-directed network activity at all.
+    // validate_dns_host` now delegates to `rustls_pki_types::DnsName` (the
+    // same type `ServerName::try_from` builds internally) so the two
+    // agree on DNS-name syntax — but a host is threaded through this
+    // module and `ca.rs` as two separate `&str` values (this function's
+    // own `host` parameter here, the CA's internally-canonicalized copy
+    // there), so a canonicalization mismatch between them (e.g. `ca.rs`
+    // trims/lowercases before minting; this construction does not) can
+    // still make a minted leaf's host fail here. This check — and its
+    // placement before the dial — is defense in depth against exactly
+    // that class of residual/future divergence, not a symptom of a known
+    // current one: dialing first would open a real outbound TCP
+    // connection to an attacker-influenced host that is about to be
+    // rejected anyway; validating first means an invalid host never
+    // causes any origin-directed network activity at all.
     let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
         TlsInterceptError::InvalidSniHost {
             host: host.to_string(),

@@ -303,6 +303,32 @@ fn consecutive_dots_are_rejected_as_an_empty_label() {
 }
 
 #[test]
+fn leading_hyphen_label_is_rejected() {
+    // Regression for the validator divergence this module used to have
+    // with `rustls_pki_types::ServerName::try_from`: every byte of a
+    // leading- or trailing-hyphen label is inside the old hand-rolled
+    // `[a-z0-9-.]` charset check, so that check accepted it — but
+    // `DnsName`/`ServerName` reject it as invalid RFC 1035 label syntax
+    // (a label may not start or end with a hyphen). `validate_dns_host`
+    // now delegates to `DnsName` so it agrees with `ServerName::try_from`
+    // on hosts like this one — see
+    // `tls_intercept::tests::invalid_sni_host_fails_before_the_origin_is_dialed`
+    // for the end-to-end proof this can no longer reach a leaf mint.
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    let leading = ca.issue_leaf_for_host("-leading-hyphen.example.com");
+    assert!(leading.is_err(), "a leading-hyphen label must be rejected");
+    assert_eq!(ca.cached_entry_count(), 0);
+
+    let trailing = ca.issue_leaf_for_host("trailing-hyphen-.example.com");
+    assert!(
+        trailing.is_err(),
+        "a trailing-hyphen label must be rejected"
+    );
+    assert_eq!(ca.cached_entry_count(), 0);
+}
+
+#[test]
 fn oversized_dns_label_is_rejected() {
     let ca = SandboxCertificateAuthority::generate().unwrap();
     // A single 64-byte label exceeds `MAX_DNS_LABEL_LEN` (63) while the
