@@ -181,13 +181,46 @@ async fn run_sequence(sequence: &[GateAction]) {
     );
 }
 
+/// How long a sequence to enumerate. Pull requests get depth 2 (20 sequences,
+/// ~20s); the nightly deep lane raises it.
+///
+/// Parsed strictly rather than with `unwrap_or(2)`: a typo in the workflow
+/// would otherwise silently run the shallow lane while the job name still
+/// claimed a deep one, which is the failure this epic keeps finding.
+const SEQUENCE_DEPTH_ENV: &str = "IRONCLAW_GENERATED_SEQUENCE_DEPTH";
+const DEFAULT_SEQUENCE_DEPTH: usize = 2;
+
+fn sequence_depth() -> usize {
+    match std::env::var(SEQUENCE_DEPTH_ENV) {
+        Err(std::env::VarError::NotPresent) => DEFAULT_SEQUENCE_DEPTH,
+        Err(err) => panic!("{SEQUENCE_DEPTH_ENV} is not readable: {err}"),
+        Ok(raw) => {
+            let depth: usize = raw.trim().parse().unwrap_or_else(|err| {
+                panic!("{SEQUENCE_DEPTH_ENV}={raw:?} is not a number: {err}")
+            });
+            assert!(
+                (1..=4).contains(&depth),
+                "{SEQUENCE_DEPTH_ENV}={depth} is out of range; depth 0 would \
+                 test nothing and above 4 is {} sequences",
+                ALPHABET.len().pow(5)
+            );
+            depth
+        }
+    }
+}
+
 #[tokio::test]
 async fn generated_gate_sequences_preserve_lifecycle_invariants() {
-    let sequences = sequences(2);
+    let depth = sequence_depth();
+    let sequences = sequences(depth);
     assert!(
         sequences.len() >= ALPHABET.len(),
-        "enumeration produced {} sequences; an empty or truncated list would \
-         pass this test while checking nothing",
+        "enumeration produced {} sequences at depth {depth}; an empty or \
+         truncated list would pass this test while checking nothing",
+        sequences.len()
+    );
+    eprintln!(
+        "generated-gate-sequences: depth {depth}, {} sequences",
         sequences.len()
     );
     for sequence in sequences {
@@ -235,6 +268,13 @@ mod invariant_checker {
     #[should_panic(expected = "a cancelled run reported Completed")]
     fn rejects_a_cancelled_run_completing() {
         observed_with(&[TurnStatus::Cancelled, TurnStatus::Completed]);
+    }
+
+    #[test]
+    fn default_depth_enumerates_more_than_the_alphabet() {
+        // Depth 1 alone would only ever exercise single actions, never an
+        // ordering — which is the entire point of this suite.
+        assert!(sequences(DEFAULT_SEQUENCE_DEPTH).len() > ALPHABET.len());
     }
 
     #[test]
