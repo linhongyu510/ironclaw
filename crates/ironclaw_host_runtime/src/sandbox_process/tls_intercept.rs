@@ -10,10 +10,11 @@
 //! **D1 (hard invariant):** an unbound host MUST stay an opaque
 //! `copy_bidirectional` tunnel with NO leaf cert ever issued for it. This
 //! module never mints or looks up a leaf certificate except from
-//! [`terminate_and_forward`], and `egress_proxy::handle_connect` only calls
-//! that function once it has already confirmed the host is bound (see
-//! [`TlsInterceptConfig::is_bound`]) — an unbound host never reaches this
-//! module at all.
+//! [`terminate_and_forward`], and that function's `host` parameter is a
+//! [`BoundHost`] — the only way to obtain one is
+//! [`TlsInterceptConfig::bind`], which returns `None` for an unbound host —
+//! so an unbound host cannot be *passed* to this module's cert-minting
+//! path at all, not merely "shouldn't be" by caller convention.
 //!
 //! **Binding decision — phase 1 is a flat allowlist, not a binding model.**
 //! [`TlsInterceptConfig`] carries a plain `HashSet<String>` of hosts this
@@ -264,9 +265,42 @@ impl TlsInterceptConfig {
     /// value sent to the origin can never disagree about which host is
     /// meant. Everything not in this set stays an opaque tunnel — see the
     /// module doc's D1 section.
+    ///
+    /// Kept as a free-standing `bool` predicate (rather than folded into
+    /// [`bind`](Self::bind) alone) because `egress_proxy::handle_connect`'s
+    /// routing decision — "does this CONNECT target get the TLS-termination
+    /// path or the opaque tunnel path at all" — is a separate question from
+    /// "hand me proof I can mint a leaf for it," and this module's own tests
+    /// use it to assert the CA's leaf cache stays empty independent of ever
+    /// calling [`terminate_and_forward`].
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn is_bound(&self, host: &str) -> bool {
         self.bound_hosts.contains(&normalize_host(host))
+    }
+
+    /// D1 enforced by construction, not a runtime branch: the **only**
+    /// production door to a [`BoundHost`]. Returns `None` for an unbound
+    /// host instead of an `Err` a caller could `?`-propagate past — there is
+    /// no `BoundHost` value [`terminate_and_forward`] could ever receive for
+    /// a host this config does not terminate TLS for, so a future proxy
+    /// implementation cannot forget the D1 check the way a redundant `if
+    /// !config.is_bound(host) { return Err(..) }` guard could silently stop
+    /// being reachable (e.g. if a caller upstream of it changes and no
+    /// longer calls it) without anyone noticing. Same shape as
+    /// [`VerifiedOriginConnector::from_system_roots`] above for the sibling
+    /// invariant: one checked production constructor, a `#[cfg(test)]`-only
+    /// escape hatch, no bare-`String` overload for a production caller to
+    /// reach for instead.
+    ///
+    /// Routes through the identical [`normalize_host`] [`is_bound`](Self::
+    /// is_bound) and [`terminate_and_forward_core`]'s leaf mint/SNI both
+    /// use, so the allowlist check baked into the returned [`BoundHost`] and
+    /// the value actually threaded through cert minting and SNI can never
+    /// disagree about which host is meant.
+    #[allow(dead_code)] // consumed by W6; not wired yet
+    pub(crate) fn bind(&self, host: &str) -> Option<BoundHost> {
+        let host = normalize_host(host);
+        self.bound_hosts.contains(&host).then_some(BoundHost(host))
     }
 
     /// Test/introspection seam: how many hosts this config's CA currently
@@ -277,6 +311,37 @@ impl TlsInterceptConfig {
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn cached_leaf_count(&self) -> usize {
         self.ca.cached_entry_count()
+    }
+}
+
+/// Proof that [`TlsInterceptConfig::bind`] confirmed a host is one this
+/// proxy instance terminates TLS for (D1) — the wrapped `String` is already
+/// the canonical [`normalize_host`] output. [`terminate_and_forward`] and
+/// [`terminate_and_forward_with_timeout`] take this instead of `host: &str`
+/// plus a separate `config: &TlsInterceptConfig`, so an unbound host cannot
+/// be passed to either function at all: D1 becomes a compile-time property
+/// of the call site instead of a runtime `if` those functions would have to
+/// remember to check (and a future caller could forget to gate on) — see
+/// [`TlsInterceptConfig::bind`]'s doc for why the type was chosen over an
+/// inner guard.
+///
+/// [`TlsInterceptConfig::bind`] is the **only** door — there is no way to
+/// build a `BoundHost` from a caller-supplied `&str` at all, not even under
+/// `#[cfg(test)]`: every test in this module already has a
+/// `TlsInterceptConfig` to `bind` through (unlike [`VerifiedOriginConnector`]
+/// above, whose tests need a permissive connector `from_system_roots` can
+/// never produce, `BoundHost` has no test scenario that needs to skip the
+/// allowlist check, so it gets no escape hatch — the mirrored shape is "one
+/// checked constructor, no bypass," not "always add a `#[cfg(test)]` door.")
+#[allow(dead_code)] // consumed by W6; not wired yet
+pub(crate) struct BoundHost(String);
+
+impl BoundHost {
+    /// Named accessor for the wrapped host, matching this module's other
+    /// newtype ([`VerifiedOriginConnector::connector`]) instead of letting
+    /// callers reach past the type via `.0`.
+    fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -303,6 +368,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// tunnel path already has to handle) — fed to the TLS acceptor before any
 /// further bytes are read off the socket, via [`LeadingBytes`].
 ///
+/// `host` is a [`BoundHost`], not a bare `&str`: D1 ("an unbound host stays
+/// an opaque tunnel, never a leaf mint") is enforced by this signature
+/// itself — the only way to produce a `BoundHost` in a production build is
+/// [`TlsInterceptConfig::bind`], so a caller can no longer forget to gate on
+/// `is_bound` before reaching this function. See [`TlsInterceptConfig::
+/// bind`]'s doc for why that is a type instead of an inner `if`.
+///
 /// Every failure path returns `Err` and touches neither `client` nor an
 /// origin socket again — no code path here ever falls through to a
 /// plaintext relay. `egress_proxy::handle_connect` must preserve that: log
@@ -311,7 +383,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) async fn terminate_and_forward(
     client: TcpStream,
     leftover: Vec<u8>,
-    host: &str,
+    host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
 ) -> Result<(), TlsInterceptError> {
@@ -329,7 +401,7 @@ pub(crate) async fn terminate_and_forward(
 async fn terminate_and_forward_with_timeout(
     client: TcpStream,
     leftover: Vec<u8>,
-    host: &str,
+    host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
@@ -367,7 +439,7 @@ async fn terminate_and_forward_with_timeout(
 async fn terminate_and_forward_with_forced_sni_failure(
     client: TcpStream,
     leftover: Vec<u8>,
-    host: &str,
+    host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
@@ -400,7 +472,7 @@ async fn terminate_and_forward_with_forced_sni_failure(
 async fn terminate_and_forward_core<F>(
     client: TcpStream,
     leftover: Vec<u8>,
-    host: &str,
+    host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
@@ -409,19 +481,21 @@ async fn terminate_and_forward_core<F>(
 where
     F: FnOnce(&str) -> Result<ServerName<'static>, TlsInterceptError>,
 {
-    // Normalize once, at this seam's entry, and use the SAME canonical
-    // value for both the leaf mint below and the SNI value threaded to the
-    // origin dial further down. This is the fix for the asymmetry
-    // `normalize_host`'s own doc describes: `issue_leaf_for_host` used to
-    // canonicalize its own copy of `host` while this function passed the
-    // original, un-normalized parameter to `ServerName::try_from` — a
-    // padded host could mint a leaf and complete the client handshake,
-    // then fail SNI conversion because whitespace is not a valid DNS byte.
-    // `issue_leaf_for_host` still normalizes again internally (it must
-    // stay safe to call on its own), but that second normalization is now
-    // idempotent on an already-canonical string, not the only
-    // normalization in the whole path.
-    let host = normalize_host(host);
+    // `host` arrives already canonicalized — `BoundHost` only exists via
+    // `TlsInterceptConfig::bind`, which normalizes through the same
+    // `normalize_host` this used to call directly here. Use that SAME
+    // canonical value for both the leaf mint below and the SNI value
+    // threaded to the origin dial further down: this is what closes the
+    // asymmetry `normalize_host`'s own doc describes — `issue_leaf_for_host`
+    // used to canonicalize its own copy of `host` while this function
+    // passed the original, un-normalized parameter to `ServerName::
+    // try_from` — a padded host could mint a leaf and complete the client
+    // handshake, then fail SNI conversion because whitespace is not a
+    // valid DNS byte. `issue_leaf_for_host` still normalizes again
+    // internally (it must stay safe to call on its own), but that second
+    // normalization is now idempotent on an already-canonical string, not
+    // the only normalization in the whole path.
+    let host = host.as_str().to_string();
     let issued = config.ca.issue_leaf_for_host(&host).map_err(|error| {
         TlsInterceptError::LeafMintFailed {
             host: host.clone(),

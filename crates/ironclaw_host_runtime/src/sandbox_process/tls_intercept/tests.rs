@@ -151,22 +151,116 @@ fn parse<'a>(pem: &'a str) -> X509Certificate<'a> {
 }
 
 /// D1: an unbound host must never even reach `terminate_and_forward` —
-/// `TlsInterceptConfig::is_bound` is the gate `egress_proxy::
-/// handle_connect` checks before calling it. Pinning this at the
-/// config-predicate level (rather than only end-to-end through the
-/// proxy) keeps the assertion tied directly to the CA's own cache
-/// counter, independent of `egress_proxy`'s plumbing.
-#[test]
-fn unbound_host_is_not_bound_and_mints_no_leaf() {
+/// `TlsInterceptConfig::bind` is the gate that makes this a compile-time
+/// property (D1 enforced by construction, see `BoundHost`'s doc): there is
+/// no `BoundHost` value this test, or any other caller, could construct for
+/// "unbound.example.com" outside `#[cfg(test)]`, so the literal "call
+/// `terminate_and_forward` with an unbound host and assert nothing
+/// happened" test is now impossible to write — a compile error, not a
+/// runtime path. `is_bound` is still exercised directly too, since it
+/// remains the separate predicate `egress_proxy::handle_connect` would use
+/// for routing (see its doc).
+///
+/// This also closes the real gap the previous version of this test left
+/// open: it only ever exercised the free `is_bound` predicate and the CA's
+/// cache counter, never `terminate_and_forward` itself. Below, the one
+/// `BoundHost` `bind` can actually produce is driven through
+/// `terminate_and_forward` for real — proving a leaf IS minted for a bound
+/// host, the positive counterpart to "an unbound host mints no leaf". The
+/// client sends garbage instead of a `ClientHello`, so the handshake fails
+/// deterministically right after the leaf-mint step, which is enough to
+/// prove the leaf was minted without this test also needing to stand up a
+/// full origin server (see
+/// `bound_host_is_intercepted_with_our_ca_and_relays_bytes` for that full
+/// end-to-end proof).
+#[tokio::test]
+async fn unbound_host_is_not_bound_and_mints_no_leaf() {
     let ca = SandboxCertificateAuthority::generate().unwrap();
     let bound_hosts = HashSet::from(["bound.example.com".to_string()]);
     let config = TlsInterceptConfig::new(ca, bound_hosts, connector_trusting_nothing());
 
     assert!(!config.is_bound("unbound.example.com"));
     assert!(config.is_bound("bound.example.com"));
-    // No leaf was ever minted for either host by constructing/querying
-    // the config alone — the cache is still empty.
-    assert_eq!(config.ca.cached_entry_count(), 0);
+    assert!(config.bind("unbound.example.com").is_none());
+    let bound_host = config
+        .bind("bound.example.com")
+        .expect("a bound host must produce a BoundHost");
+    // No leaf was ever minted for either host by constructing/querying the
+    // config or calling `bind` alone — the cache is still empty right up
+    // until `terminate_and_forward` actually runs, below.
+    assert_eq!(config.cached_leaf_count(), 0);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let unreachable_origin_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        let result = terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            unreachable_origin_addr,
+            &config,
+        )
+        .await;
+        (result, config.cached_leaf_count())
+    });
+
+    let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+    raw_client
+        .write_all(b"this is not a tls client hello at all")
+        .await
+        .unwrap();
+    drop(raw_client);
+
+    let (result, cached_leaf_count_after) =
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic");
+    assert!(
+        matches!(result, Err(TlsInterceptError::ClientHandshakeFailed(_))),
+        "expected a client handshake failure, got: {result:?}"
+    );
+    assert_eq!(
+        cached_leaf_count_after, 1,
+        "a bound host driven through terminate_and_forward must mint exactly one leaf"
+    );
+}
+
+/// [`TlsInterceptConfig::bind`] must apply the same [`normalize_host`]
+/// canonicalization [`TlsInterceptConfig::is_bound`] does — otherwise the
+/// allowlist check and the value actually threaded through cert minting and
+/// SNI could disagree about which host is meant (the exact asymmetry bug
+/// `terminate_and_forward_core`'s doc describes for the leaf-mint/SNI
+/// pair). Mixed-case and padded hosts must resolve identically through
+/// both.
+#[test]
+fn bind_applies_the_same_normalization_as_is_bound() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+    let bound_hosts = HashSet::from(["bound.example.com".to_string()]);
+    let config = TlsInterceptConfig::new(ca, bound_hosts, connector_trusting_nothing());
+
+    for candidate in [
+        "BOUND.EXAMPLE.COM",
+        "Bound.Example.Com",
+        "  bound.example.com  ",
+    ] {
+        assert!(
+            config.is_bound(candidate),
+            "is_bound must accept {candidate:?}"
+        );
+        let bound = config
+            .bind(candidate)
+            .unwrap_or_else(|| panic!("bind must accept {candidate:?}"));
+        assert_eq!(
+            bound.as_str(),
+            "bound.example.com",
+            "bind must canonicalize {candidate:?} the same way is_bound's own \
+             normalize_host check does"
+        );
+    }
+    assert!(config.bind("unbound.example.com").is_none());
 }
 
 /// `is_bound`'s doc comment claims case-insensitive matching "to match
@@ -246,7 +340,8 @@ async fn bound_host_is_intercepted_with_our_ca_and_relays_bytes() {
             .read_exact(&mut leftover)
             .await
             .expect("reads the buffered ClientHello prefix");
-        terminate_and_forward(stream, leftover.to_vec(), host, origin_addr, &config).await
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        terminate_and_forward(stream, leftover.to_vec(), bound_host, origin_addr, &config).await
     });
 
     // The "container" side: a real rustls client, trusting only OUR
@@ -351,7 +446,8 @@ async fn client_handshake_failure_never_dials_the_origin() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
-        terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await
     });
 
     let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
@@ -410,7 +506,8 @@ async fn origin_handshake_failure_never_leaks_plaintext_to_the_origin() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
-        terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await
     });
 
     // The "container" side trusts OUR ca, so its own handshake with the
@@ -476,10 +573,11 @@ async fn client_handshake_times_out_instead_of_hanging_forever() {
     let unreachable_origin_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
+        let bound_host = config.bind(host).expect("host is bound in this test");
         terminate_and_forward_with_timeout(
             stream,
             Vec::new(),
-            host,
+            bound_host,
             unreachable_origin_addr,
             &config,
             Duration::from_millis(200),
@@ -675,7 +773,9 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
-        let result = terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await;
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        let result =
+            terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await;
         (result, config.cached_leaf_count())
     });
 
@@ -759,10 +859,11 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
+        let bound_host = config.bind(host).expect("host is bound in this test");
         terminate_and_forward_with_forced_sni_failure(
             stream,
             Vec::new(),
-            host,
+            bound_host,
             origin_addr,
             &config,
             HANDSHAKE_TIMEOUT,

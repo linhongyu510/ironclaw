@@ -94,13 +94,14 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     // 4 -> 5 for `VerifiedOriginConnector::from_system_roots`, the type's
     // only production constructor, then 5 -> 6 for `from_root_store`, the
     // fail-closed empty-store core it delegates to (split out so that
-    // branch is unit-testable without faking the OS trust store) —
-    // unwired for the same reason.
+    // branch is unit-testable without faking the OS trust store), then
+    // 6 -> 7 for `TlsInterceptConfig::bind`, D1's only production door to a
+    // `BoundHost` — unwired for the same reason.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 6,
+        count: 7,
     },
     FrozenPathCount {
         category: "dead-code",
@@ -284,7 +285,11 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     },
     // Bumped 1 -> 2 for `VerifiedOriginConnector::for_test`, the
     // `#[cfg(test)]`-only escape hatch that keeps a permissive connector
-    // unreachable from a production build.
+    // unreachable from a production build. `BoundHost` (D1's own
+    // construction gate) deliberately gets no matching escape hatch — every
+    // test already has a `TlsInterceptConfig` to `TlsInterceptConfig::bind`
+    // through, so there is no test scenario that needs to bypass the
+    // allowlist check, and this count does not grow for it.
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
