@@ -857,6 +857,15 @@ mod tests {
             .await
             .expect("echo listener binds");
         let echo_port = echo_listener.local_addr().unwrap().port();
+        // Proves the ordering, not just the outcome: the allowlist check must
+        // reject the CONNECT before the proxy ever dials the origin. If the
+        // deny check ran after (or raced) the dial, this fake origin would
+        // see a real TCP connection despite the client getting a 403 — the
+        // same "record whether the origin was ever dialed" pattern as
+        // `tls_intercept::client_handshake_failure_never_dials_the_origin`.
+        let origin_saw_a_connection = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(300), echo_listener.accept()).await
+        });
 
         let proxy = EgressAllowlistProxy::new(policy_allowing(&["github.com"]));
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
@@ -885,6 +894,15 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
+
+        let origin_result = origin_saw_a_connection
+            .await
+            .expect("origin probe task did not panic");
+        assert!(
+            origin_result.is_err(),
+            "the denied host's origin must never be dialed — the allowlist check must run \
+             strictly before any connection attempt"
+        );
     }
 
     /// E2 hardening 1 (SSRF/DNS-rebinding guard) — headline test. A host
@@ -1067,6 +1085,187 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
+    }
+
+    /// Plain-HTTP mirror of `connect_to_denied_host_returns_403_and_closes`:
+    /// the CONNECT and plain-HTTP forward paths are two independently
+    /// implemented handlers (`handle_connect` / `handle_plain_http`), each
+    /// with its own allowlist-then-dial ordering — a `FixedAddrResolver`
+    /// stands a real listener in as the origin the denied host would
+    /// resolve to, so a bug that let `handle_plain_http` dial before
+    /// checking the allowlist would show up as a real connection here even
+    /// though `example.com` itself is never reachable in this environment.
+    #[tokio::test]
+    async fn plain_http_to_denied_host_never_dials_the_origin() {
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener binds");
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let origin_saw_a_connection = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
+        });
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["github.com"]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        client
+            .write_all(b"GET http://example.com/index.html HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .expect("plain HTTP request writes");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full 403 response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403 Forbidden, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        let origin_result = origin_saw_a_connection
+            .await
+            .expect("origin probe task did not panic");
+        assert!(
+            origin_result.is_err(),
+            "the denied host's origin must never be dialed on the plain-HTTP forward path \
+             either — the allowlist check must run strictly before any connection attempt"
+        );
+    }
+
+    /// A CONNECT target with no `:port` suffix at all (e.g. a client that
+    /// sends `CONNECT github.com HTTP/1.1` instead of `CONNECT
+    /// github.com:443 HTTP/1.1`) must be denied even though the hostname
+    /// itself passes the allowlist — `handle_connect` has no port to pin
+    /// against and denies rather than assuming one.
+    #[tokio::test]
+    async fn connect_target_without_a_port_is_denied() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["github.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        client
+            .write_all(b"CONNECT github.com HTTP/1.1\r\n\r\n")
+            .await
+            .expect("CONNECT request writes");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full 403 response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403 Forbidden for a portless CONNECT target, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// An allowlisted, well-formed CONNECT whose resolved origin refuses the
+    /// connection must surface a clean `502 Bad Gateway` to the client
+    /// rather than hanging or crashing the connection handler — the origin
+    /// is untrusted infrastructure the proxy does not control.
+    #[tokio::test]
+    async fn connect_to_allowed_host_with_unreachable_origin_returns_502() {
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["unreachable.example"]),
+            // Port 1 on loopback: nothing listens there, so the OS refuses
+            // the connection immediately instead of timing out.
+            resolver: Arc::new(FixedAddrResolver("127.0.0.1:1".parse().unwrap())),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        client
+            .write_all(b"CONNECT unreachable.example:443 HTTP/1.1\r\n\r\n")
+            .await
+            .expect("CONNECT request writes");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 502"),
+            "expected 502 Bad Gateway for an unreachable origin, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// `host_allowed` is the pure decision function both `handle_connect`
+    /// and `handle_plain_http` gate their dial on. Pin its normalization
+    /// directly: DNS hostnames the container sends may differ in case or
+    /// carry a trailing root-zone dot from the client's own resolver, and
+    /// neither may cause a host that should be denied to slip through, nor
+    /// a host that should be allowed to be spuriously rejected.
+    #[test]
+    fn host_allowed_normalizes_case_and_trailing_dot() {
+        let policy = policy_allowing(&["api.github.com", "*.pypi.org"]);
+
+        assert!(
+            host_allowed("api.github.com", &policy),
+            "exact-case match must be allowed"
+        );
+        assert!(
+            host_allowed("API.GITHUB.COM", &policy),
+            "an upper-case host must still match a lower-case allowlist entry"
+        );
+        assert!(
+            host_allowed("Api.GitHub.Com.", &policy),
+            "mixed case plus a trailing root-zone dot must still match"
+        );
+        assert!(
+            host_allowed("files.pypi.org", &policy),
+            "a `*.suffix` glob must match case-normalized subdomains"
+        );
+        assert!(
+            host_allowed("FILES.PYPI.ORG.", &policy),
+            "a `*.suffix` glob must match upper-case, dot-padded subdomains too"
+        );
+        assert!(
+            !host_allowed("api.github.com.evil.example", &policy),
+            "a denied host must not slip through by merely containing an allowed suffix"
+        );
+        assert!(
+            !host_allowed("notgithub.com", &policy),
+            "an unrelated host must stay denied"
+        );
     }
 
     /// Mirrors `connect_to_allowed_host_non_443_port_returns_403`: the
