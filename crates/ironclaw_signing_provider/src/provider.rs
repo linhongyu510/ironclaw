@@ -216,11 +216,7 @@ mod tests {
             proof: &SigningProof,
         ) -> Result<VerifiedProof, SigningProviderError> {
             if self.accept {
-                Ok(VerifiedProof::new(
-                    self.id,
-                    *approved_tx_hash,
-                    proof.clone(),
-                ))
+                Ok(VerifiedProof::new(self, *approved_tx_hash, proof.clone()))
             } else {
                 Err(SigningProviderError::SignerMismatch)
             }

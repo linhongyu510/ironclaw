@@ -29,13 +29,37 @@ use ironclaw_signing_provider::{
 
 /// The composite identity of a signing grant.
 ///
-/// Two requests are "the same grant" iff every component matches. The key
-/// deliberately omits `scope`/`actor` from [`SigningContext`]: a grant is
+/// Two requests are "the same grant" iff every component matches. A grant is
 /// keyed by *who* (`tenant`, `user`), *which run* (`run_id`), *which gate*
 /// (`gate_ref`), *exactly what* (`approved_tx_hash`), and *with which key on
 /// which chain* (`key_or_account_id`, `chain_id`). Any mismatch in these
 /// components is a different grant and therefore [`GrantError::NotFound`] on
 /// claim.
+///
+/// # Why `scope` / `actor` are not part of the key
+///
+/// This omission is deliberate, and it is **not** the reason a foreign caller
+/// cannot claim someone else's grant. Adding them here would be inert, because
+/// the key cannot disagree with itself:
+///
+/// * At seal time the key is derived from the raise-time [`SigningContext`],
+///   which is then stored inside the authoritative gate binding.
+/// * At claim time it is derived from `binding.context` — that same stored
+///   context — on every path. The driver hands `&binding.context` to
+///   `SigningProvider::verify_resume`, so the custodial signer and all three
+///   external-wallet providers key off the binding rather than off anything
+///   the caller supplied.
+///
+/// Both sides therefore read the same value by construction: `scope` and
+/// `actor` could never differ between seal and claim, so keying on them would
+/// add two fields that can only ever agree.
+///
+/// The real cross-caller check is `assert_binding_owner` in the continuation
+/// driver, which compares the **caller's** identity against the binding
+/// *before* the grant is claimed, and fails closed indistinguishably from a
+/// missing binding (no existence oracle). Enforcement belongs there — where a
+/// caller-supplied identity actually enters — not in this key. If you are here
+/// because it looks like an authorization gap, that is the code to read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GrantKey {
     /// Tenant boundary.
@@ -57,8 +81,11 @@ pub struct GrantKey {
 impl GrantKey {
     /// Derive a grant key from a [`SigningContext`] and the approved-tx hash.
     ///
-    /// `scope` and `actor` are intentionally not part of the key (see the type
-    /// docs).
+    /// Callers must pass the context from the **authoritative gate binding**,
+    /// never a caller-supplied one — that is what makes the seal-time and
+    /// claim-time keys agree by construction. `scope` and `actor` are
+    /// intentionally not part of the key; see the type docs for why, and for
+    /// where cross-caller enforcement actually lives.
     pub fn from_context(ctx: &SigningContext, approved_tx_hash: ApprovedTxHash) -> Self {
         Self {
             tenant: ctx.tenant.clone(),

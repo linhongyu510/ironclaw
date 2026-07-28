@@ -44,28 +44,58 @@ impl SigningProof {
 
 /// A [`SigningProof`] that a provider's verifier has validated.
 ///
-/// A `VerifiedProof` is a *trust token*: its mere existence is evidence that a
-/// provider's verifier ran and accepted the proof against a specific binding.
-/// To keep that guarantee meaningful, the type is deliberately
-/// **un-deserializable** — it derives [`Serialize`] but not [`Deserialize`], so
-/// an untrusted payload can never be rehydrated into a "verified" value off the
-/// wire. The only way to obtain one is [`VerifiedProof::new`], called by a
-/// provider's verifier after [`crate::SigningProvider::verify_resume`] succeeds.
+/// # What this type does and does not guarantee
 ///
-/// It also binds the [`ProviderId`] and [`ApprovedTxHash`] that were checked, so
-/// a verified proof cannot be silently re-pointed at a different provider or
-/// transaction. The actual verification logic (signature recovery, WebAuthn RP
-/// checks, scope checks) lives in the provider / attestation crates downstream;
-/// this type is the trait-level token they return.
+/// A `VerifiedProof` is a *provenance* token, not a proof of correctness. Be
+/// precise about the difference, because the gap is where a false sense of
+/// safety would live:
 ///
-/// The following must not compile — `VerifiedProof` is intentionally not
-/// `Deserialize`, so it cannot be forged from an untrusted payload:
+/// * **Guaranteed:** the value was minted by code holding a
+///   [`SigningProvider`], and its [`ProviderId`] is that provider's own
+///   identity. It cannot be rehydrated from the wire — the type derives
+///   [`Serialize`] but deliberately not [`Deserialize`] — and it cannot be
+///   minted by the driver, composition, or product layers, which hold no
+///   provider.
+/// * **NOT guaranteed:** that any cryptographic check actually ran. The
+///   [`SigningProvider`] trait *requires* implementors to produce this type, so
+///   a buggy or hostile provider can return one having checked nothing. No type
+///   signature can close that: the trust boundary for provider *conduct* is
+///   registration (which providers the registry admits), not construction.
+///
+/// So: treat a `VerifiedProof` as "provider P asserts this proof is good for
+/// this hash", never as "this proof is good". The driver relies on the former
+/// and re-reads the authoritative binding for everything else.
+///
+/// The identity is taken from the verifier rather than passed beside it, so a
+/// provider cannot stamp another provider's [`ProviderId`] onto a proof it
+/// minted — the mismatch is unrepresentable rather than merely discouraged.
+///
+/// The actual verification logic (signature recovery, WebAuthn RP checks, scope
+/// checks) lives in the provider / attestation crates downstream; this type is
+/// the trait-level token they return.
+///
+/// `VerifiedProof` is intentionally not `Deserialize`, so it cannot be forged
+/// from an untrusted payload:
 ///
 /// ```compile_fail
 /// use ironclaw_signing_provider::VerifiedProof;
 ///
 /// fn requires_deserialize<'de, T: serde::Deserialize<'de>>() {}
 /// requires_deserialize::<VerifiedProof>();
+/// ```
+///
+/// Nor can it be minted without a provider in hand, which keeps every layer
+/// downstream of the registry from manufacturing its own trust token:
+///
+/// ```compile_fail
+/// use ironclaw_signing_provider::{ApprovedTxHash, ProviderId, SigningProof, VerifiedProof};
+///
+/// // No `SigningProvider` here — there is no constructor to reach.
+/// let _ = VerifiedProof::new(
+///     ProviderId::Injected,
+///     ApprovedTxHash::from_bytes([0u8; 32]),
+///     SigningProof::InjectedProof(vec![]),
+/// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedProof {
@@ -75,18 +105,23 @@ pub struct VerifiedProof {
 }
 
 impl VerifiedProof {
-    /// Wrap a proof that a downstream verifier has accepted.
+    /// Wrap a proof that `verifier` has accepted.
     ///
-    /// Call this only from a provider's verifier *after* it has cryptographically
-    /// validated `proof` against `approved_tx_hash` and the signing context.
-    /// Constructing a `VerifiedProof` asserts that verification succeeded.
-    pub fn new(
-        provider_id: ProviderId,
-        approved_tx_hash: ApprovedTxHash,
-        proof: SigningProof,
-    ) -> Self {
+    /// Call this only from a provider's own
+    /// [`verify_resume`](crate::SigningProvider::verify_resume), *after* it has
+    /// cryptographically validated `proof` against `approved_tx_hash` and the
+    /// signing context — pass `self` as `verifier`.
+    ///
+    /// Taking the provider by reference is what keeps non-provider code from
+    /// minting a trust token, and taking the [`ProviderId`] from
+    /// [`SigningProvider::provider_id`] rather than as a separate argument is
+    /// what makes a mis-stamped identity unrepresentable.
+    pub fn new<P>(verifier: &P, approved_tx_hash: ApprovedTxHash, proof: SigningProof) -> Self
+    where
+        P: crate::SigningProvider + ?Sized,
+    {
         Self {
-            provider_id,
+            provider_id: verifier.provider_id(),
             approved_tx_hash,
             proof,
         }
@@ -157,11 +192,47 @@ mod tests {
         );
     }
 
+    /// A verifier that reports one identity. Used to prove the minted proof
+    /// takes its `provider_id` from the verifier itself.
+    struct StubVerifier {
+        id: ProviderId,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::SigningProvider for StubVerifier {
+        fn provider_id(&self) -> ProviderId {
+            self.id
+        }
+        fn trust_model(&self) -> crate::TrustModel {
+            crate::TrustModel::ExternalWallet
+        }
+        async fn initiate(
+            &self,
+            _context: &crate::SigningContext,
+            _decoded: &crate::transaction::DecodedTransaction,
+            _rendered: &crate::transaction::RenderedTx,
+            _approved_tx_hash: &ApprovedTxHash,
+        ) -> Result<crate::InitiationOutcome, crate::SigningProviderError> {
+            Ok(crate::InitiationOutcome::ReadyForProof)
+        }
+        async fn verify_resume(
+            &self,
+            _context: &crate::SigningContext,
+            approved_tx_hash: &ApprovedTxHash,
+            proof: &SigningProof,
+        ) -> Result<VerifiedProof, crate::SigningProviderError> {
+            Ok(VerifiedProof::new(self, *approved_tx_hash, proof.clone()))
+        }
+    }
+
     #[test]
     fn verified_proof_serializes_binding_but_is_not_deserializable() {
         let approved_tx_hash = ApprovedTxHash::from_bytes([9u8; 32]);
         let proof = SigningProof::InjectedProof(vec![5, 6]);
-        let verified = VerifiedProof::new(ProviderId::Injected, approved_tx_hash, proof.clone());
+        let verifier = StubVerifier {
+            id: ProviderId::Injected,
+        };
+        let verified = VerifiedProof::new(&verifier, approved_tx_hash, proof.clone());
 
         // Accessors expose the bound identity, hash, and proof.
         assert_eq!(verified.provider_id(), ProviderId::Injected);
@@ -177,9 +248,32 @@ mod tests {
         );
         assert_eq!(json["proof"]["kind"], "injected_proof");
 
-        // It is NOT deserializable — the `compile_fail` doctest on the type locks
-        // in that a `VerifiedProof` can never be rehydrated from an untrusted
-        // payload, so the only way to obtain one is through a verifier calling
-        // `VerifiedProof::new`.
+        // It is NOT deserializable, and cannot be minted without a provider —
+        // both locked in by the `compile_fail` doctests on the type.
+    }
+
+    /// The minted identity comes from the verifier, never from a caller-supplied
+    /// argument. This is what makes "provider A mints a proof stamped provider
+    /// B" unrepresentable rather than merely discouraged: there is no argument
+    /// left to disagree with `provider_id()`.
+    #[test]
+    fn verified_proof_identity_is_taken_from_the_minting_verifier() {
+        let approved_tx_hash = ApprovedTxHash::from_bytes([4u8; 32]);
+        let proof = SigningProof::WalletConnectProof(vec![1]);
+
+        for id in [
+            ProviderId::Injected,
+            ProviderId::NearRedirect,
+            ProviderId::WalletConnect,
+            ProviderId::Custodial,
+        ] {
+            let verified =
+                VerifiedProof::new(&StubVerifier { id }, approved_tx_hash, proof.clone());
+            assert_eq!(
+                verified.provider_id(),
+                id,
+                "the minted proof must carry the minting verifier's own identity"
+            );
+        }
     }
 }
