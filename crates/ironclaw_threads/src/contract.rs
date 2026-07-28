@@ -472,7 +472,48 @@ pub struct PutToolResultRecordRequest {
 /// tool outputs recoverable in 1-2 calls instead of ~49.
 /// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
 /// this value; raising it here raises that ceiling too.
-pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
+/// Compile-time CEILING on a single `result_read` request.
+///
+/// 64 KiB, raised from 24 KiB. The model-observation envelope in
+/// `tool_result_reference.rs` is DERIVED from this (`* 2`) and asserted at compile
+/// time, so this also sets that envelope to 128 KiB — the reason not to go higher.
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 64 * 1024;
+
+/// Effective per-request cap: 64 KiB, up from the historical 24 KiB.
+///
+/// Override with `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
+/// `[4, TOOL_RESULT_RECORD_READ_MAX_BYTES]` — it can
+/// never exceed the compile-time ceiling, so the observation envelope is always
+/// large enough for whatever a read returns.
+///
+/// Why it is worth raising: a small cap turns one large file into a paging loop.
+/// On `manufacturing_equipment_maintenance` (nearai/benchmarks#287) reborn made 8
+/// `read_file` calls and ZERO shell calls, hit this cap, spent the turn on
+/// `result_read` at offset 24576 plus `handbook.pdf` at offsets 400/800/1200, and
+/// never computed anything — `outputs_exist=0.00`.
+///
+/// 64 KiB is a deliberate middle ground: enough that a typical data file or
+/// document page arrives in one read instead of a paging loop, without the 128 KiB
+/// observation envelope a larger cap would force.
+pub const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+
+/// Env var controlling [`effective_tool_result_read_max_bytes`].
+pub const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
+
+/// Resolve the effective per-request `result_read` cap.
+///
+/// Unparseable or out-of-range values fall back to the default rather than
+/// failing the run — a malformed tuning knob must not take down an agent.
+pub fn effective_tool_result_read_max_bytes() -> usize {
+    match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            // floor mirrors `tool_result_records::TOOL_RESULT_RECORD_READ_MIN_BYTES`
+            Ok(v) => v.clamp(4, TOOL_RESULT_RECORD_READ_MAX_BYTES),
+            Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+        },
+        Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {
@@ -903,5 +944,36 @@ mod tests {
         assert_eq!(record.created_at, None);
         assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
+}
+
+#[cfg(test)]
+mod tool_result_read_cap_tests {
+    use super::*;
+
+    /// 64 KiB, up from the historical 24 KiB, and never above the ceiling the
+    /// observation envelope is derived from.
+    #[test]
+    fn default_is_64k_and_within_the_ceiling() {
+        assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 64 * 1024);
+        assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES);
+    }
+
+    /// The ceiling is what the model-observation envelope is derived from
+    /// (`* 2`, asserted at compile time in tool_result_reference.rs), so 64 KiB here
+    /// means a 128 KiB envelope. An env override can never exceed the ceiling, so
+    /// the envelope always fits whatever a read returns.
+    #[test]
+    fn ceiling_is_64k_bounding_the_observation_envelope() {
+        assert_eq!(TOOL_RESULT_RECORD_READ_MAX_BYTES, 64 * 1024);
+    }
+
+    /// A malformed knob must degrade to the default, never fail the run.
+    #[test]
+    fn env_var_name_is_stable() {
+        assert_eq!(
+            TOOL_RESULT_READ_MAX_BYTES_ENV,
+            "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES"
+        );
     }
 }

@@ -23,8 +23,11 @@ pub(crate) fn validate_tool_result_record_content(
 }
 
 pub(crate) fn validate_tool_result_record_read(max_bytes: usize) -> Result<(), SessionThreadError> {
-    if !(TOOL_RESULT_RECORD_READ_MIN_BYTES..=TOOL_RESULT_RECORD_READ_MAX_BYTES).contains(&max_bytes)
-    {
+    // Upper bound is the EFFECTIVE cap, not the compile-time ceiling: 64 KiB by
+    // default, retunable via IRONCLAW_TOOL_RESULT_READ_MAX_BYTES so a large file can be
+    // pulled in one read instead of a paging loop (see contract.rs for the measurement).
+    let ceiling = crate::contract::effective_tool_result_read_max_bytes();
+    if !(TOOL_RESULT_RECORD_READ_MIN_BYTES..=ceiling).contains(&max_bytes) {
         return Err(SessionThreadError::Serialization(
             "tool result record read size is outside the supported range".to_string(),
         ));
