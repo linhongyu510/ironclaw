@@ -74,30 +74,7 @@ pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
 
 fn cors_origin_allowed(origin: &HeaderValue, configured: &[HeaderValue]) -> bool {
-    let Ok(origin_text) = origin.to_str() else {
-        return false;
-    };
-    let Ok(origin_url) = url::Url::parse(origin_text) else {
-        return false;
-    };
-    configured.iter().any(|entry| {
-        if entry == origin {
-            return true;
-        }
-        let Ok(entry_text) = entry.to_str() else {
-            return false;
-        };
-        let Ok(entry_url) = url::Url::parse(entry_text) else {
-            return false;
-        };
-        entry_url.scheme() == "http"
-            && origin_url.scheme() == "http"
-            && matches!(
-                entry_url.host_str(),
-                Some("localhost" | "127.0.0.1" | "::1")
-            )
-            && entry_url.host_str() == origin_url.host_str()
-    })
+    configured.iter().any(|entry| entry == origin)
 }
 
 const REBORN_HEALTH_PATH: &str = "/api/health";

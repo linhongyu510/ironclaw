@@ -27,10 +27,10 @@ export function hostedLoginUrl(
   return url.toString();
 }
 
-export function callbackAccountToken(url: string): string {
+export function callbackLoginTicket(url: string): string {
   const callback = new URL(url);
   const hash = new URLSearchParams(callback.hash.replace(/^#/, ""));
-  return callback.searchParams.get("token") ?? hash.get("token") ?? "";
+  return callback.searchParams.get("login_ticket") ?? hash.get("login_ticket") ?? "";
 }
 
 export class HostedControlApi {
@@ -55,6 +55,28 @@ export class HostedControlApi {
       throw new Error(message || "Could not load your hosted agents");
     }
     return payload && "items" in payload ? payload.items ?? [] : [];
+  }
+
+  async exchangeLoginTicket(ticket: string): Promise<string> {
+    const headers = new Headers({
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    });
+    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    const response = await fetch(`${this.origin}/auth/session/exchange`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ticket })
+    });
+    const payload = (await response.json().catch(() => undefined)) as
+      | { token?: string; detail?: string }
+      | undefined;
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Could not complete hosted login");
+    }
+    const nextToken = payload?.token?.trim() ?? "";
+    if (!nextToken) throw new Error("Hosted login did not return a session token");
+    return nextToken;
   }
 }
 

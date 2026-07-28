@@ -1656,7 +1656,7 @@ async fn cors_allows_configured_origin() {
 }
 
 #[tokio::test]
-async fn cors_allows_configured_localhost_origin_on_another_port() {
+async fn cors_rejects_unconfigured_localhost_port() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -1676,7 +1676,7 @@ async fn cors_allows_configured_localhost_origin_on_another_port() {
             .headers()
             .get("access-control-allow-origin")
             .and_then(|v| v.to_str().ok()),
-        Some("http://localhost:8081"),
+        None,
     );
 }
 

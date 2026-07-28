@@ -29,6 +29,11 @@ import {
 import type { DraftAttachment, TimelineMessage } from "@/types";
 import { colors } from "@/theme";
 
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BASE64_BYTES = 14 * 1024 * 1024;
+
 function valueText(value: unknown): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
@@ -92,6 +97,29 @@ function actionFor(item: TimelineMessage) {
     result: valueText(preview),
     error: valueText(envelope.toolError ?? envelope.tool_error ?? envelope.error ?? envelope.output_summary)
   };
+}
+
+function encodedBase64Length(byteLength: number): number {
+  return Math.ceil(byteLength / 3) * 4;
+}
+
+function validateAttachmentSelection(attachments: DraftAttachment[]): string {
+  if (attachments.length > MAX_ATTACHMENTS) return `Attach up to ${MAX_ATTACHMENTS} files.`;
+  let decodedTotal = 0;
+  let encodedTotal = 0;
+  for (const attachment of attachments) {
+    if (typeof attachment.size !== "number" || !Number.isFinite(attachment.size)) {
+      return `${attachment.name} does not report a file size.`;
+    }
+    if (attachment.size > MAX_ATTACHMENT_BYTES) {
+      return `${attachment.name} is larger than 10 MB.`;
+    }
+    decodedTotal += attachment.size;
+    encodedTotal += encodedBase64Length(attachment.size);
+  }
+  if (decodedTotal > MAX_TOTAL_ATTACHMENT_BYTES) return "Attachments must total 10 MB or less.";
+  if (encodedTotal > MAX_TOTAL_ATTACHMENT_BASE64_BYTES) return "Attachments are too large to send.";
+  return "";
 }
 
 export default function ThreadScreen() {
@@ -194,13 +222,16 @@ export default function ThreadScreen() {
     setMessages((current) => [...current, pending]);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 0);
     try {
-      const wireAttachments = await Promise.all(
-        attachments.map(async (attachment) => ({
+      const attachmentError = validateAttachmentSelection(attachments);
+      if (attachmentError) throw new Error(attachmentError);
+      const wireAttachments: Array<{ mime_type: string; filename: string; data_base64: string }> = [];
+      for (const attachment of attachments) {
+        wireAttachments.push({
           mime_type: attachment.mimeType || "application/octet-stream",
           filename: attachment.name,
           data_base64: await readAsStringAsync(attachment.uri, { encoding: EncodingType.Base64 })
-        }))
-      );
+        });
+      }
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
       await api.sendMessage(id, content, clientActionId(), wireAttachments);
       setDraft("");
@@ -221,10 +252,17 @@ export default function ThreadScreen() {
   async function pickAttachment() {
     const result = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
     if (result.canceled) return;
-    setAttachments((current) => [
-      ...current,
-      ...result.assets.map((asset) => ({ id: `${asset.name}-${asset.size ?? Date.now()}`, name: asset.name, mimeType: asset.mimeType ?? "application/octet-stream", uri: asset.uri, size: asset.size }))
-    ].slice(0, 10));
+    const selected = result.assets.map((asset) => ({ id: `${asset.name}-${asset.size ?? Date.now()}`, name: asset.name, mimeType: asset.mimeType ?? "application/octet-stream", uri: asset.uri, size: asset.size }));
+    setAttachments((current) => {
+      const next = [...current, ...selected];
+      const validation = validateAttachmentSelection(next);
+      if (validation) {
+        setError(validation);
+        return current;
+      }
+      setError("");
+      return next;
+    });
   }
 
   async function cancel() {

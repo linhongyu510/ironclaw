@@ -91,6 +91,7 @@ export async function cacheThreads(scope: string, threads: ThreadRecord[]): Prom
   const db = await database();
   if (!db) return;
   await db.withTransactionAsync(async () => {
+    await db.runAsync("DELETE FROM threads WHERE scope = ?", scope);
     for (const thread of threads) {
       const id = recordId(thread);
       if (!id) continue;
@@ -138,6 +139,11 @@ export async function cacheTimeline(
   const db = await database();
   if (!db) return;
   await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      "DELETE FROM timeline WHERE scope = ? AND thread_id = ?",
+      scope,
+      threadId
+    );
     for (const [index, message] of messages.entries()) {
       await db.runAsync(
         `INSERT INTO timeline(scope, thread_id, message_id, position, payload, updated_at)
@@ -188,6 +194,7 @@ export async function cacheAutomations(scope: string, rows: Automation[]): Promi
   const db = await database();
   if (!db) return;
   await db.withTransactionAsync(async () => {
+    await db.runAsync("DELETE FROM automations WHERE scope = ?", scope);
     for (const automation of rows) {
       await db.runAsync(
         `INSERT INTO automations(scope, automation_id, payload, updated_at)
@@ -200,6 +207,12 @@ export async function cacheAutomations(scope: string, rows: Automation[]): Promi
         Date.now()
       );
     }
+    await db.runAsync(
+      `INSERT INTO sync_meta(scope, resource, synced_at) VALUES (?, 'automations', ?)
+       ON CONFLICT(scope, resource) DO UPDATE SET synced_at = excluded.synced_at`,
+      scope,
+      Date.now()
+    );
   });
 }
 

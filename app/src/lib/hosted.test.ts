@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  callbackAccountToken,
+  callbackLoginTicket,
+  HostedControlApi,
   hostedControlOrigin,
   hostedLoginUrl,
   preferredIronClawInstance
@@ -14,7 +15,7 @@ describe("hosted account bootstrap", () => {
     );
   });
 
-  it("builds the hosted OAuth URL and reads query or fragment tokens", () => {
+  it("builds the hosted OAuth URL and reads query or fragment login tickets", () => {
     const url = hostedLoginUrl(
       "https://private.near.ai",
       "github",
@@ -22,8 +23,9 @@ describe("hosted account bootstrap", () => {
     );
     expect(url).toContain("/v1/auth/github");
     expect(url).toContain("oauth_channel=mobile");
-    expect(callbackAccountToken("ironclaw://auth/callback?token=query")).toBe("query");
-    expect(callbackAccountToken("ironclaw://auth/callback#token=fragment")).toBe("fragment");
+    expect(callbackLoginTicket("ironclaw://auth/callback?login_ticket=query")).toBe("query");
+    expect(callbackLoginTicket("ironclaw://auth/callback#login_ticket=fragment")).toBe("fragment");
+    expect(callbackLoginTicket("ironclaw://auth/callback?token=bearer")).toBe("");
   });
 
   it("selects a running IronClaw deployment", () => {
@@ -44,5 +46,30 @@ describe("hosted account bootstrap", () => {
         }
       ])?.id
     ).toBe("running");
+  });
+
+  it("exchanges a hosted login ticket without putting a bearer in the callback URL", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ token: "account-token" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }) as typeof fetch;
+    try {
+      await expect(
+        new HostedControlApi("https://private.near.ai", "").exchangeLoginTicket("ticket-1")
+      ).resolves.toBe("account-token");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://private.near.ai/auth/session/exchange");
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ ticket: "ticket-1" }));
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get("Authorization")).toBeNull();
   });
 });

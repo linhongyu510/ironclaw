@@ -7,7 +7,7 @@ import { Platform } from "react-native";
 import { IronClawApi } from "@/lib/api";
 import { validateDeploymentOrigin } from "@/lib/deployment-url";
 import {
-  callbackAccountToken,
+  callbackLoginTicket,
   HostedControlApi,
   hostedControlOrigin,
   hostedLoginUrl,
@@ -125,8 +125,10 @@ export function SessionProvider({ children }: React.PropsWithChildren) {
         returnUrl
       );
       if (result.type !== "success") return;
-      const accountToken = callbackAccountToken(result.url);
-      if (!accountToken) throw new Error("The hosted login did not return an account token");
+      const loginTicket = callbackLoginTicket(result.url);
+      if (!loginTicket) throw new Error("The hosted login did not return a login ticket");
+      const bootstrapApi = new HostedControlApi(controlOrigin, "");
+      const accountToken = await bootstrapApi.exchangeLoginTicket(loginTicket);
       const instances = await new HostedControlApi(controlOrigin, accountToken).listInstances();
       const instance = preferredIronClawInstance(instances);
       if (!instance?.dashboard_url) {
