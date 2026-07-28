@@ -76,41 +76,112 @@ impl HostResolver for DnsResolver {
     }
 }
 
-/// Returns a fixed audit label if `ip` is private, loopback, link-local, or
-/// otherwise reserved, per `ironclaw_network`'s canonical range check —
-/// delegated to via [`network_denies_resolved_ip`] rather than
+/// Every distinct branch that can deny an egress request, in both
+/// `handle_connect` and `handle_plain_http`. Before this type existed every
+/// branch wrote the client-facing body `"host not in allowlist"`
+/// unconditionally (see [`write_denied_response`]'s old shape), so a request
+/// denied by, say, the private-IP guard told the client it had failed the
+/// hostname allowlist instead — found running the proxy against real
+/// containers for the first time: Docker's default bridge subnets are
+/// RFC1918, so an allowlisted origin on a default bridge tripped
+/// [`DenyReason::PrivateAddress`] while [`audit_rule`](Self::audit_rule) and
+/// the response body both still said "not in allowlist", sending debugging
+/// in exactly the wrong direction.
+///
+/// Each variant names the *category* of check that failed, both in the
+/// `debug!` audit line (`audit_rule`) and the client-facing `403`/`502` body
+/// (`client_message`) — never a resolved IP or a full URL (which could carry
+/// `user:pass@host` userinfo). Distinguishing the cause does not require
+/// disclosing the value that tripped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenyReason {
+    /// Hostname allowlist miss (`host_allowed` returned `false`).
+    NotInAllowlist,
+    /// `CONNECT host` with no `:port` suffix at all.
+    MalformedConnectTarget,
+    /// `CONNECT host:port` where `port != 443` (E2 hardening 2).
+    ConnectPortNotPermitted,
+    /// Plain-HTTP absolute-URI target with a port other than 80.
+    PlainHttpPortNotPermitted,
+    /// A plain-HTTP request-target that doesn't parse as an absolute URI at
+    /// all — nothing to allowlist-check against.
+    MalformedRequestTarget,
+    /// The resolved dial address is private, loopback, link-local, CGNAT, or
+    /// otherwise reserved (E2 hardening 1 / SSRF guard). Collapses every
+    /// matched range to one reason — see [`denied_ip_reason`]'s doc for why.
+    PrivateAddress,
+    /// DNS resolution for an otherwise-allowed host returned zero addresses.
+    NoAddressesResolved,
+}
+
+impl DenyReason {
+    /// Audit-log token threaded through this module's `tracing::debug!`
+    /// `rule` field.
+    fn audit_rule(self) -> &'static str {
+        match self {
+            Self::NotInAllowlist => "not_in_allowlist",
+            Self::MalformedConnectTarget => "malformed_connect_target",
+            Self::ConnectPortNotPermitted => "connect_port_not_443",
+            Self::PlainHttpPortNotPermitted => "plain_http_port_not_80",
+            Self::MalformedRequestTarget => "malformed_request_target",
+            Self::PrivateAddress => "private_or_reserved_ip",
+            Self::NoAddressesResolved => "no_addresses_resolved",
+        }
+    }
+
+    /// Client-facing message written into the `403`/`502` body. Names only
+    /// the category — never a resolved IP or full URL.
+    fn client_message(self) -> &'static str {
+        match self {
+            Self::NotInAllowlist => "host not in allowlist",
+            Self::MalformedConnectTarget => "malformed CONNECT target: missing port",
+            Self::ConnectPortNotPermitted => "port not permitted: CONNECT is restricted to 443",
+            Self::PlainHttpPortNotPermitted => "port not permitted: plain HTTP is restricted to 80",
+            Self::MalformedRequestTarget => "malformed request target",
+            Self::PrivateAddress => "resolved address is private",
+            Self::NoAddressesResolved => "host did not resolve to any address",
+        }
+    }
+}
+
+/// Returns [`DenyReason::PrivateAddress`] if `ip` is private, loopback,
+/// link-local, or otherwise reserved, per `ironclaw_network`'s canonical
+/// range check — delegated to via [`network_denies_resolved_ip`] rather than
 /// re-implemented here. This proxy previously hand-rolled its own range
 /// list and it had already drifted behind that canonical check, missing
 /// `0.0.0.0/8`, IPv6 link-local `fe80::/10`, and the `fc00::/7` half of the
 /// RFC 4193 unique-local range. The canonical check also unwraps
 /// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to their v4 form itself,
 /// and additionally denies broadcast/multicast/documentation addresses — a
-/// strictly larger deny set, which is fine for an egress guard. The label
-/// collapses every reason to one generic string rather than re-deriving a
-/// granular one: the canonical check only returns `bool`, and a second,
-/// independently-maintained granular reason table would recreate exactly
-/// the kind of drift-prone duplication this delegation removes.
-fn denied_ip_reason(ip: IpAddr) -> Option<&'static str> {
-    network_denies_resolved_ip(ip).then_some("private_or_reserved_ip")
+/// strictly larger deny set, which is fine for an egress guard. The reason
+/// collapses every matched range to one variant rather than re-deriving a
+/// granular one per range: the canonical check only returns `bool`, and a
+/// second, independently-maintained granular reason table would recreate
+/// exactly the kind of drift-prone duplication this delegation removes.
+fn denied_ip_reason(ip: IpAddr) -> Option<DenyReason> {
+    network_denies_resolved_ip(ip).then_some(DenyReason::PrivateAddress)
 }
 
 /// Resolves `host:port` and applies the dial-time private-IP guard when
 /// `deny_private_ips` is set. Returns the first candidate address that
 /// passes the guard (or the first candidate at all, when the guard is
 /// disabled) as the `Ok` half; a guard rejection is the `Err` half, carrying
-/// the matched rule for the audit log. `deny_private_ips` is only ever
-/// turned off by test fixtures standing a loopback echo server in for a
-/// real origin (see the byte-plumbing test below) — production callers
-/// always pass `true`.
+/// the [`DenyReason`] for the audit log and the client response.
+/// `deny_private_ips` is only ever turned off by test fixtures standing a
+/// loopback echo server in for a real origin (see the byte-plumbing test
+/// below) — production callers always pass `true`.
 async fn resolve_dial_addr(
     resolver: &dyn HostResolver,
     host: &str,
     port: u16,
     deny_private_ips: bool,
-) -> std::io::Result<Result<SocketAddr, &'static str>> {
+) -> std::io::Result<Result<SocketAddr, DenyReason>> {
     let addrs = resolver.resolve(host, port).await?;
     if !deny_private_ips {
-        return Ok(addrs.into_iter().next().ok_or("no addresses resolved"));
+        return Ok(addrs
+            .into_iter()
+            .next()
+            .ok_or(DenyReason::NoAddressesResolved));
     }
     match addrs
         .iter()
@@ -121,7 +192,7 @@ async fn resolve_dial_addr(
             let reason = addrs
                 .first()
                 .and_then(|addr| denied_ip_reason(addr.ip()))
-                .unwrap_or("no addresses resolved");
+                .unwrap_or(DenyReason::NoAddressesResolved);
             Ok(Err(reason))
         }
     }
@@ -393,14 +464,29 @@ where
     }))
 }
 
-/// Writes a `403 Forbidden` response naming `host` as the denied target.
-/// The proxy then closes the connection (dropping `stream` after this call
-/// sends the TCP FIN) — no tunnel/forward ever opens for a denied host.
-async fn write_denied_response<W>(stream: &mut W, host: &str) -> std::io::Result<()>
+/// Writes a `403 Forbidden` response naming `reason`'s category, and `host`
+/// (when known) as the denied target. The proxy then closes the connection
+/// (dropping `stream` after this call sends the TCP FIN) — no tunnel/forward
+/// ever opens for a denied host.
+///
+/// `host` is `None` only for [`DenyReason::MalformedRequestTarget`], where
+/// the request-target didn't parse as an absolute URI at all: it is not
+/// echoed back, deliberately — an unparsed target is exactly the shape a
+/// `user:pass@host` URL would take before parsing, and the category alone
+/// (`"malformed request target"`) is enough for the client to fix its
+/// request without the proxy echoing back the raw value it sent.
+async fn write_denied_response<W>(
+    stream: &mut W,
+    host: Option<&str>,
+    reason: DenyReason,
+) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let body = format!("egress denied: host not in allowlist: {host}");
+    let body = match host {
+        Some(host) => format!("egress denied: {}: {host}", reason.client_message()),
+        None => format!("egress denied: {}", reason.client_message()),
+    };
     let response = format!(
         "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -494,44 +580,52 @@ async fn handle_connect(
         .and_then(|(_host, port)| port.parse().ok());
 
     if !host_allowed(host, policy) {
+        let reason = DenyReason::NotInAllowlist;
         tracing::debug!(
             host,
             action = "deny",
-            rule = "not_in_allowlist",
+            rule = reason.audit_rule(),
             "egress proxy: CONNECT denied"
         );
-        write_denied_response(&mut client, host).await?;
+        write_denied_response(&mut client, Some(host), reason).await?;
         return Ok(());
     }
 
     let Some(port) = port else {
+        let reason = DenyReason::MalformedConnectTarget;
         tracing::debug!(
             host,
             action = "deny",
-            rule = "malformed_connect_target",
+            rule = reason.audit_rule(),
             "egress proxy: CONNECT denied"
         );
-        write_denied_response(&mut client, host).await?;
+        write_denied_response(&mut client, Some(host), reason).await?;
         return Ok(());
     };
 
     if port != 443 {
+        let reason = DenyReason::ConnectPortNotPermitted;
         tracing::debug!(
             host,
             port,
             action = "deny",
-            rule = "connect_port_not_443",
+            rule = reason.audit_rule(),
             "egress proxy: CONNECT denied"
         );
-        write_denied_response(&mut client, host).await?;
+        write_denied_response(&mut client, Some(host), reason).await?;
         return Ok(());
     }
 
     let dial_addr = match resolve_dial_addr(resolver, host, port, deny_private_ips).await {
         Ok(Ok(addr)) => addr,
-        Ok(Err(rule)) => {
-            tracing::debug!(host, action = "deny", rule, "egress proxy: CONNECT denied");
-            write_denied_response(&mut client, host).await?;
+        Ok(Err(reason)) => {
+            tracing::debug!(
+                host,
+                action = "deny",
+                rule = reason.audit_rule(),
+                "egress proxy: CONNECT denied"
+            );
+            write_denied_response(&mut client, Some(host), reason).await?;
             return Ok(());
         }
         Err(error) => {
@@ -640,8 +734,16 @@ async fn handle_plain_http(
     let host_only = parsed.as_ref().and_then(|url| url.host_str());
     let Some(host_only) = host_only else {
         // Not a well-formed absolute-URI proxy request; nothing to
-        // allowlist-check against, so deny rather than forward blind.
-        write_denied_response(&mut client, &head.target).await?;
+        // allowlist-check against, so deny rather than forward blind. `host`
+        // is deliberately `None` here — see `write_denied_response`'s doc for
+        // why the raw (unparsed) target is never echoed back.
+        let reason = DenyReason::MalformedRequestTarget;
+        tracing::debug!(
+            action = "deny",
+            rule = reason.audit_rule(),
+            "egress proxy: plain HTTP denied"
+        );
+        write_denied_response(&mut client, None, reason).await?;
         return Ok(());
     };
     let host_only = host_only.to_string();
@@ -651,28 +753,30 @@ async fn handle_plain_http(
         .unwrap_or(80);
 
     if !host_allowed(&host_only, policy) {
-        tracing::debug!(host = %host_only, action = "deny", rule = "not_in_allowlist", "egress proxy: plain HTTP denied");
-        write_denied_response(&mut client, &host_only).await?;
+        let reason = DenyReason::NotInAllowlist;
+        tracing::debug!(host = %host_only, action = "deny", rule = reason.audit_rule(), "egress proxy: plain HTTP denied");
+        write_denied_response(&mut client, Some(&host_only), reason).await?;
         return Ok(());
     }
 
     if port != 80 {
+        let reason = DenyReason::PlainHttpPortNotPermitted;
         tracing::debug!(
             host = %host_only,
             port,
             action = "deny",
-            rule = "plain_http_port_not_80",
+            rule = reason.audit_rule(),
             "egress proxy: plain HTTP denied"
         );
-        write_denied_response(&mut client, &host_only).await?;
+        write_denied_response(&mut client, Some(&host_only), reason).await?;
         return Ok(());
     }
 
     let dial_addr = match resolve_dial_addr(resolver, &host_only, port, deny_private_ips).await {
         Ok(Ok(addr)) => addr,
-        Ok(Err(rule)) => {
-            tracing::debug!(host = %host_only, action = "deny", rule, "egress proxy: plain HTTP denied");
-            write_denied_response(&mut client, &host_only).await?;
+        Ok(Err(reason)) => {
+            tracing::debug!(host = %host_only, action = "deny", rule = reason.audit_rule(), "egress proxy: plain HTTP denied");
+            write_denied_response(&mut client, Some(&host_only), reason).await?;
             return Ok(());
         }
         Err(error) => {
@@ -891,6 +995,14 @@ mod tests {
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden, got: {response}"
         );
+        // Names its real cause (hostname allowlist miss), not a generic
+        // catch-all — this is the exact denial category the private-IP
+        // guard's own denial (`connect_to_allowlisted_host_resolving_private_
+        // ip_is_denied`, below) must NOT be confused with.
+        assert!(
+            response.contains("host not in allowlist"),
+            "expected an allowlist-miss message, got: {response}"
+        );
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
@@ -910,6 +1022,13 @@ mod tests {
     /// link-local address (via an injected resolver, so the assertion does
     /// not depend on live DNS); the dial-time private-IP check must deny it
     /// even though the hostname itself was allowed.
+    ///
+    /// Also pins the defect this task fixed: before the fix, this denial's
+    /// body read `"host not in allowlist"` — the SAME text
+    /// `connect_to_denied_host_returns_403_and_closes` above asserts for an
+    /// actual allowlist miss — even though the host in this test WAS
+    /// allowlisted and the real cause was the private-IP guard. Distinct
+    /// causes must produce distinguishable messages.
     #[tokio::test]
     async fn connect_to_allowlisted_host_resolving_private_ip_is_denied() {
         let proxy = EgressAllowlistProxy {
@@ -945,6 +1064,16 @@ mod tests {
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden for a private-IP resolution, got: {response}"
         );
+        assert!(
+            response.contains("resolved address is private"),
+            "an allowlisted host denied by the private-IP guard must say so, not \
+             claim the host itself isn't allowlisted, got: {response}"
+        );
+        assert!(
+            !response.contains("host not in allowlist"),
+            "this host WAS allowlisted — the denial must not misname the cause as an \
+             allowlist miss, got: {response}"
+        );
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
@@ -978,6 +1107,16 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden for a non-443 CONNECT port, got: {response}"
+        );
+        // `github.com` IS allowlisted; the denial must name the port pin as
+        // the real cause, not claim the host wasn't allowed.
+        assert!(
+            response.contains("port not permitted"),
+            "expected a port-pin denial message, got: {response}"
+        );
+        assert!(
+            !response.contains("host not in allowlist"),
+            "this host WAS allowlisted — the denial must not misname the cause, got: {response}"
         );
 
         let _ = shutdown_tx.send(true);
@@ -1082,6 +1221,10 @@ mod tests {
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden, got: {response}"
         );
+        assert!(
+            response.contains("host not in allowlist"),
+            "expected an allowlist-miss message, got: {response}"
+        );
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
@@ -1179,6 +1322,10 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden for a portless CONNECT target, got: {response}"
+        );
+        assert!(
+            response.contains("missing port"),
+            "expected a malformed-target message distinct from an allowlist miss, got: {response}"
         );
 
         let _ = shutdown_tx.send(true);
@@ -1301,6 +1448,70 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden for a non-80 plain-HTTP port, got: {response}"
+        );
+        // `github.com` IS allowlisted; the denial must name the port pin,
+        // not claim the host wasn't allowed.
+        assert!(
+            response.contains("port not permitted"),
+            "expected a port-pin denial message, got: {response}"
+        );
+        assert!(
+            !response.contains("host not in allowlist"),
+            "this host WAS allowlisted — the denial must not misname the cause, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// A plain-HTTP request-target that doesn't parse as an absolute URI at
+    /// all (no scheme, e.g. an origin-form target a client mistakenly sends
+    /// to a proxy) has no host to allowlist-check against — `handle_plain_
+    /// http` denies it as a malformed target rather than forwarding blind or
+    /// misreporting it as an allowlist miss. Also proves the raw
+    /// unparseable target is never echoed back into the response body (see
+    /// `write_denied_response`'s doc): a request-target that failed to
+    /// parse is exactly the shape a `user:pass@host` URL would take before
+    /// parsing, so echoing it back would be the same class of leak PR #6746
+    /// fixed elsewhere in this crate.
+    #[tokio::test]
+    async fn plain_http_malformed_target_returns_403_without_echoing_it_back() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["github.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let secret_bearing_target = "not-a-url-at-all-user:hunter2@evil.example";
+        client
+            .write_all(
+                format!("GET {secret_bearing_target} HTTP/1.1\r\nHost: example.com\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("plain HTTP request writes");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full 403 response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403 Forbidden for a malformed request target, got: {response}"
+        );
+        assert!(
+            response.contains("malformed request target"),
+            "expected a malformed-target message, got: {response}"
+        );
+        assert!(
+            !response.contains("hunter2"),
+            "the raw unparseable target must never be echoed back into the response body, \
+             got: {response}"
         );
 
         let _ = shutdown_tx.send(true);
