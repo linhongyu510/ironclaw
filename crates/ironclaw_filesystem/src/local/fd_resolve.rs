@@ -4,11 +4,13 @@
 //! *components* (never a joined host path string). `open_one` is the one
 //! place a directory-entry lookup happens. It now **follows** a symlink that
 //! stays inside the resolution root, and refuses (fails closed) one that
-//! would step outside it — on Linux via a single kernel-enforced
-//! `openat2(RESOLVE_BENEATH)` call, on other platforms via this module's own
-//! bounded, fd-anchored walk. Because resolution never hands back a path for
-//! a later, independent syscall to re-open, there is no window between
-//! "checked" and "acted on" for an attacker to swap the entry in.
+//! would step outside it — on Linux via a kernel-enforced
+//! `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` call for the (common,
+//! no-symlink) fast case, falling back to this module's own bounded,
+//! fd-anchored walk the instant a symlink is actually encountered — on other
+//! platforms always via that same walk. Because resolution never hands back
+//! a path for a later, independent syscall to re-open, there is no window
+//! between "checked" and "acted on" for an attacker to swap the entry in.
 //!
 //! **Invariant every step in this module preserves:** no step ever resolves
 //! a path *string* against anything other than an fd this module already
@@ -27,6 +29,42 @@
 //! why this module has no reason to ever import `tokio::fs` (or any other
 //! path-based filesystem API): its whole job is to be the fd-relative
 //! alternative to one.
+//!
+//! **Why the Linux fast path no longer lets the kernel silently follow a
+//! symlink (`RESOLVE_NO_SYMLINKS` added, PR #6817 follow-up):** a bare
+//! `openat2(dir, name, RESOLVE_BENEATH)` call's containment boundary is
+//! `dir` — the *immediate* parent of the one component being opened — not
+//! this mount's true root. That composes correctly across a chain of plain
+//! (non-symlink) directories, since each step's `dir` is itself beneath its
+//! own parent's already-verified boundary. It does **not** compose for a
+//! *parent-relative* symlink: `dir/link -> ../sibling`, where `sibling` is
+//! still safely inside the mount root but the `..` in the target text steps
+//! above `dir` itself. `RESOLVE_BENEATH` rejects that with `EXDEV`
+//! regardless of where `sibling` actually is, because the kernel has no way
+//! to know this process's notion of "the true root" — only `RESOLVE_BENEATH`'s
+//! own `dir` argument. This is exactly the shape a real pnpm `node_modules`
+//! layout uses (`node_modules/@types/react ->
+//! ../.pnpm/react@.../node_modules/react`), so silently deferring every
+//! symlink to the kernel's own resolution would make this module reject
+//! (or, worse, sometimes accept via a coincidentally-matching boundary and
+//! sometimes reject) exactly the layouts the "follow in-bounds symlinks"
+//! policy change exists to support — and would do so only on Linux, silently
+//! diverging from the portable fallback below, which has always tracked the
+//! true root correctly (see [`walk_symlink_target`]).
+//!
+//! The fix: `open_one_inner`'s Linux arm adds `RESOLVE_NO_SYMLINKS` to its
+//! `openat2` flags. That makes the kernel refuse to follow *any* symlink at
+//! all (single-component call, so "any" only ever means "this one entry"),
+//! reporting `ELOOP` — at which point control falls to
+//! [`follow_symlink_component`], the exact same fd-anchored, budget-bounded,
+//! true-root-tracking walk the portable fallback always used. A plain
+//! directory/file component still resolves in one kernel-enforced syscall,
+//! at full speed; only the (uncommon) symlink case now pays for a handful of
+//! extra syscalls to resolve it correctly and portably. This also closes the
+//! [`SymlinkBudget`] gap tracked below: since every symlink hop, on every
+//! platform, now flows through [`follow_symlink_component`]'s
+//! `budget.consume()` call, the shared per-resolution cap actually bounds
+//! Linux resolution too, not just the portable fallback.
 
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
@@ -42,21 +80,23 @@ use crate::{CasExpectation, FileType, FilesystemError, FilesystemOperation, Reco
 
 static LOCAL_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Cap on symlink expansion during a single resolution — both the number of
-/// symlink hops `open_one`'s portable fallback will follow while descending
-/// a walk, and the number of hops [`resolve_write_leaf`] will chase at a
-/// write target. Chosen to match the ballpark of a typical kernel
-/// `SYMLOOP_MAX` (Linux and macOS both default to 40) without depending on
-/// the host's actual `sysconf` value: a legitimate directory structure never
-/// nests this many symlinks, so hitting the cap always means a cycle (or a
-/// pathological chain worth failing closed on rather than resolving), never
-/// a benign deep structure.
+/// Cap on symlink expansion during a single resolution — the number of
+/// symlink hops [`follow_symlink_component`] will follow while descending a
+/// walk, on *every* platform (see the module doc for why the Linux fast path
+/// now reaches this too, not just the portable fallback). Chosen to match
+/// the ballpark of a typical kernel `SYMLOOP_MAX` (Linux and macOS both
+/// default to 40) without depending on the host's actual `sysconf` value: a
+/// legitimate directory structure never nests this many symlinks, so hitting
+/// the cap always means a cycle (or a pathological chain worth failing
+/// closed on rather than resolving), never a benign deep structure.
 const MAX_SYMLINK_DEPTH: u8 = 32;
 
-/// A single-resolution symlink-hop budget, shared across every `open_one`
-/// call [`resolve_walk`]/[`descend_creating`]/[`resolve_write_leaf`] make
-/// while walking their (possibly multi-component) path — never reset
-/// per-component.
+/// A single-resolution symlink-hop budget, shared across every
+/// [`follow_symlink_component`] hop [`resolve_walk`]/[`descend_creating`]/
+/// [`resolve_write_leaf`] make while walking their (possibly
+/// multi-component) path — never reset per-component, and never reset
+/// per-platform: the Linux fast path and the portable fallback draw on the
+/// exact same budget for the exact same reason (see the module doc).
 ///
 /// Before this type existed, [`open_one`] always started a fresh
 /// [`MAX_SYMLINK_DEPTH`]-hop budget (`open_one_depth(..., 0)`), and
@@ -64,18 +104,10 @@ const MAX_SYMLINK_DEPTH: u8 = 32;
 /// component in a loop. That let a 10-component path with a
 /// `MAX_SYMLINK_DEPTH`-hop chain planted at *each* component accumulate
 /// roughly `10 * MAX_SYMLINK_DEPTH` total hops in one resolution — looser
-/// than the real `openat2(RESOLVE_BENEATH)` kernel fast path, which applies
-/// its own internal cap (Linux's `SYMLOOP_MAX`, effectively ~40) *once per
-/// whole resolution*, not per path component. Still bounded (no DoS) either
-/// way, but this type makes the portable fallback match that per-resolution
-/// semantics instead of a looser per-component one: one `SymlinkBudget` is
+/// than a per-resolution cap should allow. One `SymlinkBudget` is
 /// constructed at the top of each of those three functions and threaded by
 /// reference through every `open_one`/symlink-following call the walk makes,
 /// so the whole resolution shares one `MAX_SYMLINK_DEPTH`-hop ceiling.
-///
-/// The Linux `openat2` fast path is unaffected: it is a single syscall per
-/// component and the kernel enforces its own bound *inside* that syscall,
-/// with no dependency on this type at all.
 ///
 /// A `Cell`, not an `AtomicU8`: every caller of these functions runs the
 /// whole walk synchronously on one blocking-pool thread with no `.await` in
@@ -126,45 +158,137 @@ fn io_err(errno: Errno) -> ResolveError {
 }
 
 /// Opens exactly one path component beneath `dir`, following it if it is a
-/// symlink whose resolution stays inside `root`'s tree, and failing closed
-/// (`ResolveError::Escape`) if it would step outside `root` or exceed
-/// [`MAX_SYMLINK_DEPTH`].
+/// symlink whose resolution stays inside the true mount root, and failing
+/// closed (`ResolveError::Escape`) if it would step outside the root or
+/// exceed [`MAX_SYMLINK_DEPTH`].
 ///
-/// On Linux, this is one syscall via `openat2(RESOLVE_BENEATH)` when the
-/// kernel supports it (falling back below on `ENOSYS`). `RESOLVE_BENEATH`
-/// alone — without `RESOLVE_NO_SYMLINKS` — is already race-free and
-/// kernel-enforced: it follows a symlink whose resolution stays beneath
-/// `dir`'s own tree and refuses, atomically, one that would not.
-/// `RESOLVE_BENEATH`'s containment composes transitively across the calls
-/// [`resolve_walk`]/[`descend_creating`] make one component at a time (each
-/// step beneath its immediate parent, which is itself beneath its parent,
-/// …), so this function does not need `root` on the Linux fast path — only
-/// the portable fallback below does, to resolve an *absolute* symlink
-/// target against the correct anchor.
+/// `ancestors` is every already-open, already-verified directory fd strictly
+/// above `dir`, root-first (root itself is *not* included — callers that
+/// start at the root pass `&[]`). It exists solely to answer a `..`
+/// component inside a followed symlink's target text (see
+/// [`walk_symlink_target`]) without ever performing a live, name-based
+/// `openat(fd, "..")` lookup: popping this slice hands back an fd this
+/// module itself opened and is still holding, which a concurrent rename
+/// anywhere in the tree cannot invalidate (an open fd is immune to renames
+/// of the directory entry that produced it — see the module-level TOCTOU
+/// invariant). Forward (non-`..`) resolution never touches `ancestors` at
+/// all.
 ///
-/// Everywhere else (including macOS, which has no `openat2`), a
-/// per-component `openat` with `O_NOFOLLOW` detects a symlink and this
-/// module's own bounded walk ([`follow_symlink_component`]) resolves it —
-/// fd-anchored at every step, per the module invariant.
-/// Opens a single path component, following an in-bounds symlink against the
-/// shared per-resolution `budget` (see [`SymlinkBudget`]). Callers resolving
-/// a single, standalone component (not part of a multi-component walk) may
-/// pass a fresh `&SymlinkBudget::new()` — [`resolve_walk`]/
-/// [`descend_creating`] construct one `SymlinkBudget` and pass the *same*
-/// reference to every component's `open_one` call instead.
+/// On Linux, this is one syscall via
+/// `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` for the common case
+/// where `name` is not itself a symlink (falling back below on `ENOSYS`, or
+/// on an exhausted `EAGAIN` retry budget). `RESOLVE_NO_SYMLINKS` is the
+/// deliberate difference from a bare `RESOLVE_BENEATH`: it makes the kernel
+/// refuse to expand `name` even if it *is* a symlink whose resolution would
+/// have stayed within `dir`'s own tree, reporting `ELOOP` instead — at which
+/// point control falls through to [`follow_symlink_component`], the same
+/// fd-anchored, true-root-tracking walk the portable fallback always uses.
+/// See the module doc for why letting the kernel silently follow a symlink
+/// itself (the old, `RESOLVE_NO_SYMLINKS`-less behavior) breaks containment
+/// for a parent-relative symlink target and silently diverges from the
+/// portable fallback's correct behavior.
+///
+/// Everywhere else (including macOS, which has no `openat2`, and the Linux
+/// symlink case above), a per-component `openat` with `O_NOFOLLOW` detects a
+/// symlink and this module's own bounded walk
+/// ([`follow_symlink_component`]) resolves it — fd-anchored at every step,
+/// per the module invariant.
 pub(super) fn open_one(
     root: BorrowedFd<'_>,
+    ancestors: &[OwnedFd],
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
     budget: &SymlinkBudget,
 ) -> Result<OwnedFd, ResolveError> {
-    open_one_inner(root, dir, name, oflags, mode, budget)
+    open_one_inner(root, ancestors, dir, name, oflags, mode, budget)
+}
+
+/// Outcome of the Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`
+/// fast-path attempt (see [`open_one`]).
+#[cfg(target_os = "linux")]
+enum FastOpenOutcome {
+    /// Opened directly — `name` was not a symlink.
+    Opened(OwnedFd),
+    /// `name` is itself a symlink (kernel refused to expand it because of
+    /// `RESOLVE_NO_SYMLINKS`); the caller must resolve it via
+    /// [`follow_symlink_component`].
+    IsSymlink,
+    /// The kernel doesn't support `openat2` (`ENOSYS`), or the retry budget
+    /// for a benign concurrent-rename `EAGAIN` was exhausted; the caller
+    /// must fall back to the portable `O_NOFOLLOW` path below, which does
+    /// not share `openat2`'s whole-path-restart-on-`EAGAIN` failure mode.
+    Unsupported,
+    /// A genuine error (including a real containment/mount-crossing
+    /// rejection), to propagate as-is.
+    Failed(ResolveError),
+}
+
+#[cfg(target_os = "linux")]
+fn open_one_beneath_no_symlinks(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+    oflags: OFlags,
+    mode: Mode,
+) -> FastOpenOutcome {
+    use rustix::fs::{ResolveFlags, openat2};
+
+    // `openat2(2)` documents `EAGAIN` for "a resolution restart was
+    // necessary, e.g. because of concurrent rename or unlink of a path
+    // component" — a *legitimate* concurrent mutation (an editor's atomic
+    // save, `git checkout`, a parallel build touching the same subtree), not
+    // an attack. Without a retry, a real, benign rename racing an unrelated
+    // open makes `openat2` spuriously fail and the caller sees an opaque
+    // `Backend` error for an operation that would have succeeded a moment
+    // later. Retry a small, fixed number of times — each retry is a fresh
+    // kernel-side resolution, not a busy spin on our own state, so the bound
+    // only needs to outlast one rename's duration, not any unbounded
+    // contention; the loop always terminates within `MAX_AGAIN_RETRIES + 1`
+    // attempts, never spins unbounded.
+    const MAX_AGAIN_RETRIES: u8 = 4;
+    let mut retries = 0;
+    loop {
+        match openat2(
+            dir,
+            name,
+            oflags | OFlags::CLOEXEC,
+            mode,
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        ) {
+            Ok(fd) => return FastOpenOutcome::Opened(fd),
+            // Kernel predates openat2 (< 5.6), or a seccomp/container policy
+            // denies the syscall outright.
+            Err(Errno::NOSYS) => return FastOpenOutcome::Unsupported,
+            Err(Errno::AGAIN) if retries < MAX_AGAIN_RETRIES => {
+                retries += 1;
+                continue;
+            }
+            Err(Errno::AGAIN) => return FastOpenOutcome::Unsupported,
+            // `RESOLVE_BENEATH` implies `RESOLVE_NO_XDEV`: a mountpoint
+            // crossing anywhere in the resolution — even one that stays
+            // lexically "inside" the tree, e.g. a bind mount planted under a
+            // leaf directory — fails here too. Both a genuine
+            // beneath-root escape and an in-tree mount crossing report
+            // `EXDEV`; the kernel gives no way to tell them apart from the
+            // errno alone, and both are exactly the class this function
+            // exists to fail closed on, so both map to `Escape`.
+            Err(Errno::XDEV) => return FastOpenOutcome::Failed(ResolveError::Escape),
+            // With `RESOLVE_NO_SYMLINKS` set, `ELOOP` from a single-component
+            // resolution unambiguously means "this entry is a symlink" (the
+            // kernel never attempts to expand it, so a genuine cycle cannot
+            // be observed here, exactly like the portable `O_NOFOLLOW` path
+            // below) — hand it to the caller to follow via
+            // `follow_symlink_component`.
+            Err(Errno::LOOP) => return FastOpenOutcome::IsSymlink,
+            Err(errno) => return FastOpenOutcome::Failed(io_err(errno)),
+        }
+    }
 }
 
 fn open_one_inner(
     root: BorrowedFd<'_>,
+    ancestors: &[OwnedFd],
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
@@ -173,74 +297,15 @@ fn open_one_inner(
 ) -> Result<OwnedFd, ResolveError> {
     #[cfg(target_os = "linux")]
     {
-        use rustix::fs::{ResolveFlags, openat2};
-
-        // `openat2(2)` documents `EAGAIN` for "a resolution restart was
-        // necessary, e.g. because of concurrent rename or unlink of a path
-        // component" — a *legitimate* concurrent mutation (an editor's
-        // atomic save, `git checkout`, a parallel build touching the same
-        // subtree), not an attack. Without a retry, a real, benign rename
-        // racing an unrelated open makes `openat2` spuriously fail and the
-        // caller sees an opaque `Backend` error for an operation that would
-        // have succeeded a moment later. Retry a small, fixed number of
-        // times — each retry is a fresh kernel-side resolution, not a busy
-        // spin on our own state, so the bound only needs to outlast one
-        // rename's duration, not any unbounded contention; the loop always
-        // terminates within `MAX_AGAIN_RETRIES + 1` attempts, never spins
-        // unbounded. What happens when the bound is exhausted is documented
-        // at the `Err(Errno::AGAIN) => break` arm below.
-        const MAX_AGAIN_RETRIES: u8 = 4;
-        let mut retries = 0;
-        loop {
-            match openat2(
-                dir,
-                name,
-                oflags | OFlags::CLOEXEC,
-                mode,
-                ResolveFlags::BENEATH,
-            ) {
-                Ok(fd) => return Ok(fd),
-                // Kernel predates openat2 (< 5.6), or a seccomp/container
-                // policy denies the syscall outright. Fall through to the
-                // portable per-component path below rather than failing
-                // closed on a syscall the fallback doesn't need.
-                Err(Errno::NOSYS) => break,
-                Err(Errno::AGAIN) if retries < MAX_AGAIN_RETRIES => {
-                    retries += 1;
-                    continue;
-                }
-                // Retries exhausted (a pathological, sustained-rename case
-                // rather than one atomic swap): fall through to the
-                // portable per-component path below instead of surfacing an
-                // opaque `Backend` error, since that path does not share
-                // `openat2`'s whole-path-restart-on-`EAGAIN` failure mode.
-                Err(Errno::AGAIN) => break,
-                // `RESOLVE_BENEATH` implies `RESOLVE_NO_XDEV`: a mountpoint
-                // crossing anywhere in the resolution — even one that stays
-                // lexically "inside" the tree, e.g. a bind mount planted
-                // under a leaf directory — fails here too. Both a genuine
-                // beneath-root escape and an in-tree mount crossing report
-                // `EXDEV`; the kernel gives no way to tell them apart from
-                // the errno alone, and both are exactly the class this
-                // function exists to fail closed on (a mount crossing is
-                // itself a potential escape vector — the mounted filesystem
-                // is not something this mount's containment promise covers)
-                // — so both map to `Escape`, surfaced to callers as
-                // `FilesystemError::SymlinkEscape`, which is the crate's one
-                // "containment rejected this" vocabulary rather than a
-                // confusing raw `EXDEV` `Backend` error.
-                Err(Errno::XDEV) => return Err(ResolveError::Escape),
-                // With `RESOLVE_NO_SYMLINKS` no longer set, `ELOOP` here
-                // means the kernel's own resolution hit a genuine symlink
-                // *cycle* (or a chain deep enough to trip its internal
-                // bound) while expanding an in-bounds symlink — a real
-                // filesystem condition, not a containment escape. Report it
-                // as a plain I/O error rather than `Escape` so it is never
-                // conflated with — or mistaken for evidence of — an escape
-                // attempt.
-                Err(Errno::LOOP) => return Err(io_err(Errno::LOOP)),
-                Err(errno) => return Err(io_err(errno)),
+        match open_one_beneath_no_symlinks(dir, name, oflags, mode) {
+            FastOpenOutcome::Opened(fd) => return Ok(fd),
+            FastOpenOutcome::IsSymlink => {
+                return follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget);
             }
+            FastOpenOutcome::Failed(error) => return Err(error),
+            // Fall through to the portable per-component path below instead
+            // of surfacing an opaque `Backend` error.
+            FastOpenOutcome::Unsupported => {}
         }
     }
     match rustix::fs::openat(dir, name, oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC, mode) {
@@ -249,7 +314,9 @@ fn open_one_inner(
         // unambiguously means "this entry is a symlink" (the kernel never
         // attempts to expand it, so a genuine cycle cannot be observed
         // here) — follow it ourselves, fd-anchored and budget-bounded.
-        Err(Errno::LOOP) => follow_symlink_component(root, dir, name, oflags, mode, budget),
+        Err(Errno::LOOP) => {
+            follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget)
+        }
         // Some platforms (observed on macOS) report `ENOTDIR` rather than
         // `ELOOP` when `O_DIRECTORY | O_NOFOLLOW` hits a symlink — the
         // kernel checks "is this a directory" before "did NOFOLLOW block
@@ -263,7 +330,7 @@ fn open_one_inner(
                     if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                         == rustix::fs::FileType::Symlink =>
                 {
-                    follow_symlink_component(root, dir, name, oflags, mode, budget)
+                    follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget)
                 }
                 _ => Err(io_err(Errno::NOTDIR)),
             }
@@ -274,12 +341,14 @@ fn open_one_inner(
 
 /// Follows the symlink at `name` (found directly under `dir`), fd-anchored
 /// and budget-bounded (see [`SymlinkBudget`]), and finishes opening its
-/// ultimate target with the caller's original `oflags`/`mode`. Used only by
-/// the portable fallback (macOS, or a Linux host whose `openat2` is
-/// unavailable) — on Linux with `openat2`, the kernel does this same job for
-/// us inside a single `RESOLVE_BENEATH` call.
+/// ultimate target with the caller's original `oflags`/`mode`. Reached from
+/// both the Linux fast path (once `RESOLVE_NO_SYMLINKS` reports `ELOOP`) and
+/// the portable `O_NOFOLLOW` path — see the module doc for why both now
+/// share this exact walk instead of the Linux side ever letting the kernel
+/// expand a symlink itself.
 fn follow_symlink_component(
     root: BorrowedFd<'_>,
+    ancestors: &[OwnedFd],
     dir: BorrowedFd<'_>,
     name: &OsStr,
     oflags: OFlags,
@@ -288,9 +357,18 @@ fn follow_symlink_component(
 ) -> Result<OwnedFd, ResolveError> {
     budget.consume()?;
     let target = rustix::fs::readlinkat(dir, name, Vec::new()).map_err(io_err)?;
-    let (anchor, last) = walk_symlink_target(root, dir, target.as_bytes(), budget)?;
+    let (new_ancestors, anchor, last) =
+        walk_symlink_target(root, ancestors, dir, target.as_bytes(), budget)?;
     match last {
-        Some(final_name) => open_one_inner(root, anchor.as_fd(), &final_name, oflags, mode, budget),
+        Some(final_name) => open_one_inner(
+            root,
+            &new_ancestors,
+            anchor.as_fd(),
+            &final_name,
+            oflags,
+            mode,
+            budget,
+        ),
         // Target had no final component (e.g. "/" or ""): it resolves to
         // the anchor directory itself.
         None => Ok(anchor),
@@ -298,9 +376,11 @@ fn follow_symlink_component(
 }
 
 /// Walks every component of a symlink's `target` text except the last,
-/// fd-anchored throughout, and returns the resulting directory fd plus the
-/// final component's own name (left un-opened — the caller decides how to
-/// use it: as a final `open_one` leaf, or as a bare name for `atomic_write_file`).
+/// fd-anchored throughout, and returns the resulting ancestor stack
+/// (everything above the returned directory fd, root-first), that directory
+/// fd, plus the final component's own name (left un-opened — the caller
+/// decides how to use it: as a final `open_one` leaf, or as a bare name for
+/// `atomic_write_file`).
 ///
 /// **Absolute targets are rejected outright (`Escape`), unconditionally —
 /// this deliberately matches Linux's native `openat2(RESOLVE_BENEATH)`
@@ -310,39 +390,62 @@ fn follow_symlink_component(
 /// because the kernel has no concept of "this process's virtual mount root"
 /// to reinterpret it against — only `RESOLVE_IN_ROOT` does that, a
 /// materially different (chroot-emulating) primitive this module does not
-/// use. Reinterpreting an absolute target against `root` here on the
-/// portable fallback would (a) diverge from Linux's real, kernel-enforced
-/// behavior for the identical symlink, and (b) not even help in practice: a
-/// symlink created by any real tool (`ln -s`, an editor, a package manager)
-/// stores the *real host absolute path*, which reinterpreted against a
-/// mount's `root_fd` is essentially never the intended target — it is
-/// coincidence, not signal. Both platforms therefore agree: an absolute
-/// symlink target is always an escape attempt.
+/// use. Reinterpreting an absolute target against the root here would (a)
+/// diverge from Linux's real, kernel-enforced behavior for the identical
+/// symlink, and (b) not even help in practice: a symlink created by any real
+/// tool (`ln -s`, an editor, a package manager) stores the *real host
+/// absolute path*, which reinterpreted against a mount's root is essentially
+/// never the intended target — it is coincidence, not signal. Both platforms
+/// therefore agree: an absolute symlink target is always an escape attempt.
 ///
 /// A relative target resolves from `dir` (the directory the symlink itself
-/// lives in). `..` components are handled by literally `openat`-ing the
-/// parent (fd-relative, no string trust involved), but only after
-/// confirming the *current* position is not already `root`:
-/// `openat(root_fd, "..", …)` would happily open the real host parent of
-/// the mount, so a `..` that would step above `root` is refused (`Escape`)
-/// instead. Every forward (non-`.`/`..`) component goes back through
-/// [`open_one_inner`], so a symlink nested inside another symlink's target
-/// is itself resolved through this exact same escape/budget-bounded
-/// machinery, never treated as plain text — and consumes budget from the
-/// same shared [`SymlinkBudget`] as everything else in the resolution.
+/// lives in). **`..` components are answered by popping `ancestors` — never
+/// by a live, name-based `openat(fd, "..")` lookup.** An earlier version of
+/// this function did exactly that: capture `cur`'s `(device, inode)`
+/// identity, compare it against the root's to decide whether to refuse, and
+/// only then call `openat(cur, "..", …)`. That check answers "is `cur`
+/// itself the root" correctly, but it does not close the actual race: `..`
+/// is *always* a live, name-based lookup, resolved by the kernel at the
+/// moment of the syscall against whatever `cur`'s *current* parent directory
+/// entry is — not a snapshot from whenever the identity check ran. A
+/// concurrent rename of the directory `cur` refers to (e.g. `mv realdir
+/// /outside/newname`, executed by another thread between the identity check
+/// and the `openat` call) changes what `..` resolves to without changing
+/// `cur`'s own `(device, inode)` at all, so no ordering of that check
+/// relative to the `openat` call closes the window — confirmed with a
+/// working exploit (a test-only sleep widening the window let a concurrent
+/// rename make a read return bytes from outside the mount). Popping
+/// `ancestors` instead never asks the kernel to re-derive a parent by name
+/// at all: every element on the stack is an fd this module already opened
+/// and is still holding open, and an open fd's target is fixed regardless of
+/// what happens to the directory entries that were used to reach it — no
+/// concurrent rename anywhere in the tree can change what a pop yields. "Am
+/// I already at the root" becomes `ancestors.is_empty()`, a pure in-process
+/// check with no syscall (and therefore no race window) at all, replacing
+/// the old `fd_identity(root) == fd_identity(cur)` `fstat` comparison.
+///
+/// Every forward (non-`.`/`..`) component goes back through
+/// [`open_one_inner`] (pushing the fd it steps off of onto the stack before
+/// moving on), so a symlink nested inside another symlink's target is itself
+/// resolved through this exact same escape/budget-bounded machinery, never
+/// treated as plain text — and consumes budget from the same shared
+/// [`SymlinkBudget`] as everything else in the resolution.
 fn walk_symlink_target(
     root: BorrowedFd<'_>,
+    ancestors: &[OwnedFd],
     dir: BorrowedFd<'_>,
     target: &[u8],
     budget: &SymlinkBudget,
-) -> Result<(OwnedFd, Option<OsString>), ResolveError> {
+) -> Result<(Vec<OwnedFd>, OwnedFd, Option<OsString>), ResolveError> {
     if target.starts_with(b"/") {
         return Err(ResolveError::Escape);
     }
+    let mut stack: Vec<OwnedFd> = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors {
+        stack.push(dup_fd(ancestor.as_fd())?);
+    }
     let mut cur = dup_fd(dir)?;
-    let rest = target;
-    let root_id = fd_identity(root)?;
-    let mut components = rest
+    let mut components = target
         .split(|byte| *byte == b'/')
         .filter(|component| !component.is_empty())
         .peekable();
@@ -353,40 +456,32 @@ fn walk_symlink_target(
             continue;
         }
         if component == ".." {
-            if fd_identity(cur.as_fd())? == root_id {
-                return Err(ResolveError::Escape);
+            match stack.pop() {
+                Some(parent) => cur = parent,
+                // Nothing left to pop means we are already at (or above,
+                // which cannot happen by construction) the root — refuse
+                // exactly like the old identity check did, just without a
+                // syscall to race.
+                None => return Err(ResolveError::Escape),
             }
-            cur = rustix::fs::openat(
-                cur.as_fd(),
-                "..",
-                OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(io_err)?;
             continue;
         }
         if is_last {
-            return Ok((cur, Some(component.to_os_string())));
+            return Ok((stack, cur, Some(component.to_os_string())));
         }
-        cur = open_one_inner(
+        let next = open_one_inner(
             root,
+            &stack,
             cur.as_fd(),
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
             budget,
         )?;
+        stack.push(cur);
+        cur = next;
     }
-    Ok((cur, None))
-}
-
-/// `(device, inode)` identity of `fd`, used to detect "we are already at
-/// `root`" before honoring a `..` component in a symlink target — the one
-/// place this module cannot lean on `RESOLVE_BENEATH`/`openat2` and must
-/// enforce the "never above root" boundary itself.
-fn fd_identity(fd: BorrowedFd<'_>) -> Result<(u64, u64), ResolveError> {
-    let stat = rustix::fs::fstat(fd).map_err(io_err)?;
-    Ok((stat.st_dev as u64, stat.st_ino as u64))
+    Ok((stack, cur, None))
 }
 
 fn dup_fd(fd: BorrowedFd<'_>) -> Result<OwnedFd, ResolveError> {
@@ -406,30 +501,38 @@ fn dup_fd(fd: BorrowedFd<'_>) -> Result<OwnedFd, ResolveError> {
 ///
 /// One [`SymlinkBudget`] is constructed here and shared across every
 /// component's `open_one` call — the whole multi-component walk shares one
-/// [`MAX_SYMLINK_DEPTH`]-hop ceiling, not a fresh one per component (see
-/// `SymlinkBudget`'s doc for why that distinction matters).
+/// [`MAX_SYMLINK_DEPTH`]-hop ceiling, not a fresh one per component. An
+/// ancestor stack (see [`open_one`]'s `ancestors` parameter) is built up
+/// alongside it, so a symlink discovered at any depth can answer a `..` in
+/// its own target text by popping an already-open fd from *this* walk's own
+/// history, never by a live `openat(fd, "..")` lookup.
 pub(super) fn resolve_walk(
     root: BorrowedFd<'_>,
     components: &[OsString],
     final_oflags: OFlags,
 ) -> Result<(OwnedFd, Option<(OwnedFd, OsString)>), ResolveError> {
-    let Some((leaf, ancestors)) = components.split_last() else {
+    let Some((leaf, ancestor_components)) = components.split_last() else {
         return Ok((dup_fd(root)?, None));
     };
     let budget = SymlinkBudget::new();
     let mut cur = dup_fd(root)?;
-    for component in ancestors {
-        cur = open_one(
+    let mut ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestor_components.len());
+    for component in ancestor_components {
+        let next = open_one(
             root,
+            &ancestors,
             cur.as_fd(),
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
             &budget,
         )?;
+        ancestors.push(cur);
+        cur = next;
     }
     let fd = open_one(
         root,
+        &ancestors,
         cur.as_fd(),
         leaf,
         final_oflags,
@@ -440,10 +543,25 @@ pub(super) fn resolve_walk(
 }
 
 /// Walks `components` from `root`, creating any missing directory along the
-/// way (`mkdir -p` semantics), and returns the final directory's fd. Used
-/// by `write_file`/`append_file` (parent-only — matching the previous
+/// way (`mkdir -p` semantics), and returns the final directory's fd. Used by
+/// `write_file`/`append_file` (parent-only — matching the previous
 /// implementation's "always create the parent chain" behavior) and by
 /// `create_dir_all` (full path, leaf included).
+///
+/// Builds its own ancestor stack internally (root-first, not including the
+/// returned fd) so its *own* walk can answer a `..` inside any symlink it
+/// follows along the way by popping an already-open fd rather than a live
+/// `openat(fd, "..")` lookup (see [`walk_symlink_target`]) — but does not
+/// expose that stack to the caller: the only two callers that chase a
+/// symlink chain past the fd this returns
+/// ([`resolve_write_leaf`]/`append_file`'s own `open_one` call, both in
+/// `local.rs`) pass an empty ancestor slice instead, which means a `..` in a
+/// symlink discovered *at that position* fails closed rather than
+/// (correctly, but not yet wired end to end) resolving past this
+/// directory's own parent. No existing symlink test exercises a `..` at a
+/// write-leaf/append position, so this is a conservative gap, not a
+/// regression — see the module's write-side call sites in `local.rs` for
+/// the exact scope.
 ///
 /// Each level is still resolved through [`open_one`], so a symlink swapped
 /// into any not-yet-existing ancestor between one level's `mkdirat` and the
@@ -461,30 +579,43 @@ pub(super) fn descend_creating(
 ) -> Result<OwnedFd, ResolveError> {
     let budget = SymlinkBudget::new();
     let mut cur = dup_fd(root)?;
+    let mut ancestors: Vec<OwnedFd> = Vec::new();
     for component in components {
         cur = match open_one(
             root,
+            &ancestors,
             cur.as_fd(),
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
             &budget,
         ) {
-            Ok(fd) => fd,
+            Ok(fd) => {
+                ancestors.push(cur);
+                fd
+            }
             Err(ResolveError::Io(io_err)) if io_err.kind() == std::io::ErrorKind::NotFound => {
                 match rustix::fs::mkdirat(cur.as_fd(), component.as_os_str(), new_dir_mode()) {
                     Ok(()) => {}
                     Err(Errno::EXIST) => {}
                     Err(errno) => return Err(ResolveError::Io(errno.into())),
                 }
-                open_one(
+                // Re-open through the same `open_one`/`ancestors`-aware path
+                // rather than assuming the freshly created entry is safe to
+                // use directly: a concurrent swap between the `mkdirat`
+                // above and this re-open is rejected exactly like any other
+                // escaping symlink in the walk (see the doc above).
+                let fd = open_one(
                     root,
+                    &ancestors,
                     cur.as_fd(),
                     component,
                     OFlags::DIRECTORY,
                     Mode::empty(),
                     &budget,
-                )?
+                )?;
+                ancestors.push(cur);
+                fd
             }
             Err(other) => return Err(other),
         };
@@ -495,6 +626,15 @@ pub(super) fn descend_creating(
 /// Resolves `leaf` under `parent` to the `(parent, leaf-name)` pair a write
 /// should actually land at, chasing a chain of in-bounds symlinks *at the
 /// leaf position* (bounded by [`MAX_SYMLINK_DEPTH`]).
+///
+/// `ancestors` is `parent`'s own ancestor stack (root-first, not including
+/// `parent` itself) — normally the second element of
+/// [`descend_creating`]'s return value, since `parent` is typically exactly
+/// the directory `descend_creating` just resolved/created. It is required
+/// for the same reason [`open_one`]'s `ancestors` parameter is: a `..` in a
+/// leaf-position symlink's target must be answered by popping an
+/// already-open fd, never by a live `openat(fd, "..")` lookup (see
+/// [`walk_symlink_target`]).
 ///
 /// `rename`/`link` — how [`atomic_write_file`] installs bytes — never follow
 /// a symlink at the destination name; they replace/create the directory
@@ -515,10 +655,15 @@ pub(super) fn descend_creating(
 /// symlink transparently.
 pub(super) fn resolve_write_leaf(
     root: BorrowedFd<'_>,
+    ancestors: &[OwnedFd],
     parent: BorrowedFd<'_>,
     leaf: &OsStr,
 ) -> Result<(OwnedFd, OsString), ResolveError> {
     let budget = SymlinkBudget::new();
+    let mut cur_ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors {
+        cur_ancestors.push(dup_fd(ancestor.as_fd())?);
+    }
     let mut cur_parent = dup_fd(parent)?;
     let mut cur_leaf = leaf.to_os_string();
     loop {
@@ -543,14 +688,20 @@ pub(super) fn resolve_write_leaf(
         budget.consume()?;
         let target =
             rustix::fs::readlinkat(cur_parent.as_fd(), &cur_leaf, Vec::new()).map_err(io_err)?;
-        let (new_parent, new_leaf) =
-            walk_symlink_target(root, cur_parent.as_fd(), target.as_bytes(), &budget)?;
+        let (new_ancestors, new_parent, new_leaf) = walk_symlink_target(
+            root,
+            &cur_ancestors,
+            cur_parent.as_fd(),
+            target.as_bytes(),
+            &budget,
+        )?;
         let Some(new_leaf) = new_leaf else {
             // Symlink target has no final path component (e.g. "/" or ""):
             // there is no meaningful write-target name. Fail closed rather
             // than guess.
             return Err(ResolveError::Escape);
         };
+        cur_ancestors = new_ancestors;
         cur_parent = new_parent;
         cur_leaf = new_leaf;
     }
@@ -584,7 +735,9 @@ const MAX_REMOVE_DIR_DEPTH: usize = 512;
 /// `remove_dir_contents` only ever calls back in here for an
 /// `AT_SYMLINK_NOFOLLOW`-confirmed real directory) symlink-following path
 /// inside `open_one`, kept for signature uniformity with the rest of this
-/// module rather than smuggling in a path-based fallback.
+/// module rather than smuggling in a path-based fallback. Passes an empty
+/// ancestor stack to `open_one` for the same reason: that path is never
+/// actually taken, so there is no `..`-in-a-symlink-target case to answer.
 pub(super) fn remove_dir_all_fd(
     root: BorrowedFd<'_>,
     parent: BorrowedFd<'_>,
@@ -606,6 +759,7 @@ fn remove_dir_all_fd_bounded(
     }
     let dir_fd = open_one(
         root,
+        &[],
         parent,
         name,
         OFlags::DIRECTORY,

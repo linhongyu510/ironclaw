@@ -865,6 +865,59 @@ async fn local_backend_resolves_read_through_relative_symlink_chain() {
     assert_eq!(bytes, b"chained");
 }
 
+/// PR #6817 follow-up finding (Task 1): a real pnpm `node_modules` layout
+/// places a *parent-relative* symlink — `node_modules/@types/react ->
+/// ../.pnpm/react@x.y.z/node_modules/react` — one directory level up from
+/// where the symlink itself lives, then back down into a sibling subtree.
+/// The target is still fully inside the mount root throughout. A resolver
+/// whose containment boundary for the fast path is the symlink's *immediate
+/// parent* directory (rather than the true mount root) rejects this: `..`
+/// steps above that immediate parent, so a bare `RESOLVE_BENEATH`-style
+/// check on the immediate parent alone reports "escape" even though the
+/// fully-resolved target never leaves the mount. This test pins that a
+/// parent-relative, fully in-bounds symlink chain — including one whose
+/// target's directory doesn't exist yet as a distinct virtual path component
+/// until the symlink is followed — resolves correctly for both read and
+/// write, on every platform this crate ships on (this is the general,
+/// cross-platform regression pin; `local_backend_linux_openat2_...` below is
+/// the Linux-specific execution evidence for why the fast path needed to
+/// change to make this true).
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_resolves_parent_relative_symlink_pnpm_layout() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    let project = storage.path().join("project1");
+    // node_modules/.pnpm/react@1.0.0/node_modules/react/index.js  (the real file)
+    let pnpm_real_dir = project.join("node_modules/.pnpm/react@1.0.0/node_modules/react");
+    std::fs::create_dir_all(&pnpm_real_dir).unwrap();
+    std::fs::write(pnpm_real_dir.join("index.js"), b"module.exports = {}").unwrap();
+    // node_modules/@types  (the symlink's own directory)
+    let types_dir = project.join("node_modules/@types");
+    std::fs::create_dir_all(&types_dir).unwrap();
+    // node_modules/@types/react -> ../.pnpm/react@1.0.0/node_modules/react
+    // ("..": step out of @types back into node_modules, then descend).
+    symlink(
+        "../.pnpm/react@1.0.0/node_modules/react",
+        types_dir.join("react"),
+    )
+    .unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
+    let bytes = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/node_modules/@types/react/index.js").unwrap(),
+        )
+        .await
+        .expect(
+            "a parent-relative, fully in-bounds symlink (the real pnpm node_modules shape) \
+             must resolve, not be rejected as an escape",
+        );
+    assert_eq!(bytes, b"module.exports = {}");
+}
+
 /// An absolute symlink target is rejected outright (`Escape`), unconditionally
 /// — even when, interpreted as real bytes, it happens to land inside the
 /// mount. This deliberately matches Linux's native
@@ -1431,6 +1484,90 @@ mod toctou_escape {
             !outside_leaf_marker.exists(),
             "outside directory must not gain a leftover 'leaf' entry once the race \
              loop completes"
+        );
+    }
+
+    /// (e) PR #6817 follow-up (Task 2): `walk_symlink_target`'s old defense
+    /// against stepping above the mount root captured `fd_identity(cur)` and
+    /// compared it to the root's identity *before* calling
+    /// `openat(cur.as_fd(), "..", …)` — but `..` is always a live,
+    /// name-based lookup, resolved by the kernel at the moment of that
+    /// `openat` call against whatever `cur`'s *current* parent directory
+    /// entry is, not a snapshot from whenever the identity check ran.
+    /// Renaming the directory `cur` refers to (its own `(device, inode)` is
+    /// unaffected by a rename — only its parent link changes) to a location
+    /// outside the mount, concurrently with that `openat` call, makes `..`
+    /// resolve to the new, outside parent no matter when the identity check
+    /// ran relative to it.
+    ///
+    /// This doesn't reuse the `race()` helper above: those three cases swap
+    /// a *leaf* entry for a symlink-to-outside; this one instead renames an
+    /// already-open **ancestor** directory (`project1/subdir`, which holds
+    /// the symlink `link -> ../secret.txt`) so its live parent link flips
+    /// between "inside the mount" and "under `outside`", for the entire
+    /// real-syscall-latency duration of a `read_file` call — the same
+    /// many-real-fast-iterations technique, just racing a rename of the
+    /// resolver's own already-open ancestor fd's parent instead of a leaf
+    /// swap-to-symlink.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn walk_symlink_target_dotdot_rename_race_never_leaks_outside_file() {
+        let storage = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let project = storage.path().join("project1");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("secret.txt"), b"legit-content").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"OUTSIDE SECRET").unwrap();
+
+        let subdir_in = project.join("subdir");
+        let subdir_out = outside.path().join("subdir");
+
+        let root = disk_fs(storage.path());
+        let path = VirtualPath::new("/projects/project1/subdir/link").unwrap();
+
+        const RACE_ITERATIONS: usize = 2000;
+        let mut escaped = false;
+        for _ in 0..RACE_ITERATIONS {
+            let _ = std::fs::remove_dir_all(&subdir_out);
+            let _ = std::fs::remove_dir_all(&subdir_in);
+            std::fs::create_dir_all(&subdir_in).unwrap();
+            symlink("../secret.txt", subdir_in.join("link")).unwrap();
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let racer_stop = Arc::clone(&stop);
+            let racer_in = subdir_in.clone();
+            let racer_out = subdir_out.clone();
+            let racer = std::thread::spawn(move || {
+                while !racer_stop.load(Ordering::Relaxed) {
+                    // Best-effort, exactly like the other racers above:
+                    // failures here just mean we lost this particular
+                    // sub-iteration's timing, not a bug.
+                    let _ = std::fs::rename(&racer_in, &racer_out);
+                    let _ = std::fs::rename(&racer_out, &racer_in);
+                }
+            });
+
+            let root = &root;
+            let path = &path;
+            let result = futures_block_on(async { root.read_file(path).await });
+            stop.store(true, Ordering::Relaxed);
+            let _ = racer.join();
+
+            if matches!(result, Ok(bytes) if bytes == b"OUTSIDE SECRET") {
+                escaped = true;
+                break;
+            }
+        }
+        // Restore a stable on-disk shape before the tempdirs drop, so
+        // cleanup never has to contend with the racer thread's last swap.
+        let _ = std::fs::remove_dir_all(&subdir_out);
+
+        assert!(
+            !escaped,
+            "resolving `..` inside a followed symlink target must never leak bytes \
+             from outside the mount, even when a concurrent rename moves the \
+             resolver's own already-open ancestor directory to a different, \
+             outside parent between the identity check and the old \
+             `openat(cur, \"..\")` call"
         );
     }
 
