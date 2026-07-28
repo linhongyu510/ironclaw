@@ -243,10 +243,66 @@ impl DiskFilesystem {
     /// this is pure string/virtual-path routing, and is not part of the
     /// TOCTOU surface: the actual containment enforcement happens
     /// fd-relatively in `open_one` as each returned component is walked.
+    ///
+    /// This is the public routing entry point every real filesystem
+    /// operation (`read_file`, `write_file`, ... in `local.rs`) resolves
+    /// through, so it is where the PR #6817 fix applies: see
+    /// [`Self::narrowing_lost`] for the fail-closed check layered on top of
+    /// the raw routing in [`Self::resolve_mount_route`]. Internal bootstrap
+    /// callers that must legitimately resolve through a *wider* ancestor
+    /// mount before a narrower one exists — namely
+    /// `ensure_scoped_mount_dynamic` descending from the parent mount to
+    /// open its own narrow anchor — call `resolve_mount_route` directly to
+    /// bypass this check.
     pub(super) fn resolve_mount_target(
         &self,
         path: &VirtualPath,
     ) -> Result<MountTarget, FilesystemError> {
+        let (target, matched_virtual_root) = self.resolve_mount_route(path)?;
+        if self.narrowing_lost(path, &matched_virtual_root) {
+            // A virtual root at least as specific as this path was, at some
+            // point, established as this backend's own containment boundary
+            // for that scope (`ensure_scoped_mount_dynamic`) — but no mount
+            // that specific is live right now, only a shorter/wider
+            // ancestor (`matched_virtual_root`). Matching the ancestor here
+            // would silently re-widen containment for whatever caller
+            // narrowed this scope, reopening the same-storage-root
+            // cross-tenant symlink escape narrowing exists to close (PR
+            // #6817). Fail loudly instead: the caller must re-establish
+            // narrowing (`ensure_scoped_mount`) before this path resolves
+            // again, exactly like a first-time access.
+            return Err(FilesystemError::MountNotFound { path: path.clone() });
+        }
+        Ok(target)
+    }
+
+    /// `true` when `path` requires narrowing (some virtual root at least as
+    /// specific as `matched_virtual_root` was previously established via
+    /// `ensure_scoped_mount_dynamic`) but the mount that actually matched in
+    /// `resolve_mount_route` is not that narrow root itself — i.e. narrowing
+    /// was lost (typically: LRU-evicted) and never re-established.
+    fn narrowing_lost(&self, path: &VirtualPath, matched_virtual_root: &str) -> bool {
+        let narrow_roots = self
+            .narrow_scoped_roots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        narrow_roots.iter().any(|root| {
+            root.len() > matched_virtual_root.len() && path_prefix_matches(root, path.as_str())
+        })
+    }
+
+    /// The raw longest-prefix routing `resolve_mount_target` wraps with the
+    /// narrowing-lost check — used directly, without that check, by
+    /// `ensure_scoped_mount_dynamic`'s own bootstrap resolution (it must be
+    /// able to resolve through a wider ancestor mount precisely in order to
+    /// *create* the narrower one; requiring the narrow mount to already
+    /// exist to resolve through it would be circular). Returns the matched
+    /// mount's own `virtual_root` alongside the target so callers can tell
+    /// which mount actually satisfied the routing.
+    fn resolve_mount_route(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<(MountTarget, String), FilesystemError> {
         let mounts = self
             .mounts
             .read()
@@ -267,6 +323,7 @@ impl DiskFilesystem {
             mount.last_used.store(next_touch(), Ordering::Relaxed);
         }
 
+        let matched_virtual_root = mount.virtual_root.as_str().to_string();
         let tail = path
             .as_str()
             .strip_prefix(mount.virtual_root.as_str())
@@ -302,11 +359,14 @@ impl DiskFilesystem {
             components.push(OsString::from(segment));
         }
 
-        Ok(MountTarget {
-            root_fd: Arc::clone(&mount.root_fd),
-            components,
-            leaf_scoped: mount.leaf_scoped,
-        })
+        Ok((
+            MountTarget {
+                root_fd: Arc::clone(&mount.root_fd),
+                components,
+                leaf_scoped: mount.leaf_scoped,
+            },
+            matched_virtual_root,
+        ))
     }
 
     /// Dynamically registers a mount rooted exactly *at* `virtual_root`, if
@@ -352,11 +412,29 @@ impl DiskFilesystem {
         &self,
         virtual_root: &VirtualPath,
     ) -> Result<(), FilesystemError> {
+        // Record *before* the idempotent short-circuit and before any
+        // eviction can happen: from this point on, `virtual_root` is a
+        // containment boundary some caller relies on, permanently — even
+        // across a later LRU eviction of the live entry below. See
+        // `DiskFilesystem::narrow_scoped_roots` and
+        // `resolve_mount_target`/`narrowing_lost` (PR #6817 fix).
+        self.narrow_scoped_roots
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(virtual_root.as_str().to_string());
+
         if self.has_mount(virtual_root) {
             return Ok(());
         }
         let virtual_root = virtual_root.clone();
-        let target = self.resolve_mount_target(&virtual_root)?;
+        // Raw routing, not `resolve_mount_target`: this call resolves
+        // through the (necessarily wider) *ancestor* mount to descend into
+        // `virtual_root` and open its own anchor fd — `virtual_root` itself
+        // has no live mount yet, that is exactly what this function is
+        // registering. Going through `resolve_mount_target` here would
+        // wrongly fail closed on `virtual_root`'s own just-recorded
+        // narrowing requirement.
+        let (target, _matched_virtual_root) = self.resolve_mount_route(&virtual_root)?;
         let path = virtual_root.clone();
         let anchor_fd =
             super::run_blocking(path.clone(), FilesystemOperation::MountLocal, move || {
@@ -722,12 +800,21 @@ mod tests {
     }
 
     /// FIX 2 regression, second half: a scope evicted to make room for newer
-    /// ones must still resolve correctly once it is touched again — eviction
-    /// only drops the registry's own `Arc<OwnedFd>` clone (see
-    /// `ensure_scoped_mount_dynamic`'s eviction comment), never an fd a
-    /// concurrent or later request is relying on, so re-registering the same
-    /// virtual root must transparently re-open it and behave exactly like the
-    /// first time.
+    /// ones must still resolve correctly once its narrowing is properly
+    /// re-established — eviction only drops the registry's own
+    /// `Arc<OwnedFd>` clone (see `ensure_scoped_mount_dynamic`'s eviction
+    /// comment), never an fd a concurrent or later request is relying on,
+    /// nor the underlying host directory or its contents.
+    ///
+    /// Updated for the PR #6817 fix: a bare `read_file`/`write_file` call no
+    /// longer transparently re-widens through the ancestor mount after
+    /// eviction (see `evicted_narrow_mount_fails_closed_instead_of_reopening_cross_tenant_symlink_escape`
+    /// below) — that silent widening *was* the bug. The realistic "reused"
+    /// path, matching every real caller (`ScopedFilesystem` always calls
+    /// `ensure_scoped_mount` immediately before each op), is to
+    /// re-`ensure_scoped_mount_dynamic` the scope first; this test proves
+    /// that path still transparently re-opens the evicted scope and behaves
+    /// exactly like the first registration.
     #[tokio::test]
     async fn ensure_scoped_mount_evicted_scope_still_resolves_after_reregistration() {
         let storage = tempdir().unwrap();
@@ -760,14 +847,30 @@ mod tests {
         }
         assert_eq!(dynamic_mount_count(&root), MAX_DYNAMIC_MOUNTS);
 
-        // scope-0's file is still on disk (eviction only drops the fd
-        // *cache* entry, never the underlying host directory or its
-        // contents) — reading it forces `ensure_scoped_mount_dynamic` to
-        // re-register the mount from scratch.
+        // A bare read against the evicted scope, without re-establishing
+        // narrowing, must now fail closed (PR #6817 fix) rather than
+        // silently resolving through the wide `/projects` ancestor.
+        let error = root
+            .read_file(&VirtualPath::new("/projects/scope-0/marker.txt").unwrap())
+            .await
+            .expect_err("read against an evicted, non-re-narrowed scope must fail closed");
+        assert!(
+            matches!(error, FilesystemError::MountNotFound { .. }),
+            "expected MountNotFound after eviction with no re-narrowing, got: {error:?}"
+        );
+
+        // The realistic reuse path: re-establish narrowing, exactly as
+        // `ScopedFilesystem` does before every op. scope-0's file is still
+        // on disk (eviction only drops the fd *cache* entry, never the
+        // underlying host directory or its contents), so re-registering
+        // must transparently re-open it.
+        root.ensure_scoped_mount_dynamic(&first_scope)
+            .await
+            .expect("re-register scope-0 after eviction");
         let bytes = root
             .read_file(&VirtualPath::new("/projects/scope-0/marker.txt").unwrap())
             .await
-            .expect("scope-0 must still resolve correctly after eviction and re-registration");
+            .expect("scope-0 must resolve correctly once narrowing is re-established");
         assert_eq!(bytes, b"first-registration");
 
         root.write_file(
@@ -782,5 +885,85 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, b"second-registration");
         assert_eq!(dynamic_mount_count(&root), MAX_DYNAMIC_MOUNTS);
+    }
+
+    /// PROVEN cross-tenant escape (PR #6817), permanent regression test.
+    ///
+    /// `ensure_scoped_mount_dynamic` narrows containment to exactly one
+    /// caller's own scope (here `/projects/scope-a`) so a symlink escaping
+    /// that scope — even while staying under the wider `/projects` mount —
+    /// is rejected. But that narrow mount is one of `MAX_DYNAMIC_MOUNTS`
+    /// LRU-bounded entries: if it is evicted (one attacker can self-trigger
+    /// this by forcing `MAX_DYNAMIC_MOUNTS` registrations) before the
+    /// narrowed caller's own operation resolves, `resolve_mount_target` used
+    /// to silently fall back to the wider `/projects` mount — reopening the
+    /// exact escape narrowing exists to close, with no error and no signal
+    /// that narrowing was lost.
+    ///
+    /// This exercises the *real* production trigger (an actual
+    /// `MAX_DYNAMIC_MOUNTS`-entry LRU eviction), not a hand-removed mount
+    /// entry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn evicted_narrow_mount_fails_closed_instead_of_reopening_cross_tenant_symlink_escape() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let scope_a = host_root.join("scope-a");
+        let scope_b = host_root.join("scope-b");
+        std::fs::create_dir_all(&scope_a).unwrap();
+        std::fs::create_dir_all(&scope_b).unwrap();
+        std::fs::write(scope_b.join("secret.txt"), b"scope-b secret").unwrap();
+        std::os::unix::fs::symlink("../scope-b/secret.txt", scope_a.join("escape.txt")).unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        let narrow_target = VirtualPath::new("/projects/scope-a").unwrap();
+        let escape_path = VirtualPath::new("/projects/scope-a/escape.txt").unwrap();
+
+        // Narrow mount live: containment is anchored at scope-a's own leaf,
+        // so the symlink escaping to scope-b is rejected.
+        root.ensure_scoped_mount_dynamic(&narrow_target)
+            .await
+            .expect("establish narrow mount for scope-a");
+        let error = root.read_file(&escape_path).await.unwrap_err();
+        assert!(
+            matches!(error, FilesystemError::SymlinkEscape { .. }),
+            "expected SymlinkEscape with the narrow mount live, got: {error:?}"
+        );
+
+        // Force scope-a's narrow mount out of the real LRU cache without
+        // ever re-narrowing for it — the exact production trigger: a busy
+        // multi-tenant host (or one attacker) registering
+        // `MAX_DYNAMIC_MOUNTS` distinct scopes evicts an unrelated caller's
+        // narrow mount mid-request.
+        for i in 0..MAX_DYNAMIC_MOUNTS {
+            let target = VirtualPath::new(format!("/projects/filler-{i}")).unwrap();
+            root.ensure_scoped_mount_dynamic(&target)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("ensure_scoped_mount(filler-{i}) failed: {error:?}")
+                });
+        }
+        assert!(
+            !root.has_mount(&narrow_target),
+            "scope-a's narrow mount must have been evicted by the fill loop"
+        );
+
+        // The identical read, with narrowing lost and never re-established,
+        // must now fail closed rather than silently falling back to the
+        // wide `/projects` mount and returning scope-b's file content.
+        let error = root.read_file(&escape_path).await.expect_err(
+            "read after narrow-mount eviction must fail closed, not resolve through the wider mount",
+        );
+        assert!(
+            matches!(error, FilesystemError::MountNotFound { .. }),
+            "expected MountNotFound (fail-closed) after narrowing was lost, got: {error:?}"
+        );
     }
 }

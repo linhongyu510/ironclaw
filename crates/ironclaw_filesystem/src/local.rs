@@ -38,6 +38,17 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct DiskFilesystem {
     mounts: std::sync::RwLock<Vec<LocalMount>>,
+    /// Every virtual root ever passed to
+    /// [`ensure_scoped_mount_dynamic`](DiskFilesystem::ensure_scoped_mount_dynamic),
+    /// retained permanently (never evicted, unlike `mounts`). Backs the
+    /// PR #6817 cross-tenant fix in `mount_registry`'s `resolve_mount_target`:
+    /// once a virtual root has ever been narrowed, every future resolution
+    /// under it must find a live matching dynamic mount or fail closed,
+    /// rather than silently matching a wider ancestor mount whose
+    /// containment boundary the narrowing was meant to replace. Only
+    /// strings, not fds, so it does not reopen the `RLIMIT_NOFILE` leak
+    /// `MAX_DYNAMIC_MOUNTS` exists to bound.
+    narrow_scoped_roots: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 impl DiskFilesystem {
@@ -87,6 +98,7 @@ fn anchor_for_target(
     } else {
         open_one(
             target.root_fd.as_fd(),
+            &[],
             target.root_fd.as_fd(),
             leaf,
             OFlags::DIRECTORY,
@@ -237,8 +249,13 @@ impl RootFilesystem for DiskFilesystem {
             // transparently (unlike `write_file`'s rename-based atomic
             // install, a plain `open`-and-append writes straight through
             // one), so no separate `resolve_write_leaf` chase is needed here.
+            // Empty ancestors: `descend_creating` does not expose its own
+            // internal ancestor stack past `parent_fd` (see its doc comment)
+            // — a `..` in a symlink discovered at `leaf` fails closed rather
+            // than resolving past `parent_fd`'s own parent.
             let fd = open_one(
                 anchor.as_fd(),
+                &[],
                 parent_fd.as_fd(),
                 &leaf,
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
@@ -469,11 +486,19 @@ impl DiskFilesystem {
             // follow a symlink at the destination name — resolve any
             // in-bounds symlink chain at `leaf` ourselves first so the
             // install lands at the symlink's ultimate target, not over the
-            // symlink entry itself.
-            let (write_parent_fd, write_leaf) =
-                resolve_write_leaf(anchor.as_fd(), parent_fd.as_fd(), &leaf).map_err(|error| {
-                    resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
-                })?;
+            // symlink entry itself. Empty ancestors: see the empty-slice
+            // note at `append_file`'s `open_one` call above — `parent_fd`'s
+            // own ancestor stack past itself is not exposed by
+            // `descend_creating`.
+            let (write_parent_fd, write_leaf) = resolve_write_leaf(
+                anchor.as_fd(),
+                &[],
+                parent_fd.as_fd(),
+                &leaf,
+            )
+            .map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
+            })?;
             atomic_write_file(&path, write_parent_fd.as_fd(), &write_leaf, &bytes, cas)
         })
         .await
