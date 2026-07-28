@@ -274,10 +274,25 @@ pub(crate) fn build_server_config(
             TlsInterceptError::ServerConfigFailed("leaf key pem contained no key".to_string())
         })?;
 
-    rustls::ServerConfig::builder()
+    let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(chain, key)
-        .map_err(|error| TlsInterceptError::ServerConfigFailed(error.to_string()))
+        .map_err(|error| TlsInterceptError::ServerConfigFailed(error.to_string()))?;
+    // Pin ALPN to http/1.1 on this leg. W6 phase 2 parses HTTP/1.1 request
+    // heads out of the decrypted stream to do the credential swap — a
+    // client that negotiated h2 would have its binary HPACK framing
+    // misparsed as an HTTP/1.1 head, which could leave a credential
+    // unswapped or partially swapped while the code believes it succeeded
+    // (a leak, not a crash). Today's absence of ALPN is not exploitable (h2
+    // requires a successful ALPN negotiation; a client that sends no ALPN
+    // extension cannot silently switch framing), but that safety rested on
+    // an unenforced convention rather than a pinned contract. Setting this
+    // makes rustls itself reject a client that offers ONLY h2 with
+    // `NoApplicationProtocol` instead of silently completing a handshake
+    // this seam is not equipped to parse. See `alpn_pinned_to_http1_1`
+    // tests below for the observed fail-closed/happy-path behavior.
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(server_config)
 }
 
 /// Wraps an `AsyncRead + AsyncWrite` stream with bytes that must be replayed
@@ -366,9 +381,14 @@ mod tests {
                 .add(cert.expect("valid root cert pem"))
                 .expect("root cert adds");
         }
-        let client_config = rustls::ClientConfig::builder()
+        let mut client_config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        // Symmetric with `build_server_config`'s leaf-side pin: the origin
+        // leg is pinned to http/1.1 too, so a production connector built the
+        // same way never lets an origin answer h2 on a leg whose decrypted
+        // bytes get relayed straight to an http/1.1 client.
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         TlsConnector::from(Arc::new(client_config))
     }
 
@@ -378,9 +398,10 @@ mod tests {
     /// conditions.
     fn connector_trusting_nothing() -> TlsConnector {
         ensure_crypto_provider_installed();
-        let client_config = rustls::ClientConfig::builder()
+        let mut client_config = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         TlsConnector::from(Arc::new(client_config))
     }
 
@@ -597,5 +618,124 @@ mod tests {
             "origin must never be dialed after a failed client handshake (fail-closed, no \
              plaintext fallback)"
         );
+    }
+
+    /// `build_server_config` pins ALPN to `http/1.1` (see its doc comment).
+    /// A client that offers ONLY `h2` must fail the handshake with rustls's
+    /// `NoApplicationProtocol` alert — proving the pin is an enforced
+    /// contract, not just an absence-of-ALPN convention. This is what makes
+    /// it safe for W6 phase 2 to parse the decrypted stream as HTTP/1.1: a
+    /// client that negotiated h2 can never reach that parser with binary
+    /// HPACK framing it would silently misparse.
+    #[tokio::test]
+    async fn h2_only_client_fails_the_handshake_with_no_application_protocol() {
+        let host = "bound.example.com";
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let issued = ca.issue_leaf_for_host(host).unwrap();
+        let server_config = build_server_config(&issued.certificate).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            acceptor.accept(stream).await
+        });
+
+        ensure_crypto_provider_installed();
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut ca.root_certificate_pem().as_bytes()) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        // Offers ONLY h2 — no http/1.1 fallback in the client's own ALPN
+        // list, so a server pinned to http/1.1 alone has no protocol left to
+        // agree on.
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let raw_client = TcpStream::connect(addr).await.unwrap();
+        let server_name = ServerName::try_from(host.to_string()).unwrap();
+        let client_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, raw_client),
+        )
+        .await
+        .expect("handshake attempt must not hang");
+
+        assert!(
+            client_result.is_err(),
+            "an h2-only client must fail the handshake against a server pinned to http/1.1"
+        );
+
+        let server_result = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic");
+        let server_error = server_result.expect_err(
+            "the server side must also observe the ALPN mismatch as a handshake failure",
+        );
+        // rustls's `AlertDescription::NoApplicationProtocol` surfaces on the
+        // server side as this `PeerIncompatible` message (verified above:
+        // the actual `Display` text is "peer doesn't support any known
+        // protocol", not a string containing "NoApplicationProtocol").
+        let message = server_error.to_string();
+        assert!(
+            message.contains("doesn't support any known protocol"),
+            "expected rustls's NoApplicationProtocol failure on the server side, got: {message}"
+        );
+    }
+
+    /// Companion to the h2-only failure above: a client that explicitly
+    /// offers `http/1.1` (matching the server's pin) completes the
+    /// handshake normally — the pin rejects h2 specifically, not ALPN
+    /// negotiation in general.
+    #[tokio::test]
+    async fn http1_1_client_still_completes_the_handshake() {
+        let host = "bound.example.com";
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let issued = ca.issue_leaf_for_host(host).unwrap();
+        let server_config = build_server_config(&issued.certificate).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            acceptor.accept(stream).await
+        });
+
+        ensure_crypto_provider_installed();
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut ca.root_certificate_pem().as_bytes()) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let raw_client = TcpStream::connect(addr).await.unwrap();
+        let server_name = ServerName::try_from(host.to_string()).unwrap();
+        let client_tls = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, raw_client),
+        )
+        .await
+        .expect("handshake attempt must not hang")
+        .expect("an http/1.1 client must complete the handshake against the pinned server");
+
+        assert_eq!(
+            client_tls.get_ref().1.alpn_protocol(),
+            Some(b"http/1.1".as_slice()),
+            "negotiated protocol must be http/1.1"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic")
+            .expect("server side must also complete the handshake");
     }
 }
