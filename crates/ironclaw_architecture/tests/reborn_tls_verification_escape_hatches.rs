@@ -29,6 +29,17 @@
 //! `tests.rs` files and truncates any file at its own `#[cfg(test)] mod
 //! tests` marker, scanning only what precedes it.
 //!
+//! **The standalone-`tests.rs` exemption verifies its wiring, not just the
+//! filename.** A file merely being named `.../tests.rs` proves nothing on
+//! its own — nothing stops that file's content from compiling into every
+//! build if the parent module's `mod tests;` declaration ever loses its
+//! `#[cfg(test)]`. [`parent_gates_tests_module_behind_cfg_test`] reads the
+//! parent file and confirms `#[cfg(test)]` (or `#[cfg(all(test, ...))]`)
+//! genuinely precedes `mod tests;` before exempting the file; if that
+//! wiring is missing or unparseable, the file is scanned like production
+//! code instead of silently exempted. See that function's doc for exactly
+//! what it does and does not handle.
+//!
 //! **Comments (and string literals) are exempt too**, same rule and same
 //! rationale as `reborn_retired_failure_vocabulary.rs`: this module's own
 //! doc comments (including this one) explain the ban by naming the exact
@@ -79,9 +90,104 @@ fn sandbox_process_dir(root: &Path) -> PathBuf {
 }
 
 /// A standalone test file (`ca/tests.rs`, `credential_firewall/tests.rs`) is
-/// pure test code end to end — excluded wholesale rather than line-scanned.
+/// pure test code end to end — excluded wholesale rather than line-scanned,
+/// PROVIDED its parent module actually wires it in behind `#[cfg(test)]`
+/// (see [`parent_gates_tests_module_behind_cfg_test`]). This predicate alone
+/// is filename-only and must never be used, on its own, to decide
+/// exemption — see that function's doc for why.
 fn is_standalone_test_file(relative: &str) -> bool {
     relative.ends_with("/tests.rs") || relative.ends_with("\\tests.rs")
+}
+
+/// Whether `line` (already trimmed) is a `#[cfg(...)]` attribute that
+/// *unconditionally requires* `test` — either the bare `#[cfg(test)]` or an
+/// `#[cfg(all(test, ...))]` combination. An `any(test, ...)` is deliberately
+/// rejected: it does not guarantee the module is test-only, since the `any`
+/// branch could be satisfied without `test` being set, so a module gated
+/// that way could still compile into a non-test build.
+fn is_cfg_test_attribute(line: &str) -> bool {
+    let Some(inner) = line
+        .strip_prefix("#[cfg(")
+        .and_then(|rest| rest.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    if inner == "test" {
+        return true;
+    }
+    match inner
+        .strip_prefix("all(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(args) => args.split(',').any(|part| part.trim() == "test"),
+        None => false,
+    }
+}
+
+/// The real fix this gate was missing: verifies a standalone `.../tests.rs`
+/// file's *parent* module actually declares it behind `#[cfg(test)]` —
+/// `#[cfg(test)]` (or `#[cfg(all(test, ...))]`), then `mod tests;`, allowing
+/// blank lines, doc comments, and other (non-`cfg`) attributes in between —
+/// rather than trusting the `/tests.rs` filename alone.
+///
+/// **Why this exists.** Without it, stripping `#[cfg(test)]` from
+/// `tls_intercept.rs`'s `mod tests;` — so `tls_intercept/tests.rs` compiles
+/// into *every* build, including release — combined with a `.dangerous()`
+/// call planted inside that file, passed this gate silently: the file was
+/// exempted purely because its name ended in `/tests.rs`, never checking
+/// whether it was actually reachable only under `#[cfg(test)]`. This gate
+/// has now silently failed to bind four times (see the module's history);
+/// this function exists so a `/tests.rs` file with no verified `#[cfg(test)]`
+/// wiring is scanned like production code instead of silently exempted.
+///
+/// **Fails toward scanning, not toward exemption.** Every unhandled shape —
+/// a missing parent file, an `#[cfg(any(test, ...))]` gate, a multi-line
+/// `#[cfg(...)]` attribute, `#[path = "..."]` redirection to a
+/// differently-named module, or an inline `mod tests { ... }` body instead
+/// of an external-file `mod tests;` declaration — returns `Ok(false)`
+/// ("not verified"), which the caller treats as "scan it like production
+/// code." A false negative here (a legitimately test-only file this check
+/// can't verify) only costs an extra, harmless scan; a false positive would
+/// recreate the exact hole this function exists to close. A genuine I/O
+/// error reading the parent file is propagated, not swallowed — same
+/// fail-loud policy as [`scan_dir`]'s own I/O handling.
+fn parent_gates_tests_module_behind_cfg_test(root: &Path, relative: &str) -> io::Result<bool> {
+    let Some(parent_stem) = relative
+        .strip_suffix("/tests.rs")
+        .or_else(|| relative.strip_suffix("\\tests.rs"))
+    else {
+        return Ok(false);
+    };
+    let parent_path = root.join(format!("{parent_stem}.rs"));
+    let contents = match std::fs::read_to_string(&parent_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    let mut pending_cfg_test = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            // Blank lines and doc comments never break a pending #[cfg(test)].
+            continue;
+        }
+        if pending_cfg_test && trimmed == "mod tests;" {
+            return Ok(true);
+        }
+        if is_cfg_test_attribute(trimmed) {
+            pending_cfg_test = true;
+            continue;
+        }
+        if trimmed.starts_with('#') && trimmed.ends_with(']') {
+            // A different single-line attribute (e.g. `#[allow(dead_code)]`)
+            // between `#[cfg(test)]` and `mod tests;` — tolerated, does not
+            // reset the pending state.
+            continue;
+        }
+        pending_cfg_test = false;
+    }
+    Ok(false)
 }
 
 /// Files in this crate keep their `#[cfg(test)] mod tests { ... }` at the
@@ -200,7 +306,9 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> io::Result<()> {
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        if is_standalone_test_file(&relative) {
+        if is_standalone_test_file(&relative)
+            && parent_gates_tests_module_behind_cfg_test(root, &relative)?
+        {
             continue;
         }
         let contents = std::fs::read_to_string(&path)?;
@@ -444,4 +552,156 @@ fn is_standalone_test_file_recognizes_both_path_separators_and_only_tests_rs() {
     assert!(!is_standalone_test_file(
         "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs"
     ));
+}
+
+/// Unit coverage for [`is_cfg_test_attribute`]'s recognizer, independent of
+/// the file-scanning end-to-end tests below: the exact spellings the module
+/// doc calls out as things a correct check must handle (plain `#[cfg(test)]`,
+/// `#[cfg(all(test, ...))]`) and the ones it must NOT treat as an
+/// unconditional test gate (`any(...)`, `not(test)`, an unrelated cfg, or
+/// plain non-attribute code).
+#[test]
+fn is_cfg_test_attribute_recognizes_the_documented_shapes() {
+    assert!(is_cfg_test_attribute("#[cfg(test)]"));
+    assert!(is_cfg_test_attribute("#[cfg(all(test, unix))]"));
+    assert!(is_cfg_test_attribute("#[cfg(all(unix, test))]"));
+    assert!(is_cfg_test_attribute("#[cfg(all(test,windows))]"));
+
+    // `any(...)` does not guarantee test-only: the module could still
+    // compile in a non-test build if the other branch is satisfied.
+    assert!(!is_cfg_test_attribute("#[cfg(any(test, feature = \"x\"))]"));
+    // A negation must not be confused with a positive test gate.
+    assert!(!is_cfg_test_attribute("#[cfg(not(test))]"));
+    assert!(!is_cfg_test_attribute("#[cfg(unix)]"));
+    assert!(!is_cfg_test_attribute("mod tests;"));
+    assert!(!is_cfg_test_attribute("#[allow(dead_code)]"));
+}
+
+/// End-to-end proof that the exemption is now conditioned on real wiring,
+/// not the filename alone — the exact planted-violation scenario from the
+/// module doc: a parent module declares `mod tests;` with NO preceding
+/// `#[cfg(test)]` (so that file's content, including its "test" module,
+/// compiles into every build, including release), and the sibling
+/// `tests.rs` contains a banned escape-hatch spelling. Before this fix,
+/// `is_standalone_test_file` alone decided exemption and this reported
+/// clean; the gate must now report the hit.
+///
+/// Uses a fabricated fixture tree under a tempdir (not the real repo files)
+/// so this test can plant an unwired `mod tests;` without ever touching
+/// real source — the same property `sanctioned_call_site_is_scoped_to_the_
+/// one_function_not_the_whole_file` above already relies on by constructing
+/// its own `impostor_body` string rather than mutating `tls_intercept.rs`.
+#[test]
+fn gate_fails_when_a_tests_rs_files_cfg_test_wiring_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    let tls_dir = sandbox_dir.join("tls_intercept");
+    std::fs::create_dir_all(&tls_dir).expect("create tls_intercept dir");
+
+    // The planted violation: `mod tests;` with no preceding `#[cfg(test)]`.
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn noop() {}\n\nmod tests;\n",
+    )
+    .expect("write tls_intercept.rs");
+    // The escape-hatch spelling planted inside the file the old, filename-only
+    // check would have wrongly exempted.
+    std::fs::write(
+        tls_dir.join("tests.rs"),
+        "fn build() { let _ = rustls::ClientConfig::builder().dangerous(); }\n",
+    )
+    .expect("write tls_intercept/tests.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a tests.rs file whose parent does not gate it behind #[cfg(test)] \
+         must be scanned like production code, not silently exempted — the \
+         gate must report the planted `.dangerous()` call"
+    );
+}
+
+/// The other half of the same proof: the identical banned spelling in the
+/// identical `tests.rs` location must still be exempt once the parent's
+/// wiring is genuinely correct (`#[cfg(test)]` immediately before
+/// `mod tests;`, matching `ca.rs`/`credential_firewall.rs`/`tls_intercept.rs`'s
+/// real convention) — the fix must not turn into a blanket false-positive
+/// generator against every legitimately test-only `tests.rs` file.
+#[test]
+fn gate_still_exempts_a_correctly_cfg_test_wired_tests_rs_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    let tls_dir = sandbox_dir.join("tls_intercept");
+    std::fs::create_dir_all(&tls_dir).expect("create tls_intercept dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn noop() {}\n\n#[cfg(test)]\nmod tests;\n",
+    )
+    .expect("write tls_intercept.rs");
+    std::fs::write(
+        tls_dir.join("tests.rs"),
+        "fn build() { let _ = rustls::ClientConfig::builder().dangerous(); }\n",
+    )
+    .expect("write tls_intercept/tests.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        hits.is_empty(),
+        "a correctly #[cfg(test)]-gated tests.rs file must still be exempt, \
+         got: {hits:?}"
+    );
+}
+
+/// Proves the parent-wiring check tolerates the specific shapes the module
+/// doc calls out as things that must not defeat it — blank lines, a doc
+/// comment, and another (non-`cfg`) attribute between `#[cfg(test)]` and
+/// `mod tests;` — while still rejecting the shapes that must NOT count as
+/// verified wiring: a missing parent file, and an inline `mod tests { ... }`
+/// body instead of an external-file `mod tests;` declaration.
+#[test]
+fn parent_gates_tests_module_behind_cfg_test_handles_documented_edge_cases() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+    let relative = "crates/ironclaw_host_runtime/src/sandbox_process/widget/tests.rs";
+
+    // Whitespace, a doc comment, and another attribute in between: still
+    // verified.
+    std::fs::write(
+        sandbox_dir.join("widget.rs"),
+        "#[cfg(test)]\n\n/// explains the test module\n#[allow(dead_code)]\nmod tests;\n",
+    )
+    .expect("write widget.rs");
+    assert!(
+        parent_gates_tests_module_behind_cfg_test(root, relative).expect("read must succeed"),
+        "blank lines, a doc comment, and another attribute between \
+         #[cfg(test)] and `mod tests;` must not defeat the check"
+    );
+
+    // No parent file at all: not verified, but not an error either — the
+    // caller treats `Ok(false)` as "scan it."
+    std::fs::remove_file(sandbox_dir.join("widget.rs")).expect("remove widget.rs");
+    assert!(
+        !parent_gates_tests_module_behind_cfg_test(root, relative).expect("must not error"),
+        "a missing parent file must not be silently treated as verified"
+    );
+
+    // An inline `mod tests { ... }` body is a different construct entirely
+    // from an external-file `mod tests;` declaration — must not verify.
+    std::fs::write(
+        sandbox_dir.join("widget.rs"),
+        "#[cfg(test)]\nmod tests {\n    // inline, not the external tests.rs file\n}\n",
+    )
+    .expect("write widget.rs");
+    assert!(
+        !parent_gates_tests_module_behind_cfg_test(root, relative).expect("read must succeed"),
+        "an inline `mod tests {{ ... }}` body must not verify an external \
+         tests.rs file's wiring"
+    );
 }
