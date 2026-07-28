@@ -108,6 +108,101 @@ fn unbound_host_is_not_bound_and_mints_no_leaf() {
     assert_eq!(config.ca.cached_entry_count(), 0);
 }
 
+/// `read_request_head`'s three fail-closed/framing paths, exercised directly
+/// against the function rather than through the full TLS harness — cheap,
+/// and these are exactly the framing-boundary decisions
+/// `a_pipelined_second_request_cannot_borrow_the_first_requests_authorization`
+/// established matter for correctness.
+mod read_request_head_framing {
+    use super::*;
+
+    /// Exceeding the cap without ever seeing the terminator must fail
+    /// closed rather than keep growing the buffer forever.
+    #[tokio::test]
+    async fn over_the_size_cap_without_a_terminator_is_request_head_too_large() {
+        let (mut client, mut server) = tokio::io::duplex(128 * 1024);
+        let body = vec![b'a'; MAX_REQUEST_HEAD_BYTES + 1];
+        let writer = tokio::spawn(async move {
+            server.write_all(&body).await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+
+        let error = read_request_head(&mut client).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TlsInterceptError::RequestHeadTooLarge { .. }
+        ));
+        writer.await.unwrap();
+    }
+
+    /// EOF after some bytes were buffered but before `\r\n\r\n` was seen is
+    /// a distinct failure from `Ok(None)` (EOF before any byte at all): the
+    /// client sent a partial, unusable head rather than simply not
+    /// connecting.
+    #[tokio::test]
+    async fn eof_after_a_partial_head_is_malformed_request_head() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            server
+                .write_all(b"GET /x HTTP/1.1\r\nHost: h")
+                .await
+                .unwrap();
+            server.shutdown().await.unwrap();
+        });
+
+        let error = read_request_head(&mut client).await.unwrap_err();
+
+        assert!(matches!(error, TlsInterceptError::MalformedRequestHead));
+        writer.await.unwrap();
+    }
+
+    /// EOF before any byte at all is not malformed — it's simply no
+    /// request, e.g. a client that connected and disconnected.
+    #[tokio::test]
+    async fn eof_before_any_byte_is_ok_none() {
+        let (mut client, server) = tokio::io::duplex(64);
+        drop(server);
+
+        let result = read_request_head(&mut client).await.unwrap();
+
+        assert!(result.is_none());
+    }
+
+    /// The four-byte terminator itself must be found even when it straddles
+    /// two separate reads — the scan re-examines the whole accumulated
+    /// buffer each iteration, not just the newly read chunk.
+    #[tokio::test]
+    async fn a_terminator_split_across_two_reads_is_still_found() {
+        // An 8-byte duplex buffer forces `read_request_head`'s internal
+        // 4096-byte-chunk reads to actually arrive in several small pieces,
+        // so the `\r\n\r\n` terminator (which starts mid-way through the
+        // head) straddles at least two of its `client.read()` calls.
+        let (mut client, mut server) = tokio::io::duplex(8);
+        let trailing = b"trailing-bytes".to_vec();
+        let payload = [b"GET /x HTTP/1.1\r\nHost: h\r\n\r\n".as_slice(), &trailing].concat();
+        let writer = tokio::spawn(async move {
+            server.write_all(&payload).await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+
+        let (head, rest) = read_request_head(&mut client)
+            .await
+            .unwrap()
+            .expect("a well-formed head arrives");
+        assert_eq!(head, b"GET /x HTTP/1.1\r\nHost: h\r\n\r\n");
+
+        // Whatever of `trailing` hadn't yet arrived when the terminator was
+        // found is still sitting in the pipe for the next reader (the
+        // scrubbing relay) to pick up — `read_request_head` only reports
+        // what it already had, never blocks to slurp more.
+        let mut remainder = rest;
+        client.read_to_end(&mut remainder).await.unwrap();
+        assert_eq!(remainder, trailing);
+        writer.await.unwrap();
+    }
+}
+
 /// A BOUND host is genuinely intercepted end to end: a real rustls
 /// client dialing through `terminate_and_forward` completes its TLS
 /// handshake against a certificate chaining to OUR CA (not the fake

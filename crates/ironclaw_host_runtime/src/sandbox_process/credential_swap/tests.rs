@@ -349,6 +349,65 @@ fn swap_debug_never_prints_identity_or_material() {
     assert!(!debug_output.contains("tenant-a"));
 }
 
+/// `scrub_prefix` sees the streaming carry buffer one read at a time, so a
+/// candidate whose match window ends exactly at the buffer's current end has
+/// not actually been confirmed exact-length yet — the byte that would prove
+/// it (alphanumeric ⇒ a longer, non-placeholder run; anything else ⇒ genuinely
+/// exact) simply has not been read. It must not be committed (stripped or
+/// passed through as "inside") until a future read confirms it one way or the
+/// other, or EOF (`min_hold_back == 0`) makes "no more bytes" a fact rather
+/// than a guess.
+#[test]
+fn scrub_prefix_does_not_commit_a_candidate_still_unconfirmed_at_the_buffer_end() {
+    let fixture = fixture("github", "github", policy("/repos", NetworkMethod::Get));
+    // The carry buffer is exactly the placeholder token, nothing more —
+    // indistinguishable, from this buffer alone, from the first 38 bytes of a
+    // 39-byte alphanumeric run that is NOT a placeholder.
+    let buffer = fixture.token.clone().into_bytes();
+    let min_hold_back = PLACEHOLDER_TOKEN_LEN.saturating_sub(1);
+
+    let (scrubbed, consumed) = fixture.swap.scrub_prefix(&buffer, min_hold_back);
+
+    assert_eq!(
+        consumed, 0,
+        "a candidate unconfirmed at the buffer's end must not be committed yet"
+    );
+    assert!(scrubbed.is_empty());
+}
+
+/// End-to-end version of the above through the public relay path: a real
+/// placeholder immediately followed (no delimiter) by one more alphanumeric
+/// byte is a 39-char run, which is NOT a valid placeholder by the exact-length
+/// rule — so it must reach the origin byte-for-byte untouched, even when the
+/// extra byte arrives in a later read than the token itself.
+#[tokio::test]
+async fn a_placeholder_immediately_followed_by_more_alnum_bytes_across_a_read_boundary_is_never_stripped()
+ {
+    let fixture = fixture("github", "github", policy("/repos", NetworkMethod::Get));
+    let payload = format!("{}Z", fixture.token).into_bytes();
+
+    let (scrubbed, consumed) = fixture.swap.scrub_prefix(
+        &payload[..PLACEHOLDER_TOKEN_LEN],
+        PLACEHOLDER_TOKEN_LEN.saturating_sub(1),
+    );
+    assert_eq!(
+        consumed, 0,
+        "must hold back rather than guess at the buffer edge"
+    );
+    assert!(scrubbed.is_empty());
+
+    // The next read supplies the disambiguating byte. The whole 39-byte run
+    // must now pass through untouched: it was never a placeholder to begin
+    // with.
+    let (scrubbed, consumed) = fixture.swap.scrub_prefix(&payload, 0);
+    assert_eq!(consumed, payload.len());
+    assert_eq!(
+        scrubbed.as_ref(),
+        payload.as_slice(),
+        "a 39-byte alphanumeric run must never be partially stripped as an exact-length placeholder"
+    );
+}
+
 #[tokio::test]
 async fn the_relay_scrubber_removes_a_placeholder_split_across_two_reads() {
     let fixture = fixture("github", "github", policy("/repos", NetworkMethod::Get));

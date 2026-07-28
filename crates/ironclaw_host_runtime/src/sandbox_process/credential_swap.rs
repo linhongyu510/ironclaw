@@ -298,6 +298,18 @@ impl SandboxCredentialSwap {
         // mid-splice, which is exactly the un-zeroized-copy hazard the two
         // passes exist to avoid. (Asserting against `capacity()` instead would
         // be wrong — `with_capacity` may legitimately over-allocate.)
+        //
+        // `debug_assert_eq!`, not `assert_eq!`: this repo bans panic-on-
+        // reachable-input in production code (`scripts/check_no_panics.py`;
+        // see `.claude/rules/error-handling.md`), and a real `assert_eq!` here
+        // would let a future accounting bug turn into a host-process crash
+        // reachable from sandboxed-container-controlled bytes — trading one
+        // hazard (an un-zeroized copy, only possible if this invariant is
+        // ever violated) for a worse, always-live one (a DoS any container
+        // could trigger on demand). The two-pass exact-capacity construction
+        // above is what actually prevents the growth/copy hazard; this assert
+        // is a development-time regression pin on that construction, not the
+        // mechanism that makes it safe.
         debug_assert_eq!(output.len(), output_len);
 
         if report.stripped > 0 {
@@ -338,7 +350,7 @@ impl SandboxCredentialSwap {
         // registry resolved it, so it is a real token — it is simply not
         // this connection's. Strip, never swap.
         if candidate.owner.tenant_id != *tenant_id || candidate.owner.user_id != *user_id {
-            tracing::warn!(
+            tracing::debug!(
                 "sandbox credential swap: placeholder owner does not match the attributed \
                  connection; stripping"
             );
@@ -369,7 +381,7 @@ impl SandboxCredentialSwap {
                 // poisoning / TTL bookkeeping) and carries no request bytes,
                 // but it is scrubbed anyway: this is exactly the error path
                 // the discipline exists for.
-                tracing::warn!(
+                tracing::debug!(
                     error = %scrub_for_model_visibility(&error.to_string()),
                     "sandbox credential swap: staged material unavailable; stripping placeholder"
                 );
@@ -405,7 +417,7 @@ impl SandboxCredentialSwap {
                 Ok(Some(owner)) => Some(ResolvedPlaceholder { offset, owner }),
                 Ok(None) => None,
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         error = %scrub_for_model_visibility(&error.to_string()),
                         "sandbox credential swap: placeholder registry unavailable"
                     );
@@ -420,21 +432,44 @@ impl SandboxCredentialSwap {
     ///
     /// `min_hold_back` is how many trailing bytes must stay unconsumed
     /// because a token could still be straddling the end of what has been
-    /// read so far. The subtle part — and the bug this shape exists to
-    /// prevent — is that the *scan* must run over the whole buffer, not over
-    /// the prefix: a token starting just before the hold-back boundary is
-    /// fully present in `buffer` but invisible to a scan of the prefix alone,
-    /// so scanning the prefix would emit its first bytes verbatim and leave
-    /// the rest to be scrubbed later, letting a mangled-but-recognizable
-    /// token cross the boundary. Any candidate straddling the boundary
-    /// therefore *extends* the consumed prefix to cover it whole.
+    /// read so far. `min_hold_back == 0` means EOF: no more bytes are ever
+    /// coming, so "no byte after this candidate" is a fact, not a guess.
+    ///
+    /// The subtle part — and the bug this shape exists to prevent — is that
+    /// the *scan* must run over the whole buffer, not over the prefix: a
+    /// token starting just before the hold-back boundary is fully present in
+    /// `buffer` but invisible to a scan of the prefix alone, so scanning the
+    /// prefix would emit its first bytes verbatim and leave the rest to be
+    /// scrubbed later, letting a mangled-but-recognizable token cross the
+    /// boundary. Any candidate straddling the boundary therefore *extends*
+    /// the consumed prefix to cover it whole.
+    ///
+    /// A second, easy-to-miss instance of the same class of bug: a candidate
+    /// whose match window ends exactly at `buffer.len()` has its exact-length
+    /// check satisfied by "there is no byte at this position *yet*" — true of
+    /// the buffer read so far, but not proof the run does not continue when
+    /// more bytes arrive. Extending `boundary` to cover such a candidate
+    /// before that next byte is known would commit (strip or pass through) a
+    /// candidate that a single following alphanumeric byte would disqualify
+    /// as a placeholder entirely (see the module doc's "bounded work" and
+    /// `only_an_exactly_sized_alphanumeric_suffix_is_a_placeholder_candidate`).
+    /// So while more bytes may still arrive (`min_hold_back > 0`), such a
+    /// candidate is left out of `boundary` instead — held back whole, to be
+    /// re-evaluated once the next read confirms it one way or the other.
     fn scrub_prefix<'a>(&self, buffer: &'a [u8], min_hold_back: usize) -> (Cow<'a, [u8]>, usize) {
         let candidates = self.resolvable_candidates(buffer);
         let mut boundary = buffer.len().saturating_sub(min_hold_back);
         for candidate in &candidates {
             let end = candidate.offset + PLACEHOLDER_TOKEN_LEN;
             if candidate.offset < boundary && end > boundary {
-                boundary = end;
+                if min_hold_back > 0 && end == buffer.len() {
+                    // Unconfirmed: hold back the candidate whole rather than
+                    // risk stripping/passing a run that isn't actually
+                    // exact-length once the next byte is known.
+                    boundary = candidate.offset;
+                } else {
+                    boundary = end;
+                }
             }
         }
         let inside: Vec<&ResolvedPlaceholder> = candidates
