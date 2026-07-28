@@ -1582,6 +1582,73 @@ where
     )))
 }
 
+/// Assemble the attested-signing signer-continuation composition.
+///
+/// Self-contained: mints a custodial keystore, reads the mainnet ship-gate from
+/// the environment, and registers the external-wallet providers over the SAME
+/// sealed-grant store the custodial signer claims from, so the one-shot CAS is
+/// authoritative across every path (threat #1). `bindings` is shared with the
+/// resume port injected into the turn state store, so a raised gate's binding
+/// is visible to the continuation driver.
+///
+/// The stores are in-memory, which is fail-closed rather than merely
+/// non-durable: grants, claims, and bindings share a lifetime, so a restart
+/// drops a pending gate entirely (it can no longer be resolved) instead of
+/// leaving a resolvable grant whose claim record was lost. Swapping in the
+/// durable backends assembled by [`crate::attested_durable`] additionally
+/// requires erasing `RebornRuntime.attested_signing` behind a trait — it is
+/// typed to the in-memory monomorphization today — which is its own change.
+///
+/// Present-but-invalid provider config is a hard startup error, not a weakened
+/// verifier; absent config leaves a provider unregistered and therefore
+/// fail-closed (`ProviderMismatch`).
+fn build_attested_composition(
+    bindings: Arc<ironclaw_attested_runtime::InMemoryAttestedGateBindingStore>,
+) -> Result<crate::attested::InMemoryAttestedComposition, RebornBuildError> {
+    use ironclaw_attestation::{InMemorySealedGrantStore, SealedGrantStore};
+    use ironclaw_attested_runtime::CustodialMainnetShipGate;
+    use ironclaw_chain_signing::SecretsKeyStore;
+    use ironclaw_secrets::SecretsCrypto;
+
+    let keystore = Arc::new(SecretsKeyStore::new(SecretsCrypto::generate()));
+    // No KMS backend here, so custodial mainnet signing stays refused
+    // (threat #18) regardless of what the environment asks for.
+    let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let providers = crate::attested_config::AttestedProvidersConfig::from_env()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("attested provider config: {error}"),
+        })?
+        .build_provider_registry(Arc::clone(&grants) as Arc<dyn SealedGrantStore>);
+    Ok(crate::attested::InMemoryAttestedComposition::new_in_memory(
+        bindings, keystore, ship_gate, grants, providers,
+    ))
+}
+
+/// Assemble the signed-intent minting used by the raise hook to mint the
+/// review link a human opens to approve a signature.
+fn build_intent_minting() -> Result<crate::attested_raise::IntentMinting, RebornBuildError> {
+    use ironclaw_attestation::{
+        DEFAULT_INTENT_TTL_MS, InMemoryAgentSigningKeyStore, InMemoryIntentStore,
+    };
+    use ironclaw_attested_runtime::{InMemorySealedAgentKeyStore, SecretsIntentSigner};
+    use ironclaw_secrets::SecretsCrypto;
+
+    let signer = Arc::new(SecretsIntentSigner::new(
+        Arc::new(SecretsCrypto::generate()),
+        Arc::new(InMemorySealedAgentKeyStore::new()),
+        Arc::new(InMemoryAgentSigningKeyStore::new()),
+    ));
+    let review_url_base = std::env::var(crate::attested_raise::INTENT_REVIEW_URL_BASE_ENV)
+        .unwrap_or_else(|_| "http://127.0.0.1:8080/intent".to_string());
+    Ok(crate::attested_raise::IntentMinting::new(
+        signer,
+        Arc::new(InMemoryIntentStore::new()),
+        DEFAULT_INTENT_TTL_MS,
+        review_url_base,
+    ))
+}
+
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: ironclaw_turns::TurnStateStoreLimits,
@@ -4636,10 +4703,25 @@ async fn build_backend_production(
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
+    // Attested-signing graph. The binding store is created HERE, before both
+    // the composition and the resume port, because both must read the same
+    // authoritative bindings: the driver verifies against the binding recorded
+    // when the gate was raised, and the resume port admits a resume only for a
+    // binding it can see. Two stores would let a gate be resumed that the
+    // driver cannot verify.
+    let attested_bindings =
+        Arc::new(ironclaw_attested_runtime::InMemoryAttestedGateBindingStore::new());
+    let attested_signing = Arc::new(build_attested_composition(Arc::clone(&attested_bindings))?);
+    let intent_minting = build_intent_minting()?;
+    let attested_resume_port: Arc<dyn AttestedResumePort> =
+        Arc::new(ironclaw_attested_runtime::RuntimeAttestedResumePort::new(
+            Arc::clone(&attested_bindings) as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
+            Arc::new(ironclaw_attested_runtime::InMemoryResumeGuard::new()),
+        ));
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,
-        None,
+        Some(attested_resume_port),
     ));
     // Rebindable source-turn-state slot for the trigger delivery-target
     // service — same repoint seam as the sibling snapshot slot below.
@@ -5555,18 +5637,30 @@ async fn build_backend_production(
     #[cfg(test)]
     let local_dev_wasm_runtime_credential_provider_captured =
         services.wasm_runtime_credential_provider_captured_for_test();
+    // Routes `request_signature` to the composition-owned raise hook. Without
+    // it the invocation falls through to the deliberately fail-closed handler
+    // in `first_party_tools::request_signature`, so no gate is ever raised and
+    // the entire attested path is unreachable from the agent loop.
+    let attested_raise_hook: Arc<dyn ironclaw_host_runtime::AttestedRaiseHook> = Arc::new(
+        crate::attested_raise::RebornAttestedRaiseHook::new(Arc::clone(&attested_signing))
+            .with_intent_minting(intent_minting.clone()),
+    );
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> = if uses_local_host_runtime {
         Arc::new(services.host_runtime_for_local_testing())
     } else {
-        Arc::new(services.host_runtime_for_production(&wiring_config)?)
+        Arc::new(
+            services
+                .host_runtime_for_production(&wiring_config)?
+                .with_attested_raise_hook(attested_raise_hook),
+        )
     };
 
     Ok(RebornRuntimeStores {
-        // Production composes no attested backend yet: the durable stores are a
-        // later group, and `None` means the gate ingress has nothing to
-        // dispatch to and refuses, rather than half-resolving a signature.
-        attested_signing: None,
-        intent_store: None,
+        // The attested graph and its intent store are handed over together:
+        // `product_surface` registers the attested continuation only when both
+        // are present, so a half-wired pair yields no attested surface at all.
+        intent_store: Some(Arc::clone(intent_minting.intents())),
+        attested_signing: Some(attested_signing),
         host_runtime,
         #[cfg(test)]
         turn_coordinator,
