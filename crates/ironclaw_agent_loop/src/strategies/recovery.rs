@@ -241,6 +241,17 @@ pub struct DefaultRecoveryStrategy {
     /// Default `12`, which with [`availability_backoff_for`] rides out
     /// roughly seven minutes of sustained provider failure.
     pub max_model_availability_attempts: u32,
+    /// Max recovery attempts across the WHOLE RUN. Default `120`.
+    ///
+    /// Every other bound here is per-stage and is wiped by `cleared_attempts()`
+    /// on any successful model call, so a run that alternates success and
+    /// failure re-earns its full budget indefinitely — the per-RUN cost was
+    /// unbounded even though each stage was capped (#6284 WS9).
+    ///
+    /// `120` is roughly three exhausted stages' worth of the availability
+    /// budget: generous enough that a long, hiccup-prone run is unaffected,
+    /// finite enough that a pathological loop stops.
+    pub max_run_recovery_attempts: u32,
 }
 
 impl Default for DefaultRecoveryStrategy {
@@ -248,6 +259,7 @@ impl Default for DefaultRecoveryStrategy {
         Self {
             max_attempts_per_class: 2,
             max_model_availability_attempts: 12,
+            max_run_recovery_attempts: 120,
         }
     }
 }
@@ -335,6 +347,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     state,
                     attempt_class,
                     self.max_attempts_per_class,
+                    self.max_run_recovery_attempts,
                     kind,
                     RetryScope::Iteration,
                     |_| None,
@@ -371,6 +384,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     state,
                     attempt_class,
                     self.max_model_availability_attempts,
+                    self.max_run_recovery_attempts,
                     kind,
                     RetryScope::Call,
                     |attempts| {
@@ -404,6 +418,7 @@ fn retry_or_abort(
     state: &LoopExecutionState,
     attempt_class: RecoveryAttemptClass,
     max_attempts_per_class: u32,
+    max_run_recovery_attempts: u32,
     failure_kind: LoopFailureKind,
     scope: RetryScope,
     alteration: impl FnOnce(u32) -> Option<RetryAlteration>,
@@ -412,6 +427,15 @@ fn retry_or_abort(
     let next = state
         .recovery_state
         .with_incremented_attempts_for(attempt_class);
+    // The whole-run bound is checked FIRST and survives `cleared_attempts()`,
+    // so a run alternating success and failure cannot re-earn its budget
+    // forever. Every per-stage bound below is reset on a successful model call.
+    if next.run_recovery_budget_exhausted(max_run_recovery_attempts) {
+        return RecoveryOutcome::Abort {
+            recovery: next,
+            failure_kind: LoopFailureKind::NoProgressDetected,
+        };
+    }
     if attempts >= max_attempts_per_class {
         RecoveryOutcome::Abort {
             recovery: next,

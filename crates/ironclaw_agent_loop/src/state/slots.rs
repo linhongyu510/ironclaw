@@ -207,6 +207,66 @@ pub enum IndexedMessageKind {
 }
 
 #[cfg(test)]
+mod run_recovery_budget_tests {
+    use super::{RecoveryAttemptClass, RecoveryStrategyState};
+
+    /// The whole-run budget must survive the per-stage reset.
+    ///
+    /// `cleared_attempts()` returned `Self::default()`, wiping every counter on
+    /// any successful model call. That bounds a single stage but leaves the RUN
+    /// unbounded: a run alternating success and failure re-earns its full
+    /// budget forever. The worst case was not the ~41 model calls one stage
+    /// permits — it was unlimited, with `RetryProvider` tripling each
+    /// underneath (#6284 WS9).
+    #[test]
+    fn a_successful_call_does_not_refund_the_whole_run_budget() {
+        let mut state = RecoveryStrategyState::default();
+
+        // Ten failure/success cycles: each failure counts an attempt, each
+        // success clears the per-stage counters.
+        for _ in 0..10 {
+            state = state.with_incremented_attempts_for(RecoveryAttemptClass::CapabilityTransient);
+            state = state.cleared_attempts();
+            assert_eq!(
+                state.attempts_for(RecoveryAttemptClass::CapabilityTransient),
+                0,
+                "the per-stage counter must still reset — that behavior is deliberate"
+            );
+        }
+
+        assert_eq!(
+            state.run_recovery_attempts, 10,
+            "the whole-run counter must survive `cleared_attempts()`, or the run \
+             budget can never be exhausted"
+        );
+        assert!(
+            state.run_recovery_budget_exhausted(10),
+            "ten attempts must exhaust a ten-attempt run budget"
+        );
+        assert!(
+            !state.run_recovery_budget_exhausted(11),
+            "the bound must not fire early"
+        );
+    }
+
+    /// The per-stage reset still does its own job: an unrelated later error
+    /// must not inherit a previous stage's consumed attempts.
+    #[test]
+    fn the_per_stage_reset_still_clears_per_class_accounting() {
+        let state = RecoveryStrategyState::default()
+            .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityTransient)
+            .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityTransient)
+            .cleared_attempts();
+
+        assert_eq!(
+            state.attempts_for(RecoveryAttemptClass::CapabilityTransient),
+            0
+        );
+        assert_eq!(state.run_recovery_attempts, 2);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -395,6 +455,23 @@ pub struct RecoveryStrategyState {
     /// observation from turning exhaustion into an infinite retry loop.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub observation_attempted_by_class: BTreeSet<ModelErrorObservationClass>,
+    /// Recovery attempts consumed across the WHOLE RUN, never reset.
+    ///
+    /// Every other counter here is per-stage and is wiped by
+    /// [`cleared_attempts`](Self::cleared_attempts) on any successful model
+    /// call. That bounds a single stage but leaves the RUN unbounded: a run
+    /// that alternates success and failure re-earns the full budget forever,
+    /// so the worst case is not the ~41 model calls one stage permits — it is
+    /// unlimited, with `RetryProvider` multiplying each by 3 underneath.
+    ///
+    /// This counter is deliberately excluded from that reset so exhausting the
+    /// run budget is possible at all (#6284 WS9).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub run_recovery_attempts: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl RecoveryStrategyState {
@@ -414,6 +491,9 @@ impl RecoveryStrategyState {
         Self {
             attempts_by_class,
             observation_attempted_by_class: self.observation_attempted_by_class.clone(),
+            // Every per-class increment is also one attempt against the
+            // whole-run budget.
+            run_recovery_attempts: self.run_recovery_attempts.saturating_add(1),
         }
     }
 
@@ -423,6 +503,7 @@ impl RecoveryStrategyState {
         Self {
             attempts_by_class,
             observation_attempted_by_class: BTreeSet::new(),
+            run_recovery_attempts: attempts,
         }
     }
 
@@ -438,8 +519,27 @@ impl RecoveryStrategyState {
 
     /// Clears retry accounting after a terminal or non-retry decision so it
     /// cannot poison an unrelated later retryable error.
+    ///
+    /// Deliberately PRESERVES [`run_recovery_attempts`](Self::run_recovery_attempts):
+    /// that counter exists precisely to survive this reset. Returning a bare
+    /// `Self::default()` here is what left the per-run cost unbounded.
     pub fn cleared_attempts(&self) -> Self {
-        Self::default()
+        Self {
+            run_recovery_attempts: self.run_recovery_attempts,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the run has spent its whole-run recovery budget.
+    pub fn run_recovery_budget_exhausted(&self, max_run_attempts: u32) -> bool {
+        self.run_recovery_attempts >= max_run_attempts
+    }
+
+    /// Count one recovery attempt against the whole-run budget.
+    pub fn with_incremented_run_recovery_attempts(&self) -> Self {
+        let mut next = self.clone();
+        next.run_recovery_attempts = next.run_recovery_attempts.saturating_add(1);
+        next
     }
 }
 

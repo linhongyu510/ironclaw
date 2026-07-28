@@ -3368,7 +3368,20 @@ async fn model_retry_success_clears_recovery_state() {
         "model retry must request a fresh host-built prompt bundle"
     );
     let final_state = final_staged_state(&host);
-    assert_eq!(final_state.recovery_state, Default::default());
+    // Per-class accounting is cleared on success, as before. The whole-run
+    // counter deliberately survives that reset — without it the run budget
+    // could never be exhausted, which is the #6284 WS9 defect.
+    assert!(final_state.recovery_state.attempts_by_class.is_empty());
+    assert!(
+        final_state
+            .recovery_state
+            .observation_attempted_by_class
+            .is_empty()
+    );
+    assert_eq!(
+        final_state.recovery_state.run_recovery_attempts, 1,
+        "the retry that preceded this success must still be charged to the run budget"
+    );
     assert_eq!(
         final_state.compaction_prompt.message_index,
         vec![
@@ -4558,7 +4571,11 @@ async fn retry_uses_single_call_invocation() {
             .expect("execute");
 
         assert!(matches!(exit, LoopExit::Completed(_)));
-        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+        // Per-class accounting clears on success; the whole-run counter does
+        // not (see `a_successful_call_does_not_refund_the_whole_run_budget`).
+        let recovery = final_staged_state(&host).recovery_state;
+        assert!(recovery.attempts_by_class.is_empty());
+        assert_eq!(recovery.run_recovery_attempts, 1);
     }
 }
 
