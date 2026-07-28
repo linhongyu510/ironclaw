@@ -790,3 +790,264 @@ fn scoped_project_fs(
         .unwrap(),
     )
 }
+
+/// TOCTOU escape coverage for the `DiskFilesystem` local backend.
+///
+/// `local_backend_denies_symlink_escape` (above) and its write-path/parent
+/// siblings plant a symlink *before* the call under test — they pin the
+/// steady-state containment check but cannot exercise a race between that
+/// check and the later syscall the checked path is handed to. These tests
+/// plant a **legitimate** entry, let the resolver's containment check pass
+/// against it, and then swap in a symlink-to-outside from a second OS thread
+/// *while the async call under test is in flight* — reproducing the actual
+/// pathname-check-then-separate-syscall gap described in
+/// `crates/ironclaw_filesystem/src/local.rs`.
+///
+/// Per `crates/ironclaw_filesystem/CLAUDE.md`'s sanctioned pattern for tests
+/// that need a read/write interleaving barrier, this is a tiny test-only
+/// delegating harness (`Racer`), not a fault fake and not a production hook.
+/// There is no seam inside `local.rs` to pause mid-resolution from outside,
+/// so the harness drives a *real* OS-thread race: a background thread spins
+/// tightly, alternating the on-disk entry between "real file/dir" (so the
+/// resolver's check succeeds) and "symlink to outside the mount" for the
+/// entire wall-clock duration of the call under test, which is real syscall
+/// latency on tokio's blocking pool — exactly the window the production code
+/// documents at `local.rs:172,204,230`. Iterating the race many times makes
+/// a genuine TOCTOU gap observable without needing a deterministic pause
+/// hook; a race-free implementation (this PR's fd-rooted fix) cannot lose
+/// this race no matter how many iterations run, because containment is
+/// re-verified against an already-open fd rather than a path string.
+#[cfg(unix)]
+mod toctou_escape {
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use ironclaw_filesystem::*;
+    use ironclaw_host_api::*;
+    use tempfile::tempdir;
+
+    /// How many times to retry the check-then-swap race before concluding a
+    /// vulnerable implementation would have leaked. Each iteration is a real
+    /// (fast) filesystem call, so this bound keeps the test's wall-clock cost
+    /// reasonable while giving the racer many shots at the narrow window.
+    const RACE_ITERATIONS: usize = 400;
+
+    /// Runs `attempt` under a background thread that repeatedly swaps
+    /// `target` between a real entry (created by `reset`) and a symlink to
+    /// `outside_target` for the duration of the call. Returns `true` the
+    /// first time `attempt` reports the escape happened (via its own return
+    /// value), or `false` if no iteration ever won the race.
+    fn race<F>(target: &Path, outside_target: &Path, reset: impl Fn(), mut attempt: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        for _ in 0..RACE_ITERATIONS {
+            reset();
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let racer_stop = Arc::clone(&stop);
+            let racer_target = target.to_path_buf();
+            let racer_outside = outside_target.to_path_buf();
+            let racer = std::thread::spawn(move || {
+                while !racer_stop.load(Ordering::Relaxed) {
+                    // Best-effort: the swap only needs to land during the
+                    // window; failures (e.g. racing our own reset) are fine.
+                    let _ = std::fs::remove_file(&racer_target)
+                        .or_else(|_| std::fs::remove_dir_all(&racer_target));
+                    let _ = symlink(&racer_outside, &racer_target);
+                }
+            });
+
+            let escaped = attempt();
+            stop.store(true, Ordering::Relaxed);
+            let _ = racer.join();
+
+            if escaped {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn disk_fs(mount_root: &Path) -> DiskFilesystem {
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(mount_root.to_path_buf()),
+        )
+        .unwrap();
+        root
+    }
+
+    /// (a) `resolve_existing`: the leaf is swapped from a real file to a
+    /// symlink-to-outside between the containment check and the caller's
+    /// `read`. A vulnerable resolver hands back a checked-then-stale path;
+    /// the later `tokio::fs::read` re-resolves that path from scratch and
+    /// follows the now-planted symlink, returning the outside secret's
+    /// bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolve_existing_leaf_swap_leaks_outside_file_on_read() {
+        let storage = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let project = storage.path().join("project1");
+        std::fs::create_dir_all(&project).unwrap();
+        let outside_secret = outside.path().join("secret.txt");
+        std::fs::write(&outside_secret, b"outside-secret-contents").unwrap();
+
+        let target = project.join("target.txt");
+        let root = disk_fs(storage.path());
+        let path = VirtualPath::new("/projects/project1/target.txt").unwrap();
+
+        let escaped = race(
+            &target,
+            &outside_secret,
+            || {
+                let _ = std::fs::remove_file(&target);
+                std::fs::write(&target, b"legit-contents").unwrap();
+            },
+            || {
+                let root = &root;
+                let path = &path;
+                futures_block_on(async {
+                    matches!(
+                        root.read_file(path).await,
+                        Ok(bytes) if bytes == b"outside-secret-contents"
+                    )
+                })
+            },
+        );
+
+        assert!(
+            !escaped,
+            "resolve_existing must never hand read_file bytes from outside the mount, \
+             even when the leaf is swapped to a symlink after the containment check"
+        );
+    }
+
+    /// (b) `resolve_for_write`: the parent is checked and re-verified, but
+    /// the *leaf* itself is never re-checked (`local.rs:177-211`) — a
+    /// symlink planted at the leaf name after the parent check, before
+    /// `append_file`'s unguarded `OpenOptions::open`, is followed straight
+    /// through into the outside file. Distinct from (a): the ancestor chain
+    /// here is legitimate throughout; only the leaf is swapped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolve_for_write_leaf_swap_leaks_outside_file_on_append() {
+        let storage = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let project = storage.path().join("project1");
+        std::fs::create_dir_all(&project).unwrap();
+        let outside_secret = outside.path().join("secret.txt");
+        std::fs::write(&outside_secret, b"original-outside").unwrap();
+
+        let target = project.join("newfile.txt");
+        let root = disk_fs(storage.path());
+        let path = VirtualPath::new("/projects/project1/newfile.txt").unwrap();
+
+        let escaped = race(
+            &target,
+            &outside_secret,
+            || {
+                // The legitimate steady state for a brand-new leaf is
+                // "doesn't exist yet" — resolve_for_write's bootstrap path
+                // is what a swap here exploits.
+                let _ = std::fs::remove_file(&target);
+            },
+            || {
+                let root = &root;
+                let path = &path;
+                let ok = futures_block_on(async {
+                    root.append_file(path, b"attacker-controlled").await.is_ok()
+                });
+                ok && std::fs::read(&outside_secret)
+                    .map(|bytes| bytes != b"original-outside")
+                    .unwrap_or(false)
+            },
+        );
+
+        assert!(
+            !escaped,
+            "resolve_for_write must never let append_file write through a leaf \
+             symlink planted after the parent containment check"
+        );
+        assert_eq!(
+            std::fs::read(&outside_secret).unwrap(),
+            b"original-outside",
+            "outside file must be untouched once the race loop completes"
+        );
+    }
+
+    /// (c)/(d) `resolve_for_create_dir_all` and its shared
+    /// `ensure_existing_ancestor_contained` ancestor walk: the nearest
+    /// *existing* ancestor (`project1`) is legitimate, but the next,
+    /// not-yet-existing path component is swapped to a symlink-to-outside
+    /// between that ancestor check and `create_dir_all`'s mkdir — pinning
+    /// the mkdir-before-recheck ordering documented at `local.rs:227-237`.
+    ///
+    /// This collapses `ensure_existing_ancestor_contained`'s own case (d)
+    /// into this scenario rather than adding a fourth standalone test:
+    /// `resolve_for_write`'s call to the same ancestor-walk helper is
+    /// provably not independently exploitable, because `resolve_for_write`
+    /// re-canonicalizes and re-checks the parent *after* its
+    /// `create_dir_all(parent)` call (`local.rs:193-199`) — closing exactly
+    /// the window this helper's ancestor check alone would otherwise leave
+    /// open. `resolve_for_create_dir_all` has no such re-check between the
+    /// ancestor walk and its own `create_dir_all`, so it is the only
+    /// reachable caller where swapping the helper's verified ancestor
+    /// matters, and this test exercises that call path directly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolve_for_create_dir_all_ancestor_swap_escapes_mount() {
+        let storage = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let project = storage.path().join("project1");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(outside.path()).unwrap();
+
+        // The not-yet-existing ancestor component that gets swapped.
+        let newdir = project.join("newdir");
+        let root = disk_fs(storage.path());
+        let path = VirtualPath::new("/projects/project1/newdir/leaf").unwrap();
+        let outside_leaf_marker = outside.path().join("leaf");
+
+        let escaped = race(
+            &newdir,
+            outside.path(),
+            || {
+                let _ = std::fs::remove_dir_all(&newdir);
+                let _ = std::fs::remove_file(&newdir);
+                let _ = std::fs::remove_dir_all(&outside_leaf_marker);
+            },
+            || {
+                let root = &root;
+                let path = &path;
+                let _ = futures_block_on(async { root.create_dir_all(path).await });
+                outside_leaf_marker.is_dir()
+            },
+        );
+
+        assert!(
+            !escaped,
+            "resolve_for_create_dir_all must never create a directory outside the \
+             mount when a not-yet-existing ancestor is swapped to a symlink after \
+             the ancestor containment check"
+        );
+        assert!(
+            !outside_leaf_marker.exists(),
+            "outside directory must not gain a leftover 'leaf' entry once the race \
+             loop completes"
+        );
+    }
+
+    /// Blocks the current worker thread on `future`, handing the async
+    /// `DiskFilesystem` call to the surrounding multi-threaded
+    /// `#[tokio::test]` runtime. `block_in_place` (not a bare
+    /// `Handle::block_on`) is required here: it parks this task off its
+    /// worker thread so the runtime can keep servicing the racer's own
+    /// blocking-pool work (`tokio::fs::*` inside the call under test)
+    /// without deadlocking against the synchronous `attempt` closure shape
+    /// shared with the plain `reset`/racer-thread code above.
+    fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+    }
+}
