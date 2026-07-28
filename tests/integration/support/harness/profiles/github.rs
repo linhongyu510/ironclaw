@@ -190,5 +190,6 @@ fn github_issue_tools_with_credential_result(
         trigger_repository: None,
         reborn_services: None,
         trigger_active_run_lookup_requested: false,
+        sandbox_workspaces_root: None,
     })
 }

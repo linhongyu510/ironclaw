@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use ironclaw_host_api::{TenantId, UserId};
+
 use super::doubles::ParkingCapabilityGate;
 use super::group::GroupCapability;
 use super::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
@@ -74,6 +76,24 @@ pub(super) enum RebornCapabilityBackend {
     /// without a confirmed host-home mount) is observable at the
     /// integration tier.
     BuiltinHttpToolsConfirmedHostMount,
+    /// W6 phase 2: `builtin.shell` wired through the real
+    /// `HostedSingleTenantVolumeSandboxed` composition path with a real
+    /// `TenantSandbox` Docker process-port binding — see
+    /// `harness::profiles::sandbox_shell`. `tenant_id`/`user_id` are minted
+    /// fresh by the CALLING TEST (`sandbox_shell_identity`) so this backend
+    /// never collides on a container name/workspace directory with a
+    /// concurrently-running test, and so the test can independently compute
+    /// the same container name for its own teardown.
+    ///
+    /// Docker-gated; the calling test MUST check
+    /// `docker_gate::docker_available()` / `docker_gate::docker_image_available()`
+    /// itself BEFORE selecting this backend (see
+    /// `tests/integration/reborn_sandbox_shell_turn.rs`) — this variant does
+    /// not skip, it fails the Docker connect.
+    SandboxShellTools {
+        tenant_id: TenantId,
+        user_id: UserId,
+    },
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -239,6 +259,13 @@ impl RebornCapabilityBackend {
                 let host_runtime =
                     core_builtin::core_builtin_tools_with_confirmed_host_mount().await?;
                 host_runtime.install_http_responses(keyed_http_responses)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::SandboxShellTools { tenant_id, user_id } => {
+                let host_runtime = super::harness::profiles::sandbox_shell::sandbox_shell_tools(
+                    tenant_id, user_id,
+                )
+                .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

@@ -582,6 +582,28 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// W6 phase 2: wire `builtin.shell` through the real
+    /// `HostedSingleTenantVolumeSandboxed` composition path with a real
+    /// `TenantSandbox` Docker process-port binding, so a scripted shell
+    /// command dispatches into an actual container instead of the host or the
+    /// inert `RecordingProcessPort`. See `RebornCapabilityBackend::SandboxShellTools`.
+    ///
+    /// `tenant_id`/`user_id` must be minted fresh per test (see
+    /// `support::sandbox_shell_identity`) — the sandbox transport names
+    /// containers and bind-mount workspace directories deterministically from
+    /// this pair, so a shared literal would collide across concurrent test
+    /// runs. Docker-gated; check `docker_gate::docker_available()` /
+    /// `docker_gate::docker_image_available()` in the TEST BEFORE calling this
+    /// (this builder method does not skip — it fails the Docker connect).
+    pub fn with_sandbox_shell_tools(
+        mut self,
+        tenant_id: ironclaw_host_api::TenantId,
+        user_id: ironclaw_host_api::UserId,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::SandboxShellTools { tenant_id, user_id };
+        self
+    }
+
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///

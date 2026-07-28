@@ -121,6 +121,17 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// default) matches every pre-existing harness: no Google OAuth backend,
     /// i.e. this instance is "unconfigured".
     pub(crate) google_oauth_backend_for_test: bool,
+    /// W6 phase 2: when `true`, `new_with_options` (1) roots this harness's
+    /// storage `TempDir` under `$HOME` instead of the system `$TMPDIR` (a
+    /// `TenantSandbox` container bind-mounts it — see
+    /// `sandbox_shell_identity`'s module doc for why the ambient `$TMPDIR`
+    /// is unsafe there) and (2) builds the composition input through the
+    /// `HostedSingleTenantVolumeSandboxed` profile with a real
+    /// `tenant_sandbox_process_binding` attached, instead of the plain
+    /// `local_dev_build_input` every other harness uses. Opt-in via
+    /// `.with_sandboxed_shell()`; every other harness stays byte-identical.
+    /// Only `profiles::sandbox_shell` sets this.
+    pub(crate) sandboxed_shell: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -146,6 +157,7 @@ impl HostRuntimeHarnessOptions {
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
+            sandboxed_shell: false,
         }
     }
 
@@ -285,6 +297,14 @@ impl HostRuntimeHarnessOptions {
     /// `google_oauth_backend_for_test`'s doc.
     pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {
         self.google_oauth_backend_for_test = true;
+        self
+    }
+
+    /// W6 phase 2: opt into the `$HOME`-rooted storage root and the
+    /// `HostedSingleTenantVolumeSandboxed` + `TenantSandbox` composition
+    /// path. See [`Self::sandboxed_shell`]'s doc.
+    pub(crate) fn with_sandboxed_shell(mut self) -> Self {
+        self.sandboxed_shell = true;
         self
     }
 }

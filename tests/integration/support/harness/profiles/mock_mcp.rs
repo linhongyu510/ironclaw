@@ -103,5 +103,6 @@ pub(crate) async fn mock_mcp_tools(
         trigger_repository: None,
         reborn_services: None,
         trigger_active_run_lookup_requested: false,
+        sandbox_workspaces_root: None,
     })
 }

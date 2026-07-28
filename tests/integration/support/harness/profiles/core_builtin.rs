@@ -329,5 +329,6 @@ fn core_builtin_tools_from_runtime(
         trigger_repository: None,
         reborn_services: None,
         trigger_active_run_lookup_requested: false,
+        sandbox_workspaces_root: None,
     })
 }

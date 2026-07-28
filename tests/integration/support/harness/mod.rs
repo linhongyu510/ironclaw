@@ -354,6 +354,15 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// decide whether to call `install_trigger_active_run_lookup_for_test` once
     /// the caller's real shared turn-state store is available.
     trigger_active_run_lookup_requested: bool,
+    /// W6 phase 2: `Some` only for a `.with_sandboxed_shell()`-built harness —
+    /// the SAME root `tenant_sandbox_process_binding` rooted the
+    /// `TenantSandbox` container's `/workspace` bind at. Consulted by
+    /// `create_recording_capability_port` to pre-create each dispatch's
+    /// per-user digest-leaf directory before the sandboxed shell execs,
+    /// mirroring production's `RefreshingLoopCapabilityPortFactory::create_capability_port`
+    /// (`crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`), which
+    /// this harness's own capability port otherwise never runs.
+    sandbox_workspaces_root: Option<PathBuf>,
 }
 
 /// Resolve the durable gate-record store a `HostRuntimeCapabilityHarness` shares
@@ -682,8 +691,17 @@ impl HostRuntimeCapabilityHarness {
             channel_extension_bindings,
             recording_network_egress,
             google_oauth_backend_for_test,
+            sandboxed_shell,
         } = options;
-        let root = Arc::new(tempfile::tempdir()?);
+        // W6 phase 2: a `TenantSandbox` container bind-mounts this root, so it
+        // must be `$HOME`-rooted rather than the system `$TMPDIR` (see
+        // `sandbox_shell_identity`'s module doc). Every other harness keeps the
+        // existing `tempfile::tempdir()` behavior byte-identical.
+        let root = Arc::new(if sandboxed_shell {
+            super::sandbox_shell_identity::home_rooted_tempdir(service_label)?
+        } else {
+            tempfile::tempdir()?
+        });
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
@@ -702,6 +720,18 @@ impl HostRuntimeCapabilityHarness {
                 &storage_root.join("system/extensions").join(extension_id),
             )?;
         }
+        // W6 phase 2: set only by the `sandboxed_shell` branch below; read at
+        // `Self { .. }` construction at the bottom of this function and
+        // consulted per-dispatch by `create_recording_capability_port` (this
+        // harness's OWN capability-port factory, which substitutes for
+        // production's `RefreshingLoopCapabilityPortFactory` and so must
+        // replicate its per-invocation sandbox digest-leaf provisioning
+        // itself — see that method's doc for why a fixed pre-creation here,
+        // keyed off `local_runtime_identity`, is wrong: the REAL dispatch
+        // scope's tenant/user come from the submitted run's own actor
+        // (`test_product_scope`'s fixed itest scope), never from this
+        // harness's own `user_id`/`local_runtime_identity` fields.
+        let mut sandbox_workspaces_root_for_harness: Option<PathBuf> = None;
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -716,6 +746,39 @@ impl HostRuntimeCapabilityHarness {
                 },
             )?
             .with_local_dev_confirmed_host_home_root(host_home_root)
+        } else if sandboxed_shell {
+            // W6 phase 2: mirrors `ironclaw_reborn_cli::runtime::
+            // build_sandboxed_local_runtime_services_input` — the production
+            // recipe for the `hosted-single-tenant-volume-sandboxed` profile.
+            // `core_builtin_tools()` (the OTHER shell-capable profile) hand-
+            // assembles a `HostRuntime` and never calls `build_runtime`, so it
+            // can never reach this path; this branch is what actually lets
+            // `builtin.shell` dispatch into a real `TenantSandbox` container.
+            let sandbox_workspaces_root = storage_root.join("sandbox-workspaces");
+            sandbox_workspaces_root_for_harness = Some(sandbox_workspaces_root.clone());
+            let tenant_sandbox = ironclaw_reborn_composition::tenant_sandbox_process_binding(
+                sandbox_workspaces_root.clone(),
+                None,
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "tenant-sandbox process backend requires a reachable Docker daemon: {error}"
+                )
+            })?;
+            let built = ironclaw_reborn_composition::local_dev_build_input_with_profile(
+                ironclaw_reborn_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                service_label,
+                storage_root,
+            )
+            .with_runtime_process_binding(tenant_sandbox.binding)
+            .with_sandbox_activity_registry(tenant_sandbox.activity)
+            .with_sandbox_attribution_resolver(tenant_sandbox.attribution)
+            .with_sandbox_workspaces_root(sandbox_workspaces_root);
+            match tenant_sandbox.egress_proxy {
+                Some(egress_proxy) => built.with_sandbox_egress_proxy_handle(egress_proxy),
+                None => built,
+            }
         } else {
             ironclaw_reborn_composition::local_dev_build_input(service_label, storage_root)
         };
@@ -930,6 +993,7 @@ impl HostRuntimeCapabilityHarness {
             trigger_repository,
             reborn_services: Some(services),
             trigger_active_run_lookup_requested,
+            sandbox_workspaces_root: sandbox_workspaces_root_for_harness,
         })
     }
 
@@ -1670,6 +1734,31 @@ impl HostRuntimeCapabilityHarness {
         // resolved user) is captured once for the lifetime of the returned
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
+        // W6 phase 2: this harness substitutes its OWN capability port for
+        // production's `RefreshingLoopCapabilityPortFactory`
+        // (`crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`),
+        // which is where the REAL per-invocation `TenantSandbox` digest-leaf
+        // directory normally gets created — bypassed here, so replicate it.
+        // Uses THIS run's actual resolved scope (`run_context.scope`, the
+        // submitted turn's real tenant/actor — e.g. the fixed
+        // `test_product_scope` itest scope), not this harness's own
+        // `user_id`/`local_runtime_identity`, which do not drive dispatch
+        // scope for a plain (non-multiuser) harness. Without this, every
+        // sandboxed shell exec fails `mkdir /workspace/.ironclaw: No such
+        // file or directory` (found by the first harness-driven sandboxed-
+        // shell run — the container's bind-mount source never gets a leaf).
+        if let Some(sandbox_workspaces_root) = self.sandbox_workspaces_root.as_ref() {
+            let mut scope = run_context.scope.to_resource_scope();
+            scope.user_id = dispatch_user.clone();
+            let leaf_dir = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&scope)
+                .workspace_path(sandbox_workspaces_root);
+            std::fs::create_dir_all(&leaf_dir).map_err(|error| {
+                ironclaw_turns::run_profile::AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    format!("sandbox workspace leaf directory could not be provisioned: {error}"),
+                )
+            })?;
+        }
         // ONE shared io, both roles: production assigns a single
         // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.

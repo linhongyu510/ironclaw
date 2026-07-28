@@ -21,6 +21,7 @@ pub mod process;
 pub mod product_surface;
 pub mod project_service_fault;
 pub mod reply;
+pub mod sandbox_shell_identity;
 pub mod scope_gateway;
 pub mod scripted_provider;
 pub mod session_thread;
