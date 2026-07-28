@@ -260,6 +260,7 @@ fn local_dev_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::local_dev_selector_config(
         false,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         !cfg.regex_activation_enabled,
@@ -280,6 +281,7 @@ fn local_dev_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::local_dev_selector_config(
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         cfg.regex_activation_enabled,
@@ -292,6 +294,7 @@ fn local_dev_selector_config_uses_large_skill_context_budget() {
     let cfg = super::local_dev_selector_config(
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -311,7 +314,7 @@ fn local_dev_selector_config_propagates_injection_mode() {
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
     ] {
-        let cfg = super::local_dev_selector_config(true, mode);
+        let cfg = super::local_dev_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
         assert_eq!(cfg.injection_mode, mode);
     }
 }

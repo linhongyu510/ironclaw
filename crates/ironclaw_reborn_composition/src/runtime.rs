@@ -4956,6 +4956,7 @@ fn optional_nonzero_u32_env(
 fn local_dev_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
+    activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
@@ -4972,6 +4973,7 @@ fn local_dev_selector_config(
             ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
+        activation_strategy,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4991,6 +4993,45 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
 }
 
 const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+/// Binding for the `skill.activation.v1` profile.
+const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
+
+/// Default activation strategy for Reborn: **behavior-preserving**.
+///
+/// Deliberately `CriteriaOnly`, matching the memory-provider discipline where the
+/// bundled native provider stays the default and a new provider is opt-in. Three
+/// existing local-dev tests encode today's selection behavior (setup-marker
+/// suppression, the webui listing candidate, `skill_activate` context loading);
+/// flipping this default changes them, so the strategy ships opt-in and the
+/// default remains byte-identical.
+///
+/// Opt in with `IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`.
+///
+/// Why anyone would: the selector scores only
+/// `activation.keywords`/`tags`/`patterns` and keeps a skill `if score > 0`, but
+/// **0 of 30** skills an agent authored for itself on the SkillsBench subset
+/// (nearai/benchmarks#287) declared any of those. Under `CriteriaOnly` every
+/// agent-authored skill is permanently unselectable — the agent can create a
+/// skill and never reuse it. `name_and_description` restores the Claude-Code
+/// contract where name + description suffice.
+const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
+    ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
+
+/// Resolve the activation binding from the env, failing closed on an unknown id.
+fn skill_activation_env()
+-> Result<ironclaw_skills::activation_strategy::ActivationStrategy, RebornRuntimeError> {
+    match std::env::var(SKILL_ACTIVATION_ENV_KEY) {
+        Ok(value) => ironclaw_skills::activation_strategy::ActivationStrategy::parse(&value)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("{SKILL_ACTIVATION_ENV_KEY}: {error}"),
+            }),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_ACTIVATION),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {SKILL_ACTIVATION_ENV_KEY}: {error}"),
+        }),
+    }
+}
 
 /// Default skill-injection mode for Reborn.
 ///
@@ -5063,7 +5104,11 @@ fn local_dev_filesystem_skill_context_source(
         reason: format!("first-party skills extension source: {reason}"),
     })?;
     let selector_config =
-        local_dev_selector_config(regex_skill_activation_enabled, skill_injection_mode_env()?);
+        local_dev_selector_config(
+            regex_skill_activation_enabled,
+            skill_injection_mode_env()?,
+            skill_activation_env()?,
+        );
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(workspace_filesystem),
