@@ -766,55 +766,190 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     assert!(!outside.path().join("new.txt").exists());
 }
 
-/// Every existing symlink-at-write-target test plants an *escaping*
-/// symlink (pointing outside the mount) and asserts `SymlinkEscape`. This
-/// pins the distinct, narrower case: a symlink that is fully *in-bounds* —
-/// its target lives inside the same mount, reachable on its own — planted
-/// at a write target. `atomic_write_file`'s pre-install probe
-/// (`local.rs:877-892`) rejects a pre-existing symlink at the leaf
-/// regardless of where it points, because silently clobbering *any*
-/// existing symlink entry is a real content-loss surprise for whatever
-/// legitimately created it — this crate's contract is "reject a
-/// pre-existing symlink at a write target", not "clobber it if it happens
-/// to be safe". Without this test, a future change that narrowed the probe
-/// to only reject *escaping* symlinks (a plausible-looking "fix" for an
-/// in-bounds false positive) would land with zero coverage catching it.
+/// Policy change (fd-rooted symlink-follow, #6723 follow-up): `RESOLVE_BENEATH`
+/// alone is already race-free and kernel-enforced — it follows an in-bounds
+/// symlink and refuses an escaping one, atomically. Rejecting *every*
+/// symlink (the old behavior this test used to pin) breaks real projects
+/// full of benign in-bounds symlinks (pnpm `node_modules`, `git worktree`
+/// `.git` links, monorepo aliases) for no containment benefit. This test now
+/// pins the inverted contract: a write through a benign, fully in-bounds
+/// symlink *resolves* — the bytes land at the symlink's target, not over the
+/// symlink entry itself (`rename`/`link` never follow a symlink at the
+/// destination name, so `write_file_with_cas` chases the chain itself first
+/// via `resolve_write_leaf` — see `local/fd_resolve.rs`). The escape case
+/// (`local_backend_denies_write_through_symlink_escape`, above) is unchanged
+/// and still rejected — this test's job is to prove the in-bounds case is no
+/// longer collateral damage from that rejection, not to weaken it.
 #[cfg(unix)]
 #[tokio::test]
-async fn local_backend_denies_write_through_benign_in_bounds_symlink() {
+async fn local_backend_resolves_write_through_benign_in_bounds_symlink() {
     use std::os::unix::fs::symlink;
 
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
     std::fs::write(storage.path().join("project1/real.txt"), b"original").unwrap();
-    // In-bounds: points at another file inside the very same mount, not
-    // outside it.
-    symlink(
-        storage.path().join("project1/real.txt"),
-        storage.path().join("project1/alias.txt"),
-    )
-    .unwrap();
+    // In-bounds and relative — the realistic shape a project's own symlinks
+    // take (pnpm, git worktree, monorepo aliases all emit relative targets).
+    symlink("real.txt", storage.path().join("project1/alias.txt")).unwrap();
 
     let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
-    let err = scoped
+    scoped
         .write_file(
             &ResourceScope::system(),
             &ScopedPath::new("/workspace/alias.txt").unwrap(),
             b"changed",
         )
         .await
+        .expect("write through an in-bounds symlink must resolve");
+
+    assert_eq!(
+        std::fs::read(storage.path().join("project1/real.txt")).unwrap(),
+        b"changed",
+        "the write must land at the symlink's real target"
+    );
+    assert!(
+        std::fs::symlink_metadata(storage.path().join("project1/alias.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink entry itself must survive the write, not be replaced by a plain file"
+    );
+}
+
+/// Read counterpart to the write-through test above: `read_file` through an
+/// in-bounds symlink must resolve to the target's bytes.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_resolves_read_through_benign_in_bounds_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/real.txt"), b"hello").unwrap();
+    symlink("real.txt", storage.path().join("project1/alias.txt")).unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let bytes = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/alias.txt").unwrap(),
+        )
+        .await
+        .expect("read through an in-bounds symlink must resolve");
+
+    assert_eq!(bytes, b"hello");
+}
+
+/// A relative in-bounds symlink chain (`link -> mid -> real.txt`, each hop
+/// relative) must resolve all the way through.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_resolves_read_through_relative_symlink_chain() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/real.txt"), b"chained").unwrap();
+    symlink("real.txt", storage.path().join("project1/mid")).unwrap();
+    symlink("mid", storage.path().join("project1/link")).unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let bytes = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/link").unwrap(),
+        )
+        .await
+        .expect("a relative in-bounds symlink chain must resolve");
+
+    assert_eq!(bytes, b"chained");
+}
+
+/// An absolute symlink target is rejected outright (`Escape`), unconditionally
+/// — even when, interpreted as real bytes, it happens to land inside the
+/// mount. This deliberately matches Linux's native
+/// `openat2(RESOLVE_BENEATH)`, which disallows *any* absolute symlink target
+/// regardless of where it points (only `RESOLVE_IN_ROOT` — a different,
+/// chroot-emulating primitive this module does not use — reinterprets one).
+/// See the `walk_symlink_target` doc comment in `local/fd_resolve.rs` for
+/// the full reasoning, including why a "reinterpret against the mount root"
+/// scheme would not even help for symlinks any real tool creates (they store
+/// the real host absolute path, which essentially never coincides with the
+/// mount root by construction).
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_denies_absolute_symlink_even_when_bytes_would_land_in_mount() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/real.txt"), b"original").unwrap();
+    symlink(
+        storage.path().join("project1/real.txt"),
+        storage.path().join("project1/absolute-alias.txt"),
+    )
+    .unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let err = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/absolute-alias.txt").unwrap(),
+        )
+        .await
         .unwrap_err();
 
     assert!(
         matches!(err, FilesystemError::SymlinkEscape { .. }),
-        "a benign, fully in-bounds symlink at a write target must still be \
-         rejected, not just an escaping one: got {err:?}"
+        "expected SymlinkEscape, got: {err:?}"
     );
-    assert_eq!(
-        std::fs::read(storage.path().join("project1/real.txt")).unwrap(),
-        b"original",
-        "the symlink's real target must be untouched — the write must never \
-         have followed through"
+}
+
+/// A symlink chain within the depth cap (`MAX_SYMLINK_DEPTH = 32`) still
+/// resolves; one exceeding it fails cleanly instead of spinning. Builds a
+/// chain of 20 relative hops (`link19 -> link18 -> … -> real.txt`), well
+/// under the cap, then a cyclic pair (`cycle-a -> cycle-b -> cycle-a`) that
+/// can never terminate on its own.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_backend_resolves_symlink_chain_within_cap_and_fails_cycle_cleanly() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/real.txt"), b"end of chain").unwrap();
+
+    const CHAIN_LEN: usize = 20;
+    let mut previous = "real.txt".to_string();
+    for i in 0..CHAIN_LEN {
+        let name = format!("link{i}");
+        symlink(&previous, storage.path().join("project1").join(&name)).unwrap();
+        previous = name;
+    }
+    symlink("cycle-b", storage.path().join("project1/cycle-a")).unwrap();
+    symlink("cycle-a", storage.path().join("project1/cycle-b")).unwrap();
+
+    let scoped = scoped_project_fs(storage.path(), MountPermissions::read_only());
+
+    let bytes = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new(format!("/workspace/{previous}")).unwrap(),
+        )
+        .await
+        .expect("a symlink chain within the depth cap must resolve");
+    assert_eq!(bytes, b"end of chain");
+
+    let cycle_err = scoped
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/cycle-a").unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(cycle_err, FilesystemError::NotFound { .. }),
+        "a genuine symlink cycle must fail cleanly (bounded), not report NotFound: {cycle_err:?}"
     );
 }
 

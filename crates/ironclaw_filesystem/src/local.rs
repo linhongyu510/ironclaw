@@ -13,8 +13,9 @@ use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{AtFlags, Mode, OFlags};
 
 use self::fd_resolve::{
-    atomic_write_file, descend_creating, map_file_type, new_file_mode, open_one, read_all,
-    remove_dir_all_fd, resolve_error_to_filesystem_error, resolve_walk, write_all,
+    ResolveError, atomic_write_file, descend_creating, map_file_type, new_file_mode, open_one,
+    read_all, remove_dir_all_fd, resolve_error_to_filesystem_error, resolve_walk,
+    resolve_write_leaf, write_all,
 };
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, RecordVersion,
@@ -37,13 +38,17 @@ pub struct DiskFilesystem {
 struct LocalMount {
     virtual_root: VirtualPath,
     /// An open directory descriptor on the mount's canonical host root,
-    /// opened once at mount time. Every request resolves *from this fd*,
-    /// component by component, with `O_NOFOLLOW` (or the single-syscall
-    /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` equivalent on
-    /// Linux) — so a symlink swapped in after any earlier check is never
-    /// followed, closing the pathname-check-then-separate-syscall TOCTOU
-    /// window `resolve_existing` / `resolve_for_write` /
-    /// `resolve_for_create_dir_all` used to leave open. See [`open_one`].
+    /// opened once at mount time. Every request resolves *from this fd*
+    /// (or, for a `leaf_scoped` mount, from a fresh per-call anchor fd
+    /// opened beneath it — see [`anchor_for_target`]), component by
+    /// component, following an in-bounds symlink and refusing an escaping
+    /// one atomically — via the single-syscall `openat2(RESOLVE_BENEATH)`
+    /// on Linux, or this crate's own bounded fd-anchored walk everywhere
+    /// else. A symlink swapped in after any earlier check is never handed
+    /// to a later, independent path-based syscall, closing the
+    /// pathname-check-then-separate-syscall TOCTOU window `resolve_existing`
+    /// / `resolve_for_write` / `resolve_for_create_dir_all` used to leave
+    /// open. See [`open_one`].
     ///
     /// Wrapped in `Arc` (not re-opened per request): cloning an `Arc<OwnedFd>`
     /// shares the same underlying open file description rather than
@@ -65,19 +70,21 @@ struct LocalMount {
     /// e.g. the sandboxed-profile `/workspace` mount, where every user's
     /// `MountView` target is `/workspace/<digest>`).
     ///
-    /// Containment no longer needs a *narrower* boundary for this mount kind
-    /// than for an ordinary one: because [`open_one`] refuses to traverse
-    /// **any** symlink anywhere in a resolved path (not just one that would
-    /// land outside the mount), a symlink planted in one caller's leaf can
-    /// never be followed into a sibling leaf either — the whole attack class
-    /// this flag used to need a bespoke `containment_root`/
-    /// `ensure_existing_ancestor_contained` bootstrap-boundary calculation
-    /// for is closed by the same no-symlink-traversal rule that protects
-    /// ordinary mounts. `leaf_scoped` now exists purely to preserve one
-    /// policy decision: a request against the bare mount root (no leaf
-    /// segment at all) must still fail closed rather than resolving to the
-    /// shared parent every caller's leaf lives under. See
-    /// [`DiskFilesystem::resolve_mount_target`].
+    /// `leaf_scoped` still needs a *narrower* containment boundary than an
+    /// ordinary mount: now that [`open_one`] follows an in-bounds symlink
+    /// instead of rejecting every symlink outright, a symlink planted in one
+    /// caller's leaf that resolves into a sibling leaf would stay "beneath"
+    /// the wide, shared mount root and pass containment there. So for a
+    /// `leaf_scoped` mount, every request is anchored not at `root_fd` but
+    /// at a fresh fd opened *at the caller's own leaf directory* (see
+    /// [`anchor_for_target`]) before any further walking happens —
+    /// `RESOLVE_BENEATH` (or the portable fallback's escape check) then
+    /// enforces containment against that narrower anchor, so a symlink can
+    /// never step from one caller's leaf into a sibling leaf. `leaf_scoped`
+    /// additionally still preserves the original policy that a request
+    /// against the bare mount root (no leaf segment at all) must fail closed
+    /// rather than resolving to the shared parent every caller's leaf lives
+    /// under. See [`DiskFilesystem::resolve_mount_target`].
     leaf_scoped: bool,
 }
 
@@ -216,8 +223,13 @@ impl DiskFilesystem {
         Ok(MountTarget {
             root_fd: Arc::clone(&mount.root_fd),
             components,
+            leaf_scoped: mount.leaf_scoped,
         })
     }
+}
+
+fn dup_owned_fd(fd: rustix::fd::BorrowedFd<'_>) -> Result<OwnedFd, ResolveError> {
+    rustix::io::dup(fd).map_err(|errno| ResolveError::Io(errno.into()))
 }
 
 /// A mount plus the path components to walk under its `root_fd`. Carries no
@@ -225,6 +237,60 @@ impl DiskFilesystem {
 struct MountTarget {
     root_fd: Arc<OwnedFd>,
     components: Vec<OsString>,
+    /// Mirrors [`LocalMount::leaf_scoped`] — carried through so the blocking
+    /// closures below can anchor containment at the caller's own leaf (see
+    /// [`anchor_for_target`]) instead of the shared mount root now that
+    /// [`open_one`] follows in-bounds symlinks. Without this, a symlink
+    /// planted inside one caller's leaf that resolves into a sibling leaf
+    /// would pass containment (both stay "beneath" the wide, shared mount
+    /// root) even though it must not.
+    leaf_scoped: bool,
+}
+
+/// For a `leaf_scoped` mount, opens the caller's own leaf directory
+/// (`target.components[0]`) as a fresh anchor fd and returns it alongside
+/// the remaining tail components: every subsequent walk resolves
+/// `RESOLVE_BENEATH` *this* anchor, not the wide, shared mount root, so an
+/// in-bounds symlink can never step from one caller's leaf into a sibling
+/// leaf. Non-leaf-scoped mounts pass the mount root straight through,
+/// unchanged.
+///
+/// `create_if_missing` mirrors [`descend_creating`]'s bootstrap semantics —
+/// a brand-new leaf's directory does not exist yet on its first write, so
+/// write paths must create it as they anchor; read paths must not (a read
+/// against a leaf that has never been written must still report
+/// `NotFound`/`MountNotFound`, not silently fabricate the directory).
+fn anchor_for_target(
+    target: &MountTarget,
+    create_if_missing: bool,
+) -> Result<(OwnedFd, Vec<OsString>), ResolveError> {
+    if !target.leaf_scoped {
+        return Ok((
+            dup_owned_fd(target.root_fd.as_fd())?,
+            target.components.clone(),
+        ));
+    }
+    let Some((leaf, rest)) = target.components.split_first() else {
+        // `resolve_mount_target` already fails a leaf-scoped mount closed on
+        // an empty tail (`PathOutsideMount`) before a `MountTarget` is ever
+        // built, so this arm is unreachable in practice; handled without
+        // `.unwrap()`/`.expect()` regardless, matching the rest of this
+        // module's no-panic discipline.
+        return Ok((dup_owned_fd(target.root_fd.as_fd())?, Vec::new()));
+    };
+    let leaf_components = std::slice::from_ref(leaf);
+    let anchor = if create_if_missing {
+        descend_creating(target.root_fd.as_fd(), leaf_components)?
+    } else {
+        open_one(
+            target.root_fd.as_fd(),
+            target.root_fd.as_fd(),
+            leaf,
+            OFlags::DIRECTORY,
+            Mode::empty(),
+        )?
+    };
+    Ok((anchor, rest.to_vec()))
 }
 
 #[async_trait]
@@ -280,14 +346,13 @@ impl RootFilesystem for DiskFilesystem {
         let target = self.resolve_mount_target(path)?;
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::ReadFile, move || {
-            let (fd, _parent) = resolve_walk(
-                target.root_fd.as_fd(),
-                &target.components,
-                OFlags::RDONLY,
-            )
-            .map_err(|error| {
+            let (anchor, rest) = anchor_for_target(&target, false).map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::ReadFile, error)
             })?;
+            let (fd, _parent) =
+                resolve_walk(anchor.as_fd(), &rest, OFlags::RDONLY).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::ReadFile, error)
+                })?;
             let stat = rustix::fs::fstat(&fd).map_err(|errno| {
                 io_error(path.clone(), FilesystemOperation::ReadFile, errno.into())
             })?;
@@ -314,14 +379,13 @@ impl RootFilesystem for DiskFilesystem {
         let target = self.resolve_mount_target(path)?;
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::ReadFile, move || {
-            let (fd, _parent) = resolve_walk(
-                target.root_fd.as_fd(),
-                &target.components,
-                OFlags::RDONLY,
-            )
-            .map_err(|error| {
+            let (anchor, rest) = anchor_for_target(&target, false).map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::ReadFile, error)
             })?;
+            let (fd, _parent) =
+                resolve_walk(anchor.as_fd(), &rest, OFlags::RDONLY).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::ReadFile, error)
+                })?;
             let stat = rustix::fs::fstat(&fd).map_err(|errno| {
                 io_error(path.clone(), FilesystemOperation::ReadFile, errno.into())
             })?;
@@ -354,15 +418,23 @@ impl RootFilesystem for DiskFilesystem {
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let target = self.resolve_mount_target(path)?;
-        let (parent_components, leaf) = split_leaf(&target.components, path)?;
         let bytes = bytes.to_vec();
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::AppendFile, move || {
+            let (anchor, rest) = anchor_for_target(&target, true).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
+            })?;
+            let (parent_components, leaf) = split_leaf(&rest, &path)?;
             let parent_fd =
-                descend_creating(target.root_fd.as_fd(), &parent_components).map_err(|error| {
+                descend_creating(anchor.as_fd(), &parent_components).map_err(|error| {
                     resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
                 })?;
+            // `open_one` already follows an in-bounds symlink at `leaf`
+            // transparently (unlike `write_file`'s rename-based atomic
+            // install, a plain `open`-and-append writes straight through
+            // one), so no separate `resolve_write_leaf` chase is needed here.
             let fd = open_one(
+                anchor.as_fd(),
                 parent_fd.as_fd(),
                 &leaf,
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
@@ -389,14 +461,13 @@ impl RootFilesystem for DiskFilesystem {
         let target = self.resolve_mount_target(path)?;
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::ListDir, move || {
-            let (fd, _parent) = resolve_walk(
-                target.root_fd.as_fd(),
-                &target.components,
-                OFlags::RDONLY,
-            )
-            .map_err(|error| {
+            let (anchor, rest) = anchor_for_target(&target, false).map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::ListDir, error)
             })?;
+            let (fd, _parent) =
+                resolve_walk(anchor.as_fd(), &rest, OFlags::RDONLY).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::ListDir, error)
+                })?;
             let mut listing = rustix::fs::Dir::read_from(fd.as_fd()).map_err(|errno| {
                 io_error(path.clone(), FilesystemOperation::ListDir, errno.into())
             })?;
@@ -442,12 +513,13 @@ impl RootFilesystem for DiskFilesystem {
         let target = self.resolve_mount_target(path)?;
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::Stat, move || {
+            let (anchor, rest) = anchor_for_target(&target, false).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::Stat, error)
+            })?;
             let (fd, _parent) =
-                resolve_walk(target.root_fd.as_fd(), &target.components, OFlags::RDONLY).map_err(
-                    |error| {
-                        resolve_error_to_filesystem_error(&path, FilesystemOperation::Stat, error)
-                    },
-                )?;
+                resolve_walk(anchor.as_fd(), &rest, OFlags::RDONLY).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::Stat, error)
+                })?;
             let stat = rustix::fs::fstat(&fd)
                 .map_err(|errno| io_error(path.clone(), FilesystemOperation::Stat, errno.into()))?;
             let len = if stat.st_size < 0 {
@@ -487,22 +559,45 @@ impl RootFilesystem for DiskFilesystem {
         }
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::Delete, move || {
+            let (anchor, rest) = anchor_for_target(&target, false).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::Delete, error)
+            })?;
+            if rest.is_empty() {
+                // Same "cannot delete the resolution root" policy as the
+                // bare-mount-root check above, restated post-anchor: for a
+                // leaf-scoped mount, `rest` empty means the request named
+                // the caller's own leaf directory itself (anchoring already
+                // consumed it as `target.components[0]`), which has no
+                // fd-relative parent inside this resolution either.
+                return Err(FilesystemError::PathOutsideMount { path: path.clone() });
+            }
             let (fd, parent) =
-                resolve_walk(target.root_fd.as_fd(), &target.components, OFlags::RDONLY).map_err(
-                    |error| {
-                        resolve_error_to_filesystem_error(&path, FilesystemOperation::Delete, error)
-                    },
-                )?;
+                resolve_walk(anchor.as_fd(), &rest, OFlags::RDONLY).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::Delete, error)
+                })?;
             let Some((parent_fd, name)) = parent else {
                 return Err(FilesystemError::PathOutsideMount { path: path.clone() });
             };
-            let stat = rustix::fs::fstat(&fd).map_err(|errno| {
-                io_error(path.clone(), FilesystemOperation::Delete, errno.into())
-            })?;
             drop(fd);
-            if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
+            // Determine the *entry's own* type via an `AT_SYMLINK_NOFOLLOW`
+            // stat against `parent_fd`/`name` — not `fstat` of `fd` (which,
+            // now that `open_one` follows in-bounds symlinks, may have
+            // opened straight through a symlink to a directory target).
+            // `std::fs::remove_dir_all`/`remove_file` never follow a
+            // symlink at the entry being removed — a symlink is always
+            // unlinked as itself, never traversed into — and this module
+            // promises the same contract; using `fd`'s (possibly-followed)
+            // type here would recurse into and delete the *target*
+            // directory's contents before failing on the final
+            // `unlinkat(..., REMOVEDIR)` (which POSIX refuses on a symlink).
+            let entry_stat =
+                rustix::fs::statat(parent_fd.as_fd(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(
+                    |errno| io_error(path.clone(), FilesystemOperation::Delete, errno.into()),
+                )?;
+            if rustix::fs::FileType::from_raw_mode(entry_stat.st_mode)
+                == rustix::fs::FileType::Directory
             {
-                remove_dir_all_fd(parent_fd.as_fd(), &name)
+                remove_dir_all_fd(anchor.as_fd(), parent_fd.as_fd(), &name)
                     .map_err(|error| io_error(path.clone(), FilesystemOperation::Delete, error))
             } else {
                 rustix::fs::unlinkat(parent_fd.as_fd(), &name, AtFlags::empty()).map_err(|errno| {
@@ -517,7 +612,10 @@ impl RootFilesystem for DiskFilesystem {
         let target = self.resolve_mount_target(path)?;
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::CreateDirAll, move || {
-            descend_creating(target.root_fd.as_fd(), &target.components)
+            let (anchor, rest) = anchor_for_target(&target, true).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::CreateDirAll, error)
+            })?;
+            descend_creating(anchor.as_fd(), &rest)
                 .map(|_fd| ())
                 .map_err(|error| {
                     resolve_error_to_filesystem_error(
@@ -539,15 +637,27 @@ impl DiskFilesystem {
         cas: CasExpectation,
     ) -> Result<(), FilesystemError> {
         let target = self.resolve_mount_target(path)?;
-        let (parent_components, leaf) = split_leaf(&target.components, path)?;
         let bytes = bytes.to_vec();
         let path = path.clone();
         run_blocking(path.clone(), FilesystemOperation::WriteFile, move || {
+            let (anchor, rest) = anchor_for_target(&target, true).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
+            })?;
+            let (parent_components, leaf) = split_leaf(&rest, &path)?;
             let parent_fd =
-                descend_creating(target.root_fd.as_fd(), &parent_components).map_err(|error| {
+                descend_creating(anchor.as_fd(), &parent_components).map_err(|error| {
                     resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
                 })?;
-            atomic_write_file(&path, parent_fd.as_fd(), &leaf, &bytes, cas)
+            // `rename`/`link` (how `atomic_write_file` installs bytes) never
+            // follow a symlink at the destination name — resolve any
+            // in-bounds symlink chain at `leaf` ourselves first so the
+            // install lands at the symlink's ultimate target, not over the
+            // symlink entry itself.
+            let (write_parent_fd, write_leaf) =
+                resolve_write_leaf(anchor.as_fd(), parent_fd.as_fd(), &leaf).map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
+                })?;
+            atomic_write_file(&path, write_parent_fd.as_fd(), &write_leaf, &bytes, cas)
         })
         .await
     }
