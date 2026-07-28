@@ -1024,10 +1024,18 @@ where
         if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
             continue;
         }
-        let stamp = manifest_sources
-            .get(extension_id.as_str())
-            .copied()
-            .unwrap_or(default_stamp);
+        let stamp = match manifest_sources.get(extension_id.as_str()) {
+            Some(ManifestSource::HostBundled) => {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "persisted manifest source for materialized extension '{}' cannot be host-bundled",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            Some(source) => *source,
+            None => default_stamp,
+        };
         match load_filesystem_package(fs, entry, &host_ports, &contracts, stamp).await {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
@@ -2402,6 +2410,35 @@ handle = "web_token"
 
         assert_eq!(package.source, ManifestSource::RegistryInstalled);
         assert_eq!(package.summary().source, LifecycleExtensionSource::Registry);
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_rejects_persisted_host_bundled_source_before_parsing() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/fixture/manifest.toml").unwrap(),
+            b"this is deliberately not a manifest",
+        )
+        .await
+        .unwrap();
+        let manifest_sources =
+            BTreeMap::from([("fixture".to_string(), ManifestSource::HostBundled)]);
+
+        let error = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
+            &manifest_sources,
+        )
+        .await
+        .expect_err("persisted host-bundled provenance must fail closed");
+
+        assert!(matches!(
+            error,
+            ProductSurfaceFailure::InvalidBindingRequest { reason }
+                if reason.contains("persisted manifest source")
+                    && reason.contains("cannot be host-bundled")
+        ));
     }
 
     #[tokio::test]

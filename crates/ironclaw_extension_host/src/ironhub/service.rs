@@ -16,7 +16,8 @@ use ironclaw_product::{
     LifecycleProductResponse, LifecycleProductSurfaceContext,
 };
 use ironclaw_skills::{
-    ScopedSkillManagementError, ScopedSkillManagementPort, SkillManagementErrorKind,
+    ManagedSkillSource, ScopedSkillManagementError, ScopedSkillManagementPort,
+    SkillManagementErrorKind,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -288,93 +289,101 @@ impl IronHubService {
         let manifest = self.fetch_manifest_cached().await?;
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options)?;
-        let lock = install_lock(&format!("{}:{name}", kind.as_str()));
-        let _guard = lock.lock().await;
-        let lifecycle = match kind {
-            IronHubEntryKind::Skill => {
-                let entry = manifest
-                    .find_skill(name)
-                    .ok_or_else(|| catalog("skill not found"))?;
-                let content = self
-                    .download_verified(&entry.skill_md, MAX_METADATA_BYTES)
-                    .await?;
-                let content =
-                    String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
-                        reason: format!("skill markdown is not UTF-8: {error}"),
+        let lock_key = format!("{}:{name}", kind.as_str());
+        let lock = install_lock(&lock_key);
+        let result = async {
+            let _guard = lock.lock().await;
+            let lifecycle = match kind {
+                IronHubEntryKind::Skill => {
+                    let entry = manifest
+                        .find_skill(name)
+                        .ok_or_else(|| catalog("skill not found"))?;
+                    let content = self
+                        .download_verified(&entry.skill_md, MAX_METADATA_BYTES)
+                        .await?;
+                    let content = String::from_utf8(content).map_err(|error| {
+                        IronHubCommandError::Install {
+                            reason: format!("skill markdown is not UTF-8: {error}"),
+                        }
                     })?;
-                let installed = self
-                    .install_skill(
-                        entry.name.as_str(),
-                        &content,
-                        &entry.skill_md.url,
-                        options.force,
-                    )
-                    .await?;
-                LifecycleProductResponse {
-                    package_ref: Some(
-                        LifecyclePackageRef::new(
-                            LifecyclePackageKind::Skill,
-                            installed.name.as_str(),
+                    let installed = self
+                        .install_skill(
+                            entry.name.as_str(),
+                            &content,
+                            &entry.skill_md.url,
+                            options.force,
                         )
-                        .map_err(|error| invalid(error.to_string()))?,
-                    ),
-                    phase: InstallationState::Installed,
-                    blockers: Vec::new(),
-                    message: None,
-                    payload: Some(LifecycleProductPayload::SkillInstall {
-                        installed: true,
-                        name: LifecyclePackageId::new(installed.name)
+                        .await?;
+                    LifecycleProductResponse {
+                        package_ref: Some(
+                            LifecyclePackageRef::new(
+                                LifecyclePackageKind::Skill,
+                                installed.name.as_str(),
+                            )
                             .map_err(|error| invalid(error.to_string()))?,
-                    }),
+                        ),
+                        phase: InstallationState::Installed,
+                        blockers: Vec::new(),
+                        message: None,
+                        payload: Some(LifecycleProductPayload::SkillInstall {
+                            installed: true,
+                            name: LifecyclePackageId::new(installed.name)
+                                .map_err(|error| invalid(error.to_string()))?,
+                        }),
+                    }
                 }
-            }
-            IronHubEntryKind::Tool => {
-                let entry = manifest
-                    .find_tool(name)
-                    .ok_or_else(|| catalog("tool not found"))?;
-                let wasm = self.download_verified(&entry.wasm, MAX_WASM_BYTES).await?;
-                let capabilities = self
-                    .download_verified(&entry.capabilities, MAX_METADATA_BYTES)
-                    .await?;
-                let reserved = self
-                    .extension_management
-                    .reserved_bundled_extension_ids()
-                    .await;
-                let package = ironhub_tool_package(entry, wasm, capabilities, &reserved)?;
-                self.extension_management
-                    .install_registry_package(
-                        package,
-                        options.force,
-                        &self.scope.user_id,
-                        &self.scope,
-                    )
-                    .await?
-            }
-        };
-        let entry = match kind {
-            IronHubEntryKind::Tool => tool_summary(
-                manifest
-                    .find_tool(name)
-                    .ok_or_else(|| catalog("tool not found"))?,
-            ),
-            IronHubEntryKind::Skill => skill_summary(
-                manifest
-                    .find_skill(name)
-                    .ok_or_else(|| catalog("skill not found"))?,
-            ),
-        };
-        Ok(IronHubResponse {
-            phase: IronHubPhase::Installed,
-            entries: vec![entry],
-            lifecycle: Some(lifecycle),
-            message: Some(install_message(
-                kind,
-                name,
-                &entry_version(&manifest, kind, name)?,
-                provenance,
-                &artifact_digest,
-            )),
-        })
+                IronHubEntryKind::Tool => {
+                    let entry = manifest
+                        .find_tool(name)
+                        .ok_or_else(|| catalog("tool not found"))?;
+                    let wasm = self.download_verified(&entry.wasm, MAX_WASM_BYTES).await?;
+                    let capabilities = self
+                        .download_verified(&entry.capabilities, MAX_METADATA_BYTES)
+                        .await?;
+                    let reserved = self
+                        .extension_management
+                        .reserved_bundled_extension_ids()
+                        .await;
+                    let package = ironhub_tool_package(entry, wasm, capabilities, &reserved)?;
+                    self.extension_management
+                        .install_registry_package(
+                            package,
+                            options.force,
+                            &self.scope.user_id,
+                            &self.scope,
+                        )
+                        .await?
+                }
+            };
+            let entry = match kind {
+                IronHubEntryKind::Tool => tool_summary(
+                    manifest
+                        .find_tool(name)
+                        .ok_or_else(|| catalog("tool not found"))?,
+                ),
+                IronHubEntryKind::Skill => skill_summary(
+                    manifest
+                        .find_skill(name)
+                        .ok_or_else(|| catalog("skill not found"))?,
+                ),
+            };
+            Ok(IronHubResponse {
+                phase: IronHubPhase::Installed,
+                entries: vec![entry],
+                lifecycle: Some(lifecycle),
+                message: Some(install_message(
+                    kind,
+                    name,
+                    &entry_version(&manifest, kind, name)?,
+                    provenance,
+                    &artifact_digest,
+                )),
+            })
+        }
+        .await;
+        drop(lock);
+        evict_idle_async_locks(&INSTALL_LOCKS);
+        result
     }
 
     async fn install_skill(
@@ -399,6 +408,21 @@ impl IronHubService {
             .read_content_for_scope(self.scope.clone(), name)
             .await
             .map_err(skill_install_error)?;
+        let previous_source_url = match previous.source {
+            ManagedSkillSource::Installed => Some(previous.source_url.as_deref().ok_or_else(|| {
+                IronHubCommandError::Install {
+                    reason: format!(
+                        "cannot force-replace installed skill '{name}' because its source URL is unavailable"
+                    ),
+                }
+            })?),
+            ManagedSkillSource::User => None,
+            ManagedSkillSource::System => {
+                return Err(IronHubCommandError::Install {
+                    reason: format!("cannot force-replace system skill '{name}'"),
+                });
+            }
+        };
         self.skill_management
             .remove_for_scope(self.scope.clone(), name)
             .await
@@ -410,11 +434,24 @@ impl IronHubService {
         {
             Ok(result) => Ok(result),
             Err(original_error) => {
-                if let Err(restore_error) = self
-                    .skill_management
-                    .install_for_scope(self.scope.clone(), Some(name), &previous.content)
-                    .await
-                {
+                let restore = match previous_source_url {
+                    Some(source_url) => {
+                        self.skill_management
+                            .install_from_url_for_scope(
+                                self.scope.clone(),
+                                Some(name),
+                                &previous.content,
+                                source_url,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.skill_management
+                            .install_for_scope(self.scope.clone(), Some(name), &previous.content)
+                            .await
+                    }
+                };
+                if let Err(restore_error) = restore {
                     return Err(IronHubCommandError::Install {
                         reason: format!(
                             "forced skill replacement failed ({original_error}); previous skill restoration also failed ({restore_error})"
@@ -432,14 +469,20 @@ impl IronHubService {
             return Ok(hit);
         }
         let lock = manifest_fetch_lock(&self.manifest_url);
-        let _guard = lock.lock().await;
-        let now = Instant::now();
-        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
-            return Ok(hit);
+        let result = async {
+            let _guard = lock.lock().await;
+            let now = Instant::now();
+            if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+                return Ok(hit);
+            }
+            let manifest = Arc::new(self.fetch_manifest().await?);
+            manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
+            Ok(manifest)
         }
-        let manifest = Arc::new(self.fetch_manifest().await?);
-        manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
-        Ok(manifest)
+        .await;
+        drop(lock);
+        evict_idle_async_locks(&MANIFEST_FETCH_LOCKS);
+        result
     }
 
     async fn fetch_manifest(&self) -> Result<IronHubManifest, IronHubCommandError> {
@@ -548,6 +591,30 @@ pub(crate) fn configure_test_catalog(
     service
 }
 
+#[cfg(test)]
+pub(crate) fn clear_test_manifest_cache(url: &str) {
+    MANIFEST_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(url);
+}
+
+#[cfg(test)]
+pub(crate) fn test_manifest_fetch_lock_exists(url: &str) -> bool {
+    MANIFEST_FETCH_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(url)
+}
+
+#[cfg(test)]
+pub(crate) fn test_install_lock_exists(key: &str) -> bool {
+    INSTALL_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(key)
+}
+
 fn ironhub_command_capability_id(
     command: &IronHubCommand,
 ) -> Result<CapabilityId, IronHubCommandError> {
@@ -636,6 +703,16 @@ fn manifest_fetch_lock(url: &str) -> Arc<AsyncMutex<()>> {
         .clone()
 }
 
+fn evict_idle_async_locks(locks: &std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>) {
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Once an operation releases its async guard and drops its local Arc,
+    // the map is the sole owner. Remove those idle entries; live/waiting
+    // operations retain an Arc and therefore keep their shared lock.
+    guard.retain(|_, lock| Arc::strong_count(lock) > 1);
+}
+
 fn enforce_manifest_monotonic(
     url: &str,
     manifest: &IronHubManifest,
@@ -654,6 +731,11 @@ fn enforce_manifest_monotonic(
             generated_at.to_rfc3339(),
             previous.to_rfc3339()
         )));
+    }
+    if !guard.contains_key(url) && guard.len() >= MANIFEST_CACHE_MAX_ENTRIES {
+        return Err(catalog(
+            "manifest replay tracking capacity exceeded; refusing untracked manifest URL",
+        ));
     }
     guard.insert(url.to_string(), generated_at);
     Ok(())
