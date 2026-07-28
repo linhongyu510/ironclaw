@@ -249,6 +249,116 @@ async fn timeout_kills_process_group_but_container_survives() {
     }
 }
 
+/// Renders every process line `docker top` reports for `container_id` as one
+/// space-joined string per row — used to search for a distinctive argv
+/// (e.g. a `sleep <unique-seconds>` marker) anywhere in the container's live
+/// process tree, regardless of which pgid/wrapper layer it actually landed
+/// under.
+async fn container_process_listing(docker: &Docker, container_id: &str) -> String {
+    let top = docker
+        .top_processes::<String>(container_id, None)
+        .await
+        .expect("docker top succeeds");
+    top.processes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| row.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Proves the timeout-kill path actually terminates the timed-out job inside
+/// the container, not just that the exec call *reports* a timeout. The
+/// production kill (`kill_exec_process_group` in `exec_transport.rs`) issues
+/// `kill -KILL -<exec_pid>` against the pid Docker reports for the exec, but
+/// that pid is `setsid --wait`'s own pid — a session leader with NO live
+/// children in its own process group, since `setsid` internally forks a
+/// child to make the `setsid()` syscall and that child (not the waiting
+/// parent) ends up owning the real job's pgid. The kill therefore currently
+/// hits "No such process" and the job runs to completion regardless of the
+/// reported timeout.
+///
+/// Also pins the two collateral-damage invariants any real fix must
+/// preserve: an unrelated background job in the SAME container must survive
+/// a foreground timeout kill (containers are reused across commands, and
+/// background jobs are deliberately detached from the timed-out exec), and
+/// the container itself must remain usable for a subsequent command.
+#[tokio::test]
+async fn timed_out_process_is_actually_killed_but_background_and_container_survive() {
+    let image = skip_unless_docker_ready!(
+        "timed_out_process_is_actually_killed_but_background_and_container_survive"
+    );
+
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let user_scope = scope("timeout-kill-tenant", "timeout-kill-user");
+    let workspace = RebornSandboxUserKey::from_scope(&user_scope).workspace_path(temp.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let port = sandbox_transport::connect_for_test(&workspace, &image)
+        .await
+        .expect("sandbox transport connects");
+
+    // Distinct sleep durations act as unique argv markers in `docker top`,
+    // letting us tell the timed-out job apart from the survivor without
+    // depending on pid/pgid values this test doesn't control.
+    let background_launch = port
+        .run_command(background_request(user_scope.clone(), "sleep 8172"))
+        .await
+        .expect("background launch succeeds");
+    assert!(
+        background_launch.output.starts_with("Started in background: pid "),
+        "expected the background-launch acknowledgement: {background_launch:?}"
+    );
+
+    let mut timeout_request = request(user_scope.clone(), "sleep 8171");
+    timeout_request.timeout_secs = Some(1);
+    let timed_out = port.run_command(timeout_request).await;
+    assert!(
+        matches!(timed_out, Err(RuntimeProcessError::Timeout(_))),
+        "long-running command must time out: {timed_out:?}"
+    );
+
+    let container_id = find_labeled_container(&docker, "timeout-kill-tenant", "timeout-kill-user")
+        .await
+        .expect("container exists after the timed-out command");
+
+    // Poll rather than check once — the kill (once it actually works) is a
+    // best-effort exec issued after the timeout fires, so it races this
+    // check by a small, non-deterministic amount.
+    let mut listing = String::new();
+    let mut target_still_present = true;
+    for _ in 0..20 {
+        listing = container_process_listing(&docker, &container_id).await;
+        if !listing.contains("8171") {
+            target_still_present = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        !target_still_present,
+        "the timed-out `sleep 8171` process must actually be killed, but it is still \
+         present in `docker top` after waiting: {listing}"
+    );
+
+    // Collateral-damage check #1: the unrelated background job must survive
+    // the foreground timeout's kill.
+    assert!(
+        listing.contains("8172"),
+        "an unrelated background job in the same container must NOT be killed by a \
+         different foreground exec's timeout: {listing}"
+    );
+
+    // Collateral-damage check #2: the container itself must still be usable.
+    let still_alive = port
+        .run_command(request(user_scope, "echo alive"))
+        .await
+        .expect("the container itself must survive a timeout kill of the exec'd process group");
+    assert!(still_alive.output.contains("alive"));
+
+    best_effort_remove(&docker, &container_id).await;
+}
+
 #[tokio::test]
 async fn cross_user_containers_and_workspaces_are_isolated() {
     let image = skip_unless_docker_ready!("cross_user_containers_and_workspaces_are_isolated");

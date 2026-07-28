@@ -28,6 +28,7 @@ use bollard::{
 use futures_util::StreamExt;
 use ironclaw_host_api::{TenantId, UserId};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{CommandExecutionOutput, RuntimeProcessError};
 
@@ -619,44 +620,94 @@ pub(super) async fn user_container_launch_config(
 }
 
 /// `setsid` creates a new session AND process group for `command`, isolating
-/// it (and anything it forks) from the exec's own process so a timeout kill
-/// can target the whole job without touching the container's PID 1.
+/// it (and anything it forks) from the launching exec's own process. Used
+/// only by [`background_launch_script`] today — the persistent container's
+/// only `background: true` path — where it is also what detaches the
+/// launched job from the (short-lived) launching exec's session so it keeps
+/// running after that exec returns.
 ///
 /// `--wait` is load-bearing and easy to miss: without it, (util-linux)
 /// `setsid` forks the target command and returns IMMEDIATELY, exit code 0,
 /// without waiting for it — since this whole line is reached via `exec`
 /// (replacing the exec'd process in place), that immediate return becomes
 /// the WHOLE wrapped command's reported completion. Docker's own `exec`
-/// tracking (`inspect_exec`'s `Pid`/`ExitCode`, what
-/// `CommandExecutionOutput::exit_code` is built from) then reflects
-/// `setsid`'s own always-0 launch status, not `command`'s real exit code —
-/// verified empirically: `docker exec ... setsid sh -c 'false'` reports
-/// **0**. `--wait` makes `setsid` block until `command` finishes and exit
-/// with `command`'s own status, so `inspect_exec`'s `ExitCode` (and
-/// therefore every `CommandExecutionOutput::exit_code` this crate hands
-/// out) is finally trustworthy. Output collection itself was never affected
-/// either way — bollard's exec stream stays open until every process
-/// sharing its stdout/stderr fds closes them, not just the top-level exec'd
-/// one — only the exit code was silently wrong.
+/// tracking (`inspect_exec`'s `Pid`/`ExitCode`) then reflects `setsid`'s own
+/// always-0 launch status, not `command`'s real exit code — verified
+/// empirically: `docker exec ... setsid sh -c 'false'` reports **0**.
+/// `--wait` makes `setsid` block until `command` finishes and exit with
+/// `command`'s own status.
 ///
-/// Known gap this does NOT fix: with `--wait`, `setsid` still internally
-/// forks a child to make the actual `setsid()` syscall (required — it
-/// cannot be called on a process-group leader, which this process already
-/// is by the time it's reached via `exec`), so the real job's pgid is that
-/// child's pid, not the pid Docker reports for the exec (the *waiting*
-/// `setsid` process). `kill_exec_process_group`'s `kill -KILL -<pid>` was
-/// ALREADY silently non-functional before this change for the same
-/// reason — `inspect_exec`'s `Pid` is a host-namespace value that doesn't
-/// resolve to anything inside the container's own pid namespace at all
-/// (confirmed empirically: issuing that kill against a live `sleep`
-/// reports "No such process" and the process survives) — so a timed-out
-/// job's process group is only ever reclaimed when the container itself is
-/// later recycled, never by the best-effort kill. This is a pre-existing
-/// gap, not introduced here; no test currently depends on the kill actually
-/// working (`timeout_kills_process_group_but_container_survives` only
-/// asserts the timeout fires and the container stays usable afterward).
+/// This wrapper is NOT used for the foreground [`exec_in_container`] path —
+/// see [`wrap_foreground_command_reporting_pgid`]'s doc comment for why a
+/// `setsid`-based wrapper is both unnecessary and actively wrong there.
 fn wrap_command_for_pgid_isolation(command: &str) -> String {
     format!("exec setsid --wait sh -c {}", shell_single_quote(command))
+}
+
+/// Builds the wrapped command line [`exec_in_container`] actually launches,
+/// and the counterpart [`kill_exec_process_group`] reads back from to issue
+/// a timeout kill that actually works — replacing a `setsid`-based wrapper
+/// (still used for background launches, see [`wrap_command_for_pgid_isolation`])
+/// whose `kill -KILL -<inspect_exec_pid>` was silently non-functional.
+/// Empirically-confirmed root causes, in order of what made the OLD wrapper
+/// unfixable without a bigger structural change here:
+///
+/// 1. **PID-namespace mismatch.** `docker inspect_exec`'s reported `Pid` is
+///    a HOST-namespace value: creating an exec, reading its `Pid` back via
+///    the Docker API, and checking `/proc/<pid>` INSIDE the very container
+///    that exec is running in shows nothing there — confirmed against a
+///    real daemon. `kill_exec_process_group` issues its kill via a NEW
+///    `docker exec` (which only ever sees the container's OWN pid
+///    namespace), so that reported number can never resolve there, no
+///    matter what process-group structure the wrapped command creates.
+/// 2. **`setsid`'s internal fork (compounding, not the root cause).** Every
+///    `docker exec`'s own top-level process is *already* the leader of a
+///    fresh process group, distinct from PID 1's and from every other
+///    exec's — confirmed by creating consecutive bare execs and reading
+///    each one's own pgid back from `/proc/<pid>/stat` inside the
+///    container: each lands in a pgid equal to its own, distinct pid.
+///    `setsid()` cannot be called on a process that is already a group
+///    leader, so `setsid --wait` forked an extra child to do the actual
+///    `setsid()` + exec, leaving the pid Docker reports (the *waiting*
+///    parent) with no live children in its own group at all — the second
+///    layer of brokenness on top of (1).
+///
+/// Fix: since a bare exec's own top-level process is already an isolated
+/// group leader (root cause 2 needs no `setsid` at all), this wrapper has
+/// that process report its own pid — via `$$`, evaluated from INSIDE the
+/// container, so it is inherently container-namespace-correct (fixing root
+/// cause 1) — to a per-exec marker file under `/workspace/.ironclaw`
+/// *before* running `command`. [`kill_exec_process_group`] reads that file
+/// back through a second `docker exec` (also container-namespace-scoped, so
+/// the two sides always agree) to get a pgid a `kill -KILL -<pgid>` can
+/// actually resolve.
+///
+/// Deliberately does NOT `exec` into the inner `sh -c command` the way the
+/// `setsid` wrapper does — staying in a normal fork+wait lets it clean up
+/// the marker file and propagate the real exit status afterward, without
+/// reintroducing the "the wrapper's own launch status shadows the command's
+/// real exit code" failure mode `--wait` exists to avoid above. `command`'s
+/// own children (anything it forks, backgrounds, or execs) inherit this
+/// same process group by default — no `setsid` call anywhere in this
+/// path — so `kill -KILL -<pgid>` reaps the whole family, not just the
+/// single top-level process.
+fn wrap_foreground_command_reporting_pgid(command: &str, pgid_marker: &str) -> String {
+    let marker_path = foreground_pgid_marker_path(pgid_marker);
+    format!(
+        "mkdir -p {BACKGROUND_LOG_DIR} && echo $$ >{marker_path} && sh -c {}; \
+         status=$?; rm -f {marker_path}; exit $status",
+        shell_single_quote(command),
+    )
+}
+
+/// Path (inside the container) [`wrap_foreground_command_reporting_pgid`]
+/// writes its self-reported pgid to and [`kill_exec_process_group`] reads it
+/// back from. Shares [`BACKGROUND_LOG_DIR`] with background job logs — both
+/// are per-exec scratch files under the one already-writable, already-
+/// `mkdir -p`'d scratch directory inside the persistent workspace; no new
+/// mount or directory is needed for this.
+fn foreground_pgid_marker_path(pgid_marker: &str) -> String {
+    format!("{BACKGROUND_LOG_DIR}/{pgid_marker}.pgid")
 }
 
 /// The unprivileged user (baked into the image by
@@ -686,7 +737,14 @@ pub(super) async fn exec_in_container(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-    let wrapped = wrap_command_for_pgid_isolation(&command);
+    // Unique per invocation, generated host-side before `create_exec` (not
+    // derived from the eventual `exec.id`) purely because the wrapped
+    // command string has to be built before that id exists — see
+    // `wrap_foreground_command_reporting_pgid`'s doc comment for why this
+    // marker file replaces `inspect_exec`'s `Pid` as the timeout kill's
+    // target.
+    let pgid_marker = Uuid::new_v4().to_string();
+    let wrapped = wrap_foreground_command_reporting_pgid(&command, &pgid_marker);
     let exec = docker
         .create_exec(
             container_id,
@@ -732,7 +790,7 @@ pub(super) async fn exec_in_container(
     let output = match tokio::time::timeout(timeout, run).await {
         Ok(result) => result?,
         Err(_) => {
-            kill_exec_process_group(docker, container_id, &exec.id).await;
+            kill_exec_process_group(docker, container_id, &pgid_marker).await;
             return Err(RuntimeProcessError::Timeout(timeout));
         }
     };
@@ -902,15 +960,28 @@ mod footer_tests {
 }
 
 /// Best-effort: kills the whole process group the timed-out exec started
-/// (see [`wrap_command_for_pgid_isolation`]), but never fails the caller
-/// over it — the caller already treats the command as having timed out
-/// regardless of whether this cleanup exec itself succeeds.
-async fn kill_exec_process_group(docker: &Docker, container_id: &str, exec_id: &str) {
-    let Ok(inspected) = docker.inspect_exec(exec_id).await else {
-        return;
-    };
-    let Some(pid) = inspected.pid else { return };
-    let kill_cmd = format!("kill -KILL -{pid} 2>/dev/null || true");
+/// (see [`wrap_foreground_command_reporting_pgid`]), but never fails the
+/// caller over it — the caller already treats the command as having timed
+/// out regardless of whether this cleanup exec itself succeeds.
+///
+/// Reads the pgid back from `pgid_marker`'s marker file rather than
+/// `docker.inspect_exec`'s reported `Pid` — that field is a host-namespace
+/// value that never resolves inside a `docker exec` issued into the
+/// container (see `wrap_foreground_command_reporting_pgid`'s doc comment for
+/// the empirical proof this function used to be a silent no-op). Both the
+/// write (by the timed-out exec, before it ran `command`) and this read
+/// happen via `docker exec`, so they always agree on the same
+/// container-local pid namespace.
+///
+/// Also removes the marker file: it is the ONLY place left to clean it up
+/// once the wrapped command has been killed mid-flight — the wrapped
+/// script's own `rm -f` (see [`wrap_foreground_command_reporting_pgid`])
+/// only ever runs on normal completion.
+async fn kill_exec_process_group(docker: &Docker, container_id: &str, pgid_marker: &str) {
+    let marker_path = foreground_pgid_marker_path(pgid_marker);
+    let kill_cmd = format!(
+        "kill -KILL -$(cat {marker_path} 2>/dev/null) 2>/dev/null || true; rm -f {marker_path}"
+    );
     if let Ok(kill_exec) = docker
         .create_exec(
             container_id,
@@ -993,6 +1064,30 @@ mod tests {
         // whether `command` actually succeeded. See this function's doc
         // comment for the full empirical case.
         assert_eq!(wrapped, "exec setsid --wait sh -c 'echo hi && sleep 1'");
+    }
+
+    #[test]
+    fn foreground_wrapper_reports_its_own_pid_before_running_and_cleans_up_after() {
+        let wrapped = wrap_foreground_command_reporting_pgid("echo hi && sleep 1", "marker-abc");
+        assert_eq!(
+            wrapped,
+            "mkdir -p /workspace/.ironclaw && echo $$ >/workspace/.ironclaw/marker-abc.pgid && \
+             sh -c 'echo hi && sleep 1'; status=$?; rm -f /workspace/.ironclaw/marker-abc.pgid; \
+             exit $status"
+        );
+    }
+
+    #[test]
+    fn foreground_wrapper_never_execs_over_itself() {
+        // The whole point of NOT using `exec` here (unlike the setsid
+        // wrapper) is staying alive long enough to `rm` the marker file and
+        // report the real exit status after `command` finishes — an `exec`
+        // anywhere in this wrapper would silently regress that.
+        let wrapped = wrap_foreground_command_reporting_pgid("true", "m");
+        assert!(
+            !wrapped.contains("exec "),
+            "the foreground wrapper must not `exec` over itself: {wrapped}"
+        );
     }
 
     /// Pins the pid-agreement invariant `background_launch_script` exists
