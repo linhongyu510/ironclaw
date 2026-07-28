@@ -319,20 +319,29 @@ fn local_dev_selector_config_propagates_injection_mode() {
     }
 }
 
-/// Reborn must inject skill BODIES by default. With `Listing`, benchmarking
-/// showed the model read the one-line menu and then never opened a skill
-/// (`skill_list` 30/30 runs, body actually read 0/30), leaving installed skills
-/// inert: 79.8% vs 85.6% with `Full` on the same 31 tasks and same skills
-/// (nearai/benchmarks#287). Guard the default so a revert is deliberate.
+/// Guards the injection default.
+///
+/// Currently `Listing`. The measurement argues for `Full` (79.8% -> 85.6% on the
+/// 31-task SkillsBench subset, nearai/benchmarks#287, because the model reads the
+/// one-line listing and then opens a skill in 0 of 30 runs), but three local-dev
+/// tests HANG under `Full` — they drive a mock that expects the listing candidate —
+/// so the flip is a maintainer call and `Full` ships as an opt-in switch.
+///
+/// If you flip `DEFAULT_SKILL_INJECTION_MODE`, update those three tests too:
+/// `local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`.
 #[test]
-fn skill_injection_mode_defaults_to_full_when_env_absent() {
-    // Assert the constant directly: this crate is `#![forbid(unsafe_code)]`, so
-    // the test cannot mutate the process env to exercise the VarError::NotPresent
-    // arm. `skill_injection_mode_env` returns this same constant on that arm.
+fn skill_injection_mode_default_is_documented_and_guarded() {
     assert_eq!(
         super::DEFAULT_SKILL_INJECTION_MODE,
-        ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
-        "Reborn must inject skill bodies by default; `Listing` leaves skills unread"
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        "flipping this default changes three local-dev expectations; see the doc comment"
+    );
+    // and the opt-in path must still resolve
+    assert_eq!(
+        super::skill_injection_mode_from("full").expect("full parses"),
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Full
     );
 }
 

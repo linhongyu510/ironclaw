@@ -5063,9 +5063,17 @@ fn skill_activation_env()
 /// reference, harnesses that inject skill bodies unconditionally (Hermes, Claude
 /// Code) score 91.5% on the same tasks with the same skills.
 ///
-/// Set `IRONCLAW_REBORN_SKILL_INJECTION=listing` to restore the previous
-/// behavior where context budget matters more than skill usage.
-const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Full;
+/// **This default is deliberately left at `Listing`** even though the measurement
+/// above argues for `Full`: three existing local-dev tests HANG under `Full`
+/// (`local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`) because
+/// they drive a mock that expects the one-line listing candidate. Flipping the
+/// product default is a maintainer call that needs those expectations updated
+/// first, so this ships as an opt-in switch with the evidence attached.
+///
+/// Opt in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
+const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Listing;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
     match value.trim().to_ascii_lowercase().as_str() {
