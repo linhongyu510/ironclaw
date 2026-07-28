@@ -125,9 +125,13 @@ impl McpEgressEndpoint {
     }
 
     fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
+        let endpoint_port = self.parsed.port().or_else(|| match self.parsed.scheme() {
+            McpHttpScheme::Http => Some(80),
+            McpHttpScheme::Https => Some(443),
+        });
         target.scheme == Some(self.scheme())
             && target.host_pattern.eq_ignore_ascii_case(self.parsed.host())
-            && target.port == self.parsed.port()
+            && (target.port.is_none() || target.port == endpoint_port)
     }
 
     fn matches_url(&self, url: &str) -> bool {
@@ -241,6 +245,38 @@ mod tests {
             injections[0].target,
             RuntimeCredentialTarget::Header { .. }
         ));
+    }
+
+    #[test]
+    fn planner_matches_credential_audience_wildcard_and_default_ports() {
+        for (url, audience_port, expected_injections) in [
+            ("https://fixture.example.com:8443/mcp", None, 1),
+            ("https://fixture.example.com/mcp", Some(443), 1),
+            ("https://fixture.example.com:8443/mcp", Some(443), 0),
+        ] {
+            let registry = Arc::new(SharedExtensionRegistry::new(
+                registry_with_provider_source_and_audience_port(
+                    "fixture",
+                    url,
+                    "fixture.search",
+                    "fixture_token",
+                    ManifestSource::HostBundled,
+                    audience_port,
+                ),
+            ));
+            let planner = RegistryMcpEgressPlanner::new(registry);
+            let provider = ExtensionId::new("fixture").unwrap();
+            let capability_id = CapabilityId::new("fixture.search").unwrap();
+            let scope = sample_scope();
+
+            let plan = planner.plan(sample_plan_request(&provider, &capability_id, url, &scope));
+
+            assert_eq!(
+                plan.credential_injections.len(),
+                expected_injections,
+                "credential audience matched endpoint {url} incorrectly"
+            );
+        }
     }
 
     // ── provider scoping ───────────────────────────────────────────────────
@@ -658,6 +694,24 @@ mod tests {
         credential_handle: &str,
         source: ManifestSource,
     ) -> ironclaw_extensions::ExtensionRegistry {
+        registry_with_provider_source_and_audience_port(
+            provider,
+            url,
+            capability_id,
+            credential_handle,
+            source,
+            None,
+        )
+    }
+
+    fn registry_with_provider_source_and_audience_port(
+        provider: &str,
+        url: &str,
+        capability_id: &str,
+        credential_handle: &str,
+        source: ManifestSource,
+        audience_port: Option<u16>,
+    ) -> ironclaw_extensions::ExtensionRegistry {
         let mut registry = ironclaw_extensions::ExtensionRegistry::new();
         let host = url::Url::parse(url)
             .unwrap()
@@ -719,7 +773,7 @@ mod tests {
                                     audience: NetworkTargetPattern {
                                         scheme: Some(NetworkScheme::Https),
                                         host_pattern: host,
-                                        port: None,
+                                        port: audience_port,
                                     },
                                     target: RuntimeCredentialTarget::Header {
                                         name: "authorization".to_string(),
