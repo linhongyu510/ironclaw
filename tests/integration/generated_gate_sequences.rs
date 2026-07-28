@@ -44,6 +44,27 @@ use serde_json::json;
 /// and the scripted call cannot drift apart.
 const GATED_CAPABILITY: &str = "builtin.write_file";
 
+/// Where each dimension workstream 9 names is actually exercised.
+///
+/// Listing them as a comment rather than inventing an enum per axis: a typed
+/// `Ingress` with one variant that nothing matches on is decoration, and it
+/// would read as coverage on a scan.
+///
+/// | axis | exercised | where |
+/// |---|---|---|
+/// | lifecycle state | yes | `GateAction` below, enumerated |
+/// | policy state | yes | auto-approve on/off, per owner, in the cross-actor case |
+/// | auth state | partly | `auth/auth_gate.rs` + the expired-credential resume; not enumerated with the lifecycle axis |
+/// | provider outcome | partly | `with_github_network_status` drives 401/5xx in the auth slice; not crossed with gate actions |
+/// | operation class | no | read vs idempotent vs non-idempotent write is an E2E fault-matrix axis (`provider_fault_cases.py`) |
+/// | ingress | no | one ingress at this tier; WebUI/Slack/Telegram are covered whole-path in E2E |
+/// | delivery target | no | same — a delivery target needs a channel, which this tier does not run |
+///
+/// The three "no" rows are not oversights: crossing them with the lifecycle
+/// axis needs a tier that runs channels and providers, which is the E2E
+/// journey suite, not this one. Recorded so the epic is not read as claiming
+/// this file covers all seven.
+
 /// One dimension of workstream 9's lifecycle axis: what a client can do to a
 /// run parked on an approval gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
