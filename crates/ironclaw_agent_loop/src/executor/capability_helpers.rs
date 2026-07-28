@@ -459,11 +459,13 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
         summary: "Tool input failed schema validation.".to_string(),
         detail: ToolObservationDetail::InvalidInput { issues },
         artifacts: Vec::new(),
-        recovery: Some(ToolRecoveryObservation {
-            same_call_retry: SameCallRetryConstraint::RequiresChangedInput,
-            repairs,
-            recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
-        }),
+        recovery: Some(
+            ToolRecoveryObservation::new(
+                SameCallRetryConstraint::RequiresChangedInput,
+                CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+            )
+            .with_repairs(repairs),
+        ),
         trust: ObservationTrust::UntrustedToolOutput,
     }
 }
@@ -515,11 +517,13 @@ fn generic_failure_recovery(error_kind: FailureKind) -> ToolRecoveryObservation 
         | FailureKind::Unclassified
         | FailureKind::StaleSurface => SameCallRetryConstraint::Allowed,
     };
-    ToolRecoveryObservation {
+    ToolRecoveryObservation::new(
         same_call_retry,
-        repairs: Vec::new(),
-        recovery_hint: CapabilityRecoveryHint::RespectFailureConstraint,
-    }
+        // Was a hardcoded `RespectFailureConstraint` for every kind — the model
+        // was told to obey a retry rule and nothing else. The hint now comes
+        // from the kind itself (#6284 item 4).
+        CapabilityRecoveryHint::for_failure_kind(error_kind),
+    )
 }
 
 fn input_issue_repair(issue: &CapabilityInputIssue) -> CapabilityInputRepair {

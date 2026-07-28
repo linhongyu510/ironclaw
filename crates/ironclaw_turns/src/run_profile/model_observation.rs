@@ -232,9 +232,52 @@ pub struct ToolRecoveryObservation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<CapabilityInputRepair>,
     pub recovery_hint: CapabilityRecoveryHint,
+    /// How long to wait before re-issuing, when the provider told us.
+    ///
+    /// [`SameCallRetryConstraint::AllowedAfterDelay`] says *wait* without
+    /// saying *how long*, so the model had to guess and the provider's own
+    /// `Retry-After` was discarded. The value lives here rather than inside the
+    /// constraint variant so the addition stays wire-compatible: the constraint
+    /// keeps serializing as a bare string, and observations persisted before
+    /// this field existed still deserialize (pinned by
+    /// `recovery_observation_without_a_delay_still_loads`).
+    ///
+    /// Only meaningful alongside `AllowedAfterDelay`; `None` means the provider
+    /// gave no hint, not "retry immediately".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ToolRecoveryObservation {
+    /// A recovery observation carrying no repairs and no delay.
+    ///
+    /// Every construction site goes through this or [`Self::with_retry_after`],
+    /// so adding a field to the struct cannot silently leave a producer
+    /// defaulting it.
+    pub fn new(
+        same_call_retry: SameCallRetryConstraint,
+        recovery_hint: CapabilityRecoveryHint,
+    ) -> Self {
+        Self {
+            same_call_retry,
+            repairs: Vec::new(),
+            recovery_hint,
+            retry_after_ms: None,
+        }
+    }
+
+    /// Attach the provider's requested wait.
+    pub fn with_retry_after(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
+        self
+    }
+
+    /// Attach model-actionable input repairs.
+    pub fn with_repairs(mut self, repairs: Vec<CapabilityInputRepair>) -> Self {
+        self.repairs = repairs;
+        self
+    }
+
     fn validate(&self) -> Result<(), String> {
         validate_len(
             self.repairs.len(),
@@ -303,11 +346,131 @@ pub enum SameCallRetryConstraint {
     Forbidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What the model should actually *do* about a failure.
+///
+/// Before #6284 item 4 this had two variants and one of them was a constant:
+/// every kind except `InputEncode` got [`RespectFailureConstraint`], which says
+/// only "obey the retry rule you were already given" — it names no action. A
+/// missing credential, a pending approval, an absent runtime and a permanent
+/// refusal were all told the same nothing.
+///
+/// Each variant below names a *different next move*. They are assigned beside
+/// the failure kind in a wildcard-free match ([`FailureKind::recovery_hint`]),
+/// so a new kind cannot compile until someone decides what the model should do
+/// about it.
+///
+/// [`RespectFailureConstraint`]: Self::RespectFailureConstraint
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityRecoveryHint {
+    /// The input was wrong and the model can fix it — see `repairs`.
     CorrectArgumentsBeforeRetry,
+    /// No action names itself: obey `same_call_retry` and use judgment.
+    ///
+    /// Retained as the honest answer for genuinely unclassifiable failures.
+    /// It is no longer the default for everything else.
     RespectFailureConstraint,
+    /// A credential is missing or was refused. Completing an auth flow for the
+    /// provider is what unlocks this call.
+    AuthenticateThenRetry,
+    /// A human can approve this. Asking is worthwhile; the same call may
+    /// succeed once approval lands.
+    RequestApproval,
+    /// The world hiccuped. Wait — see `retry_after_ms` when the provider told
+    /// us how long — and re-issue the same call.
+    WaitThenRetry,
+    /// The runtime or configuration this capability needs is absent. A setup
+    /// step outside the run must happen first; the accompanying
+    /// `HostRemediation` detail carries it when one is known.
+    CompleteSetup,
+    /// This capability is not available to this caller and re-calling it cannot
+    /// succeed. Reach the goal a different way.
+    UseDifferentCapability,
+    /// Permanently refused. Neither this call nor a variation of it will be
+    /// permitted; change the plan rather than the arguments.
+    ReviseApproach,
+}
+
+impl CapabilityRecoveryHint {
+    /// The action the model should take for a given failure kind.
+    ///
+    /// Exhaustive and wildcard-free over the closed [`FailureKind`] vocabulary
+    /// (it is deliberately not `#[non_exhaustive]`), so adding a kind refuses
+    /// to compile until its next move is chosen here — the same compile-forcing
+    /// discipline [`FailureKind::fate`] uses for the retry/terminal decision.
+    ///
+    /// `fate()` answers *what the loop does*; this answers *what the model
+    /// does*. They are deliberately separate: `Unavailable` is retried by the
+    /// host **and**, once retries are spent, tells the model to wait.
+    pub fn for_failure_kind(kind: FailureKind) -> Self {
+        match kind {
+            // A credential is the unlock.
+            FailureKind::Authorization
+            | FailureKind::AuthRequired
+            | FailureKind::SecretDenied => Self::AuthenticateThenRetry,
+
+            // A human is the unlock.
+            FailureKind::GateDeclined => Self::RequestApproval,
+
+            // The world hiccuped; the same call can succeed later.
+            FailureKind::Network
+            | FailureKind::Transient
+            | FailureKind::Unavailable
+            | FailureKind::Backend
+            | FailureKind::Internal
+            | FailureKind::Resource => Self::WaitThenRetry,
+
+            // The model wrote something it can rewrite.
+            FailureKind::InputEncode
+            | FailureKind::OutputTooLarge
+            | FailureKind::OutputDecode
+            | FailureKind::InvalidResult => Self::CorrectArgumentsBeforeRetry,
+
+            // Not available to this caller; another route is needed.
+            FailureKind::MethodMissing
+            | FailureKind::UndeclaredCapability
+            | FailureKind::UnknownCapability
+            | FailureKind::UnknownProvider
+            | FailureKind::StaleSurface => Self::UseDifferentCapability,
+
+            // Something outside the run must be installed or configured.
+            FailureKind::MissingRuntime
+            | FailureKind::MissingRuntimeBackend
+            | FailureKind::UnsupportedRunner
+            | FailureKind::RuntimeMismatch
+            | FailureKind::ExtensionRuntimeMismatch
+            | FailureKind::Manifest => Self::CompleteSetup,
+
+            // Refused, and no amount of rewording changes that.
+            FailureKind::PolicyDenied
+            | FailureKind::NetworkDenied
+            | FailureKind::FilesystemDenied => Self::ReviseApproach,
+
+            // The extension is broken or the operation genuinely failed. The
+            // model may reasonably try something else, but no specific action
+            // names itself, so it gets the constraint and its own judgment.
+            FailureKind::OperationFailed
+            | FailureKind::Guest
+            | FailureKind::ExitFailure
+            | FailureKind::Memory
+            | FailureKind::Client
+            | FailureKind::Executor
+            | FailureKind::Cancelled
+            // Unclassifiable by construction: this is the one honest use of
+            // the old blanket answer.
+            | FailureKind::Unclassified => Self::RespectFailureConstraint,
+        }
+    }
+
+    /// Whether this hint names a concrete next move.
+    ///
+    /// [`RespectFailureConstraint`](Self::RespectFailureConstraint) does not —
+    /// it defers to the retry constraint. The conformance test
+    /// `only_genuinely_unclassifiable_failures_may_decline_to_name_an_action`
+    /// uses this to pin the small set of kinds allowed to answer that way.
+    pub fn names_an_action(self) -> bool {
+        !matches!(self, Self::RespectFailureConstraint)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,13 +580,15 @@ mod tests {
                 }],
             },
             artifacts: Vec::new(),
-            recovery: Some(ToolRecoveryObservation {
-                same_call_retry: SameCallRetryConstraint::RequiresChangedInput,
-                repairs: vec![CapabilityInputRepair::ProvideRequiredField {
+            recovery: Some(
+                ToolRecoveryObservation::new(
+                    SameCallRetryConstraint::RequiresChangedInput,
+                    CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
+                )
+                .with_repairs(vec![CapabilityInputRepair::ProvideRequiredField {
                     path: "file_path".to_string(),
-                }],
-                recovery_hint: CapabilityRecoveryHint::CorrectArgumentsBeforeRetry,
-            }),
+                }]),
+            ),
             trust: ObservationTrust::UntrustedToolOutput,
         };
 
@@ -551,5 +716,99 @@ mod tests {
         );
         let back: CapabilityFailureDetail = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, detail);
+    }
+
+    /// The conformance rule for #6284 item 4: **no failure may reach the model
+    /// without naming what to do about it**.
+    ///
+    /// Before this, `CapabilityRecoveryHint` had two variants and one was a
+    /// constant — 18 of 19 kinds got `RespectFailureConstraint`, which names no
+    /// action. This pins that only kinds that are genuinely unclassifiable, or
+    /// whose cause is opaque to the host, may answer that way. Every other kind
+    /// must name a move.
+    ///
+    /// If this fails after adding a kind, give it a real hint in
+    /// `for_failure_kind` rather than widening this list.
+    #[test]
+    fn only_genuinely_unclassifiable_failures_may_decline_to_name_an_action() {
+        // Opaque by nature: the extension broke, the operation genuinely
+        // failed, or the run was stopped. No specific action follows.
+        let may_defer = [
+            FailureKind::OperationFailed,
+            FailureKind::Guest,
+            FailureKind::ExitFailure,
+            FailureKind::Memory,
+            FailureKind::Client,
+            FailureKind::Executor,
+            FailureKind::Cancelled,
+            FailureKind::Unclassified,
+        ];
+        for kind in FailureKind::ALL {
+            let hint = CapabilityRecoveryHint::for_failure_kind(*kind);
+            if may_defer.contains(kind) {
+                continue;
+            }
+            assert!(
+                hint.names_an_action(),
+                "{} reaches the model with no action to take; give it a hint in \
+                 for_failure_kind",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// Guard against the hint collapsing back into one answer. If every kind
+    /// maps to the same value again, the vocabulary is decorative.
+    #[test]
+    fn recovery_hints_stay_distinguishable_across_kinds() {
+        let distinct: std::collections::HashSet<CapabilityRecoveryHint> = FailureKind::ALL
+            .iter()
+            .map(|kind| CapabilityRecoveryHint::for_failure_kind(*kind))
+            .collect();
+        assert!(
+            distinct.len() >= 6,
+            "recovery hints collapsed to {} distinct values; the model cannot \
+             tell an auth prompt from a setup step from a permanent refusal",
+            distinct.len()
+        );
+    }
+
+    /// The delay payload is additive: observations persisted before
+    /// `retry_after_ms` existed must still load. (LLM data is never deleted —
+    /// stored observations outlive the schema that wrote them.)
+    #[test]
+    fn recovery_observation_without_a_delay_still_loads() {
+        let legacy = serde_json::json!({
+            "same_call_retry": "allowed_after_delay",
+            "recovery_hint": "respect_failure_constraint"
+        });
+        let observation: ToolRecoveryObservation =
+            serde_json::from_value(legacy).expect("pre-retry_after_ms observation deserializes");
+        assert_eq!(observation.retry_after_ms, None);
+        assert_eq!(
+            observation.same_call_retry,
+            SameCallRetryConstraint::AllowedAfterDelay
+        );
+
+        // And the constraint itself still serializes as a bare string, so a
+        // new writer stays readable by an old reader.
+        assert_eq!(
+            serde_json::to_value(SameCallRetryConstraint::AllowedAfterDelay).expect("serialize"),
+            serde_json::json!("allowed_after_delay")
+        );
+    }
+
+    /// A provider-supplied wait survives the round trip.
+    #[test]
+    fn recovery_observation_carries_the_providers_requested_wait() {
+        let observation = ToolRecoveryObservation::new(
+            SameCallRetryConstraint::AllowedAfterDelay,
+            CapabilityRecoveryHint::WaitThenRetry,
+        )
+        .with_retry_after(Some(30_000));
+        let value = serde_json::to_value(&observation).expect("serialize");
+        assert_eq!(value["retry_after_ms"], serde_json::json!(30_000));
+        let back: ToolRecoveryObservation = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, observation);
     }
 }
