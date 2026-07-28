@@ -3,7 +3,10 @@ mod fd_resolve;
 use std::{
     ffi::{OsStr, OsString},
     os::unix::ffi::OsStrExt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -34,7 +37,46 @@ pub struct DiskFilesystem {
     mounts: std::sync::RwLock<Vec<LocalMount>>,
 }
 
-#[derive(Debug, Clone)]
+/// Upper bound on how many *dynamically*-registered scoped mounts (see
+/// [`DiskFilesystem::ensure_scoped_mount`]) this backend keeps open directory
+/// fds for at once. Boot-time static mounts ([`DiskFilesystem::mount_local`]/
+/// [`mount_local_per_leaf`](DiskFilesystem::mount_local_per_leaf)) are never
+/// counted against this bound or evicted — there are only a handful of them,
+/// fixed at process startup, and every future virtual path under one
+/// resolves through it, so evicting one would break resolution for its whole
+/// subtree with no way to recreate it from a later request.
+///
+/// Once `ensure_scoped_mount` is reachable from the production request path
+/// (the fix this constant ships alongside), one dynamic mount is registered
+/// per distinct `MountGrant::target` a caller resolves through — in
+/// practice, one per active (tenant, user) scope touching a
+/// wide-mount-backed grant like `/skills`. Left unbounded, that is one open
+/// directory fd per distinct scope for the process's entire lifetime: a
+/// slow leak against `RLIMIT_NOFILE` on a long-lived, multi-tenant host.
+///
+/// 512 is chosen against a default Linux soft `RLIMIT_NOFILE` of 1024:
+/// even if every slot is a live fd, this cache alone cannot claim more than
+/// half of a stock default limit, leaving headroom for sockets, log files,
+/// the boot-time static mounts, and every other fd the process needs.
+/// Exceeding the bound evicts the least-recently-touched dynamic entry
+/// rather than failing the request — see [`DiskFilesystem::ensure_scoped_mount`].
+const MAX_DYNAMIC_MOUNTS: usize = 512;
+
+/// Process-wide logical clock for dynamic-mount LRU recency. A simple
+/// monotonically increasing counter (not wall-clock time) is enough: only
+/// the *relative order* of touches across entries in one `DiskFilesystem`'s
+/// mount list matters for picking an eviction victim, and a counter avoids
+/// any dependency on clock resolution or monotonicity guarantees. Shared
+/// across every `DiskFilesystem` instance in the process — harmless, since
+/// each instance only ever compares its own entries' values against each
+/// other, never against another instance's.
+static DYNAMIC_MOUNT_CLOCK: AtomicU64 = AtomicU64::new(0);
+
+fn next_touch() -> u64 {
+    DYNAMIC_MOUNT_CLOCK.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug)]
 struct LocalMount {
     virtual_root: VirtualPath,
     /// An open directory descriptor on the mount's canonical host root,
@@ -86,6 +128,23 @@ struct LocalMount {
     /// rather than resolving to the shared parent every caller's leaf lives
     /// under. See [`DiskFilesystem::resolve_mount_target`].
     leaf_scoped: bool,
+    /// `true` for a mount registered by [`DiskFilesystem::ensure_scoped_mount`]
+    /// (a caller-scoped anchor, e.g. one per (tenant, user) `/skills` grant);
+    /// `false` for a boot-time [`mount_local`](DiskFilesystem::mount_local)/
+    /// [`mount_local_per_leaf`](DiskFilesystem::mount_local_per_leaf) mount.
+    /// Only `dynamic` entries count against [`MAX_DYNAMIC_MOUNTS`] and are
+    /// eligible for LRU eviction — static entries are exempt (see
+    /// `MAX_DYNAMIC_MOUNTS`'s doc for why).
+    dynamic: bool,
+    /// Logical-clock recency stamp for LRU eviction among `dynamic` entries
+    /// only (see [`next_touch`]); meaningless and never read for a static
+    /// entry. An `AtomicU64` rather than a plain field so
+    /// [`DiskFilesystem::resolve_mount_target`] can update recency through a
+    /// shared `&self`/read-lock reference on every request that resolves
+    /// through this mount, without needing the write lock just to record
+    /// "this was used" — the field is interior-mutable, the `Vec` slot
+    /// itself is not relocated by a touch.
+    last_used: AtomicU64,
 }
 
 impl DiskFilesystem {
@@ -150,6 +209,8 @@ impl DiskFilesystem {
             virtual_root,
             root_fd: Arc::new(root_fd),
             leaf_scoped,
+            dynamic: false,
+            last_used: AtomicU64::new(0),
         });
         Ok(())
     }
@@ -180,6 +241,16 @@ impl DiskFilesystem {
             .filter(|mount| path_prefix_matches(mount.virtual_root.as_str(), path.as_str()))
             .max_by_key(|mount| mount.virtual_root.as_str().len())
             .ok_or_else(|| FilesystemError::MountNotFound { path: path.clone() })?;
+
+        // Recency touch for LRU eviction (see `MAX_DYNAMIC_MOUNTS`). Every
+        // real filesystem operation routes through here, so this is the true
+        // usage signal — a no-op for a static mount (its `last_used` is
+        // never read), and for a dynamic mount it keeps an actively-used
+        // scope's entry from looking idle just because no *new* registration
+        // happened recently.
+        if mount.dynamic {
+            mount.last_used.store(next_touch(), Ordering::Relaxed);
+        }
 
         let tail = path
             .as_str()
@@ -686,10 +757,44 @@ impl RootFilesystem for DiskFilesystem {
         {
             return Ok(());
         }
+
+        // Bound the dynamic-mount population (`MAX_DYNAMIC_MOUNTS`) before
+        // adding one more: evict the least-recently-touched dynamic entry if
+        // we are at capacity. Still under the same write-lock guard as the
+        // push below, so no other caller can register a mount, race this
+        // eviction, or observe a moment where capacity is exceeded.
+        //
+        // Safety of eviction: dropping a `LocalMount` here only drops the
+        // registry's own `Arc<OwnedFd>` reference. A request already
+        // in-flight against this mount captured its own clone of that `Arc`
+        // in a `MountTarget` (`resolve_mount_target` does `Arc::clone`, not a
+        // move) before this eviction could ever run — the write lock held
+        // here cannot be held concurrently with `resolve_mount_target`'s read
+        // lock, but the in-flight request's *clone* was already taken and
+        // handed off to the blocking closure by an earlier, already-released
+        // read-lock critical section. So eviction only ever drops the
+        // registry's reference; the underlying open file description stays
+        // open until every clone — including any in-flight one — is dropped,
+        // per ordinary `Arc` semantics. No in-use fd is ever closed by this.
+        let dynamic_count = mounts.iter().filter(|mount| mount.dynamic).count();
+        if dynamic_count >= MAX_DYNAMIC_MOUNTS {
+            let evict_index = mounts
+                .iter()
+                .enumerate()
+                .filter(|(_, mount)| mount.dynamic)
+                .min_by_key(|(_, mount)| mount.last_used.load(Ordering::Relaxed))
+                .map(|(index, _)| index);
+            if let Some(evict_index) = evict_index {
+                mounts.remove(evict_index);
+            }
+        }
+
         mounts.push(LocalMount {
             virtual_root,
             root_fd: Arc::new(anchor_fd),
             leaf_scoped: false,
+            dynamic: true,
+            last_used: AtomicU64::new(next_touch()),
         });
         Ok(())
     }
@@ -1096,5 +1201,106 @@ mod tests {
             "expected SymlinkEscape, got: {error:?}"
         );
         assert!(!leaf_b.join("planted.txt").exists());
+    }
+
+    fn dynamic_mount_count(root: &DiskFilesystem) -> usize {
+        root.mounts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|mount| mount.dynamic)
+            .count()
+    }
+
+    /// FIX 2 regression: registering more distinct scopes than
+    /// `MAX_DYNAMIC_MOUNTS` must evict rather than grow unbounded — proving
+    /// the fd-leak bound actually holds, not just that the constant exists.
+    /// Registers `MAX_DYNAMIC_MOUNTS + 5` distinct scoped mounts (each opens
+    /// its own directory fd) and asserts the live dynamic-mount population
+    /// never exceeds the cap.
+    #[tokio::test]
+    async fn ensure_scoped_mount_caps_dynamic_mount_population() {
+        let storage = tempdir().unwrap();
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        for i in 0..(MAX_DYNAMIC_MOUNTS + 5) {
+            let target = VirtualPath::new(format!("/projects/scope-{i}")).unwrap();
+            root.ensure_scoped_mount(&target)
+                .await
+                .unwrap_or_else(|error| panic!("ensure_scoped_mount({i}) failed: {error:?}"));
+            assert!(
+                dynamic_mount_count(&root) <= MAX_DYNAMIC_MOUNTS,
+                "dynamic mount population exceeded MAX_DYNAMIC_MOUNTS after registering scope {i}"
+            );
+        }
+
+        assert_eq!(dynamic_mount_count(&root), MAX_DYNAMIC_MOUNTS);
+    }
+
+    /// FIX 2 regression, second half: a scope evicted to make room for newer
+    /// ones must still resolve correctly once it is touched again — eviction
+    /// only drops the registry's own `Arc<OwnedFd>` clone (see
+    /// `ensure_scoped_mount`'s eviction comment), never an fd a concurrent or
+    /// later request is relying on, so re-registering the same virtual root
+    /// must transparently re-open it and behave exactly like the first time.
+    #[tokio::test]
+    async fn ensure_scoped_mount_evicted_scope_still_resolves_after_reregistration() {
+        let storage = tempdir().unwrap();
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let first_scope = VirtualPath::new("/projects/scope-0").unwrap();
+        root.ensure_scoped_mount(&first_scope)
+            .await
+            .expect("register scope-0 first");
+        root.write_file(
+            &VirtualPath::new("/projects/scope-0/marker.txt").unwrap(),
+            b"first-registration",
+        )
+        .await
+        .expect("write through scope-0 before eviction");
+
+        // Push scope-0 out: fill past the cap with fresh scopes, none of
+        // which ever touch scope-0 again, so it is the oldest-by-recency
+        // entry and the eviction victim.
+        for i in 1..=MAX_DYNAMIC_MOUNTS {
+            let target = VirtualPath::new(format!("/projects/scope-{i}")).unwrap();
+            root.ensure_scoped_mount(&target)
+                .await
+                .unwrap_or_else(|error| panic!("ensure_scoped_mount({i}) failed: {error:?}"));
+        }
+        assert_eq!(dynamic_mount_count(&root), MAX_DYNAMIC_MOUNTS);
+
+        // scope-0's file is still on disk (eviction only drops the fd
+        // *cache* entry, never the underlying host directory or its
+        // contents) — reading it forces `ensure_scoped_mount` to
+        // re-register the mount from scratch.
+        let bytes = root
+            .read_file(&VirtualPath::new("/projects/scope-0/marker.txt").unwrap())
+            .await
+            .expect("scope-0 must still resolve correctly after eviction and re-registration");
+        assert_eq!(bytes, b"first-registration");
+
+        root.write_file(
+            &VirtualPath::new("/projects/scope-0/marker.txt").unwrap(),
+            b"second-registration",
+        )
+        .await
+        .expect("write through re-registered scope-0");
+        let bytes = root
+            .read_file(&VirtualPath::new("/projects/scope-0/marker.txt").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"second-registration");
+        assert_eq!(dynamic_mount_count(&root), MAX_DYNAMIC_MOUNTS);
     }
 }
