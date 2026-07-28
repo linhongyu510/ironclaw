@@ -52,6 +52,17 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_reborn_composition/src/runtime.rs",
         count: 2,
     },
+    // `SandboxReaperRuntimeHandle::reaper` — test-only introspection handle
+    // (see the paired test-support entry below); the field is also
+    // `#[allow(dead_code)]` because the `--all-features` lib-only build
+    // (`test-support` without `cfg(test)`) never compiles this crate's own
+    // `#[cfg(test)] mod tests` that reads it.
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "field",
+        path: "crates/ironclaw_reborn_composition/src/sandbox_reaper_task.rs",
+        count: 1,
+    },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
@@ -73,20 +84,8 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
-        count: 3,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/reaper.rs",
-        count: 1,
+        count: 2,
     },
     // Unwired sandbox credential-firewall primitives (W5/W8). Retire these
     // entries when the egress proxy consumer (W6) lands on main and the
@@ -116,6 +115,22 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        count: 1,
+    },
+    // `attribution_for_test` — composition-tier introspection so
+    // `sandbox_attribution_reaches_both_production_consumers` can assert a
+    // PRODUCTION-constructed transport/reaper actually holds the shared
+    // `ConnectionAttributionResolver`, not just that a builder exists.
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/reaper.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -153,6 +168,14 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "field",
         path: "crates/ironclaw_reborn_composition/src/runtime.rs",
         count: 12,
+    },
+    // `SandboxReaperRuntimeHandle::reaper` — see the paired dead-code entry
+    // above.
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
+        path: "crates/ironclaw_reborn_composition/src/sandbox_reaper_task.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::UserId;
-use ironclaw_host_runtime::SandboxActivityRegistry;
+use ironclaw_host_runtime::{ConnectionAttributionResolver, SandboxActivityRegistry};
 use ironclaw_resources::ResourceGovernor;
 
 use crate::RebornBuildError;
@@ -94,6 +94,14 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     /// constructed registry, or its idle/activity reads would never match
     /// what the transport records.
     pub(crate) activity: Arc<SandboxActivityRegistry>,
+    /// The SAME attribution resolver `tenant_sandbox_process_binding`
+    /// already wired into the exec transport
+    /// (`TenantSandboxBinding::attribution`), so the reaper's teardown
+    /// paths invalidate the identical cache the transport reads from
+    /// instead of a second, disjoint one. `None` only for callers that
+    /// never went through `tenant_sandbox_process_binding` (e.g. a direct
+    /// test construction of `SandboxProfileBindingInputs`).
+    pub(crate) attribution: Option<Arc<ConnectionAttributionResolver>>,
     /// Task A6: the sandbox concurrency ceiling is scoped per-user (not
     /// per-tenant), so one user cannot starve every other user in the
     /// tenant.
@@ -157,8 +165,11 @@ impl SandboxRuntimeBindings {
         // silently to `None`. Shares `inputs.activity` with the exec
         // transport (Task A5) so both observe the same per-user
         // last-activity timestamps.
-        let reaper =
-            crate::sandbox_reaper_task::spawn_sandbox_reaper(Arc::clone(&inputs.activity)).await?;
+        let reaper = crate::sandbox_reaper_task::spawn_sandbox_reaper(
+            Arc::clone(&inputs.activity),
+            inputs.attribution.clone(),
+        )
+        .await?;
 
         // Phase C: an unbindable egress proxy means sandboxed shell egress
         // would have no enforcement, so spawn failure here also fails this
@@ -225,6 +236,7 @@ mod tests {
             local_runtime_identity: None,
             resource_governor: governor(),
             activity: Arc::new(SandboxActivityRegistry::new()),
+            attribution: None,
             owner_user_id: UserId::new("probe-user").unwrap(),
             egress_proxy: None,
         })
@@ -283,6 +295,7 @@ mod tests {
                 local_runtime_identity: None,
                 resource_governor: Arc::clone(&governor),
                 activity: Arc::new(SandboxActivityRegistry::new()),
+                attribution: None,
                 owner_user_id: owner_user_id.clone(),
                 egress_proxy: None,
             }))
@@ -340,6 +353,7 @@ mod tests {
                 local_runtime_identity: None,
                 resource_governor: governor(),
                 activity: Arc::new(SandboxActivityRegistry::new()),
+                attribution: None,
                 owner_user_id,
                 egress_proxy: None,
             }));
@@ -363,5 +377,87 @@ mod tests {
         let bindings = SandboxRuntimeBindings::none();
         assert!(bindings.reaper.is_none());
         assert!(bindings.egress_proxy.is_none());
+    }
+
+    /// The landing gate for W6 phase 2's connection-attribution wiring
+    /// (design doc, W17 note): `ConnectionAttributionResolver::for_sandbox_egress`,
+    /// `RebornScopedSandboxCommandTransport::with_attribution_resolver`, and
+    /// `SandboxReaper::with_attribution_resolver` all existed before this
+    /// test with zero production callers — `invalidate()`'s call sites in
+    /// `reaper.rs`/`exec_transport.rs` compiled clean and looked wired, but
+    /// fired never, because nothing ever populated the `Option<Arc<...>>`
+    /// they read. Verifying "call sites exist" is not the same as verifying
+    /// the control can fire; this test drives the actual PRODUCTION
+    /// constructors — `sandbox_boot::tenant_sandbox_process_binding` (the
+    /// exec-transport side) and `SandboxRuntimeBindings::build` /
+    /// `sandbox_reaper_task::spawn_sandbox_reaper` (the reaper side) — and
+    /// asserts the reaper ends up holding the SAME resolver instance the
+    /// transport was wired with, not a second independently constructed one
+    /// (which would defeat W17's whole point: invalidating on the transport
+    /// side would leave the reaper's copy of the cache stale).
+    ///
+    /// Docker-gated like `sandboxed_profile_applies_the_user_ceiling`
+    /// (`tenant_sandbox_process_binding` requires a reachable daemon).
+    #[tokio::test]
+    async fn sandbox_attribution_reaches_both_production_consumers() {
+        if !docker_available().await {
+            eprintln!(
+                "SKIP: no docker daemon reachable — sandbox_attribution_reaches_both_production_consumers requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        // Bound for the whole test (not a bare temporary) — the sandbox
+        // config keeps referencing this path after construction, so the
+        // directory must outlive the `tenant_sandbox_process_binding` call.
+        let workspace_dir = tempfile::tempdir().expect("tempdir creates");
+        let tenant_sandbox = crate::sandbox_boot::tenant_sandbox_process_binding(
+            workspace_dir.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect(
+            "tenant sandbox process binding builds against this machine's reachable Docker daemon",
+        );
+
+        let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
+            is_sandboxed_profile: true,
+            local_runtime_identity: None,
+            resource_governor: governor(),
+            activity: Arc::clone(&tenant_sandbox.activity),
+            // The SAME instance `tenant_sandbox_process_binding` already
+            // wired into the exec transport — exactly what
+            // `RebornHostBindings::with_sandbox_attribution_resolver` /
+            // `RebornProductionBuildContext::sandbox_attribution` thread
+            // through production's `factory.rs` in the real boot path.
+            attribution: Some(Arc::clone(&tenant_sandbox.attribution)),
+            owner_user_id: UserId::new("attribution-probe-user").unwrap(),
+            egress_proxy: tenant_sandbox.egress_proxy,
+        })
+        .await
+        .expect("sandboxed profile build succeeds against a reachable Docker daemon");
+
+        let reaper_handle = bindings
+            .reaper
+            .as_ref()
+            .expect("sandboxed profile always spawns a reaper");
+        let reaper_attribution = reaper_handle
+            .reaper
+            .as_ref()
+            .expect("spawn_sandbox_reaper always retains a test-support handle to the reaper")
+            .attribution_for_test();
+
+        assert!(
+            reaper_attribution.is_some(),
+            "REGRESSION: the reaper's attribution resolver is None after production \
+             construction — with_attribution_resolver has no effective production caller"
+        );
+        assert!(
+            Arc::ptr_eq(&tenant_sandbox.attribution, &reaper_attribution.unwrap()),
+            "the reaper must share the SAME resolver instance the exec transport was wired \
+             with, not a second, independently constructed one"
+        );
+
+        bindings.shutdown_all(Duration::from_secs(1)).await;
     }
 }

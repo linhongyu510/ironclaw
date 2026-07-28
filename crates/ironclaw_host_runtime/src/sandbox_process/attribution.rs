@@ -39,12 +39,15 @@
 //! credential to another user's request, which is the exact failure this
 //! design exists to prevent.
 //!
-//! **W6 is the consumer, not built yet.** [`ConnectionAttributionResolver`]
-//! is a standalone, independently testable unit; nothing in this crate
-//! constructs one in production today. The proxy's TCP-accept loop already
-//! discards the peer address it would need to pass in (see `egress_proxy`'s
-//! accept loop) — wiring that hand-off, plus TLS termination and credential
-//! injection, is W6's job.
+//! **W6 is the consumer.** [`ConnectionAttributionResolver`] is a
+//! standalone, independently testable unit; composition constructs the one
+//! production instance via [`ConnectionAttributionResolver::for_sandbox_egress`]
+//! and shares it (both the exec transport and the reaper hold the SAME
+//! `Arc`) so cache invalidation actually reaches both consumers — see
+//! `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`.
+//! The proxy's TCP-accept loop still discards the peer address it would need
+//! to pass in (see `egress_proxy`'s accept loop) — wiring that hand-off,
+//! plus TLS termination and credential injection, remains W6 phase 2's job.
 //!
 //! **W17: every container-teardown path invalidates ahead of W6.** A cache
 //! hit never re-verifies the container, so a torn-down container's IP that
@@ -100,7 +103,7 @@ pub(crate) enum ConnectionAttribution {
 /// branch of [`ConnectionAttributionResolver`] without a daemon. The
 /// production impl is `NetworkContainerLookup for Docker` below.
 #[async_trait]
-pub(crate) trait NetworkContainerLookup: Send + Sync {
+pub trait NetworkContainerLookup: Send + Sync {
     async fn containers_on_network(
         &self,
         network: &str,
@@ -163,7 +166,7 @@ struct CacheEntry {
 /// changed, rather than relying on TTL expiry alone. Until such a hook is
 /// wired, the TTL is the only bound — keep it short relative to how often
 /// containers are recycled if this is tightened further.
-pub(crate) struct ConnectionAttributionResolver<L: NetworkContainerLookup = Docker> {
+pub struct ConnectionAttributionResolver<L: NetworkContainerLookup = Docker> {
     lookup: L,
     network: String,
     label_prefix: String,
@@ -172,13 +175,34 @@ pub(crate) struct ConnectionAttributionResolver<L: NetworkContainerLookup = Dock
 }
 
 impl ConnectionAttributionResolver<Docker> {
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn new(
         docker: Docker,
         network: impl Into<String>,
         label_prefix: impl Into<String>,
     ) -> Self {
         Self::with_lookup(docker, network, label_prefix)
+    }
+
+    /// Production factory (W6/W17's one production constructor): resolves
+    /// against the sandbox egress network with this crate's canonical label
+    /// prefix — the same `broker::SANDBOX_EGRESS_NETWORK_NAME`/`LABEL_PREFIX`
+    /// vocabulary the container-creation path
+    /// (`registry::build_user_container_labels`) already writes with, so a
+    /// composition caller never has to duplicate either constant to build a
+    /// resolver that actually matches this crate's containers.
+    ///
+    /// Composition constructs exactly ONE of these per boot and shares the
+    /// `Arc` between `RebornScopedSandboxCommandTransport::
+    /// with_attribution_resolver` and `SandboxReaper::with_attribution_resolver`
+    /// — two independently constructed resolvers would maintain two
+    /// disjoint caches, defeating the whole point of W17's invalidation
+    /// wiring (see the module doc's "W17" section).
+    pub fn for_sandbox_egress(docker: Docker) -> Self {
+        Self::new(
+            docker,
+            super::broker::SANDBOX_EGRESS_NETWORK_NAME,
+            super::LABEL_PREFIX,
+        )
     }
 }
 

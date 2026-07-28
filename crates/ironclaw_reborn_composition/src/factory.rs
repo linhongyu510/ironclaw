@@ -3447,6 +3447,7 @@ async fn build_production_shaped(
         runtime_process_binding,
         sandbox_activity,
         sandbox_egress_proxy,
+        sandbox_attribution,
         sandbox_workspaces_root,
         product_auth_ports,
         native_extension_factories,
@@ -3543,6 +3544,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_attribution,
                 sandbox_workspaces_root: sandbox_workspaces_root.clone(),
                 product_auth_ports,
                 oauth_provider_configs,
@@ -3607,6 +3609,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_attribution,
                 sandbox_workspaces_root: sandbox_workspaces_root.clone(),
                 product_auth_ports,
                 oauth_provider_configs,
@@ -3682,6 +3685,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_attribution,
                 sandbox_workspaces_root: None,
                 product_auth_ports,
                 oauth_provider_configs,
@@ -3746,6 +3750,7 @@ async fn build_production_shaped(
                 local_process_port: None,
                 sandbox_activity,
                 sandbox_egress_proxy,
+                sandbox_attribution,
                 sandbox_workspaces_root: None,
                 product_auth_ports,
                 oauth_provider_configs,
@@ -4031,6 +4036,11 @@ struct RebornProductionBuildContext {
     /// spawned, carried so `shutdown_all` shuts down the SAME proxy the
     /// container was pointed at. `None` for every non-sandboxed profile.
     sandbox_egress_proxy: Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
+    /// The SAME attribution resolver `tenant_sandbox_process_binding` wired
+    /// into the exec transport, carried so `SandboxRuntimeBindings::build`
+    /// wires the reaper to the identical instance rather than a second,
+    /// disjoint one. `None` for every non-sandboxed profile.
+    sandbox_attribution: Option<Arc<ironclaw_host_runtime::ConnectionAttributionResolver>>,
     /// The host directory the `TenantSandbox` container bind is rooted at
     /// (see `RebornHostBindings::sandbox_workspaces_root`). Consulted by
     /// `build_local_storage_production_shaped`'s `is_sandboxed_profile`
@@ -4670,6 +4680,7 @@ async fn build_backend_production(
         local_process_port,
         sandbox_activity,
         sandbox_egress_proxy,
+        sandbox_attribution,
         // Already consumed above (`workspace_root_mode`'s `is_sandboxed_profile`
         // branch, computed before this context is passed in here) — not
         // needed again in this function.
@@ -5807,6 +5818,12 @@ async fn build_backend_production(
             activity: sandbox_activity
                 .clone()
                 .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
+            // The SAME attribution resolver `tenant_sandbox_process_binding`
+            // wired into the exec transport (threaded here via
+            // `RebornProductionBuildContext::sandbox_attribution`), so the
+            // reaper's teardown paths invalidate the identical cache the
+            // transport reads from. `None` for non-sandboxed profiles.
+            attribution: sandbox_attribution.clone(),
             owner_user_id: owner_user_id.clone(),
             // Phase C: the proxy `tenant_sandbox_process_binding` already
             // spawned (and pointed the sandbox container's default proxy

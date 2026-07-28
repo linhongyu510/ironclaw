@@ -41,6 +41,7 @@ mod user_key;
 use mounts::RebornSandboxMountSources;
 use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
+pub use attribution::ConnectionAttributionResolver;
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
@@ -276,15 +277,16 @@ pub struct RebornScopedSandboxCommandTransport {
     /// Wired so `exec_transport::ensure_container`'s posture-mismatch
     /// recycle collapses the egress-proxy attribution cache's staleness
     /// window to zero for the IP the recycled container releases (see
-    /// `attribution`'s module doc, "W17"). `None` by default: no resolver is
-    /// constructed in production yet (W6 is its consumer), so this is a
-    /// no-op until something wires one in via
-    /// [`Self::with_attribution_resolver`].
+    /// `attribution`'s module doc, "W17"). Production composition always
+    /// wires this via [`Self::with_attribution_resolver`]
+    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`);
+    /// `None` only for callers that construct a transport directly (tests,
+    /// or a future non-sandboxed caller that has no attribution cache to
+    /// invalidate).
     ///
     /// Concrete type, not `Arc<dyn AttributionInvalidator>`: that trait had
     /// exactly one impl and zero callers of the dyn-erased path, so it was
-    /// collapsed (see `attribution`'s module doc). Only the `Option` is
-    /// load-bearing today — nothing constructs a resolver yet.
+    /// collapsed (see `attribution`'s module doc).
     attribution: Option<Arc<attribution::ConnectionAttributionResolver>>,
 }
 
@@ -329,17 +331,32 @@ impl RebornScopedSandboxCommandTransport {
     }
 
     /// Wires a shared attribution-cache invalidator (see
-    /// [`Self::attribution`]'s doc). `pub(crate)`, not `pub`: the resolver
-    /// type is crate-private (nothing outside this crate constructs one
-    /// today — W6 is its consumer), so this stays internal until W6 gives it
-    /// a public constructor.
-    #[allow(dead_code)] // wired by tests today; a production caller lands with W6
-    pub(crate) fn with_attribution_resolver(
+    /// [`Self::attribution`]'s doc). Composition
+    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+    /// is the production caller: it builds one
+    /// [`attribution::ConnectionAttributionResolver::for_sandbox_egress`]
+    /// instance and wires the SAME `Arc` here and into
+    /// [`super::reaper::SandboxReaper::with_attribution_resolver`].
+    pub fn with_attribution_resolver(
         mut self,
         resolver: Arc<attribution::ConnectionAttributionResolver>,
     ) -> Self {
         self.attribution = Some(resolver);
         self
+    }
+
+    /// Test-only introspection: whether — and which — attribution resolver
+    /// this transport was wired with. Mirrors the production call site
+    /// `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`
+    /// (`with_attribution_resolver` above), so a composition-tier test can
+    /// assert against a PRODUCTION-constructed transport that this is
+    /// `Some`, and (via `Arc::ptr_eq` against
+    /// `SandboxReaper::attribution_for_test`) that the reaper was wired with
+    /// the SAME instance rather than a second, independently constructed
+    /// one. Ships zero bytes in production binaries.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attribution_for_test(&self) -> Option<Arc<attribution::ConnectionAttributionResolver>> {
+        self.attribution.clone()
     }
 
     pub fn into_process_port(self) -> TenantSandboxProcessPort {

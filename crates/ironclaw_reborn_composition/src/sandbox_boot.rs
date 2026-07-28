@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_host_runtime::{
-    RebornSandboxConfig, RebornScopedSandboxCommandTransport, SandboxActivityRegistry,
+    ConnectionAttributionResolver, RebornSandboxConfig, RebornScopedSandboxCommandTransport,
+    SandboxActivityRegistry,
 };
 
 use crate::RebornBuildError;
@@ -82,6 +83,26 @@ pub async fn tenant_sandbox_process_binding(
         default_broker_port,
     )?;
     let activity = Arc::new(SandboxActivityRegistry::new());
+    // W17/W6: one shared attribution resolver, wired into BOTH this
+    // transport and (via `TenantSandboxBinding::attribution`, threaded
+    // through `RebornHostBindings::with_sandbox_attribution_resolver` and
+    // `SandboxRuntimeBindings::build`) the reaper — see
+    // `ConnectionAttributionResolver::for_sandbox_egress`'s doc for why a
+    // second, independently constructed resolver would defeat W17's
+    // invalidation wiring. A second `Docker` connect (separate from the
+    // transport's own `connect`, which does not expose its handle) — the
+    // same "reconnect per component" shape `sandbox_reaper_task::
+    // spawn_sandbox_reaper` already uses for the reaper's own connect.
+    let attribution_docker = ironclaw_host_runtime::connect_docker_with_retry()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "tenant-sandbox attribution resolver requires a reachable Docker daemon: {error}"
+            ),
+        })?;
+    let attribution = Arc::new(ConnectionAttributionResolver::for_sandbox_egress(
+        attribution_docker,
+    ));
     let transport = RebornScopedSandboxCommandTransport::connect(config)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -89,11 +110,13 @@ pub async fn tenant_sandbox_process_binding(
                 "tenant-sandbox process backend requires a reachable Docker daemon: {error}"
             ),
         })?
-        .with_activity_registry(Arc::clone(&activity));
+        .with_activity_registry(Arc::clone(&activity))
+        .with_attribution_resolver(Arc::clone(&attribution));
     let process_port = Arc::new(transport.into_process_port());
     Ok(TenantSandboxBinding {
         binding: RebornRuntimeProcessBinding::tenant_sandbox(process_port),
         activity,
+        attribution,
         egress_proxy,
     })
 }
@@ -107,6 +130,13 @@ pub async fn tenant_sandbox_process_binding(
 pub struct TenantSandboxBinding {
     pub binding: RebornRuntimeProcessBinding,
     pub activity: Arc<SandboxActivityRegistry>,
+    /// The SAME attribution-cache resolver this call wired into the exec
+    /// transport (`with_attribution_resolver` above) — the caller threads
+    /// this onward (`RebornHostBindings::with_sandbox_attribution_resolver`)
+    /// so `SandboxRuntimeBindings::build` wires the reaper to the identical
+    /// instance rather than a second, independently constructed resolver
+    /// with a disjoint cache.
+    pub attribution: Arc<ConnectionAttributionResolver>,
     /// `Some` when this call spawned its own egress-allowlist proxy (the
     /// production case: no `default_broker_port` was supplied). The caller
     /// threads this onward (`RebornHostBindings::with_sandbox_egress_proxy_handle`)

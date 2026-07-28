@@ -312,14 +312,14 @@ pub struct SandboxReaper {
     /// Wired so idle-stop, aged-remove, and forced-recycle all collapse the
     /// egress-proxy attribution cache's staleness window to zero for the IP
     /// a torn-down container releases (see `attribution`'s module doc,
-    /// "W17"). `None` by default: no resolver is constructed in production
-    /// yet (W6 is its consumer), so this is a no-op until something wires
-    /// one in via [`Self::with_attribution_resolver`].
+    /// "W17"). Production composition always wires this via
+    /// [`Self::with_attribution_resolver`]
+    /// (`ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`);
+    /// `None` only for callers that construct a reaper directly (tests).
     ///
     /// Concrete type, not `Arc<dyn AttributionInvalidator>`: that trait had
     /// exactly one impl and zero callers of the dyn-erased path, so it was
-    /// collapsed (see `attribution`'s module doc). Only the `Option` is
-    /// load-bearing today — nothing constructs a resolver yet.
+    /// collapsed (see `attribution`'s module doc).
     attribution: Option<Arc<ConnectionAttributionResolver>>,
 }
 
@@ -339,17 +339,33 @@ impl SandboxReaper {
     }
 
     /// Wires a shared attribution-cache invalidator (see [`Self::attribution`]'s
-    /// doc). `pub(crate)`, not `pub`: the resolver type is crate-private
-    /// (nothing outside this crate constructs one today — W6 is its
-    /// consumer), so this stays internal until W6 gives it a public
-    /// constructor.
-    #[allow(dead_code)] // wired by tests today; a production caller lands with W6
-    pub(crate) fn with_attribution_resolver(
+    /// doc). Composition
+    /// (`ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`)
+    /// is the production caller: it wires the SAME `Arc` this crate's exec
+    /// transport received via
+    /// [`super::RebornScopedSandboxCommandTransport::with_attribution_resolver`],
+    /// built from
+    /// [`ConnectionAttributionResolver::for_sandbox_egress`].
+    pub fn with_attribution_resolver(
         mut self,
         resolver: Arc<ConnectionAttributionResolver>,
     ) -> Self {
         self.attribution = Some(resolver);
         self
+    }
+
+    /// Test-only introspection: whether — and which — attribution resolver
+    /// this reaper was wired with. Mirrors the production call site
+    /// `ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`
+    /// (`with_attribution_resolver` above), so a composition-tier test can
+    /// assert against a PRODUCTION-constructed reaper that this is `Some`,
+    /// and (via `Arc::ptr_eq` against
+    /// `RebornScopedSandboxCommandTransport::attribution_for_test`) that it
+    /// shares the SAME instance the exec transport was wired with. Ships
+    /// zero bytes in production binaries.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attribution_for_test(&self) -> Option<Arc<ConnectionAttributionResolver>> {
+        self.attribution.clone()
     }
 
     /// Runs the scan loop until `shutdown` reports `true`. Composition owns

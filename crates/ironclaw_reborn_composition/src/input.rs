@@ -12,7 +12,9 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
-use ironclaw_host_runtime::{SandboxActivityRegistry, TenantSandboxProcessPort};
+use ironclaw_host_runtime::{
+    ConnectionAttributionResolver, SandboxActivityRegistry, TenantSandboxProcessPort,
+};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
@@ -201,6 +203,15 @@ pub struct RebornHostBindings {
     /// independently spawned one. `None` for every non-sandboxed profile.
     pub(crate) sandbox_egress_proxy:
         Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
+    /// The SAME attribution resolver `tenant_sandbox_process_binding`
+    /// already wired into the exec transport
+    /// (`sandbox_boot::TenantSandboxBinding::attribution`), when
+    /// `runtime_process_binding` is a `TenantSandbox` binding. `factory.rs`
+    /// forwards this same instance into `SandboxRuntimeBindings::build` so
+    /// the reaper invalidates the exact cache the transport reads from,
+    /// rather than a second, independently constructed resolver. `None` for
+    /// every non-sandboxed profile.
+    pub(crate) sandbox_attribution: Option<Arc<ConnectionAttributionResolver>>,
     /// The host directory the `TenantSandbox` container bind mounts as its
     /// per-user workspace parent — the SAME value the assembling binary
     /// passed into `tenant_sandbox_process_binding` to build
@@ -844,6 +855,20 @@ impl RebornHostBindings {
         self
     }
 
+    /// Supply the attribution resolver a `tenant_sandbox_process_binding`
+    /// caller received alongside `TenantSandboxBinding.binding` (see
+    /// `sandbox_boot::TenantSandboxBinding::attribution`), so
+    /// `build_local_runtime` can forward the SAME instance into
+    /// `SandboxRuntimeBindings::build` rather than the reaper invalidating a
+    /// second, disjoint cache the transport never reads from.
+    pub fn with_sandbox_attribution_resolver(
+        mut self,
+        attribution: Arc<ConnectionAttributionResolver>,
+    ) -> Self {
+        self.sandbox_attribution = Some(attribution);
+        self
+    }
+
     /// Supply the sandbox workspaces root the assembling binary passed into
     /// `tenant_sandbox_process_binding` (the same value the `TenantSandbox`
     /// container bind is rooted at), so the abstract-FS `/workspace` mount
@@ -1014,6 +1039,7 @@ impl RebornHostBindings {
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
             sandbox_activity: None,
             sandbox_egress_proxy: None,
+            sandbox_attribution: None,
             sandbox_workspaces_root: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,

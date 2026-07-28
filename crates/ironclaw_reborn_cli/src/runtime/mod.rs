@@ -844,6 +844,7 @@ fn build_sandboxed_local_runtime_services_input(
     let services_input = services_input
         .with_runtime_process_binding(tenant_sandbox.binding)
         .with_sandbox_activity_registry(tenant_sandbox.activity)
+        .with_sandbox_attribution_resolver(tenant_sandbox.attribution)
         .with_sandbox_workspaces_root(sandbox_workspaces_root);
     let services_input = match tenant_sandbox.egress_proxy {
         Some(egress_proxy) => services_input.with_sandbox_egress_proxy_handle(egress_proxy),
