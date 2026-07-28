@@ -306,7 +306,9 @@ async fn timed_out_process_is_actually_killed_but_background_and_container_survi
         .await
         .expect("background launch succeeds");
     assert!(
-        background_launch.output.starts_with("Started in background: pid "),
+        background_launch
+            .output
+            .starts_with("Started in background: pid "),
         "expected the background-launch acknowledgement: {background_launch:?}"
     );
 
