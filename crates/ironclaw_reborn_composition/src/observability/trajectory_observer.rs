@@ -9,13 +9,13 @@
 //! [`RebornRuntimeInput::with_trajectory_observer`](crate::RebornRuntimeInput::with_trajectory_observer)
 //! to receive those events live.
 //!
-//! # Facade ownership
+//! # Service ownership
 //!
 //! [`RebornTrajectoryObserver`] is a composition-owned trait. The capability
 //! port that drives the input hook lives in `ironclaw_loop_host` and speaks
 //! its own [`ironclaw_loop_host::CapabilityTrajectoryObserver`]; rather than
-//! re-export that substrate trait (which would commit this facade to a
-//! loop-host contract — see `CLAUDE.md`: "expose facade-shaped handles only;
+//! re-export that substrate trait (which would commit this service to a
+//! loop-host contract — see `CLAUDE.md`: "expose service-shaped handles only;
 //! keep lower substrate handles private"), we define our own trait and adapt it
 //! to the substrate one in [`as_capability_observer`]. Loop-support contract
 //! changes therefore stay internal to the adapter instead of breaking the
@@ -38,7 +38,7 @@
 //! Callbacks fire inline on the per-capability hot path and are best-effort:
 //! implementations must never block and must not rely on being called (a
 //! panicking observer is caught and dropped at the call site — see
-//! `HostRuntimeLoopCapabilityPort` / `LocalDevCapabilityIo`). An observer that
+//! `HostRuntimeLoopCapabilityPort` / `StagedCapabilityIo`). An observer that
 //! needs to do I/O or contend on a lock must hand the event to its own
 //! non-blocking queue and return immediately.
 
@@ -202,9 +202,9 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 
 /// Adapts a composition-owned [`RebornTrajectoryObserver`] to the substrate
 /// [`CapabilityTrajectoryObserver`] the loop-host capability port consumes,
-/// so the facade trait never appears in this crate's loop-host boundary. The
+/// so the service trait never appears in this crate's loop-host boundary. The
 /// substrate trait is input-only; the composition observer's result half is
-/// driven separately by `LocalDevCapabilityIo`.
+/// driven separately by `StagedCapabilityIo`.
 #[derive(Debug)]
 struct CapabilityTrajectoryObserverAdapter {
     inner: Arc<dyn RebornTrajectoryObserver>,
@@ -224,7 +224,7 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
 
 /// Adapt a composition observer to the substrate observer the loop-host
 /// capability port (the input hook) drives. The result hook lives on
-/// `LocalDevCapabilityIo`, which calls the composition trait directly.
+/// `StagedCapabilityIo`, which calls the composition trait directly.
 pub(crate) fn as_capability_observer(
     observer: Arc<dyn RebornTrajectoryObserver>,
 ) -> Arc<dyn CapabilityTrajectoryObserver> {

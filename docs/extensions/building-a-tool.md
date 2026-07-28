@@ -74,7 +74,7 @@ Pick one lane first. Do not blend lanes to make a tool work.
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
 | WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/ironclaw_first_party_extensions/assets/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
-| HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Host-bundled HTTPS (Notion) or installed-local literal-IPv4-loopback HTTP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/extension_host/mcp.rs` only if changing the source-specific MCP policy shape |
+| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_extension_host/src/mcp.rs` only if adding a new generic MCP policy shape |
 | Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
 | Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_scripts` runtime path plus manifest runtime `script` |
 
@@ -92,7 +92,7 @@ Usually touch:
 - `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`
 - `crates/ironclaw_first_party_extensions/assets/<extension>/schemas/<extension>/*.json`
 - `crates/ironclaw_first_party_extensions/assets/<extension>/prompts/<extension>/*.md`
-- `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs` only when adding
+- `crates/ironclaw_extension_host/src/available_extensions.rs` only when adding
   a host-bundled available extension to the built-in install catalog.
 
 Do not touch for ordinary tools:
@@ -117,7 +117,7 @@ Usually touch:
 - `crates/ironclaw_first_party_extensions/assets/<extension>/wasm-src/`
 - `crates/ironclaw_first_party_extensions/assets/<extension>/wasm/<tool>.wasm`
 - the extension manifest, schemas, and prompts.
-- `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs` to package
+- `crates/ironclaw_extension_host/src/available_extensions.rs` to package
   the manifest, schemas, prompts, and WASM bytes if host-bundled.
 
 Use as references:
@@ -137,19 +137,23 @@ Usually touch:
 - `crates/ironclaw_first_party_extensions/assets/<provider>-mcp/manifest.toml`
 - `schemas/<provider>/...`
 - `prompts/<provider>/...`
-- `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs` if
+- `crates/ironclaw_extension_host/src/available_extensions.rs` if
   host-bundled.
 
 Use as references:
 
 - `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
-- `crates/ironclaw_reborn_composition/src/extension_host/mcp.rs`
-- `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`
+- `crates/ironclaw_extension_host/src/mcp.rs`
+- `crates/ironclaw_auth/src/engine/`
+- composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`
 
-Only touch `crates/ironclaw_reborn_composition/src/extension_host/mcp.rs` if the hosted MCP
-runtime policy needs a new generic rule. Notion already demonstrates the common
-shape: HTTPS-only endpoint, exact host/path match, no URL credentials, no query,
-no fragment, host-mediated egress, staged product-auth token.
+Only touch `crates/ironclaw_extension_host/src/mcp.rs` if the MCP runtime policy
+needs a new generic rule. Host-bundled packages remain HTTPS-only.
+Installed-local packages may use plaintext HTTP only at an exact literal IPv4
+loopback endpoint; `localhost`, IPv6, LAN/private non-loopback, remote
+plaintext, registry-installed, and stdio MCP endpoints remain denied. Notion
+demonstrates the hosted shape: exact endpoint match, no URL credentials, no
+query, no fragment, host-mediated egress, staged product-auth token.
 
 ### Auth/OAuth lane
 
@@ -157,12 +161,14 @@ Usually touch only when adding a new product-auth provider:
 
 - `crates/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
   must be shared and durable.
-- `crates/ironclaw_reborn_composition/src/product_auth/oauth/<provider>_oauth.rs`
-  for provider specs like Notion.
-- `crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs`
-  only if the provider needs a new generic exchange behavior.
-- `crates/ironclaw_reborn_composition/src/product_auth/serve/` only for product
-  auth HTTP setup/callback surfaces.
+- `crates/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
+  exchange behavior.
+- `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`
+  for bundled first-party provider recipe data.
+- `crates/ironclaw_reborn_composition/src/factory.rs` for composition-time
+  provider recipe wiring.
+- `crates/ironclaw_webui/src/product_auth/` only for product auth HTTP
+  setup/callback route surfaces.
 
 Do not create extension-local OAuth maps or store OAuth tokens in runtime code.
 Credential accounts and secrets belong to `ironclaw_auth` /
@@ -340,8 +346,8 @@ Network policy belongs in host/runtime planning:
 
 - WASM credential injection is derived from manifest descriptors in
   `crates/ironclaw_host_runtime/src/wasm_credentials.rs`.
-- Hosted MCP policy is planned in
-  `crates/ironclaw_reborn_composition/src/extension_host/mcp.rs`.
+- MCP policy is planned in
+  `crates/ironclaw_extension_host/src/mcp.rs`.
 - GSuite WASM tools should declare narrow credential audiences and use host
   HTTP egress for Google API hosts.
 - Shared HTTP enforcement and redaction live in
@@ -405,15 +411,17 @@ Use product-auth account sources for provider accounts. Current patterns:
   `api.github.com`.
 - GSuite uses provider `google`, OAuth scopes per capability, and host egress
   to Google API hosts.
-- Notion uses provider `notion`, DCR/OAuth provider spec in composition, and a
+- Notion uses provider `notion`, DCR/OAuth recipe data wired by composition, and a
   bearer token for `mcp.notion.com`.
 
 For a new OAuth provider:
 
 1. Add provider ID and shared scope vocabulary only if it must be shared across
    crates.
-2. Add a provider spec in Reborn composition, like
-   `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`.
+2. Add bundled first-party provider recipe data in
+   `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`,
+   keep `ironclaw_auth/src/engine/` generic, and wire the recipe resolver through
+   composition provider wiring.
 3. Wire OAuth start/callback through product-auth services, not an
    extension-local map.
 4. Store access/refresh material as credential-account secret handles.
@@ -483,7 +491,7 @@ GitHub is the strongest current reference for this lane:
 - `sanitizes_host_egress_errors_without_leaking_details`
 - path/ref validation tests
 
-## HTTP MCP implementation pattern
+## Hosted MCP implementation pattern
 
 Hosted MCP packages declare runtime:
 
@@ -494,26 +502,15 @@ transport = "http"
 url = "https://mcp.notion.com/mcp"
 ```
 
-For HTTP MCP, Reborn composition:
+For host-bundled hosted HTTP MCP, Reborn composition:
 
-- accepts HTTPS for host-bundled remote providers;
-- accepts plaintext HTTP only for installed-local MCP packages at a literal
-  IPv4 loopback address, without making host-bundled providers, `localhost`
-  (DNS-rebindable), IPv6 loopback, private LAN addresses, remote HTTP, or
-  registry-installed packages valid;
+- accepts only HTTPS endpoint URLs;
 - rejects userinfo, query strings, fragments, wrong scheme, wrong host, and
   wrong path;
-- derives a locked network policy from the manifest endpoint. For an
-  installed-local loopback MCP package, that exact scheme, IP, and port replace
-  any broader manifest targets and are the only private-range exception. An
-  omitted HTTP port is pinned to port 80 rather than treated as any port;
+- derives a locked network policy from the manifest endpoint;
 - projects `runtime_credentials` to staged credential injections when the
   capability and endpoint audience match;
 - uses `RuntimeHttpEgress` instead of ambient MCP HTTP clients.
-
-Reborn still rejects stdio MCP dispatch. An installed-local HTTP MCP manifest
-must declare its capability schemas statically; live `tools/list` schema
-discovery remains the host-bundled provider path.
 
 Notion is the reference. Its manifest declares each MCP tool as a capability,
 with per-tool schemas and prompts, and a product-auth `notion` credential for
@@ -526,7 +523,7 @@ agent-loop path. Let the MCP runtime and host egress planner own it.
 
 Host-bundled extension packages are included in:
 
-- `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
+- `crates/ironclaw_extension_host/src/available_extensions.rs`
 
 That file:
 
@@ -621,7 +618,7 @@ Minimum tests for a Reborn tool:
 Useful existing test areas:
 
 - `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
-- `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs` tests
+- `crates/ironclaw_extension_host/src/available_extensions.rs` tests
 - `crates/ironclaw_host_runtime/src/capability_catalog.rs` tests
 
 ### Runtime behavior
@@ -638,7 +635,7 @@ For WASM:
 For hosted MCP:
 
 - planner denies wrong provider, wrong host, HTTP scheme, wrong path, query,
-  fragment, and URL userinfo for host-bundled providers;
+  fragment, and URL userinfo;
 - planner emits locked network policy for the canonical endpoint;
 - manifest runtime credentials project to staged injections.
 
@@ -647,11 +644,11 @@ For hosted MCP:
 Add a test through the actual call site that gates side effects:
 
 - `CapabilityHost` or runtime adapter dispatch for capability invocation.
-- Extension lifecycle install/activate path for package publication.
+- Extension lifecycle install/readiness path for package publication.
 - Product-auth setup/callback path for OAuth-backed credentials.
 
 A helper-only test is not enough when a helper gates HTTP, DB writes, OAuth,
-tool execution, or lifecycle activation.
+tool execution, or lifecycle readiness.
 
 ## Review checklist
 
@@ -688,9 +685,9 @@ shape before extending it.
 - Notion hosted MCP credential/effect semantics:
   `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
-  `crates/ironclaw_reborn_composition/src/extension_host/mcp.rs`
-- Notion OAuth provider spec:
-  `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`
+  `crates/ironclaw_extension_host/src/mcp.rs`
+- Notion OAuth provider wiring:
+  `crates/ironclaw_reborn_composition/src/factory.rs`
 - Hot capability catalog:
   `crates/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:

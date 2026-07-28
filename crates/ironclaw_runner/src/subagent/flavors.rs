@@ -422,17 +422,16 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, RuntimeKind};
+        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
         use ironclaw_loop_host::{
             CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::run_profile::{
-            AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
+            LoopRequest, LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
+            VisibleCapabilitySurface, resolution,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
@@ -442,7 +441,7 @@ mod tests {
         use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
         use crate::subagent::goal_store::{
-            InMemoryBoundedSubagentGoalStore, SubagentGoal, SubagentGoalStore,
+            SubagentGoal, SubagentGoalStorePort, in_memory_backed_subagent_goal_store,
         };
         use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
 
@@ -525,29 +524,29 @@ mod tests {
 
             async fn invoke_capability(
                 &self,
-                request: CapabilityInvocation,
-            ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+                request: LoopRequest,
+            ) -> Result<Resolution, AgentLoopHostError> {
                 self.invoked
                     .lock()
                     .expect("invoked lock")
                     .push(request.capability_id.as_str().to_string());
-                Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
-                    safe_summary: "ok".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                }))
+                Ok(resolution::completed(
+                    LoopResultRef::new("result:ok").expect("valid result ref"),
+                    "ok".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ))
             }
 
             async fn invoke_capability_batch(
                 &self,
-                _request: CapabilityBatchInvocation,
-            ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-                Ok(CapabilityBatchOutcome {
-                    outcomes: Vec::new(),
+                _request: LoopRequestBatch,
+            ) -> Result<ResolutionBatch, AgentLoopHostError> {
+                Ok(ResolutionBatch {
+                    resolutions: Vec::new(),
                     stopped_on_suspension: false,
                 })
             }
@@ -573,7 +572,7 @@ mod tests {
             ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
-            let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let mut context = test_run_context("caller-level-attenuation");
             context.resolved_run_profile.profile_id =
                 RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent profile id");
@@ -607,8 +606,8 @@ mod tests {
             (filter, spy)
         }
 
-        fn invocation(capability: &str) -> CapabilityInvocation {
-            CapabilityInvocation {
+        fn invocation(capability: &str) -> LoopRequest {
+            LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface-v1")
                     .expect("valid surface version"),
@@ -619,8 +618,8 @@ mod tests {
             }
         }
 
-        fn is_denied(outcome: &CapabilityOutcome) -> bool {
-            matches!(outcome, CapabilityOutcome::Denied(_))
+        fn is_denied(resolution: &Resolution) -> bool {
+            matches!(resolution, Resolution::Denied(_))
         }
 
         async fn visible_ids(
@@ -791,7 +790,7 @@ mod tests {
 
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
-            let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let context = test_run_context("caller-level-non-subagent");
             let base_allow_set =
                 CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);

@@ -6,8 +6,7 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use ironclaw_secrets::{
-    FilesystemSecretStore, SecretError, SecretMaterial, SecretStore, SecretStoreError,
-    SecretsCrypto,
+    SecretError, SecretMaterial, SecretStore, SecretStoreError, SecretStorePort, SecretsCrypto,
 };
 
 use crate::{
@@ -22,7 +21,7 @@ const STRESS_SECRET_HANDLE: &str = "ironclaw_stress_secret";
 const STRESS_SECRET_MASTER_KEY: &str = "0123456789abcdef0123456789abcdef";
 
 pub(crate) struct SecretConsumeWorkload {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
     target: String,
 }
 
@@ -42,7 +41,6 @@ pub(crate) async fn build_secret_consume_workload(
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_secret_consume_workload(
     args: &Args,
     run_id: &str,
@@ -51,29 +49,12 @@ async fn build_libsql_secret_consume_workload(
     secret_consume_workload_from_root(filesystem, run_id, target)
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_secret_consume_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<SecretConsumeWorkload, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_secret_consume_workload(
     args: &Args,
     run_id: &str,
 ) -> Result<SecretConsumeWorkload, String> {
     let (filesystem, _pool, target) = crate::build_postgres_root_and_pool(args).await?;
     secret_consume_workload_from_root(filesystem, run_id, target)
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_secret_consume_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<SecretConsumeWorkload, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 fn secret_consume_workload_from_root<F>(
@@ -93,7 +74,7 @@ where
         SecretsCrypto::new(SecretMaterial::from(STRESS_SECRET_MASTER_KEY.to_string()))
             .map_err(secret_crypto_error)?,
     );
-    let store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::new(scoped, crypto));
+    let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::new(scoped, crypto));
     Ok(SecretConsumeWorkload { store, target })
 }
 

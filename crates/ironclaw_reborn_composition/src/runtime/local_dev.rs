@@ -1,18 +1,17 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
 use chrono::Utc;
 use uuid::Uuid;
 
-use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExecutionContext, ExtensionId, InvocationId, MountView,
     ResourceScope, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
+    CapabilitySurfacePolicy, HostRuntime, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
@@ -20,10 +19,9 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
-use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
-use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -40,19 +38,17 @@ use ironclaw_turns::{
     },
 };
 
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
+use crate::factory::RebornRuntimeStores;
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
-use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
-use crate::{
-    RebornServices,
-    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
-    runtime::LocalDevSelectableSkillContextSource,
-};
+use crate::runtime::ComposedSelectableSkillContextSource;
+use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
-pub(super) mod extension_surface;
+pub(crate) mod extension_surface;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
@@ -68,31 +64,25 @@ mod synthetic_capability;
 pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
-use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use extension_surface::{ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
-    RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
+    RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };
 #[cfg(feature = "test-support")]
 pub(crate) use result_read::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridges (E-PROJ / E-SKILL / result_read seams), co-located with
-/// the capability each wraps and re-exported here for the `runtime` caller.
+/// Test-only bridge (result_read seam, issue #5838), co-located with the
+/// capability it wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
-pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use project_create::wrap_project_create_capability_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
+pub(super) use refreshing_capability_port::create_refreshing_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use result_read::wrap_result_read_capability_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
-pub(super) struct LocalDevCapabilityWiring {
+pub(super) struct CapabilityPortWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub(super) capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     pub(super) capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -102,49 +92,49 @@ pub(super) struct LocalDevCapabilityWiring {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
-    services: &RebornServices,
+    services: &RebornRuntimeStores,
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
-    policy: Arc<LocalDevCapabilityPolicy>,
+    policy: Arc<BuiltinCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-) -> Option<LocalDevCapabilityWiring> {
-    let runtime = services.host_runtime.clone()?;
-    let local_runtime = services.local_runtime.as_ref()?;
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let system_extensions_lifecycle_mounts =
-        local_runtime.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
-    let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-        local_runtime.tool_permission_overrides.clone();
-    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        local_runtime.auto_approve_settings.clone();
+) -> Option<CapabilityPortWiring> {
+    let runtime = services.host_runtime.clone();
+    let workspace_mounts = services.workspace_mounts.clone();
+    let memory_mounts = services.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
+    let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+        services.approval_requests.clone();
+    let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
+        services.capability_leases.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+        services.tool_permission_overrides.clone();
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
+        services.auto_approve_settings.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =
         Arc::new(StoreApprovalSettingsProvider::new(
             tool_permission_overrides,
             auto_approve_settings,
-            local_runtime.persistent_approval_policies.clone(),
+            services.persistent_approval_policies.clone(),
         ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
-        local_runtime.runtime_policy.as_ref(),
+        services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
     let extension_surface_source =
-        LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
+        ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
     // First-class project creation reuses the same access-controlled
-    // `ProjectService` facade the WebUI v2 surface wires (composition owns the
+    // `ProjectService` service the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
     // entity that appears in the Projects list.
-    let project_service: Arc<dyn ProjectService> = Arc::clone(&local_runtime.project_service);
+    let project_service: Arc<dyn ProjectService> = Arc::clone(&services.project_service);
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(
-        LocalDevCapabilityIo::new_with_durable_previews(
+        StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             Arc::clone(&thread_service),
             fallback_user_id.clone(),
@@ -153,13 +143,28 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    // Shared per-runtime catalog (owned by local_runtime services) so the
+    // Shared per-runtime catalog (owned by the composed runtime) so the
     // OpenAI-compatible Responses surface and this loop host see the same
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
-        Arc::clone(&local_runtime.external_tool_catalog);
+        services.external_tool_catalog.clone();
+    // Wire the durable gate-record and host-private replay-payload stores over
+    // the composition-owned scoped filesystem (same backend + per-user mount view
+    // as every other durable store; `extension_filesystem` is the shared composite
+    // root). Before this, the loop-host capability port defaulted both to
+    // no-op/fail-closed, so production gate records never persisted (the #6245 gap)
+    // and a gate/auth resume had no host-side replay payload to reconstitute
+    // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
+    let capability_store_filesystem =
+        crate::wrap_scoped(Arc::clone(&services.extension_filesystem));
+    let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
+        ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+    );
+    let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
+        ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
+    );
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(LocalDevLoopCapabilityPortFactory {
+        Arc::new(RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy,
@@ -174,14 +179,16 @@ pub(super) fn capability_wiring(
             project_service,
             thread_service,
             trajectory_observer,
-            outbound_preferences_facade,
+            outbound_preferences_service,
             outbound_delivery_target_set_requires_approval,
             approval_settings,
             approval_requests,
             capability_leases,
+            gate_record_store,
+            replay_payload_store,
             external_tool_catalog,
         });
-    Some(LocalDevCapabilityWiring {
+    Some(CapabilityPortWiring {
         capability_factory,
         capability_input_resolver,
         capability_result_writer,
@@ -191,26 +198,32 @@ pub(super) fn capability_wiring(
 }
 
 #[derive(Clone)]
-struct LocalDevLoopCapabilityPortFactory {
+struct RefreshingLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     fallback_user_id: UserId,
-    policy: Arc<LocalDevCapabilityPolicy>,
+    policy: Arc<BuiltinCapabilityPolicy>,
     workspace_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
-    extension_surface_source: LocalDevExtensionSurfaceSource,
+    extension_surface_source: ExtensionCapabilitySurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
+    /// Durable model-visible gate-record store; one instance per runtime, shared
+    /// by reference into every port this factory builds.
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    /// Durable host-private replay-payload store (§5.3 Stage 2a-i); one instance
+    /// per runtime, shared by reference into every port this factory builds.
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Per-runtime catalog of client-supplied ("external") tools. Shared across
     /// all runs in this runtime so a parked external-tool call and its later
     /// client-submitted output (across a pause/resume) hit the same store.
@@ -218,7 +231,7 @@ struct LocalDevLoopCapabilityPortFactory {
 }
 
 #[async_trait::async_trait]
-impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
+impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
     async fn create_capability_port(
         &self,
         run_context: &LoopRunContext,
@@ -228,7 +241,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             &self.fallback_user_id,
         ))
         .map_err(host_api_agent_loop_error)?;
-        create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
+        create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
             fallback_user_id: self.fallback_user_id.clone(),
@@ -245,21 +258,24 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             project_service: Arc::clone(&self.project_service),
             thread_service: Arc::clone(&self.thread_service),
             // Same observer drives both the input hook (on the capability port the
-            // refreshing helper builds) and the result hook (on `LocalDevCapabilityIo`),
+            // refreshing helper builds) and the result hook (on `StagedCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
-            outbound_preferences_facade: self.outbound_preferences_facade.clone(),
+            outbound_preferences_service: self.outbound_preferences_service.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            gate_record_store: Arc::clone(&self.gate_record_store),
+            replay_payload_store: Arc::clone(&self.replay_payload_store),
             external_tool_catalog: Arc::clone(&self.external_tool_catalog),
             // Test-support-only knobs (see each field's doc-comment on
-            // `RefreshingLocalDevCapabilityPortConfig`): always empty here.
+            // `RefreshingCapabilityPortConfig`): always empty here.
             capability_execution_mount_overrides: HashMap::new(),
             additional_provider_trust: BTreeMap::new(),
-            capability_id_filter: HashSet::new(),
+            capability_id_filter: None,
+            additional_capability_grants: Vec::new(),
         })
         .await
     }
@@ -274,7 +290,7 @@ const LOCAL_DEV_DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// that pages past `next_offset` sees no gap or overlap.
 const LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES: usize = TOOL_RESULT_RECORD_READ_MAX_BYTES;
 
-struct LocalDevCapabilityIo {
+struct StagedCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
@@ -296,13 +312,13 @@ struct DurableCapabilityDisplayPreviewSink {
     fallback_user_id: UserId,
 }
 
-impl Default for LocalDevCapabilityIo {
+impl Default for StagedCapabilityIo {
     fn default() -> Self {
         Self::new(Arc::new(CapabilityDisplayPreviewStore::default()))
     }
 }
 
-impl LocalDevCapabilityIo {
+impl StagedCapabilityIo {
     fn new(display_previews: Arc<CapabilityDisplayPreviewStore>) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -538,18 +554,40 @@ impl LocalDevCapabilityIo {
 /// never persists a durable record. For tests only -- gated behind
 /// `test-support`, ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
-pub(super) fn local_dev_capability_io_for_test(
+pub(super) fn staged_capability_io_for_test(
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
 ) -> (
     Arc<dyn LoopCapabilityInputResolver>,
     Arc<dyn LoopCapabilityResultWriter>,
 ) {
-    let io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+    let io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service,
         fallback_user_id,
     ));
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
+    (input_resolver, result_writer)
+}
+
+#[cfg(feature = "test-support")]
+pub(super) fn staged_capability_io_with_observer_for_test(
+    thread_service: Arc<dyn SessionThreadService>,
+    fallback_user_id: UserId,
+    observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+) -> (
+    Arc<dyn LoopCapabilityInputResolver>,
+    Arc<dyn LoopCapabilityResultWriter>,
+) {
+    let io = Arc::new(
+        StagedCapabilityIo::new_with_durable_previews(
+            Arc::new(CapabilityDisplayPreviewStore::default()),
+            thread_service,
+            fallback_user_id,
+        )
+        .with_observer(observer),
+    );
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
     (input_resolver, result_writer)
@@ -655,7 +693,7 @@ fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostE
 }
 
 #[async_trait::async_trait]
-impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
+impl LoopCapabilityInputResolver for StagedCapabilityIo {
     async fn resolve_capability_input(
         &self,
         run_context: &LoopRunContext,
@@ -727,7 +765,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
 }
 
 #[async_trait::async_trait]
-impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
+impl LoopCapabilityResultWriter for StagedCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
@@ -750,6 +788,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_content = serialized_result_output(&output)?;
+        let item_count = output.as_array().map(|items| items.len() as u64);
         let serialized_bytes = output_content.len();
         let output_bytes = serialized_bytes.try_into().unwrap_or(u64::MAX);
         // Snapshot the first-look preview from the same bytes the durable
@@ -806,6 +845,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             &write_result.result_ref,
             write_result.byte_len,
             preview,
+            item_count,
         ));
         Ok(write_result)
     }
@@ -937,23 +977,36 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
     index
 }
 
+/// Truncated-preview summary text; names the full array's element count when
+/// known so the model doesn't misread a truncated array preview as the whole
+/// result (issue: byte-slice lands mid-JSON-array).
+fn truncated_preview_summary(next_offset: u64, item_count: Option<u64>) -> String {
+    let base = format!(
+        "Tool completed; preview truncated, use result_read with the result \
+         reference and offset {next_offset} for more output."
+    );
+    match item_count {
+        Some(count) => format!("{base} Full result is a JSON array of {count} items."),
+        None => base,
+    }
+}
+
 fn local_dev_result_reference_observation(
     result_ref: &LoopResultRef,
     byte_len: u64,
     preview: Option<FirstLookResultPreview>,
+    item_count: Option<u64>,
 ) -> ModelVisibleToolObservation {
-    let (summary, preview_text, total_bytes, next_offset) = match preview {
+    let (summary, preview_text, total_bytes, next_offset, item_count) = match preview {
         Some(FirstLookResultPreview {
             text,
             next_offset: Some(next_offset),
         }) => (
-            format!(
-                "Tool completed; preview truncated, use result_read with the result reference \
-                 and offset {next_offset} for more output."
-            ),
+            truncated_preview_summary(next_offset, item_count),
             Some(text),
             Some(byte_len),
             Some(next_offset),
+            item_count,
         ),
         Some(FirstLookResultPreview {
             text,
@@ -963,10 +1016,12 @@ fn local_dev_result_reference_observation(
             Some(text),
             Some(byte_len),
             None,
+            None,
         ),
         None => (
             "Tool completed; use result_read with the result reference for more output."
                 .to_string(),
+            None,
             None,
             None,
             None,
@@ -982,6 +1037,7 @@ fn local_dev_result_reference_observation(
             preview: preview_text,
             total_bytes,
             next_offset,
+            item_count,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.as_str().to_string(),
@@ -1007,7 +1063,7 @@ fn durable_result_scope_error() -> AgentLoopHostError {
     )
 }
 
-fn local_dev_resource_scope_for_run(
+pub(super) fn local_dev_resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> ResourceScope {
@@ -1047,19 +1103,19 @@ fn local_dev_thread_scope_for_run(
     ))
 }
 
-struct LocalDevVisibleCapabilityInputs<'a> {
+struct VisibleCapabilityInputs<'a> {
     workspace_mounts: &'a MountView,
     skill_mounts: &'a MountView,
     memory_mounts: &'a MountView,
     system_extensions_lifecycle_mounts: &'a MountView,
-    policy: &'a LocalDevCapabilityPolicy,
-    extension_surface: &'a LocalDevExtensionSurface,
+    policy: &'a BuiltinCapabilityPolicy,
+    extension_surface: &'a ExtensionCapabilitySurface,
 }
 
-fn local_dev_visible_capability_request(
+fn visible_capability_request(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
-    inputs: LocalDevVisibleCapabilityInputs<'_>,
+    inputs: VisibleCapabilityInputs<'_>,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
     // Resolved BEFORE grant minting: extension grants are filtered per caller
@@ -1108,6 +1164,26 @@ fn local_dev_visible_capability_request(
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
                 allowed_effects: inputs.policy.provider.authority_effects.clone(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: Utc::now(),
+        },
+    );
+    // Native memory rides the same always-on first-party lane as builtin (not the
+    // catalog extension surface), so it is trusted here directly. Its authority
+    // ceiling is the document-store provider's needs only: dispatch + read/write
+    // filesystem (matching the builtin provider's first-party effects).
+    provider_trust.insert(
+        ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).map_err(host_api_agent_loop_error)?,
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
@@ -1164,6 +1240,26 @@ fn host_api_agent_loop_error(
         safe_summary,
         format!("{error:?}"),
     )
+}
+
+/// Shared test assertion for the `local_dev` per-capability submodules: the
+/// §5.3 collapse maps a recoverable service failure onto `Resolution::Done`
+/// carrying a `RecoverableFailure` verdict (the collapse of the old
+/// `CapabilityOutcome::Failed`). Consumed by `outbound_delivery`,
+/// `project_create`, and further submodules as they migrate to the `Resolution`
+/// shape — replacing the byte-identical per-file copies (CodeRabbit #6299).
+#[cfg(test)]
+pub(crate) fn assert_recoverable_failure(
+    resolution: &ironclaw_host_api::Resolution,
+    expected: ironclaw_host_api::FailureKind,
+) {
+    match resolution {
+        ironclaw_host_api::Resolution::Done(outcome) => {
+            let expected_verdict = ironclaw_host_api::ToolVerdict::recoverable_failure(expected);
+            assert_eq!(outcome.verdict, expected_verdict); // safety: test-only assertion helper
+        }
+        other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
+    }
 }
 
 #[cfg(test)]

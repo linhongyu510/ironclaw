@@ -5,13 +5,18 @@ use std::sync::{
 
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, CapabilityPermissionOverrideInput, CapabilityPermissionOverrideKey,
-    CapabilityPermissionOverrideRecord, CapabilityPermissionOverrideStore,
-    CapabilityPermissionStoreError, InMemoryAutoApproveSettingStore,
-    InMemoryPersistentApprovalPolicyStore, InMemoryToolPermissionOverrideStore,
+    AutoApproveSettingStore, AutoApproveSettingStorePort as _, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStorePort as _, CapabilityPermissionStoreError,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
+    test_support::{
+        in_memory_backed_auto_approve_setting_store,
+        in_memory_backed_capability_permission_override_store,
+        in_memory_backed_persistent_approval_policy_store,
+    },
 };
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExecutionContext, ExtensionId, MountView,
     PermissionMode, Principal, ResourceEstimate, RuntimeKind, Timestamp, TrustClass, UserId,
@@ -24,7 +29,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use serde_json::json;
 
 use super::*;
-use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::builtin_capability_policy::builtin_capability_policy;
 
 struct ErroringToolPermissionOverrideStore;
 
@@ -35,14 +40,14 @@ struct CountingAutoApproveSettingStore {
 }
 
 struct CountingToolPermissionOverrideStore {
-    inner: InMemoryToolPermissionOverrideStore,
+    inner: ToolPermissionOverrideStore<InMemoryBackend>,
     gets: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
 }
 
 struct CountingPersistentApprovalPolicyStore {
-    inner: InMemoryPersistentApprovalPolicyStore,
+    inner: PersistentApprovalPolicyStore<InMemoryBackend>,
     lookups: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
@@ -73,7 +78,7 @@ impl CountingAutoApproveSettingStore {
 impl CountingToolPermissionOverrideStore {
     fn with_delay(delay: Duration) -> Self {
         Self {
-            inner: InMemoryToolPermissionOverrideStore::new(),
+            inner: in_memory_backed_capability_permission_override_store(),
             gets: AtomicUsize::new(0),
             lists: AtomicUsize::new(0),
             delay,
@@ -92,7 +97,7 @@ impl CountingToolPermissionOverrideStore {
 impl CountingPersistentApprovalPolicyStore {
     fn with_delay(delay: Duration) -> Self {
         Self {
-            inner: InMemoryPersistentApprovalPolicyStore::new(),
+            inner: in_memory_backed_persistent_approval_policy_store(),
             lookups: AtomicUsize::new(0),
             lists: AtomicUsize::new(0),
             delay,
@@ -109,7 +114,7 @@ impl CountingPersistentApprovalPolicyStore {
 }
 
 #[async_trait::async_trait]
-impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
+impl ironclaw_approvals::AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
     async fn set(
         &self,
         input: AutoApproveSettingInput,
@@ -145,7 +150,9 @@ impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for CountingToolPermissionOverrideStore
+{
     async fn set(
         &self,
         input: CapabilityPermissionOverrideInput,
@@ -185,7 +192,9 @@ impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApprovalPolicyStore {
+impl ironclaw_approvals::PersistentApprovalPolicyStorePort
+    for CountingPersistentApprovalPolicyStore
+{
     async fn allow(
         &self,
         input: PersistentApprovalPolicyInput,
@@ -236,7 +245,9 @@ impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApp
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for ErroringToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for ErroringToolPermissionOverrideStore
+{
     async fn set(
         &self,
         _input: CapabilityPermissionOverrideInput,
@@ -293,7 +304,10 @@ fn local_dev_shell_authorization_inputs_with_permission(
     (descriptor, context, trust_decision)
 }
 
-async fn enable_global_auto_approve(store: &InMemoryAutoApproveSettingStore, user_id: &UserId) {
+async fn enable_global_auto_approve(
+    store: &AutoApproveSettingStore<InMemoryBackend>,
+    user_id: &UserId,
+) {
     let scope = ironclaw_host_api::ResourceScope::local_default(
         user_id.clone(),
         ironclaw_host_api::InvocationId::new(),
@@ -310,7 +324,7 @@ async fn enable_global_auto_approve(store: &InMemoryAutoApproveSettingStore, use
 }
 
 async fn seed_shell_tool_override(
-    store: &InMemoryToolPermissionOverrideStore,
+    store: &ToolPermissionOverrideStore<InMemoryBackend>,
     user_id: &UserId,
     state: ToolPermissionOverride,
 ) {
@@ -350,9 +364,11 @@ fn local_dev_shell_authorization_inputs(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     };
-    let policy = local_dev_capability_policy().expect("capability policy");
+    let policy = builtin_capability_policy().expect("capability policy");
     let grants = policy.builtin_grants(
         &provider_id,
         &MountView::default(),
@@ -401,9 +417,11 @@ async fn trace_commons_authorize_decision(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     };
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let provider_id = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id");
     let grants = policy.builtin_grants(
         &provider_id,
@@ -525,14 +543,14 @@ async fn local_dev_trace_commons_onboard_skips_approval_gate() {
 #[tokio::test]
 async fn local_dev_authorizer_refreshes_approval_settings_on_next_invocation() {
     let user_id = UserId::new("test-user").expect("user id");
-    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let overrides = Arc::new(in_memory_backed_capability_permission_override_store());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
         overrides,
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     // Global auto-approve now defaults ON, so explicitly disable it first to
@@ -583,14 +601,14 @@ async fn local_dev_authorizer_refreshes_approval_settings_on_next_invocation() {
 #[tokio::test]
 async fn local_dev_authorizer_observes_global_auto_approve_revocation_on_next_invocation() {
     let user_id = UserId::new("test-user").expect("user id");
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     enable_global_auto_approve(&auto_approve, &user_id).await;
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve.clone(),
-        Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let before = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -625,11 +643,11 @@ async fn local_dev_authorizer_caches_global_auto_approve_within_one_invocation()
     let user_id = UserId::new("test-user").expect("user id");
     let auto_approve = Arc::new(CountingAutoApproveSettingStore::enabled());
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
     let (descriptor, context, trust_decision) = local_dev_shell_authorization_inputs(&user_id);
 
@@ -702,11 +720,11 @@ async fn local_dev_authorizer_coalesces_concurrent_global_auto_approve_misses() 
         Duration::from_millis(25),
     ));
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
     let (descriptor, context, trust_decision) = local_dev_shell_authorization_inputs(&user_id);
 
@@ -762,7 +780,7 @@ async fn local_dev_authorizer_coalesces_concurrent_scope_listing_settings_misses
     ));
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
         overrides.clone(),
-        Arc::new(InMemoryAutoApproveSettingStore::new()),
+        Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_policies.clone(),
     ));
 
@@ -846,9 +864,9 @@ async fn local_dev_authorizer_releases_global_auto_approve_inflight_when_leader_
         Duration::from_millis(100),
     ));
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
 
     let leader_settings = Arc::clone(&settings);
@@ -883,7 +901,7 @@ async fn local_dev_authorizer_releases_global_auto_approve_inflight_when_leader_
 #[tokio::test]
 async fn local_dev_authorizer_fails_closed_when_override_lookup_errors() {
     let user_id = UserId::new("test-user").expect("user id");
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     let scope = ironclaw_host_api::ResourceScope::local_default(
         user_id.clone(),
         ironclaw_host_api::InvocationId::new(),
@@ -901,9 +919,9 @@ async fn local_dev_authorizer_fails_closed_when_override_lookup_errors() {
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
         Arc::new(ErroringToolPermissionOverrideStore),
         auto_approve,
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -919,17 +937,17 @@ async fn local_dev_authorizer_fails_closed_when_override_lookup_errors() {
 #[tokio::test]
 async fn per_tool_disabled_overrides_global_auto_approve_through_store() {
     let user_id = UserId::new("test-user").expect("user id");
-    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let overrides = Arc::new(in_memory_backed_capability_permission_override_store());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     enable_global_auto_approve(&auto_approve, &user_id).await;
     seed_shell_tool_override(&overrides, &user_id, ToolPermissionOverride::Disabled).await;
 
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
         overrides,
         auto_approve,
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -942,17 +960,17 @@ async fn per_tool_disabled_overrides_global_auto_approve_through_store() {
 #[tokio::test]
 async fn per_tool_ask_each_time_overrides_global_auto_approve_through_store() {
     let user_id = UserId::new("test-user").expect("user id");
-    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let overrides = Arc::new(in_memory_backed_capability_permission_override_store());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     enable_global_auto_approve(&auto_approve, &user_id).await;
     seed_shell_tool_override(&overrides, &user_id, ToolPermissionOverride::AskEachTime).await;
 
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
         overrides,
         auto_approve,
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -968,15 +986,15 @@ async fn per_tool_ask_each_time_overrides_global_auto_approve_through_store() {
 #[tokio::test]
 async fn global_auto_approve_does_not_bypass_manifest_ineligible_tool_through_store() {
     let user_id = UserId::new("test-user").expect("user id");
-    let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+    let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
     enable_global_auto_approve(&auto_approve, &user_id).await;
 
     let settings = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve,
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     // `Deny` manifest permission is not durable-approval eligible, so the
@@ -999,5 +1017,67 @@ async fn global_auto_approve_does_not_bypass_manifest_ineligible_tool_through_st
             ironclaw_host_api::Decision::RequireApproval { .. }
         ),
         "global auto-approve must not bypass a manifest-ineligible tool, got {decision:?}"
+    );
+}
+
+#[test]
+fn absent_runtime_policy_fails_closed_to_ask_always_without_minimal_bypass() {
+    // Regression for the §4.4 mode-as-type leak: `local_dev_approval_policy`
+    // used to answer an absent runtime policy with
+    // `unwrap_or(RuntimeProfile::LocalDev)` — inventing a *deployment profile*
+    // to derive authority from, and defaulting the approval width to the
+    // narrower-than-safest `AskDestructive`. It now fails closed on both axes.
+    let policy = builtin_capability_policy().expect("capability policy");
+
+    // `ReadFilesystem` is not in either gate-effect set, so under the old
+    // `AskDestructive` default it did not require approval. Under the
+    // fail-closed `AskAlways` default any non-empty effect set does.
+    assert!(
+        local_dev_effects_require_approval(None, &policy, &[EffectKind::ReadFilesystem]),
+        "an absent runtime policy must fail closed to AskAlways"
+    );
+    // The empty effect set still needs no approval under AskAlways — the
+    // fallback tightens the width, it does not gate effect-free capabilities.
+    assert!(!local_dev_effects_require_approval(None, &policy, &[]));
+}
+
+#[test]
+fn resolved_yolo_policy_allows_minimal_bypass_but_org_ceiling_removes_it() {
+    // The paired positive case, driven through the production caller: a
+    // resolved trusted-laptop policy bypasses effect gates under `Minimal`,
+    // and the same request under an org ceiling does not.
+    let policy = builtin_capability_policy().expect("capability policy");
+    let effects = [EffectKind::SpawnProcess];
+
+    let yolo = ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest {
+        yolo_disclosure_acknowledged: true,
+        ..ironclaw_runtime_policy::ResolveRequest::new(
+            ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+            ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo,
+        )
+    })
+    .expect("local yolo resolves");
+    assert_eq!(
+        yolo.approval_policy,
+        ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal
+    );
+    assert!(
+        !local_dev_effects_require_approval(Some(&yolo), &policy, &effects),
+        "resolved local-yolo must bypass effect gates under Minimal"
+    );
+
+    let narrowed = ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest {
+        yolo_disclosure_acknowledged: true,
+        org_policy: ironclaw_runtime_policy::OrgPolicyConstraints::default()
+            .set_max_profile(ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev),
+        ..ironclaw_runtime_policy::ResolveRequest::new(
+            ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+            ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo,
+        )
+    })
+    .expect("narrowed local yolo resolves");
+    assert!(
+        local_dev_effects_require_approval(Some(&narrowed), &policy, &effects),
+        "an org ceiling that removes yolo must restore effect gates"
     );
 }

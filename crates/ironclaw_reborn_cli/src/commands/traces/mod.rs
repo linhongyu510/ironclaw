@@ -391,8 +391,8 @@ impl From<TraceScopeArg> for ConsentScope {
 pub enum TraceChannelArg {
     Web,
     Cli,
-    Telegram,
-    Slack,
+    /// An extension-served channel (the retired per-vendor values map here).
+    Extension,
     Routine,
     Other,
 }
@@ -402,8 +402,7 @@ impl std::fmt::Display for TraceChannelArg {
         let value = match self {
             Self::Web => "web",
             Self::Cli => "cli",
-            Self::Telegram => "telegram",
-            Self::Slack => "slack",
+            Self::Extension => "extension",
             Self::Routine => "routine",
             Self::Other => "other",
         };
@@ -416,8 +415,7 @@ impl From<TraceChannelArg> for TraceChannel {
         match value {
             TraceChannelArg::Web => TraceChannel::Web,
             TraceChannelArg::Cli => TraceChannel::Cli,
-            TraceChannelArg::Telegram => TraceChannel::Telegram,
-            TraceChannelArg::Slack => TraceChannel::Slack,
+            TraceChannelArg::Extension => TraceChannel::Extension,
             TraceChannelArg::Routine => TraceChannel::Routine,
             TraceChannelArg::Other => TraceChannel::Other,
         }
@@ -635,11 +633,11 @@ async fn enroll_instance(
          enrollment, attributed via salted per-user pseudonyms."
     );
     println!(
-        "Opt a single user out with `ironclaw-reborn traces opt-out --user-scope \
+        "Opt a single user out with `ironclaw traces opt-out --user-scope \
          <tenant-id>/<user-id>`; an explicit opt-out always wins over instance enrollment \
          (bare `traces opt-out` disables the whole instance enrollment)."
     );
-    println!("Verify with `ironclaw-reborn traces status --json` and `traces ingest-health`.");
+    println!("Verify with `ironclaw traces status --json` and `traces ingest-health`.");
     Ok(())
 }
 
@@ -774,7 +772,7 @@ async fn profile_set(
     let runtime_scope = trace_runtime_user_scope(user_scope)?;
     set_community_profile_for_scope(Some(&runtime_scope), handle, bio).await?;
     println!("Community profile set: display handle '{}'.", handle.trim());
-    println!("Withdraw anytime with 'ironclaw-reborn traces profile withdraw'.");
+    println!("Withdraw anytime with 'ironclaw traces profile withdraw'.");
     Ok(())
 }
 

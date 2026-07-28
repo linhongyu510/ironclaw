@@ -26,8 +26,11 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 
     let root = workspace_root();
     for rule in boundary_rules() {
-        let crate_dir = root.join("crates").join(rule.crate_name);
-        let manifest = crate_dir.join("Cargo.toml");
+        let manifest = if rule.crate_name == "ironclaw" {
+            root.join("crates/ironclaw_reborn_cli/Cargo.toml")
+        } else {
+            root.join("crates").join(rule.crate_name).join("Cargo.toml")
+        };
         if !manifest.exists() {
             continue;
         }
@@ -144,7 +147,7 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             let Some(dependency_layer) = layers.get(dependency_name) else {
                 continue;
             };
-            if dependency_layer == "legacy" && crate_name != "ironclaw" {
+            if dependency_layer == "legacy" && crate_name != "ironclaw_legacy" {
                 if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
                     used_exceptions.insert((exception.crate_name, exception.dependency_name));
                     continue;
@@ -234,11 +237,16 @@ fn reborn_crate_dependency_boundaries_hold() {
     );
 
     // Provider-neutral memory contract: among internal ironclaw crates it may
-    // depend ONLY on `ironclaw_host_api`. Enforced as an allowlist (forbid every
-    // other workspace ironclaw crate) so future deps — e.g. `ironclaw_turns`,
-    // `ironclaw_product_workflow`, `ironclaw_runner` — cannot silently slip past a
-    // blocklist that only names today's offenders.
-    let memory_contract_allowed = ["ironclaw_memory", "ironclaw_host_api"];
+    // depend only on `ironclaw_host_api` plus `ironclaw_prompt_envelope`, because
+    // it owns prompt-safe wrapping for retrieved memory context (#5327). Enforced
+    // as an allowlist (forbid every other workspace ironclaw crate) so future
+    // deps — e.g. `ironclaw_turns`, `ironclaw_product`, `ironclaw_runner`
+    // — cannot silently slip past a blocklist that only names today's offenders.
+    let memory_contract_allowed = [
+        "ironclaw_memory",
+        "ironclaw_host_api",
+        "ironclaw_prompt_envelope",
+    ];
     assert_no_normal_workspace_deps(
         &dependencies,
         "ironclaw_memory",
@@ -271,7 +279,7 @@ fn reborn_crate_dependency_boundaries_hold() {
     // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
     // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
     // as an allowlist so it can never reach UPSTREAM (into
-    // `ironclaw_reborn_composition` / `ironclaw_product_workflow`) or onto the v1
+    // `ironclaw_reborn_composition` / `ironclaw_product`) or onto the v1
     // legacy enclave — the "never reach upstream" property the crate guarantees.
     let reborn_identity_allowed = [
         "ironclaw_reborn_identity",
@@ -290,6 +298,49 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+#[test]
+fn host_runtime_stays_memory_provider_neutral_and_only_composition_names_mem0() {
+    // The `ironclaw_memory_mem0` boundary rule's comment states that
+    // `ironclaw_host_runtime` must stay provider-agnostic and must NOT name the
+    // concrete mem0 provider crate; only the composition layer may depend on it
+    // (it is the one layer allowed to name concrete provider crates, building the
+    // `Arc<dyn MemoryService>` that the provider-neutral `MemoryServiceResolver`
+    // stores). That comment was previously unenforced. This test fails loudly if a
+    // future edit adds `ironclaw_memory_mem0` to `host_runtime/Cargo.toml` — or to
+    // any crate other than composition.
+    const MEM0: &str = "ironclaw_memory_mem0";
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+
+    // host_runtime must not name the concrete mem0 provider.
+    assert_no_normal_workspace_deps(&dependencies, "ironclaw_host_runtime", [MEM0]);
+
+    // Only the composition layer (the mem0 crate itself aside) may take a normal
+    // dependency on the concrete mem0 provider.
+    let mut dependents = dependencies
+        .iter()
+        .filter(|(crate_name, deps)| {
+            crate_name.as_str() != MEM0 && deps.iter().any(|dependency| dependency == MEM0)
+        })
+        .map(|(crate_name, _)| crate_name.as_str())
+        .collect::<Vec<_>>();
+    dependents.sort_unstable();
+    assert_eq!(
+        dependents,
+        vec!["ironclaw_reborn_composition"],
+        "only ironclaw_reborn_composition may take a normal dependency on {MEM0}; \
+         ironclaw_host_runtime and every other crate must resolve memory through the \
+         provider-neutral MemoryServiceResolver"
+    );
 }
 
 #[test]
@@ -471,14 +522,11 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_first_party_extensions/src",
         "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
-        "crates/ironclaw_product_adapters/src",
-        "crates/ironclaw_product_adapter_registry/src",
-        "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_reborn_webui_ingress/src",
-        "crates/ironclaw_wasm_product_adapters/src",
-        "crates/ironclaw_webui_v2/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_webui/src",
+        "crates/ironclaw_telegram_extension/src",
+        "crates/ironclaw_slack_extension/src",
         "crates/ironclaw_telegram_v2_adapter/src",
-        "crates/ironclaw_slack_v2_adapter/src",
     ];
 
     let mut violations = Vec::new();
@@ -524,12 +572,12 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let manifest =
         std::fs::read_to_string(&manifest_path).expect("Reborn CLI manifest must be readable");
     assert!(
-        manifest.contains("name = \"ironclaw_reborn_cli\""),
-        "Reborn CLI crate package name should be ironclaw_reborn_cli"
+        manifest.contains("name = \"ironclaw\""),
+        "Reborn CLI crate package name should be ironclaw"
     );
     assert!(
-        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
-        "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
+        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw\""),
+        "Reborn CLI crate must declare the canonical ironclaw binary explicitly"
     );
 
     let command_module_paths = [
@@ -564,14 +612,21 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
 
     assert_workspace_deps_exactly(
         &dependencies,
-        "ironclaw_reborn_cli",
+        "ironclaw",
         [
+            "ironclaw_auth",
+            "ironclaw_extension_host",
+            "ironclaw_first_party_extensions",
+            "ironclaw_host_api",
+            "ironclaw_operator",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
-            "ironclaw_reborn_webui_ingress",
+            "ironclaw_webui",
+            "ironclaw_slack_extension",
+            "ironclaw_telegram_extension",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -792,26 +847,8 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_runner_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_support.rs").exists(),
-        "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_host.rs").exists(),
-        "Reborn loop-host wiring must not live under root src/"
-    );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
     assert!(
@@ -826,31 +863,28 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
         "Reborn LLM gateway wiring should expose LlmProviderModelGateway from crates/ironclaw_runner"
     );
 
-    let reborn_manifest = std::fs::read_to_string(root.join("crates/ironclaw_runner/Cargo.toml"))
-        .expect("Reborn manifest must be readable");
-    assert!(
-        reborn_manifest.contains("optional = true")
-            && reborn_manifest.contains("default-features = false")
-            && reborn_manifest.contains("root-llm-provider"),
-        "ironclaw_runner may reuse root LLM code only behind an explicit feature, without enabling the root app's default postgres/libsql/tui feature set"
-    );
-
-    // The composition root — the only crate that should pull `ironclaw_runner`
-    // (and through it `ironclaw_llm`) for the assembled runtime — must mirror
-    // the same feature-gated discipline. Both `ironclaw_runner` (transitive)
-    // and `ironclaw_llm` (direct) live behind a `root-llm-provider` feature
-    // on the composition crate, so a default build of composition stays
-    // substrate-only.
-    let composition_manifest =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/Cargo.toml"))
-            .expect("Reborn composition manifest must be readable");
-    assert!(
-        composition_manifest.contains("root-llm-provider")
-            && composition_manifest.contains("ironclaw_llm")
-            && composition_manifest.contains("optional = true")
-            && composition_manifest.contains("default-features = false"),
-        "ironclaw_reborn_composition must gate `ironclaw_llm` behind the same `root-llm-provider` feature with `optional = true, default-features = false`"
-    );
+    // Reborn crates may reuse the extracted LLM crate, but never on its default
+    // terms: `ironclaw_llm`'s defaults pull in extra provider/backend features
+    // (e.g. `bedrock`) Reborn doesn't need. `default-features = false` on every
+    // edge is the durable invariant, keeping the Reborn stack's dependency
+    // footprint minimal and explicit.
+    for manifest_path in [
+        "crates/ironclaw_runner/Cargo.toml",
+        "crates/ironclaw_reborn_composition/Cargo.toml",
+    ] {
+        let manifest = std::fs::read_to_string(root.join(manifest_path))
+            .unwrap_or_else(|_| panic!("{manifest_path} must be readable"));
+        let llm_dep = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("ironclaw_llm = "))
+            .unwrap_or_else(|| panic!("{manifest_path} must depend on ironclaw_llm"));
+        assert!(
+            llm_dep.contains("default-features = false"),
+            "{manifest_path} must depend on `ironclaw_llm` with `default-features = false`, \
+             so the Reborn stack never enables the root app's default postgres/libsql/tui \
+             feature set: {llm_dep}"
+        );
+    }
 }
 
 #[test]
@@ -866,7 +900,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_safety/src/provider_validation.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
-        "crates/ironclaw_turns/src/run_profile/host.rs",
+        // The provider-tool-call DTOs live in the `capability` submodule after
+        // the `host.rs` -> `host/` decomposition.
+        "crates/ironclaw_turns/src/run_profile/host/capability.rs",
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
@@ -1006,6 +1042,755 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     );
 }
 
+#[test]
+fn composition_runtime_has_no_slack_output_policy() {
+    let disguised_policy = r#"
+        struct WorkspaceEntityMaskingGateway;
+
+        impl HostManagedModelGateway for WorkspaceEntityMaskingGateway {
+            async fn stream_model(&self, request: HostManagedModelRequest) {
+                let uses_integration = request.capabilities.iter()
+                    .any(|capability| capability.starts_with("slack."));
+                if uses_integration {
+                    response.output = ParentLoopOutput::AssistantReply(
+                        response.content.replace("W0FIXTURE1", "[redacted]")
+                    );
+                }
+            }
+        }
+    "#;
+    assert!(
+        source_has_slack_specific_model_output_policy(disguised_policy),
+        "the boundary classifier must catch a renamed or moved Slack model-output decorator"
+    );
+
+    let imported_policy_installation = r#"
+        use crate::{
+            outbound::GenericDeliveryProvider,
+            slack::entity_policy::WorkspaceEntityMaskingGateway,
+        };
+
+        async fn build_runtime(model_gateway: Arc<dyn HostManagedModelGateway>) {
+            let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
+                WorkspaceEntityMaskingGateway::new(model_gateway),
+            );
+        }
+    "#;
+    assert!(
+        source_installs_slack_specific_model_output_policy(imported_policy_installation),
+        "the boundary classifier must catch an imported Slack decorator at a runtime seam"
+    );
+
+    let distant_helper_policy = format!(
+        r#"
+            struct WorkspaceEntityPolicyGateway;
+            impl HostManagedModelGateway for WorkspaceEntityPolicyGateway {{
+                async fn stream_model(&self, request: HostManagedModelRequest) {{
+                    self.rewrite_response(request).await
+                }}
+            }}
+            {}
+            impl WorkspaceEntityPolicyGateway {{
+                fn rewrite_response(&self, response: &mut HostManagedModelResponse) {{
+                    if response.capability_id.starts_with("slack.") {{
+                        response.content = response.content.replace("W0FIXTURE1", "[redacted]");
+                    }}
+                }}
+            }}
+        "#,
+        "\n".repeat(200)
+    );
+    assert!(
+        source_has_slack_specific_model_output_policy(&distant_helper_policy),
+        "the boundary classifier must not depend on helper proximity"
+    );
+
+    let allowed_outbound_delivery = r#"
+        struct SlackOutboundDeliveryTargetProvider;
+
+        impl OutboundDeliveryTargetProvider for SlackOutboundDeliveryTargetProvider {
+            async fn deliver(&self, payload: ProductOutboundPayload) {
+                self.slack_client.send(payload).await;
+            }
+        }
+    "#;
+    assert!(
+        !source_has_slack_specific_model_output_policy(allowed_outbound_delivery),
+        "normal integration-owned outbound delivery must remain allowed"
+    );
+
+    let co_located_but_unrelated = r#"
+        struct GenericSecretMaskingGateway;
+        impl HostManagedModelGateway for GenericSecretMaskingGateway {
+            async fn stream_model(&self, response: HostManagedModelResponse) {
+                response.content = mask_secret(response.content);
+            }
+        }
+
+        struct SlackOutboundDeliveryTargetProvider;
+        impl OutboundDeliveryTargetProvider for SlackOutboundDeliveryTargetProvider {
+            async fn deliver(&self, payload: ProductOutboundPayload) {
+                self.slack_client.send(payload).await;
+            }
+        }
+
+        async fn build_runtime(model_gateway: Arc<dyn HostManagedModelGateway>) {
+            let model_gateway = Arc::new(GenericSecretMaskingGateway::new(model_gateway));
+        }
+    "#;
+    assert!(
+        !source_has_slack_specific_model_output_policy(co_located_but_unrelated),
+        "unrelated Slack delivery and generic model policy in one module must not false-positive"
+    );
+    assert!(
+        !source_installs_slack_specific_model_output_policy(co_located_but_unrelated),
+        "nearby Slack delivery must not taint a generic gateway installation"
+    );
+
+    let aliased_multiline_policy = r#"
+        use ironclaw_loop_host::HostManagedModelGateway as ModelGateway;
+        struct SlackEntityPolicyGateway;
+        impl
+            ModelGateway
+            for SlackEntityPolicyGateway
+        {
+            async fn stream_model(&self, response: HostManagedModelResponse) {
+                response.content = mask_slack_id(response.content);
+            }
+        }
+    "#;
+    assert!(
+        source_has_slack_specific_model_output_policy(aliased_multiline_policy),
+        "trait aliases and multiline impl headers must not evade the definition scan"
+    );
+
+    let interleaved_test_module = r#"
+        fn production_before() {}
+        #[cfg(test)]
+        mod shell_tests;
+        fn production_after() {}
+    "#;
+    let production = source_without_cfg_test_modules(interleaved_test_module);
+    assert!(production.contains("production_before"));
+    assert!(production.contains("production_after"));
+    assert!(!production.contains("shell_tests"));
+
+    let test_support_module = r#"
+        #[cfg(any(test, feature = "test-support"))]
+        mod runtime_support {
+            fn feature_enabled_runtime_policy() {}
+        }
+    "#;
+    let production = source_without_cfg_test_modules(test_support_module);
+    assert!(
+        production.contains("feature_enabled_runtime_policy"),
+        "modules available through a production feature must remain visible to the neutrality scan"
+    );
+
+    let production_only_module = r#"
+        #[cfg(not(test))]
+        mod slack_host_state {
+            fn production_runtime_policy() {}
+        }
+    "#;
+    let production = source_without_cfg_test_modules(production_only_module);
+    assert!(
+        production.contains("production_runtime_policy"),
+        "cfg(not(test)) modules are production code and must remain visible to the neutrality scan"
+    );
+
+    for production_cfg_module in [
+        r#"
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            mod nested_test_support {
+                fn production_runtime_policy() {}
+            }
+        "#,
+        r#"
+            #[cfg(all(unix, /* future,test,arm */ feature = "runtime-policy"))]
+            mod commented_cfg_terms {
+                fn production_runtime_policy() {}
+            }
+        "#,
+        r#"
+            #[cfg(all(unix, feature = "future,test,arm"))]
+            mod comma_delimited_feature_name {
+                fn production_runtime_policy() {}
+            }
+        "#,
+    ] {
+        let production = source_without_cfg_test_modules(production_cfg_module);
+        assert!(
+            production.contains("production_runtime_policy"),
+            "only a direct positive test conjunct may make a cfg(all(...)) module test-only"
+        );
+    }
+
+    let positive_test_conjunct = r#"
+        #[cfg(all(unix, test))]
+        mod unix_tests {
+            fn test_only_policy() {}
+        }
+    "#;
+    assert!(
+        !source_without_cfg_test_modules(positive_test_conjunct).contains("test_only_policy"),
+        "a direct positive test conjunct must still be removed from the production scan"
+    );
+
+    let root = workspace_root();
+    let composition_sources = production_composition_sources(&root);
+    let violations = composition_sources
+        .iter()
+        .filter_map(|(path, source)| {
+            let relative = path.strip_prefix(&root).unwrap_or(path).to_string_lossy();
+            let is_runtime_root = relative == "crates/ironclaw_reborn_composition/src/runtime.rs";
+            let is_runtime_source = is_runtime_root
+                || relative.starts_with("crates/ironclaw_reborn_composition/src/runtime/");
+            let defines_policy = source_has_slack_specific_model_output_policy(source);
+            let installs_policy =
+                is_runtime_source && source_installs_slack_specific_model_output_policy(source);
+            (defines_policy || installs_policy).then(|| {
+                let kind = if defines_policy && installs_policy {
+                    "defines and installs"
+                } else if defines_policy {
+                    "defines"
+                } else {
+                    "installs"
+                };
+                format!("{relative}: {kind} Slack-specific model-output policy")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "Reborn composition runtime must remain integration-neutral and must not \
+         intercept model output with Slack-specific policy. Violations:\n{}",
+        violations.join("\n")
+    );
+
+    let slack_policy_module =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs");
+    assert!(
+        !slack_policy_module.exists(),
+        "Reborn composition must not own the Slack-specific output policy module at {}",
+        slack_policy_module.display()
+    );
+}
+
+fn production_composition_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let composition_src = root.join("crates/ironclaw_reborn_composition/src");
+    let mut paths = Vec::new();
+    let mut pending = vec![composition_src];
+
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("failed to read runtime dir entry: {error}"))
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                paths.push(path);
+            }
+        }
+    }
+
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| {
+            let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+            !is_rust_test_source_path(&relative)
+        })
+        .map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            (path, source_without_cfg_test_modules(&source))
+        })
+        .collect()
+}
+
+fn source_without_cfg_test_modules(source: &str) -> String {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if cfg_attribute_is_test_only(trimmed) {
+            let mut module_line = index + 1;
+            while module_line < lines.len()
+                && (lines[module_line].trim().is_empty()
+                    || lines[module_line].trim_start().starts_with("#["))
+            {
+                module_line += 1;
+            }
+            if module_line < lines.len() && lines[module_line].trim_start().starts_with("mod ") {
+                let module_declaration = lines[module_line];
+                if module_declaration.trim_end().ends_with(';') {
+                    index = module_line + 1;
+                    continue;
+                }
+
+                let mut depth = 0;
+                let mut saw_opening_brace = false;
+                let mut in_block_comment = false;
+                index = module_line;
+                while index < lines.len() {
+                    let code = strip_line_strings_and_comments(lines[index], &mut in_block_comment);
+                    if code.contains('{') {
+                        saw_opening_brace = true;
+                    }
+                    depth = update_brace_depth(depth, &code);
+                    index += 1;
+                    if saw_opening_brace && depth == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        output.push(lines[index]);
+        index += 1;
+    }
+
+    output.join("\n")
+}
+
+fn cfg_attribute_is_test_only(attribute: &str) -> bool {
+    if !attribute.starts_with("#[cfg(") {
+        return false;
+    }
+    let Some(expression) = attribute
+        .strip_prefix("#[cfg(")
+        .and_then(|value| value.strip_suffix(")]"))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if expression == "test" {
+        return true;
+    }
+    let Some(all_terms) = expression
+        .strip_prefix("all")
+        .map(str::trim_start)
+        .and_then(|value| value.strip_prefix('('))
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    cfg_all_has_direct_test_conjunct(all_terms)
+}
+
+fn cfg_all_has_direct_test_conjunct(all_terms: &str) -> bool {
+    let bytes = all_terms.as_bytes();
+    let mut index = 0;
+    let mut parenthesis_depth = 0_usize;
+    let mut normalized_term = Vec::new();
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            let Some(comment_end) = nested_block_comment_end(bytes, index) else {
+                return false;
+            };
+            index = comment_end;
+            continue;
+        }
+        if bytes[index..].starts_with(b"//") {
+            return false;
+        }
+        if let Some((quote_index, hash_count)) = raw_string_delimiter(bytes, index) {
+            if parenthesis_depth == 0 {
+                normalized_term.push(b'"');
+            }
+            let Some(string_end) = raw_string_end(bytes, quote_index, hash_count) else {
+                return false;
+            };
+            index = string_end;
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'\'') {
+            if parenthesis_depth == 0 {
+                normalized_term.push(bytes[index]);
+            }
+            let Some(string_end) = quoted_literal_end(bytes, index, bytes[index]) else {
+                return false;
+            };
+            index = string_end;
+            continue;
+        }
+
+        match bytes[index] {
+            b'(' => {
+                if parenthesis_depth == 0 {
+                    normalized_term.push(b'(');
+                }
+                parenthesis_depth += 1;
+            }
+            b')' => {
+                let Some(next_depth) = parenthesis_depth.checked_sub(1) else {
+                    return false;
+                };
+                parenthesis_depth = next_depth;
+                if parenthesis_depth == 0 {
+                    normalized_term.push(b')');
+                }
+            }
+            b',' if parenthesis_depth == 0 => {
+                if normalized_term == b"test" {
+                    return true;
+                }
+                normalized_term.clear();
+            }
+            byte if parenthesis_depth == 0 && !byte.is_ascii_whitespace() => {
+                normalized_term.push(byte);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    parenthesis_depth == 0 && normalized_term == b"test"
+}
+
+fn nested_block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 2;
+    let mut depth = 1_usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            depth += 1;
+            index += 2;
+        } else if bytes[index..].starts_with(b"*/") {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn raw_string_delimiter(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hash_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b'"')).then_some((index, index - hash_start))
+}
+
+fn raw_string_end(bytes: &[u8], quote_index: usize, hash_count: usize) -> Option<usize> {
+    let mut index = quote_index + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes
+                .get(index + 1..index + 1 + hash_count)
+                .is_some_and(|hashes| hashes.iter().all(|byte| *byte == b'#'))
+        {
+            return Some(index + 1 + hash_count);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn quoted_literal_end(bytes: &[u8], quote_index: usize, quote: u8) -> Option<usize> {
+    let mut index = quote_index + 1;
+    let mut escaped = false;
+    while index < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[index] == b'\\' {
+            escaped = true;
+        } else if bytes[index] == quote {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
+    const OUTPUT_MUTATION_MARKERS: &[&str] = &[
+        "safe_text_update",
+        "safe_reasoning_update",
+        "safe_text_deltas",
+        "safe_reasoning_deltas",
+        "parentloopoutput::assistantreply",
+        "response.output =",
+        ".content =",
+        ".content.replace",
+        "redact",
+        "sanitize",
+        "mask",
+    ];
+
+    let impl_blocks = rust_impl_blocks(source);
+    let gateway_interception_markers = gateway_trait_impl_markers(source);
+    let gateway_types = impl_blocks
+        .iter()
+        .flat_map(|(header, _)| {
+            let normalized_header = normalize_rust_whitespace(header);
+            gateway_interception_markers
+                .iter()
+                .filter_map(move |marker| impl_type_after_marker(&normalized_header, marker))
+        })
+        .collect::<BTreeSet<_>>();
+
+    gateway_types.into_iter().any(|gateway_type| {
+        let owned_regions = impl_blocks
+            .iter()
+            .filter(|(header, _)| rust_header_mentions_type(header, &gateway_type))
+            .map(|(_, body)| body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+        owned_regions.contains("slack")
+            && OUTPUT_MUTATION_MARKERS
+                .iter()
+                .any(|marker| owned_regions.contains(marker))
+    })
+}
+
+fn gateway_trait_impl_markers(source: &str) -> BTreeSet<String> {
+    const GATEWAY_TRAITS: &[&str] = &["HostManagedModelGateway", "HostManagedModelStreamSink"];
+
+    let normalized_source = normalize_rust_whitespace(source);
+    let mut markers = GATEWAY_TRAITS
+        .iter()
+        .map(|trait_name| format!("{trait_name} for"))
+        .collect::<BTreeSet<_>>();
+    for trait_name in GATEWAY_TRAITS {
+        let alias_prefix = format!("{trait_name} as ");
+        let mut remainder = normalized_source.as_str();
+        while let Some(index) = remainder.find(&alias_prefix) {
+            let after_alias = &remainder[index + alias_prefix.len()..];
+            let alias = after_alias
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            if !alias.is_empty() {
+                markers.insert(format!("{alias} for"));
+            }
+            remainder = after_alias;
+        }
+    }
+    markers
+}
+
+fn normalize_rust_whitespace(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn rust_impl_blocks(source: &str) -> Vec<(String, String)> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !(trimmed == "impl" || trimmed.starts_with("impl ") || trimmed.starts_with("impl<")) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut depth = 0;
+        let mut saw_opening_brace = false;
+        let mut in_block_comment = false;
+        while index < lines.len() {
+            let code = strip_line_strings_and_comments(lines[index], &mut in_block_comment);
+            if code.contains('{') {
+                saw_opening_brace = true;
+            }
+            depth = update_brace_depth(depth, &code);
+            index += 1;
+            if saw_opening_brace && depth == 0 {
+                break;
+            }
+        }
+
+        let body = lines[start..index].join("\n");
+        let header = body.split('{').next().unwrap_or_default().to_string();
+        blocks.push((header, body));
+    }
+
+    blocks
+}
+
+fn impl_type_after_marker(header: &str, marker: &str) -> Option<String> {
+    header
+        .split_once(marker)
+        .and_then(|(_, suffix)| {
+            suffix
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .find(|token| !token.is_empty())
+        })
+        .map(ToString::to_string)
+}
+
+fn rust_header_mentions_type(header: &str, type_name: &str) -> bool {
+    header
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == type_name)
+}
+
+fn source_installs_slack_specific_model_output_policy(source: &str) -> bool {
+    const WRAPPER_CONSTRUCTION_MARKERS: &[&str] = &[
+        "arc::new",
+        "box::new",
+        "::new(",
+        "wrap(",
+        "decorate",
+        "let model_gateway",
+    ];
+
+    let (slack_import_symbols, has_slack_wildcard_import) = slack_import_symbols(source);
+    model_gateway_statements(source)
+        .into_iter()
+        .any(|statement| {
+            let lower_statement = statement.to_ascii_lowercase();
+            let constructs_wrapper = WRAPPER_CONSTRUCTION_MARKERS
+                .iter()
+                .any(|marker| lower_statement.contains(marker));
+            let names_slack_directly = lower_statement.contains("slack::")
+                || lower_statement.contains("crate::slack")
+                || lower_statement
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .any(|token| token.starts_with("slack") && token.len() > "slack".len());
+            let uses_slack_import = slack_import_symbols
+                .iter()
+                .any(|symbol| rust_header_mentions_type(&statement, symbol));
+            constructs_wrapper
+                && (names_slack_directly || uses_slack_import || has_slack_wildcard_import)
+        })
+}
+
+fn model_gateway_statements(source: &str) -> Vec<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut statements = BTreeSet::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains("model_gateway") {
+            continue;
+        }
+
+        let mut start = index;
+        while start > 0 {
+            let trimmed = lines[start].trim_start();
+            if trimmed.starts_with("let ") || trimmed.starts_with("model_gateway =") {
+                break;
+            }
+            let previous = lines[start - 1].trim();
+            if previous.ends_with(';') || previous.ends_with('{') || previous.ends_with('}') {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = index;
+        while end + 1 < lines.len() && !lines[end].contains(';') {
+            end += 1;
+        }
+        statements.insert(lines[start..=end].join("\n"));
+    }
+    statements.into_iter().collect()
+}
+
+fn slack_import_symbols(source: &str) -> (BTreeSet<String>, bool) {
+    const IGNORED_IMPORT_TOKENS: &[&str] = &["as", "crate", "pub", "self", "slack", "super", "use"];
+
+    let mut symbols = BTreeSet::new();
+    let mut has_wildcard = false;
+    for statement in rust_use_statements(source) {
+        let normalized = normalize_rust_whitespace(&statement);
+        let lower = normalized.to_ascii_lowercase();
+        if lower.contains("slack::*") {
+            has_wildcard = true;
+        }
+
+        let mut search_from = 0;
+        while let Some(relative_index) = lower[search_from..].find("slack::") {
+            let suffix_start = search_from + relative_index + "slack::".len();
+            let suffix = &normalized[suffix_start..];
+            let segment = slack_import_segment(suffix);
+            for token in segment
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            {
+                if token.len() > 2 && !IGNORED_IMPORT_TOKENS.contains(&token) {
+                    symbols.insert(token.to_string());
+                }
+            }
+            search_from = suffix_start;
+        }
+
+        if let Some(alias_index) = lower.find("slack as ") {
+            let alias = normalized[alias_index + "slack as ".len()..]
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            if !alias.is_empty() {
+                symbols.insert(alias.to_string());
+            }
+        }
+    }
+    (symbols, has_wildcard)
+}
+
+fn rust_use_statements(source: &str) -> Vec<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut statements = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !(trimmed.starts_with("use ") || trimmed.starts_with("pub use ")) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < lines.len() && !lines[index].contains(';') {
+            index += 1;
+        }
+        statements.push(lines[start..=index].join("\n"));
+        index += 1;
+    }
+    statements
+}
+
+fn slack_import_segment(suffix: &str) -> &str {
+    if !suffix.starts_with('{') {
+        return suffix.split([',', ';', '}']).next().unwrap_or_default();
+    }
+
+    let mut depth = 0;
+    for (index, character) in suffix.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &suffix[1..index];
+                }
+            }
+            _ => {}
+        }
+    }
+    suffix
+}
+
 /// Lock the boot-config TOML + provider-catalog layering for the
 /// standalone `ironclaw-reborn` binary.
 ///
@@ -1085,14 +1870,14 @@ fn reborn_boot_config_file_layout_is_pinned() {
          Landmines` section: \"Do not bake secret material into blueprints/config.\""
     );
 
-    // Provider-catalog load-from-path must be reachable from
-    // composition without forcing `ironclaw_reborn_config` to depend
-    // on `ironclaw_llm` (which would violate _config's standalone
-    // boundary). The composition crate is the legitimate consumer.
-    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_admin/llm_catalog.rs");
+    // Provider-catalog load-from-path must be reachable from the operator
+    // control-plane without forcing `ironclaw_reborn_config` to depend on
+    // `ironclaw_llm` (which would violate _config's standalone boundary).
+    // The composition crate only re-exports this surface for compatibility.
+    let llm_catalog = root.join("crates/ironclaw_operator/src/llm_admin/llm_catalog.rs");
     assert!(
         llm_catalog.exists(),
-        "composition must expose a catalog resolver at {} so the CLI can stitch \
+        "operator must expose a catalog resolver at {} so the CLI can stitch \
          RebornConfigFile + providers.json into a RebornLlmConfig without itself \
          depending on ironclaw_llm",
         llm_catalog.display()
@@ -1105,7 +1890,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     ] {
         assert!(
             llm_catalog_src.contains(required),
-            "composition llm_catalog must expose `{required}` so the resolver path is \
+            "operator llm_catalog must expose `{required}` so the resolver path is \
              stable; see reborn_boot_config_file_layout_is_pinned"
         );
     }
@@ -1198,253 +1983,6 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
 }
 
 #[test]
-fn wasm_product_adapter_crate_has_local_guardrails() {
-    let guardrails = workspace_root().join("crates/ironclaw_wasm_product_adapters/CLAUDE.md");
-    assert!(
-        guardrails.exists(),
-        "ironclaw_wasm_product_adapters needs local CLAUDE.md guardrails before becoming a Reborn boundary crate"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
-    let metadata = cargo_metadata();
-    let packages = metadata["packages"]
-        .as_array()
-        .expect("cargo metadata must include packages");
-    let package = packages
-        .iter()
-        .find(|package| package["name"] == "ironclaw_wasm_product_adapters")
-        .expect("ironclaw_wasm_product_adapters must be a workspace package");
-    let mut deps = package["dependencies"]
-        .as_array()
-        .expect("dependencies")
-        .iter()
-        .filter(|dependency| is_normal_dependency(dependency))
-        .filter_map(|dependency| dependency["name"].as_str())
-        .collect::<Vec<_>>();
-    deps.sort_unstable();
-
-    // Deliberate additions beyond the original auth/egress primitives:
-    //   * async-trait, tokio  — required by the native ProductAdapter runner
-    //     (async traits, semaphore-based admission control, timeout).
-    //   * chrono              — receive-timestamp for TrustedInboundContext.
-    //   * hex                 — HMAC signature encoding in the auth verifier.
-    //   * tracing             — structured logging for hardened error paths
-    //                           added in the zmanian review.
-    //   * serde_json          — validates temporary JSON-shim WIT payloads.
-    //   * ironclaw_wasm  — shared v1-style minimal WASI sandbox kernel module.
-    //   * wasmtime            — component type and generated binding instantiation.
-    // Every addition is justified by a concrete call site in src/. Adding a
-    // dep here without a matching call site is a contract violation — and
-    // adding workflow/runtime crates beyond this list still requires
-    // updating both the wasm crate's CLAUDE.md and this expected set.
-    let expected = vec![
-        "async-trait",
-        "chrono",
-        "hex",
-        "hmac",
-        "http",
-        "ironclaw_product_adapters",
-        "ironclaw_wasm",
-        "serde_json",
-        "sha2",
-        "subtle",
-        "thiserror",
-        "tokio",
-        "tracing",
-        "wasmtime",
-    ];
-    assert_eq!(
-        deps, expected,
-        "ironclaw_wasm_product_adapters should stay thin host glue; add runtime/workflow dependencies only when a call-site proves they are required"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_runtime_uses_v1_style_minimal_wasi() {
-    let root = workspace_root();
-    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs"))
-        .expect("WASM sandbox core module must be readable");
-    let adapter_store =
-        std::fs::read_to_string(root.join("crates/ironclaw_wasm_product_adapters/src/store.rs"))
-            .expect("ProductAdapter WASM store must be readable");
-    let adapter_runtime = std::fs::read_to_string(
-        root.join("crates/ironclaw_wasm_product_adapters/src/component_runtime.rs"),
-    )
-    .expect("ProductAdapter WASM runtime must be readable");
-
-    assert!(
-        adapter_store.contains("SandboxStoreCore")
-            && adapter_runtime.contains("add_minimal_wasi_to_linker"),
-        "ProductAdapter components should use the shared v1-style WASM sandbox core instead of duplicating WASI setup"
-    );
-    assert!(
-        core.contains("wasmtime_wasi::p2::add_to_linker_sync"),
-        "shared sandbox core should register WASI p2 like v1 tools/channels"
-    );
-    assert!(
-        core.contains("WasiCtxBuilder::new().build()"),
-        "shared sandbox core should use the v1 minimal default: no env, args, preopens, or inherited network"
-    );
-    for forbidden in [
-        "inherit_env",
-        "inherit_stdio",
-        "preopened_dir",
-        "inherit_network",
-        "allow_ip_name_lookup(true)",
-        "socket_addr_check(|_, _| Box::pin(async { true }))",
-    ] {
-        assert!(
-            !core.contains(forbidden)
-                && !adapter_store.contains(forbidden)
-                && !adapter_runtime.contains(forbidden),
-            "ProductAdapter minimal WASI must not enable `{forbidden}`; HTTP egress stays host-mediated"
-        );
-    }
-}
-
-#[test]
-fn wasm_product_adapter_wit_preserves_product_adapter_trust_boundary() {
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    assert!(
-        wit.contains("record parsed-inbound"),
-        "WIT should name adapter output as ParsedProductInbound, not a trusted envelope"
-    );
-    assert!(
-        wit.contains("result<parsed-inbound, string>"),
-        "parse-inbound should return a parsed inbound payload; host glue stamps TrustedInboundContext and builds ProductInboundEnvelope"
-    );
-    for forbidden in [
-        "result<option<parsed-envelope>",
-        "record parsed-envelope",
-        "envelope-json",
-        "Returns `none`",
-        "ProductInboundEnvelope",
-    ] {
-        assert!(
-            !wit.contains(forbidden),
-            "WIT must not use `{forbidden}`; no-op events are ProductInboundPayload::NoOp and envelopes are host-stamped"
-        );
-    }
-
-    let response_record = wit
-        .split("record egress-response {")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect("egress-response record must exist");
-    assert!(
-        !response_record.contains("headers"),
-        "WASM egress responses must not expose raw response headers to adapters"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_wit_declares_egress_targets_as_paired_records() {
-    // Henry's review (PR #3352, 2026-05-12T05:04:30Z) flagged that the
-    // WIT manifest previously exposed `declared-egress-hosts: list<string>`
-    // and `declared-credential-handles: list<string>` as independent
-    // lists, which contradicted the Rust `EgressPolicy` that now
-    // requires exact `(host, Option<credential_handle>)` pairs.
-    // Independent lists could not express "Slack token only for Slack",
-    // forcing the future host glue to either reintroduce the cross-pair
-    // leak the Rust policy closes or invent pair metadata the manifest
-    // did not carry.
-    //
-    // The WIT now declares a `declared-egress-target` record and the
-    // manifest carries `declared-egress-targets: list<declared-egress-
-    // target>`. This boundary test pins the new shape — a regression
-    // that splits the pair back into independent lists fails here.
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    assert!(
-        wit.contains("record declared-egress-target"),
-        "WIT must declare a paired `declared-egress-target` record so the manifest can express the (host, optional credential_handle) contract the Rust EgressPolicy enforces"
-    );
-    assert!(
-        wit.contains("declared-egress-targets: list<declared-egress-target>"),
-        "adapter-manifest must carry `declared-egress-targets: list<declared-egress-target>` (paired) instead of independent host/handle lists"
-    );
-
-    // Egress-request must reference the paired target by a single
-    // index, not split into separate host/handle indexes — the WIT
-    // shape mirrors the Rust pair-contract.
-    assert!(
-        wit.contains("egress-target-index: u32"),
-        "egress-request must reference a single paired target via `egress-target-index`"
-    );
-
-    // Forbidden: the prior independent-list shape and split indexes
-    // that allowed cross-pair leak by construction.
-    for forbidden in [
-        "declared-egress-hosts: list<string>",
-        "declared-credential-handles: list<string>",
-        "host-index: u32",
-        "credential-handle-index: option<u32>",
-    ] {
-        assert!(
-            !wit.contains(forbidden),
-            "WIT must not carry the prior independent-list / split-index shape `{forbidden}` — it could not express the paired Rust contract and would reintroduce the cross-pair credential leak"
-        );
-    }
-}
-
-#[test]
-fn wasm_product_adapter_wit_pins_json_shim_shape() {
-    // Henry's review on PR #3352 flagged that the WIT carries adapter
-    // payloads as JSON strings (`parsed-json`, `evidence-json`,
-    // `outbound-json`, `egress-request-json`, `capabilities-json`),
-    // which weakens the typed component-model boundary. The host
-    // re-validates every JSON crossing on the Rust side via serde, so
-    // the seal contract still holds — but the typed redesign is a
-    // followup. This test pins the current shim shape so a future
-    // change must EITHER:
-    //   (a) update this test alongside the corresponding typed record
-    //       (deliberate redesign), OR
-    //   (b) fail boundary checks (accidental shape drift).
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    // Top-level documentation MUST call out the shim explicitly so a
-    // reviewer doesn't have to infer the intent from the field names.
-    for required_doc in ["TEMPORARY", "JSON-string payload shim", "Follow-up"] {
-        assert!(
-            wit.contains(required_doc),
-            "WIT must document the JSON-shim status (`{required_doc}` missing); \
-             see top-of-file comment block before `package`"
-        );
-    }
-
-    // The five known JSON-shim fields. Each is the temporary surface
-    // covering a typed Rust DTO in `ironclaw_product_adapters`.
-    let shim_fields = [
-        ("parsed-inbound", "parsed-json: string"),
-        ("auth-evidence", "evidence-json: string"),
-        ("outbound-envelope", "outbound-json: string"),
-        ("outbound-render", "egress-request-json: string"),
-        ("adapter-manifest", "capabilities-json: string"),
-    ];
-    for (record, field) in shim_fields {
-        assert!(
-            wit.contains(field),
-            "WIT JSON-shim field `{field}` in record `{record}` is missing. \
-             If you removed it as part of a typed redesign, update this test \
-             to assert the new typed shape instead — otherwise the boundary \
-             is silently drifting"
-        );
-    }
-}
-
-#[test]
 fn reborn_runtime_http_egress_has_single_network_boundary() {
     let forbidden = [
         ForbiddenRuntimeNetworkUse {
@@ -1510,6 +2048,34 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 }
 
 #[test]
+fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
+    let root = workspace_root();
+    let factory =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
+            .expect("composition factory source must be readable");
+    let owner_transaction = std::fs::read_to_string(
+        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
+    )
+    .expect("extension-host activation transaction source must be readable");
+
+    for forbidden in [
+        "reconcile_hosted_mcp_runtime_readiness",
+        "reconcile_hosted_mcp_startup",
+    ] {
+        assert!(
+            !factory.contains(forbidden),
+            "composition startup must not invoke hosted-MCP discovery through `{forbidden}`; \
+             discovery requires a real caller/run ResourceScope"
+        );
+        assert!(
+            !owner_transaction.contains(forbidden),
+            "extension-host must not expose ambient hosted-MCP startup probing through \
+             `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
         ForbiddenUse {
@@ -1558,12 +2124,11 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_reborn_event_store/src",
         "crates/ironclaw_reborn_api/src",
         "crates/ironclaw_reborn_openai_compat/src",
-        "crates/ironclaw_product_adapters/src",
-        "crates/ironclaw_product_adapter_registry/src",
-        "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_wasm_product_adapters/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
-        "crates/ironclaw_slack_v2_adapter/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_telegram_extension/src",
+        "crates/ironclaw_slack_extension/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -1574,7 +2139,6 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         // never bind sockets or call `axum::serve` itself — that is
         // host composition's job. Without this entry the contract fails
         // open for the new route crate.
-        "crates/ironclaw_webui_v2/src",
     ];
 
     let mut violations = Vec::new();
@@ -1628,7 +2192,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
-            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductSurface, not legacy channel ingress",
             exempt: None,
         },
         ForbiddenUse {
@@ -1650,7 +2214,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
 
     assert!(
         violations.is_empty(),
-        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
+        "Reborn OpenAI-compatible routes must stay ProductSurface/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
         violations.join("\n")
     );
 }
@@ -1772,15 +2336,9 @@ fn reborn_product_auth_contract_stays_reborn_native() {
 
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
-    collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs"),
-        &root,
-        &forbidden,
-        &mut violations,
-    );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve.rs"),
+        &root.join("crates/ironclaw_webui/src/product_auth"),
+        &root.join("crates/ironclaw_webui/src/product_auth.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -2024,40 +2582,9 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
-            // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
-            crate_name: "ironclaw_reborn_migration",
+            crate_name: "ironclaw_product",
             forbidden: vec![
                 "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_gateway",
-                "ironclaw_llm",
-                "ironclaw_loop_host",
-                "ironclaw_mcp",
-                "ironclaw_network",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_runner",
-                "ironclaw_reborn_cli",
-                "ironclaw_reborn_event_store",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_scripts",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-                "ironclaw_webui_v2",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_product_workflow",
-            forbidden: vec![
-                "ironclaw_dispatcher",
-                "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
@@ -2068,13 +2595,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Product auth is a Reborn contract/facade vocabulary. It may
-            // describe behavior-compatible v1 inventory, but implementation
-            // code must not reach into v1 routes, extension managers, secret
-            // stores, runtimes, or channel-specific stacks.
+            // Product auth is a Reborn contract/facade vocabulary plus the
+            // recipe-driven auth engine (extension-runtime workstream D). The
+            // engine owns token secret storage, so the Reborn-native
+            // `ironclaw_secrets` store is allowed; implementation code must
+            // still not reach into v1 routes, extension managers, runtimes,
+            // or channel-specific stacks.
             crate_name: "ironclaw_auth",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -2082,9 +2611,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
-                "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -2094,93 +2621,41 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
-                "ironclaw_reborn_composition",
-                "ironclaw_reborn_config",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_storage",
-                "ironclaw_threads",
-                "ironclaw_trust",
-                "ironclaw_tui",
-                "ironclaw_turns",
-                "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-            ],
-        },
-        BoundaryRule {
-            // WebChat v2 route surface must only reach into Reborn through
-            // the host-facing facade and the ingress vocabulary; anything
-            // that lets a handler touch the dispatcher, runtime lane, run
-            // state, or a storage backend directly would defeat the
-            // single-facade discipline that this crate exists to enforce.
-            crate_name: "ironclaw_webui_v2",
-            forbidden: vec![
                 "ironclaw",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_event_projections",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_loop_host",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                // Single-facade boundary: route handlers consume only the
-                // `ironclaw_product_workflow` facade plus the ingress + error
-                // vocabulary. Projection types are re-exported through the
-                // facade crate so handlers never reach into the adapter
-                // surface directly.
-                "ironclaw_product_adapters",
-                "ironclaw_runner",
-                "ironclaw_reborn_cli",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
-                "ironclaw_first_party_extensions",
-                "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
-                "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
-                "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
+        // NOTE(webui-merge): the former `ironclaw_webui_v2` BoundaryRule was
+        // removed when that crate's route surface was folded into
+        // `ironclaw_webui` (as its `webui_v2` module). The
+        // "handlers do not touch adapters/dispatcher/runtime directly"
+        // invariant is now carried by the `ironclaw_webui`
+        // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
-            // It may depend on host ingress vocabulary and ProductWorkflow
-            // adapter contracts, but it must not revive v1 gateway/LLM proxy
-            // paths or reach into runtime/composition services directly.
+            // It may depend on host ingress vocabulary, product adapter
+            // contracts, and the ProductSurface facade, but it must not revive
+            // v1 gateway/LLM proxy paths or reach into runtime/composition
+            // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
@@ -2190,7 +2665,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // FilesystemOpenAiCompatRefStore lives behind the
+                // OpenAiCompatRefStore lives behind the
                 // `storage`/`libsql`/`postgres` features and persists opaque refs
                 // through the universal RootFilesystem port.
                 "ironclaw_gateway",
@@ -2202,9 +2677,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -2223,47 +2697,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
-            ],
-        },
-        BoundaryRule {
-            // Registry projects ProductAdapter host-api sections from the single
-            // Extension Manifest v2 over extension-owned installation and activation
-            // state. Runtime/dispatcher/engine crates would invert ownership, secrets
-            // crates could expose raw material instead of opaque handles, and v1
-            // WASM/channel crates would bypass the Reborn registry boundary.
-            crate_name: "ironclaw_product_adapter_registry",
-            forbidden: vec![
-                "ironclaw",
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_events",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_product_workflow",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_threads",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -2273,7 +2706,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // runtime handles.
             crate_name: "ironclaw_first_party_extensions",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -2292,9 +2725,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_product_adapter_registry",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
@@ -2307,7 +2739,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -2317,7 +2748,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // product composition.
             crate_name: "ironclaw_first_party_extension_ports",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -2334,9 +2765,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_product_adapter_registry",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
@@ -2349,13 +2779,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
             crate_name: "ironclaw_reborn_config",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -2375,7 +2804,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
                 "ironclaw_runner",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -2400,9 +2828,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // loop drivers, LLM registry/auth internals, etc.) and
             // re-introduces the narrow-surface regression this rule exists to
             // prevent.
-            crate_name: "ironclaw_reborn_cli",
+            crate_name: "ironclaw",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_engine",
                 "ironclaw_gateway",
                 "ironclaw_llm",
@@ -2416,14 +2844,23 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // Host-owned WebUI ingress: binds the TCP listener and runs
-            // the axum serve loop for the composed v2 Router. Deliberately
-            // narrow: it must not pull product/API internals, lower
-            // substrate handles, or v1 surface code into the binary path.
-            // Reaches Reborn through ironclaw_reborn_composition's facade
-            // only (Router + WebuiAuthenticator trait + WebuiServeConfig).
-            crate_name: "ironclaw_reborn_webui_ingress",
+            // the axum serve loop for the composed v2 Router. Since the
+            // `ironclaw_webui_v2` route surface was folded into this crate
+            // (as its `webui_v2` module), it now legitimately consumes the
+            // `ironclaw_product` `ProductSurface` facade the v2
+            // handlers dispatch through. It still must not pull lower
+            // substrate handles, product adapters, or v1 surface code into
+            // the binary path. Reaches the rest of Reborn through
+            // the ProductSurface/runtime handles it receives from
+            // ironclaw_reborn_composition, the neutral ironclaw_host_ingress
+            // Axum mount carriers, and auth-owned product-auth service
+            // contracts. The direct `ironclaw_common` edge is limited to shared
+            // response/error DTO primitives used by product-auth HTTP routes;
+            // secret storage and durable auth ownership stay behind
+            // `ironclaw_auth`, not `ironclaw_secrets`.
+            crate_name: "ironclaw_webui",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
@@ -2441,11 +2878,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -2460,8 +2894,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -2493,7 +2925,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // ironclaw_filesystem is permitted: ResourceGovernorStore
                 // routes the resource-governor snapshot through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -2577,7 +3009,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // pending-gate types.
             crate_name: "ironclaw_event_projections",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -2599,7 +3031,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_event_streams",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -2615,12 +3047,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_memory",
                 "ironclaw_network",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_reborn_event_store",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_resources",
@@ -2630,13 +3061,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -2644,10 +3073,14 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // normalization/rendering over the ProductAdapter DTO surface.
             // Host auth verification, credential resolution, delivery fanout,
             // workflow admission, and runtime/network authority stay outside
-            // the adapter crate.
-            crate_name: "ironclaw_slack_v2_adapter",
+            // the adapter crate. `ironclaw_host_api` is deliberately allowed:
+            // concrete extension crates depend on host_api /
+            // product_adapters CONTRACT types only (`RestrictedEgress`,
+            // `SecretHandle` — extension-runtime implementation.md §3), which
+            // the P4 `ChannelAdapter` signatures require.
+            crate_name: "ironclaw_slack_extension",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_auth",
@@ -2660,7 +3093,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
-                "ironclaw_host_api",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
                 "ironclaw_loop_host",
@@ -2669,10 +3101,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -2683,26 +3114,24 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
             crate_name: "ironclaw_outbound",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemOutboundStateStore
+                // ironclaw_filesystem is permitted: OutboundStateStore
                 // routes outbound persistence through ScopedFilesystem under
                 // the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -2730,7 +3159,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // owners, not by reaching upward from this crate.
             crate_name: "ironclaw_triggers",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -2746,11 +3175,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -2765,41 +3193,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_wasm_product_adapters",
-            forbidden: vec![
-                "ironclaw",
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_threads",
-                "ironclaw_tui",
-                "ironclaw_turns",
             ],
         },
         BoundaryRule {
@@ -2833,8 +3226,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemSecretStore /
-                // FilesystemCredentialBroker route secret + credential
+                // ironclaw_filesystem is permitted: SecretStore /
+                // CredentialBroker route secret + credential
                 // persistence through ScopedFilesystem under the
                 // universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -2907,7 +3300,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_threads",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -2978,7 +3371,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // ironclaw_filesystem is permitted: TurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3028,7 +3421,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_agent_loop",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_auth",
                 "ironclaw_authorization",
@@ -3049,16 +3442,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_reborn_traces",
-                "ironclaw_reborn_webui_ingress",
+                "ironclaw_webui",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -3089,7 +3481,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_authorization",
                 "ironclaw_approvals",
-                "ironclaw_capabilities",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -3159,13 +3550,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_dispatcher",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "dispatcher still reaches extension routing until the kernel consolidation makes dispatcher an internal kernel module",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_event_projections",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
@@ -3185,13 +3569,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W4.3",
         reason: "conversation ingress still names turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_product_context",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "product context still names turn DTOs that move to turn_contracts if the JIT split fires",
     },
     LayerMatrixException {
         crate_name: "ironclaw_hooks",
@@ -3271,18 +3648,11 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_reborn_webui_ingress",
-        dependency_name: "ironclaw_reborn_composition",
-        introduced: "2026-07-09",
-        removes_in: "W3.6",
-        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
+        crate_name: "ironclaw_auth",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-23",
+        removes_in: "follow-up: neutral auth/turn gate host API port",
+        reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];
 
@@ -3761,7 +4131,7 @@ fn collect_forbidden_uses_allows_reborn_tracing_targets() {
         "ironclaw-reborn-auth-boundary-dir-tracing-test-{}",
         std::process::id()
     ));
-    let src = root.join("crates/ironclaw_reborn_composition/src/product_auth_serve");
+    let src = root.join("crates/ironclaw_webui/src/product_auth");
     std::fs::create_dir_all(&src).expect("test source directory must be created");
     let mod_rs = src.join("mod.rs");
     std::fs::write(

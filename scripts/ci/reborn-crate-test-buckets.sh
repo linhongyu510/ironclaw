@@ -41,7 +41,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_loop_host: "agent-runtime",
 
       ironclaw_runner: "reborn-core",
-      ironclaw_reborn_cli: "reborn-core",
+      ironclaw: "reborn-core",
       ironclaw_reborn_config: "reborn-core",
       ironclaw_reborn_event_store: "reborn-core",
       ironclaw_reborn_identity: "reborn-core",
@@ -49,22 +49,17 @@ jq -c -n --argjson packages "${packages_json}" '
 
       ironclaw_reborn_composition: "composition-core",
 
-      ironclaw_product_adapter_registry: "product-workflow",
-      ironclaw_product_adapters: "product-workflow",
-      ironclaw_product_context: "product-workflow",
-      ironclaw_product_workflow: "product-workflow",
+      ironclaw_product: "product-workflow",
 
       ironclaw_attachments: "webui-ingress",
       ironclaw_projects: "webui-ingress",
-      ironclaw_reborn_webui_ingress: "webui-ingress",
+      ironclaw_webui: "webui-ingress",
       ironclaw_resources: "webui-ingress",
-      ironclaw_webui_v2: "webui-ingress",
 
       ironclaw_first_party_extension_ports: "wasm-sandbox",
       ironclaw_first_party_extensions: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
-      ironclaw_wasm_product_adapters: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
 
       ironclaw_filesystem: "llm-mcp",
@@ -104,8 +99,8 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_common: "adapters-misc",
       ironclaw_extensions: "adapters-misc",
       ironclaw_reborn_traces: "adapters-misc",
-      ironclaw_slack_v2_adapter: "adapters-misc",
-      ironclaw_telegram_v2_adapter: "adapters-misc"
+      ironclaw_slack_extension: "adapters-misc",
+      ironclaw_telegram_extension: "adapters-misc"
     };
 
   bucket_map as $bucket_map

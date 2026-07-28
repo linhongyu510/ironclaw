@@ -11,6 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+mod outbound_delivery;
 mod profile_set;
 mod schemas;
 mod shell;
@@ -34,17 +35,20 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ProcessBackendKind, RequestedTrustClass,
+    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
+use crate::memory_provider::MemoryServiceResolver;
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
+pub(crate) use self::schemas::{
+    resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+};
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
@@ -53,10 +57,12 @@ pub use memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID,
 };
+pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
 pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
@@ -73,6 +79,37 @@ pub use trigger_management::{
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+
+/// Provider id of the always-on native memory extension. It rides the same
+/// host-bundled, always-on first-party lane as `builtin` (not the
+/// catalog/lifecycle extension lane), so its model-facing memory tools are
+/// unconditionally available — preserving the former `builtin.memory_*`
+/// behavior. Provider-swapping stays on the document-store profile binding.
+///
+/// Aliases the canonical id owned by [`crate::memory_native_extension`] (which
+/// also owns the bundled v2 manifest + the registrable package builder), so the
+/// surface/trust seams here and the binding layer share one identity string.
+pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
+    crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
+
+/// The registry-lane provider allowlist once activated extension dispatch
+/// resolves from the extension host's active snapshot: only the always-on
+/// registry-lane packages — the synthetic built-in package and the
+/// `ironclaw.memory` native memory package — keep resolving through the
+/// registry. Neither is ever published in the extension host's active
+/// snapshot, so omitting one here makes its capabilities unresolvable
+/// (`UnknownCapability`) in every composition that installs an extension
+/// host.
+pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
+    let mut allowlist = std::collections::BTreeSet::new();
+    if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(builtin);
+    }
+    if let Ok(memory) = ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(memory);
+    }
+    allowlist
+}
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
@@ -167,6 +204,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 service: "builtin".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: {
                 let mut capabilities = vec![
                     echo::manifest()?,
@@ -183,8 +221,8 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
                     profile_set::manifest()?,
+                    outbound_delivery::manifest()?,
                 ];
-                capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities.extend(trigger_management::manifests()?);
@@ -300,27 +338,45 @@ pub fn builtin_first_party_handlers_for_process_backend(
 
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository and trigger-create lifecycle hook.
+///
+/// `active_run_lookup` is required (not `Option`): the caller-scoped
+/// `trigger_list` capability derives its `active_hold` projection from it, so
+/// production wiring must always supply the same lookup the automations
+/// panel uses (#5886).
 pub fn builtin_first_party_handlers_with_trigger_create_hook(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
     trigger_management::insert_handlers_with_create_hook(
         &mut registry,
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     Ok(registry)
+}
+
+/// Replace the fail-closed default for the current-run outbound route with the
+/// product-owned routing service selected by composition.
+pub fn register_outbound_delivery_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+) -> Result<(), HostApiError> {
+    outbound_delivery::insert_handler(registry, router)
 }
 
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
@@ -368,8 +424,59 @@ pub fn builtin_first_party_handlers_with_trigger_clock(
     Ok(registry)
 }
 
+/// Like [`builtin_first_party_handlers_with_trigger_create_hook`] but routes the
+/// memory capabilities through an explicit memory provider resolver (issue
+/// #3537) instead of hardwiring the native provider. Used by the local-dev
+/// composition path (no process-backend filtering).
+pub fn builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry_with_memory_resolver(memory_resolver)?;
+    trigger_management::insert_handlers_with_create_hook(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+    )?;
+    Ok(registry)
+}
+
+/// Like
+/// [`builtin_first_party_handlers_with_trigger_create_hook_for_process_backend`]
+/// but routes the memory capabilities through an explicit memory provider
+/// resolver (issue #3537). Used by the production composition path.
+pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    process_backend: ProcessBackendKind,
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        memory_resolver,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
 fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let handler = Arc::new(BuiltinFirstPartyTools::default());
+    builtin_first_party_base_registry_with_memory_resolver(MemoryServiceResolver::default())
+}
+
+fn builtin_first_party_base_registry_with_memory_resolver(
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let handler = Arc::new(BuiltinFirstPartyTools::with_memory_resolver(
+        memory_resolver,
+    ));
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
@@ -425,8 +532,21 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         handler.clone(),
     );
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
+    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
+}
+
+struct UnavailableRunFinalReplyRouter;
+
+#[async_trait]
+impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
+    async fn route_current_run_final_reply(
+        &self,
+        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
+    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
+        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+    }
 }
 
 fn first_party_capability_manifest(
@@ -439,7 +559,6 @@ fn first_party_capability_manifest(
     let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
-        implements: Vec::new(),
         description: description.to_string(),
         effects,
         default_permission,
@@ -447,21 +566,101 @@ fn first_party_capability_manifest(
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
+        ))?),
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile,
+        origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
     })
+}
+
+fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
     memory_state: memory::MemoryCapabilityState,
+    post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
+}
+
+impl BuiltinFirstPartyTools {
+    /// Run the operator-configured post-edit check after a SUCCESSFUL
+    /// `write_file` / `apply_patch` and append the advisory `post_edit_check`
+    /// value to the edit's model-visible output. Read-only coding tools never
+    /// trigger it, and it never fails the edit — the edit already succeeded
+    /// when this runs. The invocation-services resolver only supplies
+    /// `services.post_edit_check` when the process policy permits spawning
+    /// through `services.process`, so no placement decision happens here.
+    ///
+    /// Returns `true` when a check process actually ran (completed or timed
+    /// out), so the caller can account for it like a `builtin.shell` spawn.
+    async fn append_post_edit_check(
+        &self,
+        kind: CodingCapabilityKind,
+        request: &FirstPartyCapabilityRequest,
+        output: &mut serde_json::Value,
+    ) -> bool {
+        if !matches!(
+            kind,
+            CodingCapabilityKind::WriteFile | CodingCapabilityKind::ApplyPatch
+        ) {
+            return false;
+        }
+        let Some(service) = &request.services.post_edit_check else {
+            return false;
+        };
+        // Run the check through the resolver-selected, deployment-isolated
+        // process port (tenant sandbox under hosted multi-tenant), NOT
+        // `services.process` (the deployment-blind local port the edit plan
+        // carries), and in the mount that backs the just-edited file (from the
+        // edit result's `path`), so a multi-mount workspace checks the edited
+        // project rather than an arbitrary first writable mount.
+        let edited_scoped_path = output.get("path").and_then(serde_json::Value::as_str);
+        let Some(check) = crate::post_edit_check::run_post_edit_check(
+            &self.post_edit_check_seen,
+            service.process.as_ref(),
+            &request.scope,
+            request.mounts.as_ref(),
+            edited_scoped_path,
+            &service.config,
+        )
+        .await
+        else {
+            return false;
+        };
+        if let Some(object) = output.as_object_mut() {
+            object.insert("post_edit_check".to_string(), check);
+        }
+        true
+    }
+}
+
+impl BuiltinFirstPartyTools {
+    /// Build with a memory provider resolver (issue #3537). The default
+    /// (`MemoryServiceResolver::native()`) preserves pre-binding behavior.
+    fn with_memory_resolver(memory_resolver: MemoryServiceResolver) -> Self {
+        Self {
+            memory_state: memory::MemoryCapabilityState::with_resolver(memory_resolver),
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -474,6 +673,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
+        let mut process_count = 0u32;
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
@@ -552,33 +752,44 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                         RuntimeDispatchErrorKind::UndeclaredCapability,
                     ));
                 };
-                let request = CodingCapabilityRequest::new(
+                let coding_request = CodingCapabilityRequest::new(
                     &request.capability_id,
                     metadata.kind,
                     &request.scope,
+                    request.run_id,
                     request.mounts.as_ref(),
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                let result = self
+                let mut result = self
                     .coding_state
-                    .dispatch(&request)
+                    .dispatch(&coding_request)
                     .await
                     .map_err(coding_error)?;
+                if self
+                    .append_post_edit_check(metadata.kind, &request, &mut result.output)
+                    .await
+                {
+                    // The advisory check spawned one process; account for it
+                    // exactly like a `builtin.shell` invocation.
+                    process_count = 1;
+                }
                 (result.output, result.display_preview)
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_limit_bytes = match request.capability_id.as_str() {
-            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_SAVE_CAPABILITY_ID => FIRST_PARTY_MAX_OUTPUT_BYTES,
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
-            if network_egress_bytes > 0 {
+            if network_egress_bytes > 0 || process_count > 0 {
                 error.with_usage(
                     ResourceUsage::default()
                         .set_wall_clock_ms(wall_clock_ms)
-                        .set_network_egress_bytes(network_egress_bytes),
+                        .set_network_egress_bytes(network_egress_bytes)
+                        .set_process_count(process_count),
                 )
             } else {
                 error
@@ -587,7 +798,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let usage = ResourceUsage::default()
             .set_wall_clock_ms(wall_clock_ms)
             .set_output_bytes(output_bytes)
-            .set_network_egress_bytes(network_egress_bytes);
+            .set_network_egress_bytes(network_egress_bytes)
+            .set_process_count(process_count);
         Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }

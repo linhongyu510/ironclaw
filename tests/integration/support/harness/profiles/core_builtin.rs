@@ -18,14 +18,15 @@ use super::super::{
     local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, NetworkPolicy, RuntimeKind, UserId,
+    CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
+    NetworkPolicy, RuntimeKind, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    TIME_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -56,7 +57,7 @@ pub(crate) struct CoreBuiltinOptions {
     /// `true` (default) injects the inert `RecordingProcessPort` so
     /// `builtin.shell` invocations in tests never spawn a real OS process.
     /// `.with_live_shell()` sets this `false`, which skips injection and lets
-    /// `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    /// `HostRuntimeServices` default to the real `HostProcessPort`.
     /// Consulted for `EgressMode::Recording` and `EgressMode::RealPipeline`;
     /// the `Live` path never wires a process port either way.
     pub(crate) recording_process: bool,
@@ -82,7 +83,7 @@ impl CoreBuiltinOptions {
         self
     }
 
-    /// Opts out of the recording process port so the real `LocalHostProcessPort`
+    /// Opts out of the recording process port so the real `HostProcessPort`
     /// executes shell commands on the host.
     pub(crate) fn with_live_shell(mut self) -> Self {
         self.recording_process = false;
@@ -115,7 +116,7 @@ pub(crate) async fn core_builtin_tools(
     // Inject the inert recording port by default so `builtin.shell`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets
-    // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    // `HostRuntimeServices` default to the real `HostProcessPort`.
     let recording_process_port = if recording_process {
         Some(Arc::new(
             super::super::super::process::RecordingProcessPort::new(),
@@ -187,6 +188,34 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
     core_builtin_tools(CoreBuiltinOptions::default()).await
 }
 
+pub(crate) async fn core_builtin_tools_with_durable_capability_io()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;
+    harness.durable_capability_io_requested = true;
+    Ok(harness)
+}
+
+/// Harness-port-seam Change 4: the SAME `core_builtin_tools_default` backend,
+/// with an additional confirmed `/host` mount grant layered onto the
+/// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
+/// appending a `/host` alias when `host_home_aliases` is non-empty. This is
+/// the ONLY integration-tier construction with a confirmed host-home mount,
+/// so it is the sole way to observe `wrap_surface_disclosure`'s
+/// scoped-roots note (the layer is a no-op — disabled — without a `/host`
+/// alias present, see `HostSurfaceDisclosure::enabled`).
+pub(crate) async fn core_builtin_tools_with_confirmed_host_mount()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;
+    let mut mounts = harness.mounts.mounts.clone();
+    mounts.push(MountGrant::new(
+        MountAlias::new("/host")?,
+        VirtualPath::new("/projects/host")?,
+        MountPermissions::read_write_list_delete(),
+    ));
+    harness.mounts = MountView::new(mounts)?;
+    Ok(harness)
+}
+
 /// Real capability ids `core_builtin_tools_from_runtime` registers on the
 /// built harness — a single source shared with the wiring-parity
 /// capability-id subset check (`tests/integration/wiring_parity.rs`) instead
@@ -230,10 +259,22 @@ fn core_builtin_tools_from_runtime(
         // like the four memory_* capabilities above.
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
     ];
+    let effect_kinds = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
+        // must include it or the authorizer denies the capability before
+        // it reaches the process port.
+        EffectKind::ExecuteCode,
+    ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
@@ -250,21 +291,24 @@ fn core_builtin_tools_from_runtime(
             .collect(),
         capability_ids: core_builtin_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: vec![
-            EffectKind::DispatchCapability,
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::Network,
-            EffectKind::SpawnProcess,
-            // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
-            // must include it or the authorizer denies the capability before
-            // it reaches the process port.
-            EffectKind::ExecuteCode,
-        ],
+        effect_kinds,
         network_policy,
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-        additional_provider_trust: Vec::new(),
+        // The memory provider's trust ceiling mirrors production
+        // (production_first_party_trust_policy + the bundled manifest): the
+        // memory tools carry only dispatch + filesystem effects. Granting the
+        // full builtin set here (Network/SpawnProcess/ExecuteCode) would make
+        // the harness ceiling wider than production and mask authority-ceiling
+        // denials production would enforce.
+        additional_provider_trust: vec![(
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+        )],
         user_id,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),
@@ -284,5 +328,6 @@ fn core_builtin_tools_from_runtime(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

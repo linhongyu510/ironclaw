@@ -15,7 +15,8 @@ use tracing::{debug, error};
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
 use crate::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -43,9 +44,16 @@ pub(crate) fn sanitized_driver_failure(
     reason_kind: &str,
     detail: Option<&str>,
 ) -> Option<SanitizedFailure> {
+    // `interrupted_unexpectedly` is preserved (§5a.5, loop-failure matrix):
+    // the planned driver maps an in-flight `Cancelled` executor error to it,
+    // and collapsing it to `driver_failed` here erased the original category
+    // from the durable failure record.
     let base = if matches!(
         reason_kind,
-        MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+        MODEL_CREDITS_EXHAUSTED_CATEGORY
+            | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+            | BUDGET_ACCOUNTING_FAILED_CATEGORY
+            | "interrupted_unexpectedly"
     ) {
         match SanitizedFailure::new(reason_kind.to_string()) {
             Ok(failure) => Some(failure),
@@ -113,6 +121,7 @@ impl std::error::Error for HostFactoryError {}
 #[cfg(test)]
 mod tests {
     use super::sanitized_driver_failure;
+    use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
 
     #[test]
     fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
@@ -130,5 +139,33 @@ mod tests {
 
         assert_eq!(failure.category(), "driver_failed");
         assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
+    }
+
+    /// §5a.5 (docs/plans/2026-07-03-loop-failure-matrix.md): the planned
+    /// driver maps an in-flight `Cancelled` executor error to
+    /// `interrupted_unexpectedly`; runner sanitization must preserve that
+    /// category instead of overwriting it with the generic `driver_failed`.
+    #[test]
+    fn sanitized_driver_failure_preserves_interrupted_unexpectedly_category() {
+        let failure = sanitized_driver_failure("interrupted_unexpectedly", None)
+            .expect("interrupted_unexpectedly is a valid category");
+
+        assert_eq!(failure.category(), "interrupted_unexpectedly");
+        assert_eq!(failure.detail(), None);
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_budget_accounting_category() {
+        let failure = sanitized_driver_failure(
+            BUDGET_ACCOUNTING_FAILED_CATEGORY,
+            Some("resource accounting storage is unavailable"),
+        )
+        .expect("budget accounting category is valid");
+
+        assert_eq!(failure.category(), BUDGET_ACCOUNTING_FAILED_CATEGORY);
+        assert_eq!(
+            failure.detail(),
+            Some("resource accounting storage is unavailable")
+        );
     }
 }

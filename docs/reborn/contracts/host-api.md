@@ -3,12 +3,8 @@
 **Status:** Draft v0 contract
 **Date:** 2026-04-24
 **Target crate:** `crates/ironclaw_host_api`
-**Source architecture docs:**
-
-- `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
-- `docs/reborn/2026-04-24-os-like-architecture-design.md`
-- `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
-- `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+**Source of truth:** this contract, `crates/ironclaw_host_api/CLAUDE.md`, and
+the architecture tests in `crates/ironclaw_architecture`.
 
 ---
 
@@ -27,6 +23,12 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - resource estimates/usages
 - host-owned HTTP ingress descriptors
 - audit/event envelopes
+
+Concrete listener behavior and framework-specific router carriers are outside
+this contract crate. `ironclaw_host_ingress` defines the Axum route-mount
+carriers consumed by host assembly at the HTTP boundary:
+`PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
+`crates/ironclaw_host_ingress/src/lib.rs`.
 
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
@@ -562,7 +564,7 @@ pub struct RuntimeCredentialRequirement {
 
 pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
-    ProductAuthAccount { provider: RuntimeCredentialAccountProviderId },
+    ProductAuthAccount { provider: VendorId, setup: RuntimeCredentialAccountSetup },
 }
 ```
 
@@ -700,26 +702,35 @@ pub struct SandboxQuota {
 `ironclaw_host_api` owns the neutral already-authorized dispatch port so caller-facing workflow crates can avoid depending on the concrete dispatcher implementation:
 
 ```rust
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    pub estimate: ResourceEstimate,
-    pub mounts: Option<MountView>,
-    pub resource_reservation: Option<ResourceReservation>,
-    pub input: serde_json::Value,
+pub struct Authorized {
+    /* private: sealed invocation + RuntimeLane + mounts + reservation + deadline */
 }
 pub struct CapabilityDispatchResult;
 pub struct CapabilityDisplayOutputPreview;
-pub trait CapabilityDispatcher;
+pub trait CapabilityDispatcher {
+    async fn dispatch_json(
+        &self,
+        authorized: Authorized,
+    ) -> Result<CapabilityDispatchResult, DispatchError>;
+}
 pub enum DispatchError;
 pub enum RuntimeDispatchErrorKind;
 ```
 
+Implementation evidence: `crates/ironclaw_host_api/src/authorized.rs`
+defines `Authorized`, `ProcessAuthorizedContinuation`, and the exhaustive
+`ProcessAuthorizedContinuation::from_authorized` conversion; `crates/ironclaw_host_api/src/dispatch.rs`
+defines `CapabilityDispatcher::dispatch_json(Authorized)`; `crates/ironclaw_capabilities/src/trust.rs`
+writes process continuations during authorization, and
+`crates/ironclaw_host_runtime/src/services/process_executor.rs` re-mints through
+the process-record-backed port.
+
 Rules:
 
-- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
-- `authenticated_actor_user_id` is forwarded unchanged from the authorized execution context. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
+- `Authorized` is sealed by the capability kernel only; grant checks, approvals, trust, obligations, lane selection, mounts, resource reservations, and witness deadline are established before this boundary.
+- `Actor::Sealed(user_id)` on the authorized invocation is forwarded unchanged as the authenticated actor. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
+- Process re-dispatch uses a durable `ProcessAuthorizedContinuation` and a kernel-only, process-record-backed remint port to re-mint an `Authorized` witness at execution; missing continuations fail closed as `MissingProcessAuthorization`. The continuation is process-lifetime authority, not a second policy check, and reminting must validate the persisted process record before sealing.
+- A re-minted witness carries the original process reservation when one exists. If that reservation has been released/revoked before or during execution, runtime settlement fails closed with a resource dispatch error; adapters must not silently reserve replacement capacity.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, optional display-preview metadata, usage, and resource receipt.
 - `CapabilityDisplayOutputPreview` is a display-only side channel for renderer-ready output such as unified diffs. It must not change model-visible capability output, grant authority, or carry backend-private paths/secrets.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
@@ -1138,11 +1149,11 @@ Each `IngressRouteDescriptor` must carry a fully resolved `IngressPolicy`:
 - CORS and WebSocket Origin policy;
 - streaming mode;
 - audit/trace class;
-- allowed host-mediated effect path (`ProductWorkflow`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
+- allowed host-mediated effect path (`ProductSurface`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
 
 Actual enforcement lives in host composition. `ironclaw_host_api` must not import
 Axum, own route mounting, implement bearer/session/OIDC checks, apply policy
-engines, dispatch product workflow, or execute runtime effects.
+engines, dispatch product actions, or execute runtime effects.
 
 ---
 

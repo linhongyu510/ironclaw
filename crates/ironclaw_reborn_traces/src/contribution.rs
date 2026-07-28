@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalTraceSubmission*->NodeTraceSubmission* Bucket-3 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Privacy-preserving trace contribution envelopes.
 //!
 //! This module is intentionally separate from replay traces. Replay fixtures
@@ -46,7 +47,7 @@ pub const TRACE_REMOTE_REQUEST_TIMEOUT_ENV: &str = "IRONCLAW_TRACE_REMOTE_REQUES
 pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Default page size for an account-traces fetch when the caller passes no
-/// explicit limit. Bounds the initial WebUI/facade slice so `None` never
+/// explicit limit. Bounds the initial WebUI/service slice so `None` never
 /// requests unbounded history; full history is a future paginated flow.
 const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 200;
 /// Hard ceiling on the account-traces page size; larger requests are clamped so
@@ -101,6 +102,11 @@ pub struct IronclawTraceMetadata {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_flags: BTreeMap<String, String>,
     pub channel: TraceChannel,
+    /// The originating extension/surface id when `channel` is
+    /// [`TraceChannel::Extension`] (generic origin data replacing the retired
+    /// concrete variants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
 }
@@ -110,10 +116,15 @@ pub struct IronclawTraceMetadata {
 pub enum TraceChannel {
     Web,
     Cli,
-    Telegram,
-    Slack,
     Routine,
     Other,
+    /// An extension-served channel. The concrete identity lives in
+    /// `IronclawTraceMetadata::channel_origin` (data, never an enum variant).
+    /// `#[serde(other)]` also absorbs historical concrete tags and any
+    /// future unknown tag — persisted envelopes always deserialize (LLM data
+    /// is never dropped to a parse quarantine over a channel name).
+    #[serde(other)]
+    Extension,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1597,6 +1608,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: Some(trace.model_name.clone()),
             },
             consent: ConsentMetadata {
@@ -1725,6 +1739,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: None,
             },
             consent: ConsentMetadata {
@@ -2906,10 +2923,9 @@ fn channel_label(channel: TraceChannel) -> &'static str {
     match channel {
         TraceChannel::Web => "web",
         TraceChannel::Cli => "cli",
-        TraceChannel::Telegram => "telegram",
-        TraceChannel::Slack => "slack",
         TraceChannel::Routine => "routine",
         TraceChannel::Other => "other",
+        TraceChannel::Extension => "extension",
     }
 }
 
@@ -2926,7 +2942,9 @@ fn tool_category_for(tool_name: &str) -> String {
         "workspace".to_string()
     } else if lower.contains("memory") || lower.contains("search") {
         "retrieval".to_string()
-    } else if lower.contains("calendar") || lower.contains("email") || lower.contains("slack") {
+    } else if lower.contains("calendar") || lower.contains("email") || lower.contains('.') {
+        // Namespaced capability ids (`<extension>.<tool>`) are external-app
+        // tools by construction.
         "external_app".to_string()
     } else {
         "other".to_string()
@@ -3839,12 +3857,12 @@ fn path_to_string(path: PathBuf) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LocalTraceSubmissionRecord {
+pub struct NodeTraceSubmissionRecord {
     pub submission_id: Uuid,
     pub trace_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    pub status: LocalTraceSubmissionStatus,
+    pub status: NodeTraceSubmissionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3863,7 +3881,7 @@ pub struct LocalTraceSubmissionRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credit_events: Vec<TraceCreditEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<LocalTraceSubmissionHistoryEvent>,
+    pub history: Vec<NodeTraceSubmissionHistoryEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_credit_notice_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "TraceCreditNoticeState::is_empty")]
@@ -3871,9 +3889,9 @@ pub struct LocalTraceSubmissionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LocalTraceSubmissionHistoryEvent {
+pub struct NodeTraceSubmissionHistoryEvent {
     pub event_id: Uuid,
-    pub kind: LocalTraceSubmissionHistoryKind,
+    pub kind: NodeTraceSubmissionHistoryKind,
     pub occurred_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_status: Option<String>,
@@ -3885,7 +3903,7 @@ pub struct LocalTraceSubmissionHistoryEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LocalTraceSubmissionHistoryKind {
+pub enum NodeTraceSubmissionHistoryKind {
     StatusSync,
 }
 
@@ -3955,14 +3973,14 @@ pub struct TraceCreditNoticeDeliveryAttempt {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LocalTraceSubmissionStatus {
+pub enum NodeTraceSubmissionStatus {
     Submitted,
     Revoked,
     Expired,
     Purged,
 }
 
-impl LocalTraceSubmissionStatus {
+impl NodeTraceSubmissionStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Submitted => "submitted",
@@ -5823,7 +5841,7 @@ impl std::fmt::Display for ContributionHttpError {
 impl std::error::Error for ContributionHttpError {}
 
 /// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
-/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// (WebUI services, CLI). Applies the same hardening as the other direct
 /// clients in this module: per-request pinned DNS resolution with
 /// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
 /// no redirects, the request's own timeout, and a body read bounded DURING
@@ -6994,7 +7012,7 @@ pub async fn mint_account_login_link_via_sink(
 }
 
 /// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
-/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// for WebUI services and other trusted product surfaces: mints the one-time
 /// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
 /// private-IP filtering) instead of a host-egress sink.
 ///
@@ -7211,12 +7229,12 @@ pub async fn fetch_account_traces_via_sink(
 /// the crate-local hardened reqwest client (the direct/CLI path, no host-egress
 /// sink required).
 ///
-/// This is the facade-safe counterpart to [`fetch_account_traces_via_sink`]: it
+/// This is the service-safe counterpart to [`fetch_account_traces_via_sink`]: it
 /// uses the [`pinned_trace_commons_http_client`] (private-IP-filtered, pinned
 /// DNS resolution — the same hardening as the upload-claim issuer request), so
 /// a rebinding host cannot redirect this bearer-authenticated GET to an
 /// internal address, without coupling the caller to a host-egress
-/// `ContributionHttpSink`. Use this from WebUI facades and any non-agent
+/// `ContributionHttpSink`. Use this from WebUI services and any non-agent
 /// surface. Use [`fetch_account_traces_via_sink`] from the agent runtime where
 /// all egress must flow through `RuntimeHttpEgress`.
 ///
@@ -7579,11 +7597,11 @@ fn record_submitted_trace_envelope_for_scope_unlocked(
 
     upsert_local_trace_record_for_scope(
         scope,
-        LocalTraceSubmissionRecord {
+        NodeTraceSubmissionRecord {
             submission_id: envelope.submission_id,
             trace_id: envelope.trace_id,
             endpoint: Some(endpoint.to_string()),
-            status: LocalTraceSubmissionStatus::Submitted,
+            status: NodeTraceSubmissionStatus::Submitted,
             server_status: Some(receipt.status),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -7867,7 +7885,7 @@ async fn sync_remote_trace_submission_records_for_scope_with_credential_provider
         let records = read_local_trace_records_for_scope(scope)?;
         records
             .iter()
-            .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+            .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
             .map(|record| record.submission_id)
             .collect::<Vec<_>>()
     };
@@ -7913,7 +7931,7 @@ async fn sync_remote_trace_submission_records_for_scope_unlocked_with_target(
     let records = read_local_trace_records_for_scope(scope)?;
     let submission_ids = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
         .map(|record| record.submission_id)
         .collect::<Vec<_>>();
     if submission_ids.is_empty() {
@@ -8127,12 +8145,12 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
             record.credit_explanation = explanation;
         }
         if update.status == "revoked" {
-            record.status = LocalTraceSubmissionStatus::Revoked;
+            record.status = NodeTraceSubmissionStatus::Revoked;
             record.revoked_at.get_or_insert(now);
         } else if update.status == "expired" {
-            record.status = LocalTraceSubmissionStatus::Expired;
+            record.status = NodeTraceSubmissionStatus::Expired;
         } else if update.status == "purged" {
-            record.status = LocalTraceSubmissionStatus::Purged;
+            record.status = NodeTraceSubmissionStatus::Purged;
         }
 
         if status_changed || credit_changed || explanation_changed {
@@ -8155,9 +8173,9 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
                 reason: sync_reason,
                 created_at: now,
             });
-            let history_event = LocalTraceSubmissionHistoryEvent {
+            let history_event = NodeTraceSubmissionHistoryEvent {
                 event_id: Uuid::new_v4(),
-                kind: LocalTraceSubmissionHistoryKind::StatusSync,
+                kind: NodeTraceSubmissionHistoryKind::StatusSync,
                 occurred_at: now,
                 server_status: Some(update.status.clone()),
                 credit_delta,
@@ -8227,7 +8245,7 @@ fn safe_remote_credit_explanation_line(line: &str) -> String {
 
 pub fn read_local_trace_records_for_scope(
     scope: Option<&str>,
-) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
     let path = trace_records_path(scope);
     if !path.exists() {
         return Ok(Vec::new());
@@ -8376,7 +8394,7 @@ pub fn scoped_credit_view(scope: &str) -> anyhow::Result<ScopedCreditView> {
     Ok(view)
 }
 
-pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSummary {
+pub fn trace_credit_summary(records: &[NodeTraceSubmissionRecord]) -> CreditSummary {
     let report = trace_credit_report(records);
     CreditSummary {
         submissions_total: report.submissions_total,
@@ -8391,21 +8409,21 @@ pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSum
     }
 }
 
-pub fn trace_credit_report(records: &[LocalTraceSubmissionRecord]) -> TraceCreditReport {
+pub fn trace_credit_report(records: &[NodeTraceSubmissionRecord]) -> TraceCreditReport {
     let submissions_submitted = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
         .count() as u32;
     let submissions_revoked = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Revoked)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Revoked)
         .count() as u32;
     let submissions_expired = records
         .iter()
         .filter(|record| {
             matches!(
                 record.status,
-                LocalTraceSubmissionStatus::Expired | LocalTraceSubmissionStatus::Purged
+                NodeTraceSubmissionStatus::Expired | NodeTraceSubmissionStatus::Purged
             )
         })
         .count() as u32;
@@ -8480,7 +8498,7 @@ pub fn trace_credit_report(records: &[LocalTraceSubmissionRecord]) -> TraceCredi
     }
 }
 
-fn local_trace_server_status_matches(record: &LocalTraceSubmissionRecord, expected: &str) -> bool {
+fn local_trace_server_status_matches(record: &NodeTraceSubmissionRecord, expected: &str) -> bool {
     record
         .server_status
         .as_deref()
@@ -8489,7 +8507,7 @@ fn local_trace_server_status_matches(record: &LocalTraceSubmissionRecord, expect
 }
 
 fn trace_credit_report_explanation_lines(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     submissions_accepted: u32,
     submissions_quarantined: u32,
     submissions_rejected: u32,
@@ -8520,7 +8538,7 @@ fn trace_credit_report_explanation_lines(
 }
 
 fn recent_trace_credit_explanations(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     limit: usize,
 ) -> Vec<String> {
     records
@@ -8740,7 +8758,7 @@ fn parse_trace_submission_receipt(body: &str) -> Option<TraceSubmissionReceipt> 
 
 fn upsert_local_trace_record_for_scope(
     scope: Option<&str>,
-    record: LocalTraceSubmissionRecord,
+    record: NodeTraceSubmissionRecord,
 ) -> anyhow::Result<()> {
     let mut records = read_local_trace_records_for_scope(scope)?;
     if let Some(existing) = records
@@ -8763,18 +8781,18 @@ fn mark_local_trace_revoked_for_scope_unlocked(
     let mut found = false;
     for record in &mut records {
         if record.submission_id == submission_id {
-            record.status = LocalTraceSubmissionStatus::Revoked;
+            record.status = NodeTraceSubmissionStatus::Revoked;
             record.revoked_at = Some(now);
             record.credit_notice_state = TraceCreditNoticeState::default();
             found = true;
         }
     }
     if !found {
-        records.push(LocalTraceSubmissionRecord {
+        records.push(NodeTraceSubmissionRecord {
             submission_id,
             trace_id: Uuid::nil(),
             endpoint: None,
-            status: LocalTraceSubmissionStatus::Revoked,
+            status: NodeTraceSubmissionStatus::Revoked,
             server_status: None,
             submitted_at: None,
             revoked_at: Some(now),
@@ -8927,7 +8945,7 @@ fn snooze_trace_credit_notice_for_scope_until_at_unlocked(
 }
 
 fn trace_credit_notice_due_for_records(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     interval_hours: u32,
     now: DateTime<Utc>,
 ) -> Option<(CreditSummary, String)> {
@@ -8989,7 +9007,7 @@ fn trace_credit_notice_due_for_records(
     }
 }
 
-fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Option<String> {
+fn trace_credit_notice_fingerprint(records: &[NodeTraceSubmissionRecord]) -> Option<String> {
     let mut parts = Vec::new();
     for record in records
         .iter()
@@ -9864,13 +9882,13 @@ fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, 
     )
 }
 
-fn trace_record_noticeable(record: &LocalTraceSubmissionRecord) -> bool {
-    record.status == LocalTraceSubmissionStatus::Submitted || !record.credit_events.is_empty()
+fn trace_record_noticeable(record: &NodeTraceSubmissionRecord) -> bool {
+    record.status == NodeTraceSubmissionStatus::Submitted || !record.credit_events.is_empty()
 }
 
 fn write_local_trace_records_for_scope(
     scope: Option<&str>,
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
 ) -> anyhow::Result<()> {
     write_json_file(
         &trace_records_path(scope),
@@ -10318,6 +10336,84 @@ mod tests {
                 TraceContributionAcceptance::ManualSubmit
             ),
             Ok(())
+        );
+    }
+
+    /// Lane-2 safety pin (extension-runtime DEL-8). The trace redaction
+    /// classifier keys the payload-redaction profile (and the external-write
+    /// side-effect level) off tool-name keywords; the vendor keywords are a
+    /// genuine safety DENYLIST, not extension routing. It is deliberately a
+    /// SUPERSET of the bundled package inventory — it must also cover
+    /// non-package messaging/issue-tracker tools such as signal, discord, and
+    /// gitlab — so it cannot be sourced from the inventory without weakening
+    /// redaction. This locks the mapping so a future "de-hardcode the vendor
+    /// names" cleanup cannot silently drop a keyword and stop redacting a
+    /// tool's sensitive payload. The `contribution.rs` PATH_TERM_COLLISIONS
+    /// carve-out in
+    /// `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`
+    /// documents why the names stay here.
+    #[test]
+    fn tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing() {
+        // Package-vendor keywords select the profile whose rules redact that
+        // payload shape.
+        assert!(matches!(
+            tool_payload_profile("slack.send_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gmail.send_email"),
+            Some(ToolPayloadProfile::Email)
+        ));
+        assert!(matches!(
+            tool_payload_profile("github.create_issue"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+        // Non-inventory keywords must ALSO classify — dropping them (as
+        // sourcing the set from the package inventory would) silently stops
+        // redacting those tools' payloads.
+        assert!(matches!(
+            tool_payload_profile("signal.send"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("discord.post_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gitlab.open_merge_request"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+
+        // A `slack`-named send is an external write (the safety signal),
+        // distinct from a local write.
+        assert!(matches!(
+            classify_tool_side_effect("slack.send_message"),
+            SideEffectLevel::ExternalWrite
+        ));
+        assert!(matches!(
+            classify_tool_side_effect("file.write"),
+            SideEffectLevel::LocalWrite
+        ));
+
+        // Drive the production caller: a messaging tool's content field is
+        // redacted; a tool the classifier does not recognize passes through
+        // untouched (the control proving the keyword gates the redaction).
+        let payload = serde_json::json!({ "message": "meet me at 5", "channel": "C42" });
+        let mut report = RedactionReport::default();
+        let redacted =
+            redact_tool_specific_payload(Some("slack.send_message"), &payload, &mut report);
+        assert_ne!(
+            redacted.get("message"),
+            payload.get("message"),
+            "a messaging tool's message content must be redacted"
+        );
+
+        let mut report = RedactionReport::default();
+        let untouched =
+            redact_tool_specific_payload(Some("weather.forecast"), &payload, &mut report);
+        assert_eq!(
+            untouched, payload,
+            "a tool with no payload profile must pass through unredacted"
         );
     }
 
@@ -11461,12 +11557,12 @@ mod tests {
         credit_points_final: Option<f32>,
         last_credit_notice_at: Option<DateTime<Utc>>,
         credit_explanation: Vec<String>,
-    ) -> LocalTraceSubmissionRecord {
-        LocalTraceSubmissionRecord {
+    ) -> NodeTraceSubmissionRecord {
+        NodeTraceSubmissionRecord {
             submission_id: Uuid::new_v4(),
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: LocalTraceSubmissionStatus::Submitted,
+            status: NodeTraceSubmissionStatus::Submitted,
             server_status: Some("accepted".to_string()),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -11563,8 +11659,8 @@ mod tests {
             .expect("scope a records write");
         write_local_trace_records_for_scope(
             Some(&scope_b),
-            &[LocalTraceSubmissionRecord {
-                status: LocalTraceSubmissionStatus::Revoked,
+            &[NodeTraceSubmissionRecord {
+                status: NodeTraceSubmissionStatus::Revoked,
                 revoked_at: Some(Utc::now()),
                 ..submitted_credit_record(
                     0.0,
@@ -12218,11 +12314,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12278,11 +12374,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12336,11 +12432,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://private.trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12409,11 +12505,11 @@ mod tests {
         .expect("policy writes");
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12477,11 +12573,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12536,11 +12632,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12593,11 +12689,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12631,7 +12727,7 @@ mod tests {
         .expect("status sync applies");
 
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Expired);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Expired);
         assert_eq!(trace_credit_summary(&records).submissions_expired, 1);
         assert!(records[0].last_credit_notice_at.is_none());
     }
@@ -12644,11 +12740,11 @@ mod tests {
         let rejected_id = Uuid::new_v4();
         let sync_event_at = submitted_at + chrono::Duration::minutes(5);
         let records = vec![
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: accepted_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(submitted_at),
                 revoked_at: None,
@@ -12686,11 +12782,11 @@ mod tests {
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: quarantined_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("quarantined".to_string()),
                 submitted_at: Some(submitted_at + chrono::Duration::minutes(2)),
                 revoked_at: None,
@@ -12706,11 +12802,11 @@ mod tests {
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: rejected_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("rejected".to_string()),
                 submitted_at: Some(submitted_at + chrono::Duration::minutes(1)),
                 revoked_at: None,
@@ -12770,11 +12866,11 @@ mod tests {
 
     #[test]
     fn trace_credit_summary_uses_richer_report_totals_without_changing_shape() {
-        let record = LocalTraceSubmissionRecord {
+        let record = NodeTraceSubmissionRecord {
             submission_id: Uuid::new_v4(),
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: LocalTraceSubmissionStatus::Purged,
+            status: NodeTraceSubmissionStatus::Purged,
             server_status: Some("expired".to_string()),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -13000,11 +13096,11 @@ mod tests {
 
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id: Uuid::new_v4(),
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -13667,11 +13763,11 @@ mod tests {
         });
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -13711,7 +13807,7 @@ mod tests {
             ]
         );
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Revoked);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Revoked);
         assert!(records[0].revoked_at.is_some());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
@@ -13742,11 +13838,11 @@ mod tests {
         });
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -13785,7 +13881,7 @@ mod tests {
         assert!(!error.to_string().contains("stale-upload-claim"));
         assert!(!error.to_string().contains("fresh-upload-claim"));
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Submitted);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Submitted);
         assert!(records[0].revoked_at.is_none());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
@@ -14829,11 +14925,11 @@ mod tests {
 
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id: Uuid::new_v4(),
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -16650,7 +16746,7 @@ mod tests {
             );
         }
 
-        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // ── direct (WebUI service) variant ────────────────────────────────────
         // Same enrollment, no sink: the hosted-WebUI path mints through the
         // pinned direct client. The link is delivered ONLY in the return value
         // (the authenticated HTTP response) — it must never be persisted to a

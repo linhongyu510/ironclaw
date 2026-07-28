@@ -14,19 +14,21 @@ use ironclaw_capabilities::{
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
+    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
+    SecretStorePort,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
@@ -38,7 +40,7 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 }
 
 fn obligation_services(
-    secret_store: Arc<InMemorySecretStore>,
+    secret_store: Arc<SecretStore<InMemoryBackend>>,
     governor: Arc<InMemoryResourceGovernor>,
 ) -> BuiltinObligationServices {
     BuiltinObligationServices::new(Arc::new(InMemoryAuditSink::new()), secret_store, governor)
@@ -582,7 +584,7 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
 #[tokio::test]
 async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -608,7 +610,7 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_network_policy_on_abort() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -645,7 +647,7 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
 #[tokio::test]
 async fn network_obligation_handoff_isolates_agent_scope() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -671,7 +673,7 @@ async fn network_obligation_handoff_isolates_agent_scope() {
 
 #[tokio::test]
 async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor);
     let handler = services.obligation_handler();
@@ -749,7 +751,7 @@ async fn builtin_obligation_handler_fails_closed_when_secret_disappears_after_pr
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor);
     let handler = services.obligation_handler();
@@ -796,7 +798,7 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
 
 #[tokio::test]
 async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_releasing_reservation() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor.clone());
     let handler = services.obligation_handler();
@@ -842,7 +844,7 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
 
 #[tokio::test]
 async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let services = obligation_services(
         secret_store.clone(),
         Arc::new(InMemoryResourceGovernor::new()),
@@ -980,7 +982,9 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
 #[tokio::test]
 async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_estimate() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(PanicDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
+    }));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceResourceCeiling {
@@ -997,19 +1001,18 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
     .with_builtin_obligation_handler();
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "must not dispatch"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Resource);
+            assert_eq!(failure.kind, FailureKind::Resource);
         }
         other => panic!("expected failed outcome, got {other:?}"),
     }
@@ -1018,7 +1021,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
 #[tokio::test]
 async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceResourceCeiling {
@@ -1042,12 +1045,11 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
     .with_builtin_obligation_handler();
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default().set_usd(1.into()),
             json!({"message": "obligated"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1058,7 +1060,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
 #[tokio::test]
 async fn default_host_runtime_installs_configured_obligation_handler() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore]));
     let audit = Arc::new(InMemoryAuditSink::new());
@@ -1073,12 +1075,11 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
     .with_obligation_handler(handler);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "obligated"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1114,46 +1115,21 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
-#[derive(Default)]
-struct RecordingDispatcher;
-
-struct PanicDispatcher;
-
-#[async_trait]
-impl CapabilityDispatcher for PanicDispatcher {
-    async fn dispatch_json(
-        &self,
-        _request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: ExtensionId::new("echo").unwrap(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: request
-                    .resource_reservation
-                    .as_ref()
-                    .map(|reservation| reservation.id)
-                    .unwrap_or_default(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id(),
+        provider: ExtensionId::new("echo").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 
@@ -1226,6 +1202,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -1242,6 +1219,8 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1264,18 +1243,6 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
 
 fn capability_id() -> CapabilityId {
     CapabilityId::new("echo.say").unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::sandbox(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }
 
 #[derive(Debug)]
@@ -1327,22 +1294,29 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
 }
 
 #[derive(Debug)]
+// TOCTOU domain-state fake, not an I/O fault — cannot move to
+// `ironclaw_filesystem::FaultInjecting`. The "present at preflight, absent at
+// lease" transition is coupled inside a single `handler.prepare()` call (the
+// delete fires between `metadata` and `lease_once`, with no external seam to
+// interleave), and it needs the second read to return `Ok(None)` — a
+// genuinely-absent secret yielding `UnknownSecret` — which a filesystem
+// backend fault (only ever an `Err`) cannot reproduce.
 struct SecretDisappearsAfterPreflight {
-    inner: InMemorySecretStore,
+    inner: SecretStore<InMemoryBackend>,
     metadata_calls: AtomicUsize,
 }
 
 impl SecretDisappearsAfterPreflight {
     fn new() -> Self {
         Self {
-            inner: InMemorySecretStore::new(),
+            inner: SecretStore::ephemeral(),
             metadata_calls: AtomicUsize::new(0),
         }
     }
 }
 
 #[async_trait]
-impl SecretStore for SecretDisappearsAfterPreflight {
+impl SecretStorePort for SecretDisappearsAfterPreflight {
     async fn put(
         &self,
         scope: ResourceScope,
@@ -1415,7 +1389,7 @@ impl SecretStore for SecretDisappearsAfterPreflight {
 #[tokio::test]
 async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     // Services built without a credential_account_resolver — obligation must hard-fail.
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),
@@ -1428,7 +1402,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1454,7 +1428,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
 #[tokio::test]
 async fn inject_credential_account_once_fails_when_resolver_returns_auth_required() {
     // Services wired with a resolver that always returns AuthRequired.
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),
@@ -1469,7 +1443,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: provider_scopes.clone(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1507,7 +1481,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     // obligation is satisfied, and the staged secret appears in the injection store.
     let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
     let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     // Seed the store with material under the access handle.
     secret_store
         .put(
@@ -1533,7 +1507,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot.clone(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1560,7 +1534,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let mut target_scope = source_scope.clone();
     target_scope.project_id = Some(ProjectId::new("project-a").unwrap());
     target_scope.invocation_id = InvocationId::new();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     secret_store
         .put(
             source_scope.clone(),
@@ -1587,7 +1561,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot,
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1615,7 +1589,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     // staged-credential semantics so the runtime auth gate fires consistently
     // regardless of which staging lane (obligation vs stager) discovered the gap.
     let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new()); // empty store
+    let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral()); // empty store
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),
@@ -1629,7 +1603,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1678,3 +1652,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

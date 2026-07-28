@@ -52,7 +52,7 @@ pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunE
 /// Minimal in-memory test double recording one `(scope, run_id, gate_ref,
 /// mode)` tuple — enough for the two real-evidence tests in `mod.rs`
 /// (accept a matching blocking-mode gate, reject a background-mode one)
-/// without pulling in the real filesystem-backed `FilesystemAwaitEdgeStore`
+/// without pulling in the real filesystem-backed `AwaitEdgeStore`
 /// (feature-gated behind `filesystem-goal-store`; this test module is
 /// `#[cfg(test)]`-only and must stay compilable without that feature).
 pub(super) struct RecordingAwaitDependentRunEvidence {
@@ -148,6 +148,7 @@ pub(super) fn running_run_state(
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -283,7 +284,7 @@ pub(super) fn completed_exit(
         reply_message_refs,
         result_refs: vec![],
         final_checkpoint_id,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: test_exit_id(),
     })
 }
@@ -390,6 +391,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -672,6 +674,7 @@ fn state_for_mapping(
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,

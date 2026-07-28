@@ -16,9 +16,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostPortCatalog, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
-    PermissionMode, RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, PermissionMode,
+    RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
@@ -29,7 +29,7 @@ use ironclaw_mcp::{
     StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
@@ -81,7 +81,7 @@ pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -124,10 +124,10 @@ pub(super) fn mock_mcp_extension_package(
             url: Some(mcp_url.to_string()),
         },
         host_apis: Vec::new(),
+        host_api_surfaces: Vec::new(),
         hooks: Vec::new(),
         capabilities: vec![CapabilityManifest {
             id: CapabilityId::new(capability_id)?,
-            implements: Vec::new(),
             description: "Mock MCP capability".to_string(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
@@ -135,14 +135,16 @@ pub(super) fn mock_mcp_extension_package(
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
-            output_schema_ref: CapabilityProfileSchemaRef::new(
+            output_schema_ref: Some(CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.output.v1.json",
-            )?,
+            )?),
             prompt_doc_ref: None,
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             resource_profile: None,
+            origin_gate_matrix: None,
         }],
     };
     // Inline schema so surface_descriptor returns Ok(descriptor) without
@@ -159,7 +161,9 @@ pub(super) fn mock_mcp_extension_package(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(
@@ -202,15 +206,16 @@ description = "Mock MCP capability"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 visibility = "model"
+origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
 input_schema_ref = "schemas/mock-mcp/mock.input.v1.json"
 output_schema_ref = "schemas/mock-mcp/mock.output.v1.json"
 "#
     );
     let contracts = ironclaw_host_runtime::default_host_api_contract_registry()?;
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &raw_manifest,
         ManifestSource::InstalledLocal,
-        &HostPortCatalog::default(),
+        &ironclaw_host_runtime::default_host_port_catalog()?,
         &contracts,
     )?;
     let package = ExtensionPackage::from_manifest(
