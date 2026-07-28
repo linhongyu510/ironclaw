@@ -154,76 +154,6 @@ impl DiskFilesystem {
         Ok(())
     }
 
-    /// Dynamically registers a mount rooted exactly *at* `virtual_root`, if
-    /// one is not already registered there — idempotent, so a repeated call
-    /// for the same `virtual_root` (the usual shape: called on every request
-    /// for a given scope) is a cheap no-op after the first. Unlike
-    /// [`mount_local`](Self::mount_local) (boot-time only, exclusive
-    /// `&mut self`), this takes `&self` so it can be called per request from
-    /// behind a shared `Arc<DiskFilesystem>`.
-    ///
-    /// This is the mechanism that closes a same-storage-root cross-tenant/
-    /// cross-user symlink escape for a mount whose containment root is wider
-    /// than the subtree a specific caller is actually granted (e.g. `/projects`
-    /// mounted once over the whole local-dev storage root, while a caller's
-    /// `/skills` grant only authorizes `/projects/tenants/<t>/users/<u>/skills`).
-    /// The composition layer already knows that exact boundary — it is the
-    /// `MountGrant::target` a scope-aware `MountView` builder computes from
-    /// typed `ResourceScope` fields, not something this crate derives by
-    /// counting path segments. Registering a *second*, narrower mount at that
-    /// literal target makes [`resolve_mount_target`]'s existing
-    /// longest-prefix-wins matching pick it over the wide mount for anything
-    /// under it, so `RESOLVE_BENEATH` (or the portable fallback) enforces
-    /// containment against the caller's own subtree — exactly that subtree,
-    /// no more — rather than the shared parent every caller's subtree lives
-    /// under.
-    ///
-    /// No host path is taken as input: `virtual_root` is resolved through the
-    /// *existing* (necessarily wider) mount that already covers it, via the
-    /// same fd-rooted [`descend_creating`] every other write path in this
-    /// crate uses (creating the directory if this is a brand-new leaf's first
-    /// access, exactly like `descend_creating`'s other callers) — never a
-    /// second, independently-resolved `std::fs` path lookup. The resulting,
-    /// already-open fd becomes the new mount's `root_fd` directly.
-    pub async fn ensure_scoped_mount(
-        &self,
-        virtual_root: VirtualPath,
-    ) -> Result<(), FilesystemError> {
-        if self.has_mount(&virtual_root) {
-            return Ok(());
-        }
-        let target = self.resolve_mount_target(&virtual_root)?;
-        let path = virtual_root.clone();
-        let anchor_fd = run_blocking(path.clone(), FilesystemOperation::MountLocal, move || {
-            descend_creating(target.root_fd.as_fd(), &target.components).map_err(|error| {
-                resolve_error_to_filesystem_error(&path, FilesystemOperation::MountLocal, error)
-            })
-        })
-        .await?;
-
-        let mut mounts = self
-            .mounts
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Re-check under the write lock: two concurrent first-callers for
-        // the same scope must not both push a mount for the same
-        // `virtual_root` (that would leave two entries with the same
-        // longest-prefix key — harmless for correctness since both point at
-        // the same host directory, but wasteful and worth avoiding).
-        if mounts
-            .iter()
-            .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
-        {
-            return Ok(());
-        }
-        mounts.push(LocalMount {
-            virtual_root,
-            root_fd: Arc::new(anchor_fd),
-            leaf_scoped: false,
-        });
-        Ok(())
-    }
-
     fn has_mount(&self, virtual_root: &VirtualPath) -> bool {
         let mounts = self
             .mounts
@@ -692,6 +622,76 @@ impl RootFilesystem for DiskFilesystem {
                 })
         })
         .await
+    }
+
+    /// Dynamically registers a mount rooted exactly *at* `virtual_root`, if
+    /// one is not already registered there — idempotent, so a repeated call
+    /// for the same `virtual_root` (the usual shape: called on every request
+    /// for a given scope, now automatically via
+    /// [`ScopedFilesystem`](crate::ScopedFilesystem)'s permission-resolution
+    /// path) is a cheap no-op after the first. Unlike
+    /// [`mount_local`](Self::mount_local) (boot-time only, exclusive
+    /// `&mut self`), this takes `&self` so it can be called per request from
+    /// behind a shared `Arc<DiskFilesystem>`.
+    ///
+    /// This is the mechanism that closes a same-storage-root cross-tenant/
+    /// cross-user symlink escape for a mount whose containment root is wider
+    /// than the subtree a specific caller is actually granted (e.g. `/projects`
+    /// mounted once over the whole local-dev storage root, while a caller's
+    /// `/skills` grant only authorizes `/projects/tenants/<t>/users/<u>/skills`).
+    /// The composition layer already knows that exact boundary — it is the
+    /// `MountGrant::target` a scope-aware `MountView` builder computes from
+    /// typed `ResourceScope` fields, not something this crate derives by
+    /// counting path segments. Registering a *second*, narrower mount at that
+    /// literal target makes [`resolve_mount_target`]'s existing
+    /// longest-prefix-wins matching pick it over the wide mount for anything
+    /// under it, so `RESOLVE_BENEATH` (or the portable fallback) enforces
+    /// containment against the caller's own subtree — exactly that subtree,
+    /// no more — rather than the shared parent every caller's subtree lives
+    /// under.
+    ///
+    /// No host path is taken as input: `virtual_root` is resolved through the
+    /// *existing* (necessarily wider) mount that already covers it, via the
+    /// same fd-rooted [`descend_creating`] every other write path in this
+    /// crate uses (creating the directory if this is a brand-new leaf's first
+    /// access, exactly like `descend_creating`'s other callers) — never a
+    /// second, independently-resolved `std::fs` path lookup. The resulting,
+    /// already-open fd becomes the new mount's `root_fd` directly.
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        if self.has_mount(virtual_root) {
+            return Ok(());
+        }
+        let virtual_root = virtual_root.clone();
+        let target = self.resolve_mount_target(&virtual_root)?;
+        let path = virtual_root.clone();
+        let anchor_fd = run_blocking(path.clone(), FilesystemOperation::MountLocal, move || {
+            descend_creating(target.root_fd.as_fd(), &target.components).map_err(|error| {
+                resolve_error_to_filesystem_error(&path, FilesystemOperation::MountLocal, error)
+            })
+        })
+        .await?;
+
+        let mut mounts = self
+            .mounts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Re-check under the write lock: two concurrent first-callers for
+        // the same scope must not both push a mount for the same
+        // `virtual_root` (that would leave two entries with the same
+        // longest-prefix key — harmless for correctness since both point at
+        // the same host directory, but wasteful and worth avoiding).
+        if mounts
+            .iter()
+            .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
+        {
+            return Ok(());
+        }
+        mounts.push(LocalMount {
+            virtual_root,
+            root_fd: Arc::new(anchor_fd),
+            leaf_scoped: false,
+        });
+        Ok(())
     }
 }
 

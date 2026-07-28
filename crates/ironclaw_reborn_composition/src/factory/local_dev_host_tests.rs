@@ -313,7 +313,7 @@ async fn skills_shared_mount_cross_tenant_symlink_read() {
             .expect("virtual path");
 
     filesystem
-        .ensure_scoped_mount(grant.target.clone())
+        .ensure_scoped_mount(&grant.target)
         .await
         .expect("anchor mount for tenant A's own skills leaf");
 
@@ -402,7 +402,7 @@ async fn skills_shared_mount_same_tenant_cross_user_symlink_read() {
             .expect("virtual path");
 
     filesystem
-        .ensure_scoped_mount(grant.target.clone())
+        .ensure_scoped_mount(&grant.target)
         .await
         .expect("anchor mount for user A's own skills leaf");
 
@@ -423,6 +423,118 @@ async fn skills_shared_mount_same_tenant_cross_user_symlink_read() {
                 "SAME-TENANT CROSS-USER ESCAPE CONFIRMED: user A's /skills grant read user B's \
                  data through a symlink: {:?}",
                 String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+}
+
+/// The deliverable regression: the two tests above prove `ensure_scoped_mount`
+/// itself closes the escape, but they call it directly on a hand-built
+/// `DiskFilesystem` — never the production entry point. Production skill
+/// reads go through `ScopedSkillManagementPort::read_content_for_scope`,
+/// which builds a `SkillManagementContext` wrapping the filesystem in
+/// `ScopedFilesystem` and never touched `ensure_scoped_mount` before this
+/// fix (`ScopedSkillManagementPort`'s only filesystem handle is a
+/// type-erased `Arc<dyn RootFilesystem>`, which has zero production callers
+/// of the primitive — see the fix commit message). This test drives that
+/// exact production call chain — `ScopedSkillManagementPort` ->
+/// `SkillManagementContext` -> `ScopedFilesystem` -> `CompositeRootFilesystem`
+/// -> `DiskFilesystem` — with no direct `ensure_scoped_mount` call anywhere
+/// in the test itself.
+///
+/// Before the `scoped.rs` wiring fix, this test is RED: tenant A's `evil`
+/// skill resolves through a relative symlink into tenant B's leaf and
+/// `read_content_for_scope` returns tenant B's real skill content. After the
+/// fix, `ScopedFilesystem::resolve_with_permission` calls
+/// `ensure_scoped_mount(&grant.target)` on every resolution (including the
+/// `stat`/`read_bytes_bounded` calls `read_skill_content` makes), narrowing
+/// containment to tenant A's own leaf before either syscall — the escape is
+/// rejected and the call errors instead of leaking tenant B's bytes.
+#[tokio::test]
+async fn skills_shared_mount_cross_tenant_symlink_read_through_scoped_skill_management_port() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    std::fs::create_dir_all(&root).expect("root");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root");
+    std::fs::create_dir_all(root.join("system/extensions")).expect("system extensions root");
+    std::fs::create_dir_all(root.join("system/skills")).expect("system skills root");
+
+    let filesystem: std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem> =
+        std::sync::Arc::new(
+            local_dev_project_filesystem(&root, &workspace_root, None)
+                .expect("local-dev project filesystem, production shape"),
+        );
+
+    let scope_a = owner_scope_from_runtime_identity(
+        ironclaw_host_api::UserId::new("user-a").expect("user id"),
+        ironclaw_host_api::TenantId::new("tenant-a").expect("tenant id"),
+        ironclaw_host_api::AgentId::new("agent").expect("agent id"),
+    );
+
+    let skills_dir_for = |scope: &ironclaw_host_api::ResourceScope| {
+        root.join("tenants")
+            .join(scope.tenant_id.as_str())
+            .join("users")
+            .join(scope.user_id.as_str())
+            .join("skills")
+    };
+    let skills_a = skills_dir_for(&scope_a);
+    let skills_b = root
+        .join("tenants")
+        .join("tenant-b")
+        .join("users")
+        .join("user-b")
+        .join("skills");
+    std::fs::create_dir_all(&skills_a).expect("tenant a skills dir");
+    let secret_skill_dir = skills_b.join("secret-skill");
+    std::fs::create_dir_all(&secret_skill_dir).expect("tenant b secret skill dir");
+    std::fs::write(
+        secret_skill_dir.join("SKILL.md"),
+        b"TENANT-B-SECRET-SKILL-CONTENT",
+    )
+    .expect("tenant b secret skill file");
+
+    // Tenant A's own skills leaf gets a *real* directory named "evil"
+    // (`validate_skill_name` requires a plain alnum/`.`/`-`/`_` name, so the
+    // escape cannot itself be the leaf-named entry) containing a symlinked
+    // `SKILL.md`. `evil/` is one level deeper than `skills_a` itself, so
+    // reaching `tenants` from inside it takes 5 `..` (vs. the 4 the sibling
+    // tests above use directly inside `skills_a`).
+    #[cfg(unix)]
+    {
+        let evil_dir = skills_a.join("evil");
+        std::fs::create_dir_all(&evil_dir).expect("tenant a evil skill dir");
+        std::os::unix::fs::symlink(
+            "../../../../../tenant-b/users/user-b/skills/secret-skill/SKILL.md",
+            evil_dir.join("SKILL.md"),
+        )
+        .expect("plant cross-tenant symlink inside tenant A's own skills leaf");
+    }
+
+    let port = ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
+        scope_a.user_id.clone(),
+        filesystem,
+        std::sync::Arc::new(crate::local_dev_mounts::scoped_skill_management_mount_view),
+    );
+
+    let escape = port.read_content_for_scope(scope_a, "evil").await;
+
+    match escape {
+        Err(_error) => {
+            // Any error is the closed-escape outcome: `stat`/`read_bytes_bounded`
+            // surface `SymlinkEscape` once containment is narrowed, and
+            // `ScopedSkillManagementPort` maps every `FilesystemError` through
+            // its own error type rather than passing it through verbatim, so
+            // the specific variant is an internal implementation detail this
+            // test does not pin — only "did not leak tenant B's bytes" does.
+        }
+        Ok(result) => {
+            panic!(
+                "CROSS-TENANT ESCAPE CONFIRMED THROUGH THE PRODUCTION PATH: \
+                 ScopedSkillManagementPort::read_content_for_scope returned \
+                 tenant B's data: {:?}",
+                result.content
             );
         }
     }

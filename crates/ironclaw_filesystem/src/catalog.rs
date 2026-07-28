@@ -260,6 +260,21 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.begin(path).await
     }
 
+    /// Routes to the matching mount's backend, exactly like every other
+    /// method here. This override is load-bearing, not cosmetic: without
+    /// it, `CompositeRootFilesystem` — the actual `F` behind
+    /// `Arc<ScopedFilesystem<CompositeRootFilesystem>>` in production
+    /// composition (`ironclaw_reborn_composition::factory`) — would
+    /// silently inherit the trait's no-op default instead of reaching
+    /// whichever mounted backend (e.g. a `DiskFilesystem` mounted at
+    /// `/projects`) actually needs its containment narrowed.
+    async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        self.matching_mount(virtual_root)?
+            .backend
+            .ensure_scoped_mount(virtual_root)
+            .await
+    }
+
     // ── Event plane ──
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {

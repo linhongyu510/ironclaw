@@ -124,6 +124,33 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::EnsureIndex)
     }
 
+    /// Dynamically registers (idempotently) a scoped mount rooted exactly at
+    /// `virtual_root`, narrowing this backend's containment boundary to that
+    /// exact subtree for every subsequent operation under it.
+    ///
+    /// Exists to close a same-storage-root cross-tenant/cross-user symlink
+    /// escape for a backend whose containment root is wider than the subtree
+    /// a specific caller is actually granted — e.g. a `/projects` mount
+    /// spanning the whole local-dev storage root, while a caller's `/skills`
+    /// [`ironclaw_host_api::MountGrant`] only authorizes
+    /// `/projects/tenants/<t>/users/<u>/skills`. [`ScopedFilesystem`](crate::ScopedFilesystem)
+    /// calls this on every permission-checked resolution, passing the exact
+    /// `MountGrant::target` it already holds, so no caller can reach the
+    /// backend without first narrowing containment to its own grant.
+    ///
+    /// Default impl is a no-op: mirrors the backend-optionality pattern
+    /// [`put`](Self::put)/[`get`](Self::get) use. Only a backend with
+    /// OS-level directory-fd containment (the local disk backend,
+    /// `DiskFilesystem`) has a wider-than-granted containment root that
+    /// needs narrowing this way. Row/prefix-scoped backends (Postgres,
+    /// libSQL, in-memory) have no OS path to anchor an fd on and enforce
+    /// containment through their own per-row/prefix scoping instead, so
+    /// inheriting the no-op here is correct for them, not a placeholder
+    /// oversight.
+    async fn ensure_scoped_mount(&self, _virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
+        Ok(())
+    }
+
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 
