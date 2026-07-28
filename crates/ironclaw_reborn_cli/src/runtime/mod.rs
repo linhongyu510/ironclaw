@@ -597,6 +597,18 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
+    if caller == RuntimeInputCaller::Serve
+        && let Ok(shared_key) = std::env::var("IRONHUB_AGENT_SHARED_KEY")
+    {
+        let shared_key = shared_key.trim();
+        if !shared_key.is_empty() {
+            runtime_input = runtime_input.with_ironhub_agent_shared_key(
+                ironclaw_extension_host::ironhub::IronhubSharedKey::new(shared_key)
+                    .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
+            );
+        }
+    }
+
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
@@ -1891,6 +1903,54 @@ mod tests {
             });
             assert_eq!(boot.home().path(), config.home().path());
         }
+    }
+
+    #[test]
+    fn ironhub_register_gateway_is_disabled_without_an_explicit_shared_key() {
+        let _lock = lock_runtime_env();
+        let _shared_key = EnvGuard::clear("IRONHUB_AGENT_SHARED_KEY");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+
+        assert!(input.ironhub_agent_shared_key.is_none());
+    }
+
+    #[test]
+    fn serve_rejects_a_present_but_short_ironhub_shared_key() {
+        let _lock = lock_runtime_env();
+        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", "too-short");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("short shared key must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("IRONHUB_AGENT_SHARED_KEY is invalid"),
+            "error must identify the invalid setting without exposing it: {error:#}"
+        );
     }
 
     #[test]

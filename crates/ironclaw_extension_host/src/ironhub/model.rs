@@ -44,6 +44,7 @@ pub enum IronHubProvenance {
     Official,
     Trusted,
     Verified,
+    Private,
     #[default]
     #[serde(alias = "community")]
     New,
@@ -55,6 +56,7 @@ impl IronHubProvenance {
             Self::Official => "official",
             Self::Trusted => "trusted",
             Self::Verified => "verified",
+            Self::Private => "private",
             Self::New => "new",
         }
     }
@@ -120,13 +122,31 @@ pub(crate) struct IronHubArtifact {
     pub(crate) sha256: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct IronHubInstallOptions {
     pub kind: Option<IronHubEntryKind>,
     pub force: bool,
     pub acknowledge_unverified: bool,
     pub expected_version: Option<String>,
     pub expected_artifact_digest: Option<String>,
+    pub private_manifest_url: Option<String>,
+}
+
+impl std::fmt::Debug for IronHubInstallOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IronHubInstallOptions")
+            .field("kind", &self.kind)
+            .field("force", &self.force)
+            .field("acknowledge_unverified", &self.acknowledge_unverified)
+            .field("expected_version", &self.expected_version)
+            .field("expected_artifact_digest", &self.expected_artifact_digest)
+            .field(
+                "private_manifest_url",
+                &self.private_manifest_url.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

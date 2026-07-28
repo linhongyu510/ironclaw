@@ -81,6 +81,12 @@ struct IronHubInstallCommand {
     /// Require the catalog entry to still have this signed artifact digest.
     #[arg(long)]
     expected_artifact_digest: Option<String>,
+    /// Install from an org-scoped signed manifest URL read from this file.
+    ///
+    /// Reading the URL from a file keeps its access token out of argv and shell
+    /// history.
+    #[arg(long, value_name = "PATH")]
+    private_manifest_url_file: Option<std::path::PathBuf>,
     /// Output the response as JSON.
     #[arg(long)]
     json: bool,
@@ -127,6 +133,9 @@ impl IronHubCommand {
                         acknowledge_unverified: command.acknowledge_unverified,
                         expected_version: command.expected_version,
                         expected_artifact_digest: command.expected_artifact_digest,
+                        private_manifest_url: read_private_manifest_url(
+                            command.private_manifest_url_file.as_deref(),
+                        )?,
                     },
                 },
                 command.json,
@@ -150,6 +159,20 @@ impl From<IronHubKindArg> for IronHubEntryKind {
             IronHubKindArg::Skill => Self::Skill,
         }
     }
+}
+
+fn read_private_manifest_url(path: Option<&std::path::Path>) -> anyhow::Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let url = std::fs::read_to_string(path)
+        .with_context(|| format!("reading private manifest URL file {}", path.display()))?
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        anyhow::bail!("private manifest URL file {} is empty", path.display());
+    }
+    Ok(Some(url))
 }
 
 fn execute_ironhub_command(
@@ -183,4 +206,33 @@ fn execute_ironhub_command(
             .context("failed to shut down Reborn runtime after IronHub command")?;
         Ok(response)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_private_manifest_url;
+
+    #[test]
+    fn private_manifest_url_is_trimmed_when_read_from_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("private-manifest-url");
+        std::fs::write(&path, "  https://catalog.example/private?token=secret\n")
+            .expect("write URL file");
+
+        assert_eq!(
+            read_private_manifest_url(Some(&path)).expect("read URL"),
+            Some("https://catalog.example/private?token=secret".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_private_manifest_url_file_is_rejected() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("private-manifest-url");
+        std::fs::write(&path, "  \n").expect("write URL file");
+
+        let error = read_private_manifest_url(Some(&path))
+            .expect_err("an empty private-manifest URL must fail closed");
+        assert!(error.to_string().contains("is empty"));
+    }
 }

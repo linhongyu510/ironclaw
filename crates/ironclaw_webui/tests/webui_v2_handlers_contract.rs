@@ -39,17 +39,17 @@ use ironclaw_product::{
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, LLM_ACTIVE_SET_CAPABILITY_ID,
+    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
@@ -130,6 +130,7 @@ enum ProductSurfaceCallId {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -159,6 +160,7 @@ impl ProductSurfaceCallId {
             Self::ProjectFsRead => "project.fs.read",
             Self::FsRead => "fs.read",
             Self::AttachmentRead => "attachment.read",
+            Self::IronhubDeliverInstall => "ironhub.deliver_install",
             Self::TraceAccountLoginLink => "trace.account_login_link",
             Self::TraceHoldAuthorize => "trace.hold_authorize",
             Self::OperatorConfigSetKey => "operator.config.set_key",
@@ -188,6 +190,7 @@ impl ProductSurfaceCallId {
             "project.fs.read" => Some(Self::ProjectFsRead),
             "fs.read" => Some(Self::FsRead),
             "attachment.read" => Some(Self::AttachmentRead),
+            "ironhub.deliver_install" => Some(Self::IronhubDeliverInstall),
             "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
             "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
             "operator.config.set_key" => Some(Self::OperatorConfigSetKey),
@@ -211,13 +214,19 @@ impl ProductSurfaceCallId {
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedProductSurfaceCallRequest {
     call_id: String,
+    caller_user_id: String,
     input: Value,
 }
 
 impl RecordedProductSurfaceCallRequest {
-    fn from_value(call_id: ProductSurfaceCallId, input: Value) -> Self {
+    fn from_value(
+        call_id: ProductSurfaceCallId,
+        caller: &ProductSurfaceCaller,
+        input: Value,
+    ) -> Self {
         Self {
             call_id: call_id.as_str().to_string(),
+            caller_user_id: caller.user_id.as_str().to_string(),
             input,
         }
     }
@@ -1543,6 +1552,15 @@ impl StubServices {
                     .await?,
                 ))
             }
+            ProductSurfaceCallId::IronhubDeliverInstall => {
+                let request: IronhubInstallDeliveryRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(IronhubInstallDeliveryResult {
+                    installed: true,
+                    slug: request.slug,
+                    message: "installed".to_string(),
+                })
+            }
             ProductSurfaceCallId::TraceAccountLoginLink => {
                 RecordedProductSurfaceCallResponse::json(
                     self.trace_account_login_link(caller).await?,
@@ -1683,8 +1701,8 @@ impl ProductSurface for StubServices {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
-                    caller,
-                    RecordedProductSurfaceCallRequest::from_value(call_id, request.input),
+                    caller.clone(),
+                    RecordedProductSurfaceCallRequest::from_value(call_id, &caller, request.input),
                 )
                 .await?
                 .into_value()?;
@@ -5291,6 +5309,58 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(queries.len(), 2);
     assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
     assert_eq!(queries[1].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn ironhub_deliver_install_dispatches_with_authenticated_caller_and_typed_body() {
+    let services = Arc::new(StubServices::default());
+    let authenticated_caller = caller_for_user("user-ironhub");
+    let router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        authenticated_caller,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1","private_manifest_url":"https://catalog.example/private/repo?token=rotating"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["installed"], true);
+    assert_eq!(body["slug"], "my-skill");
+
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::IronhubDeliverInstall.as_str()
+    );
+    assert_eq!(calls[0].caller_user_id, "user-ironhub");
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({
+            "slug": "my-skill",
+            "version": "1.0.0",
+            "uid": "u",
+            "aid": "a",
+            "ts": 1_700_000_000_u64,
+            "nonce": "n",
+            "artifact_digest": "sha256:deadbeef",
+            "sig": "sig-1",
+            "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+        })
+    );
 }
 
 #[tokio::test]

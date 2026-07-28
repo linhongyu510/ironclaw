@@ -184,6 +184,7 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
+                        private_manifest_url: None,
                     },
                 }
             }

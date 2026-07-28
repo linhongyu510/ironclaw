@@ -13,6 +13,7 @@ pub(super) enum ProductCommandHandler {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -44,6 +45,7 @@ impl ProductCommandHandler {
             PROJECT_FS_READ_COMMAND_ID => Some(Self::ProjectFsRead),
             FS_READ_COMMAND_ID => Some(Self::FsRead),
             ATTACHMENT_READ_COMMAND_ID => Some(Self::AttachmentRead),
+            IRONHUB_DELIVER_INSTALL_COMMAND_ID => Some(Self::IronhubDeliverInstall),
             TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID => Some(Self::TraceAccountLoginLink),
             TRACE_HOLD_AUTHORIZE_COMMAND_ID => Some(Self::TraceHoldAuthorize),
             OPERATOR_CONFIG_SET_KEY_COMMAND_ID => Some(Self::OperatorConfigSetKey),
@@ -149,6 +151,11 @@ impl ProductCommandHandler {
             Self::AttachmentRead => command_output(
                 services
                     .read_attachment(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::IronhubDeliverInstall => command_output(
+                services
+                    .ironhub_deliver_install(caller, product_command_input(input)?)
                     .await?,
             ),
             Self::TraceAccountLoginLink => {

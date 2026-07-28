@@ -1,20 +1,28 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
+use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkPolicy, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, VirtualPath,
+    CapabilityId, ExtensionId, NetworkPolicy, ProductSurfaceCaller, ResourceScope,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind, UserId, VirtualPath,
 };
+use ironclaw_product::{IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::catalog::{classify_gate_and_digest, sha256_hex, verify_signed_manifest_with_keys};
+use super::agent_link::{InstallDelivery, IronhubSharedKey};
+use super::catalog::{
+    IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_private_manifest,
+    validate_private_manifest_origin, verify_signed_manifest_with_keys,
+};
+use super::link_service::IronhubLinkStateStore;
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubManifest,
     IronHubPhase, IronHubProvenance, IronHubSkillEntry,
 };
-use super::service::{IronHubService, configure_test_catalog};
+use super::service::{IronHubService, configure_test_catalog, configure_test_link_state};
 
 #[test]
 fn signed_catalog_verification_accepts_only_the_selected_key() {
@@ -38,6 +46,25 @@ fn signed_catalog_verification_accepts_only_the_selected_key() {
         verify_signed_manifest_with_keys(envelope.as_bytes(), &[("other-key", &verify_key)])
             .is_err()
     );
+}
+
+#[test]
+fn signed_catalog_verification_rejects_bad_signature() {
+    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let other_key = SigningKey::from_bytes(&[8_u8; 32]);
+    let manifest = br#"{"version":"1"}"#;
+    let envelope = serde_json::json!({
+        "v": 1,
+        "key_id": "test-key",
+        "manifest_b64": URL_SAFE_NO_PAD.encode(manifest),
+        "sig": URL_SAFE_NO_PAD.encode(other_key.sign(manifest).to_bytes()),
+    })
+    .to_string();
+    let verify_key = hex::encode(signing_key.verifying_key().to_bytes());
+
+    let error = verify_signed_manifest_with_keys(envelope.as_bytes(), &[("test-key", &verify_key)])
+        .expect_err("signature from another key must fail closed");
+    assert_eq!(error, "manifest signature verification failed");
 }
 
 #[test]
@@ -67,6 +94,7 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
         "community-skill",
         Some(IronHubEntryKind::Skill),
         &IronHubInstallOptions::default(),
+        IronHubManifestSource::Public,
     )
     .expect_err("unverified content requires acknowledgement");
     assert!(denied.to_string().contains("UNVERIFIED community"));
@@ -79,8 +107,91 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
             acknowledge_unverified: true,
             ..IronHubInstallOptions::default()
         },
+        IronHubManifestSource::Public,
     )
     .expect("operator acknowledgement permits install");
+}
+
+#[test]
+fn private_provenance_requires_a_validated_private_source() {
+    let mut manifest = skill_manifest(
+        "private-skill",
+        "https://hub.ironclaw.com/private/SKILL.md",
+        b"private",
+        "2026-01-02T00:00:00Z",
+    );
+    manifest.skills[0].provenance = IronHubProvenance::Private;
+    let options = IronHubInstallOptions::default();
+
+    let error = classify_gate_and_digest(
+        &manifest,
+        "private-skill",
+        Some(IronHubEntryKind::Skill),
+        &options,
+        IronHubManifestSource::Public,
+    )
+    .expect_err("private provenance from a public source must fail closed");
+    assert!(error.to_string().contains("claims private provenance"));
+
+    let (_, provenance, _) = classify_gate_and_digest(
+        &manifest,
+        "private-skill",
+        Some(IronHubEntryKind::Skill),
+        &options,
+        IronHubManifestSource::Private,
+    )
+    .expect("validated private source establishes private provenance");
+    assert_eq!(provenance, IronHubProvenance::Private);
+}
+
+#[test]
+fn private_manifest_origin_is_pinned_to_configured_catalog() {
+    let configured = "https://catalog.example/api/catalog/manifest.json";
+    let origin = validate_private_manifest_origin(
+        configured,
+        "https://catalog.example/api/private/manifest?access=rotating",
+    )
+    .expect("same origin is accepted");
+    assert!(
+        validate_private_manifest_origin(
+            configured,
+            "https://evil.example/api/private/manifest?access=rotating"
+        )
+        .is_err()
+    );
+    assert!(
+        validate_private_manifest_origin(
+            configured,
+            "https://catalog.example:444/api/private/manifest"
+        )
+        .is_err()
+    );
+
+    let cross_origin_artifact = skill_manifest(
+        "private-skill",
+        "https://evil.example/private/SKILL.md",
+        b"private",
+        "2026-01-02T00:00:00Z",
+    );
+    assert!(
+        validate_private_manifest(&cross_origin_artifact, &origin).is_err(),
+        "a private manifest cannot redirect artifact download off the pinned origin"
+    );
+}
+
+#[test]
+fn private_manifest_access_token_is_redacted_from_debug_output() {
+    let secret = "high-value-access-token";
+    let options = IronHubInstallOptions {
+        private_manifest_url: Some(format!(
+            "https://catalog.example/private/manifest?token={secret}"
+        )),
+        ..IronHubInstallOptions::default()
+    };
+
+    let debug = format!("{options:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains(secret));
 }
 
 #[tokio::test]
@@ -206,11 +317,200 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     }));
 }
 
+#[tokio::test]
+async fn replayed_private_manifest_is_rejected_across_rotating_access_tokens() {
+    let services =
+        crate::lifecycle_test_support::build_lifecycle_test_services("private-owner", None, false)
+            .await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("private-owner");
+    let configured_catalog_url = "https://hub.ironclaw.com/api/catalog/manifest.json";
+    let private_url_a = "https://hub.ironclaw.com/api/private/manifest?access=token-a";
+    let private_url_b = "https://hub.ironclaw.com/api/private/manifest?access=token-b";
+    let artifact_url = "https://hub.ironclaw.com/api/private/private-skill/SKILL.md";
+    let artifact = b"---\nname: private-skill\ndescription: private\n---\n# Private\n".to_vec();
+    let manifest = skill_manifest(
+        "private-skill",
+        artifact_url,
+        &artifact,
+        "2026-01-02T00:00:00Z",
+    );
+    let envelope = signed_manifest(
+        serde_json::to_string(&manifest).expect("manifest JSON"),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([
+        (private_url_a, envelope.clone()),
+        (private_url_b, envelope),
+        (artifact_url, artifact),
+    ]));
+    let state = Arc::new(IronhubLinkStateStore::new(Arc::clone(&services.filesystem)));
+    let service = configure_test_link_state(
+        configure_test_catalog(
+            IronHubService::new_with_runtime_egress(
+                Arc::clone(&services.skill_management),
+                Arc::clone(&services.extension_management),
+                egress,
+                scope,
+                CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            ),
+            configured_catalog_url,
+            test_manifest_verify_keys(),
+        ),
+        state,
+    );
+
+    let installed = service
+        .execute(IronHubCommand::Install {
+            name: "private-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_url_a.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("first private manifest use installs");
+    assert_eq!(installed.entries[0].provenance, IronHubProvenance::Private);
+
+    let replay = service
+        .execute(IronHubCommand::Install {
+            name: "private-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_url_b.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("same signed manifest under another access token is a replay");
+    assert!(replay.to_string().contains("replay"));
+}
+
+#[tokio::test]
+async fn deep_link_install_uses_authenticated_caller_scope_not_signed_uid_or_runtime_owner() {
+    const LINK_KEY: &str = "ihub_sk_CallerScopeTestKey0000000000000000000000000";
+
+    let services =
+        crate::lifecycle_test_support::build_lifecycle_test_services("runtime-owner", None, false)
+            .await;
+    let owner_scope =
+        crate::lifecycle_test_support::webui_gate_resource_scope_for_owner("runtime-owner");
+    let caller_user = UserId::new("authenticated-caller").expect("caller user");
+    let caller = ProductSurfaceCaller::new(
+        owner_scope.tenant_id.clone(),
+        caller_user.clone(),
+        owner_scope.agent_id.clone(),
+        owner_scope.project_id.clone(),
+    );
+    let expected_scope = ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    };
+    let private_url = "https://hub.ironclaw.com/api/private/manifest?access=caller-test";
+    let artifact_url = "https://hub.ironclaw.com/api/private/caller-skill/SKILL.md";
+    let artifact =
+        b"---\nname: caller-skill\ndescription: caller scoped\n---\n# Caller scoped\n".to_vec();
+    let mut manifest = skill_manifest(
+        "caller-skill",
+        artifact_url,
+        &artifact,
+        "2026-01-03T00:00:00Z",
+    );
+    manifest.skills[0].provenance = IronHubProvenance::Official;
+    let envelope = signed_manifest(
+        serde_json::to_string(&manifest).expect("manifest JSON"),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([
+        (private_url, envelope),
+        (artifact_url, artifact),
+    ]));
+    let state = Arc::new(IronhubLinkStateStore::new(Arc::clone(&services.filesystem)));
+    let service = super::link_service::test_support::new_with_runtime_egress(
+        Arc::clone(&services.skill_management),
+        Arc::clone(&services.extension_management),
+        egress.clone(),
+        state,
+        IronhubSharedKey::new(LINK_KEY).expect("link key"),
+    )
+    .expect("link service");
+    let artifact_digest = sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes());
+    let timestamp = u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp");
+    let mut request = IronhubInstallDeliveryRequest {
+        slug: "caller-skill".to_string(),
+        version: "1.0.0".to_string(),
+        uid: "signed-hub-user-not-the-caller".to_string(),
+        aid: "signed-hub-agent".to_string(),
+        ts: timestamp,
+        nonce: "caller-scope-single-use-nonce".to_string(),
+        artifact_digest,
+        sig: String::new(),
+        private_manifest_url: Some(private_url.to_string()),
+    };
+    let delivery = InstallDelivery {
+        slug: &request.slug,
+        version: &request.version,
+        uid: &request.uid,
+        aid: &request.aid,
+        ts: request.ts,
+        nonce: &request.nonce,
+        artifact_digest: &request.artifact_digest,
+        private_manifest_url: request.private_manifest_url.as_deref(),
+    };
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(LINK_KEY.as_bytes()).expect("HMAC key");
+    mac.update(delivery.payload().as_bytes());
+    request.sig = hex::encode(mac.finalize().into_bytes());
+
+    let replay_caller = caller.clone();
+    let replay_request = request.clone();
+    let result = service
+        .deliver_install(caller, request)
+        .await
+        .expect("authenticated caller install succeeds");
+    assert!(result.installed);
+    let installed = services
+        .skill_management
+        .read_content_for_scope(expected_scope.clone(), "caller-skill")
+        .await
+        .expect("skill is installed for authenticated caller");
+    assert!(installed.content.contains("# Caller scoped"));
+    assert!(
+        services
+            .skill_management
+            .read_content_for_scope(owner_scope, "caller-skill")
+            .await
+            .is_err(),
+        "runtime owner must not receive the authenticated caller's install"
+    );
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|record| {
+        record.scope.tenant_id == expected_scope.tenant_id
+            && record.scope.user_id == caller_user
+            && record.scope.agent_id == expected_scope.agent_id
+            && record.scope.project_id == expected_scope.project_id
+    }));
+    assert!(matches!(
+        service.deliver_install(replay_caller, replay_request).await,
+        Err(IronhubLinkError::Replay)
+    ));
+    assert_eq!(
+        egress.requests().len(),
+        2,
+        "a replayed nonce must be rejected before another manifest or artifact fetch"
+    );
+}
+
 fn test_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
 }
 
-fn test_manifest_verify_keys() -> &'static [(&'static str, &'static str)] {
+pub(super) fn test_manifest_verify_keys() -> &'static [(&'static str, &'static str)] {
     let verify_key = hex::encode(test_signing_key().verifying_key().to_bytes());
     let verify_key = Box::leak(verify_key.into_boxed_str());
     Box::leak(vec![("ironhub-test-key", verify_key as &str)].into_boxed_slice())
@@ -226,6 +526,33 @@ fn signed_manifest(manifest_json: String, signing_key: &SigningKey) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
+}
+
+fn skill_manifest(
+    name: &str,
+    artifact_url: &str,
+    artifact: &[u8],
+    generated_at: &str,
+) -> IronHubManifest {
+    IronHubManifest {
+        version: "1".to_string(),
+        generated_at: generated_at.to_string(),
+        release_tag: "test".to_string(),
+        repo: "test-org/private-repo".to_string(),
+        tools: Vec::new(),
+        skills: vec![IronHubSkillEntry {
+            name: name.to_string(),
+            trunk: String::new(),
+            version: "1.0.0".to_string(),
+            description: "private skill".to_string(),
+            provenance: IronHubProvenance::Private,
+            skill_md: IronHubArtifact {
+                url: artifact_url.to_string(),
+                size_bytes: u64::try_from(artifact.len()).expect("test artifact length"),
+                sha256: sha256_hex(artifact),
+            },
+        }],
+    }
 }
 
 struct MixedManifestFixture<'a> {
@@ -294,6 +621,7 @@ struct RecordedRequest {
     runtime: RuntimeKind,
     capability_id: CapabilityId,
     policy: NetworkPolicy,
+    scope: ResourceScope,
 }
 
 struct RecordingEgress {
@@ -332,6 +660,7 @@ impl RuntimeHttpEgress for RecordingEgress {
                 runtime: request.runtime,
                 capability_id: request.capability_id.clone(),
                 policy: request.network_policy.clone(),
+                scope: request.scope.clone(),
             });
         let body = self
             .responses

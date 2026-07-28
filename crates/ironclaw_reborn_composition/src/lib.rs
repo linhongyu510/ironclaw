@@ -33,6 +33,7 @@ mod error;
 mod factory;
 mod google_oauth_secret_store;
 mod input;
+mod ironhub_link_serve;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
@@ -161,6 +162,9 @@ pub use ironclaw_host_api::{
     installation_scoped_provider_user_id,
 };
 pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
+pub use ironhub_link_serve::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
+};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{

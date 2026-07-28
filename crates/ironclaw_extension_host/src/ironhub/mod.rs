@@ -1,5 +1,7 @@
+mod agent_link;
 mod capabilities;
 mod catalog;
+mod link_service;
 mod model;
 mod package;
 mod render;
@@ -8,9 +10,13 @@ mod service;
 #[cfg(test)]
 mod tests;
 
+pub use agent_link::{IronhubSharedKey, IronhubSharedKeyError};
 pub use capabilities::{
     IRONHUB_INFO_CAPABILITY_ID, IRONHUB_INSTALL_CAPABILITY_ID, IRONHUB_SEARCH_CAPABILITY_ID,
     extend_builtin_first_party_package, insert_handlers,
+};
+pub use link_service::{
+    IronhubLinkBuildError, IronhubLinkStateError, IronhubLinkStateStore, RebornIronhubLinkService,
 };
 pub use model::{
     IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,

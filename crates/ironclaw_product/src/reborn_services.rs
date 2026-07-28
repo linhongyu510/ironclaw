@@ -81,6 +81,7 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
@@ -141,6 +142,10 @@ use ironclaw_approvals::{
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironhub_link::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest,
+};
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -367,6 +372,11 @@ pub const ATTACHMENT_READ_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAttachmentRequest,
     RebornAttachmentBytes,
 > = ProductSurfaceCommandDescriptor::new(ATTACHMENT_READ_COMMAND_ID);
+pub const IRONHUB_DELIVER_INSTALL_COMMAND_ID: &str = "ironhub.deliver_install";
+pub const IRONHUB_DELIVER_INSTALL_COMMAND: ProductSurfaceCommandDescriptor<
+    IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult,
+> = ProductSurfaceCommandDescriptor::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID);
 pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID: &str = "trace.account_login_link";
 pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND: ProductSurfaceCommandDescriptor<
     EmptyProductCommandInput,
@@ -2304,6 +2314,7 @@ pub struct RebornServices<
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    ironhub_link: Option<Arc<dyn IronhubLinkService>>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2384,6 +2395,7 @@ where
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -2451,6 +2463,26 @@ where
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
         self
+    }
+
+    pub fn with_ironhub_link_service(mut self, ironhub_link: Arc<dyn IronhubLinkService>) -> Self {
+        self.ironhub_link = Some(ironhub_link);
+        self
+    }
+
+    pub async fn ironhub_deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, ProductSurfaceError> {
+        let service = self
+            .ironhub_link
+            .as_ref()
+            .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
+        service
+            .deliver_install(caller, request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
     }
 
     /// Wire the read-only port exposing the runtime's live active/default model

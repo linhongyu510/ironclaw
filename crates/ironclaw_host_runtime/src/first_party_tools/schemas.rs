@@ -935,6 +935,10 @@ mod tests {
                 .expect("IronHub install output schema is registered");
 
         assert!(input["properties"].get("acknowledge_unverified").is_none());
+        assert!(
+            input["properties"].get("private_manifest_url").is_none(),
+            "model-visible IronHub install must not choose a private manifest source"
+        );
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(
             output["properties"]["phase"]["enum"],

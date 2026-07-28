@@ -23,10 +23,13 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::ExtensionLifecycleManager;
 
 use super::catalog::{
-    catalog, classify, classify_gate_and_digest, entry_matches, invalid, network_policy_for_url,
-    sha256_hex, skill_summary, tool_summary, validate_artifact, validate_artifact_url,
-    validate_hub_name, validate_manifest, verify_signed_manifest,
+    CatalogOrigin, IronHubManifestSource, catalog, classify, classify_gate_and_digest,
+    entry_matches, invalid, network_policy_for_url_from_origin, sha256_hex, skill_summary,
+    tool_summary, validate_artifact_for_origin, validate_artifact_url, validate_hub_name,
+    validate_manifest, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest,
 };
+use super::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
     IronHubEntryKind, IronHubInstallOptions, IronHubManifest, IronHubPhase, IronHubProvenance,
@@ -54,6 +57,7 @@ pub trait RebornIronHubRuntime {
     fn ironhub_extension_management(&self) -> Arc<ExtensionLifecycleManager>;
     fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort>;
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext;
+    fn ironhub_link_state(&self) -> Arc<IronhubLinkStateStore>;
 }
 
 pub async fn execute_reborn_ironhub_command(
@@ -79,7 +83,8 @@ pub async fn execute_reborn_ironhub_command(
         egress,
         scope,
         ironhub_command_capability_id(&command)?,
-    );
+    )
+    .with_link_state(runtime.ironhub_link_state());
     service.execute(command).await
 }
 
@@ -156,6 +161,7 @@ pub(crate) struct IronHubService {
     scope: ResourceScope,
     manifest_url: String,
     verify_keys: &'static [(&'static str, &'static str)],
+    link_state: Option<Arc<IronhubLinkStateStore>>,
 }
 
 impl IronHubService {
@@ -172,6 +178,7 @@ impl IronHubService {
             scope,
             manifest_url: resolve_manifest_url(),
             verify_keys: super::model::MANIFEST_VERIFY_KEYS,
+            link_state: None,
         }
     }
 
@@ -193,7 +200,7 @@ impl IronHubService {
         )
     }
 
-    fn new_with_host_egress(
+    pub(super) fn new_with_host_egress(
         skill_management: Arc<ScopedSkillManagementPort>,
         extension_management: Arc<ExtensionLifecycleManager>,
         port: HostRuntimeHttpEgressPort,
@@ -209,6 +216,11 @@ impl IronHubService {
             },
             scope,
         )
+    }
+
+    pub(super) fn with_link_state(mut self, link_state: Arc<IronhubLinkStateStore>) -> Self {
+        self.link_state = Some(link_state);
+        self
     }
 
     pub(crate) async fn execute(
@@ -285,9 +297,31 @@ impl IronHubService {
         options: IronHubInstallOptions,
     ) -> Result<IronHubResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let manifest = self.fetch_manifest_cached().await?;
+        let private_origin = options
+            .private_manifest_url
+            .as_deref()
+            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
+            .transpose()?;
+        let (manifest, source) = match (
+            options.private_manifest_url.as_deref(),
+            private_origin.as_ref(),
+        ) {
+            (Some(private_url), Some(origin)) => (
+                Arc::new(self.fetch_private_manifest(private_url, origin).await?),
+                IronHubManifestSource::Private,
+            ),
+            (None, None) => (
+                self.fetch_manifest_cached().await?,
+                IronHubManifestSource::Public,
+            ),
+            _ => {
+                return Err(catalog(
+                    "private manifest source could not be validated against the catalog origin",
+                ));
+            }
+        };
         let (kind, provenance, artifact_digest) =
-            classify_gate_and_digest(&manifest, name, options.kind, &options)?;
+            classify_gate_and_digest(&manifest, name, options.kind, &options, source)?;
         let lock = install_lock(&format!("{}:{name}", kind.as_str()));
         let _guard = lock.lock().await;
         let lifecycle = match kind {
@@ -296,19 +330,18 @@ impl IronHubService {
                     .find_skill(name)
                     .ok_or_else(|| catalog("skill not found"))?;
                 let content = self
-                    .download_verified(&entry.skill_md, MAX_METADATA_BYTES)
+                    .download_verified(&entry.skill_md, MAX_METADATA_BYTES, private_origin.as_ref())
                     .await?;
                 let content =
                     String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
                         reason: format!("skill markdown is not UTF-8: {error}"),
                     })?;
+                let source_url = private_origin
+                    .as_ref()
+                    .map(CatalogOrigin::redacted_source_url)
+                    .unwrap_or_else(|| entry.skill_md.url.clone());
                 let installed = self
-                    .install_skill(
-                        entry.name.as_str(),
-                        &content,
-                        &entry.skill_md.url,
-                        options.force,
-                    )
+                    .install_skill(entry.name.as_str(), &content, &source_url, options.force)
                     .await?;
                 LifecycleProductResponse {
                     package_ref: Some(
@@ -332,9 +365,15 @@ impl IronHubService {
                 let entry = manifest
                     .find_tool(name)
                     .ok_or_else(|| catalog("tool not found"))?;
-                let wasm = self.download_verified(&entry.wasm, MAX_WASM_BYTES).await?;
+                let wasm = self
+                    .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
+                    .await?;
                 let capabilities = self
-                    .download_verified(&entry.capabilities, MAX_METADATA_BYTES)
+                    .download_verified(
+                        &entry.capabilities,
+                        MAX_METADATA_BYTES,
+                        private_origin.as_ref(),
+                    )
                     .await?;
                 let reserved = self
                     .extension_management
@@ -351,7 +390,7 @@ impl IronHubService {
                     .await?
             }
         };
-        let entry = match kind {
+        let mut entry = match kind {
             IronHubEntryKind::Tool => tool_summary(
                 manifest
                     .find_tool(name)
@@ -363,6 +402,7 @@ impl IronHubService {
                     .ok_or_else(|| catalog("skill not found"))?,
             ),
         };
+        entry.provenance = provenance;
         Ok(IronHubResponse {
             phase: IronHubPhase::Installed,
             entries: vec![entry],
@@ -445,16 +485,9 @@ impl IronHubService {
     async fn fetch_manifest(&self) -> Result<IronHubManifest, IronHubCommandError> {
         validate_artifact_url("hub-manifest", "manifest_url", &self.manifest_url)?;
         let envelope = self
-            .download_url(&self.manifest_url, MAX_SIGNED_MANIFEST_BYTES)
+            .download_url(&self.manifest_url, MAX_SIGNED_MANIFEST_BYTES, None)
             .await?;
-        let bytes = if self.verify_keys == super::model::MANIFEST_VERIFY_KEYS {
-            verify_signed_manifest(&envelope)
-        } else {
-            super::catalog::verify_signed_manifest_with_keys(&envelope, self.verify_keys)
-        }
-        .map_err(|reason| IronHubCommandError::Catalog {
-            reason: format!("signed manifest verification failed: {reason}"),
-        })?;
+        let bytes = self.verify_manifest_envelope(&envelope)?;
         if bytes.len() > usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX) {
             return Err(catalog("manifest exceeds size cap"));
         }
@@ -467,20 +500,70 @@ impl IronHubService {
         Ok(manifest)
     }
 
+    async fn fetch_private_manifest(
+        &self,
+        private_url: &str,
+        origin: &CatalogOrigin,
+    ) -> Result<IronHubManifest, IronHubCommandError> {
+        let envelope = self
+            .download_url(private_url, MAX_SIGNED_MANIFEST_BYTES, Some(origin))
+            .await?;
+        let bytes = self.verify_manifest_envelope(&envelope)?;
+        if bytes.len() > usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX) {
+            return Err(catalog("private manifest exceeds size cap"));
+        }
+        let manifest: IronHubManifest =
+            serde_json::from_slice(&bytes).map_err(|error| IronHubCommandError::Catalog {
+                reason: format!("private manifest parse failed: {error}"),
+            })?;
+        validate_private_manifest(&manifest, origin)?;
+        let generated_at = DateTime::parse_from_rfc3339(&manifest.generated_at)
+            .map_err(|error| {
+                catalog(format!(
+                    "private manifest generated_at is not RFC3339: {error}"
+                ))
+            })?
+            .with_timezone(&Utc);
+        let state = self.link_state.as_ref().ok_or_else(|| {
+            catalog("private manifest installation requires durable replay protection")
+        })?;
+        state
+            .record_private_manifest(
+                origin.host(),
+                &manifest.repo,
+                generated_at,
+                &sha256_hex(&bytes),
+            )
+            .await
+            .map_err(map_link_state_error)?;
+        Ok(manifest)
+    }
+
+    fn verify_manifest_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>, IronHubCommandError> {
+        if self.verify_keys == super::model::MANIFEST_VERIFY_KEYS {
+            verify_signed_manifest(envelope)
+        } else {
+            super::catalog::verify_signed_manifest_with_keys(envelope, self.verify_keys)
+        }
+        .map_err(|reason| IronHubCommandError::Catalog {
+            reason: format!("signed manifest verification failed: {reason}"),
+        })
+    }
+
     async fn download_verified(
         &self,
         artifact: &IronHubArtifact,
         max_bytes: u64,
+        origin: Option<&CatalogOrigin>,
     ) -> Result<Vec<u8>, IronHubCommandError> {
-        validate_artifact(artifact, max_bytes)?;
+        validate_artifact_for_origin(artifact, max_bytes, origin)?;
         let bytes = self
-            .download_url(&artifact.url, artifact.size_bytes)
+            .download_url(&artifact.url, artifact.size_bytes, origin)
             .await?;
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != artifact.size_bytes {
             return Err(IronHubCommandError::Install {
                 reason: format!(
-                    "size mismatch for {}: expected {} bytes, got {}",
-                    artifact.url,
+                    "artifact size mismatch: expected {} bytes, got {}",
                     artifact.size_bytes,
                     bytes.len()
                 ),
@@ -490,8 +573,8 @@ impl IronHubService {
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
             return Err(IronHubCommandError::Install {
                 reason: format!(
-                    "checksum mismatch for {}: expected {}, got {}",
-                    artifact.url, artifact.sha256, actual
+                    "artifact checksum mismatch: expected {}, got {}",
+                    artifact.sha256, actual
                 ),
             });
         }
@@ -502,6 +585,7 @@ impl IronHubService {
         &self,
         url: &str,
         max_bytes: u64,
+        origin: Option<&CatalogOrigin>,
     ) -> Result<Vec<u8>, IronHubCommandError> {
         let request = RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -511,7 +595,7 @@ impl IronHubService {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
-            network_policy: network_policy_for_url(url, max_bytes)?,
+            network_policy: network_policy_for_url_from_origin(url, max_bytes, origin)?,
             credential_injections: Vec::new(),
             response_body_limit: Some(max_bytes),
             save_body_to: None,
@@ -545,6 +629,15 @@ pub(crate) fn configure_test_catalog(
 ) -> IronHubService {
     service.manifest_url = manifest_url.into();
     service.verify_keys = verify_keys;
+    service
+}
+
+#[cfg(test)]
+pub(crate) fn configure_test_link_state(
+    mut service: IronHubService,
+    link_state: Arc<IronhubLinkStateStore>,
+) -> IronHubService {
+    service.link_state = Some(link_state);
     service
 }
 
@@ -589,6 +682,17 @@ fn is_skill_conflict(error: &ScopedSkillManagementError) -> bool {
 fn skill_install_error(error: ScopedSkillManagementError) -> IronHubCommandError {
     IronHubCommandError::Install {
         reason: error.to_string(),
+    }
+}
+
+fn map_link_state_error(error: IronhubLinkStateError) -> IronHubCommandError {
+    match error {
+        IronhubLinkStateError::ManifestReplay => catalog("private signed manifest replay rejected"),
+        IronhubLinkStateError::NonceReplay => invalid("install nonce was replayed"),
+        IronhubLinkStateError::InvalidInput => invalid("invalid IronHub durable state input"),
+        IronhubLinkStateError::Unavailable => {
+            catalog("IronHub durable replay state is unavailable")
+        }
     }
 }
 
