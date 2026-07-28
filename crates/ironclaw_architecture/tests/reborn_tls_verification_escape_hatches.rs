@@ -60,6 +60,7 @@
 mod ratchet_support;
 
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use ratchet_support::{strip_comments_and_strings, workspace_root};
@@ -146,14 +147,20 @@ fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSe
     sanctioned
 }
 
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Scans `dir` for the banned patterns, recursing into subdirectories.
+///
+/// Every I/O error (`read_dir`, a directory-entry read, or `read_to_string`)
+/// is propagated rather than silently skipped: a zero-occurrence security
+/// gate that can pass because it failed to read some of what it claims to
+/// scan is worse than no gate at all, since it reports "clean" without
+/// having looked. Fail the gate instead.
+fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> io::Result<()> {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            scan_dir(root, &path, hits);
+            scan_dir(root, &path, hits)?;
             continue;
         }
         let name = entry.file_name();
@@ -169,9 +176,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
         if is_standalone_test_file(&relative) {
             continue;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let contents = std::fs::read_to_string(&path)?;
         let production_only = truncate_at_inline_test_module(&contents);
         let code_only = strip_comments_and_strings(production_only);
         let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
@@ -191,13 +196,15 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             }
         }
     }
+    Ok(())
 }
 
 #[test]
 fn sandbox_process_never_hand_rolls_a_permissive_origin_connector() {
     let root = workspace_root();
     let mut hits = Vec::new();
-    scan_dir(&root, &sandbox_process_dir(&root), &mut hits);
+    scan_dir(&root, &sandbox_process_dir(&root), &mut hits)
+        .unwrap_or_else(|error| panic!("scanning sandbox_process/ for escape hatches: {error}"));
     hits.sort();
     hits.dedup();
     assert!(

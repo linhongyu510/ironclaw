@@ -50,6 +50,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Once},
     task::{Context, Poll},
+    time::Duration,
 };
 
 use rustls::pki_types::ServerName;
@@ -142,11 +143,19 @@ impl VerifiedOriginConnector {
         let mut root_store = rustls::RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for error in &native.errors {
-            tracing::warn!("sandbox tls intercept: error loading system root certs: {error}");
+            // `debug!`, not `warn!`/`info!`: this is an internal diagnostic on
+            // a per-process background path, not intentionally user-facing
+            // status, and a messy system trust store can emit one line per
+            // unparseable root — `warn!`/`info!` here would corrupt the
+            // REPL/TUI (see the crate logging-level rule). The empty-store
+            // case still fails loudly via `TrustRootsUnavailable`.
+            tracing::debug!("sandbox tls intercept: error loading system root certs: {error}");
         }
         for cert in native.certs {
             if let Err(error) = root_store.add(cert) {
-                tracing::warn!("sandbox tls intercept: skipping invalid system root cert: {error}");
+                tracing::debug!(
+                    "sandbox tls intercept: skipping invalid system root cert: {error}"
+                );
             }
         }
         Self::from_root_store(root_store)
@@ -266,6 +275,20 @@ impl TlsInterceptConfig {
     }
 }
 
+/// Bound applied to every handshake/dial leg of [`terminate_and_forward`]:
+/// the client TLS accept, the origin TCP dial, and the origin TLS connect.
+/// The client side of this seam is untrusted worker/container traffic — a
+/// peer that opens the socket and then sends nothing (or half a
+/// `ClientHello` and stalls) must not be able to pin this task and its
+/// sockets open indefinitely. Deliberately does **not** bound
+/// `copy_bidirectional`'s steady-state relay: an idle-timeout/byte-ceiling
+/// policy for a live, decrypted proxy connection is a product decision (what
+/// counts as "idle," whether a byte cap is even correct for a general HTTPS
+/// relay that legitimately serves large downloads) that belongs with
+/// whichever PR gives this seam a production caller and a concurrency/fan-out
+/// policy to sit inside, not invented ad hoc here.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Terminates TLS from `client` using a leaf certificate minted for `host`,
 /// dials `dial_addr` and re-originates TLS to the real upstream (SNI =
 /// `host`), then relays the decrypted bytes unmodified (phase 1: no parsing,
@@ -287,6 +310,25 @@ pub(crate) async fn terminate_and_forward(
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
 ) -> Result<(), TlsInterceptError> {
+    terminate_and_forward_with_timeout(client, leftover, host, dial_addr, config, HANDSHAKE_TIMEOUT)
+        .await
+}
+
+/// The timeout-parameterized core `terminate_and_forward` delegates to with
+/// [`HANDSHAKE_TIMEOUT`] — split out so tests can drive the timeout branch
+/// deterministically with a short real duration instead of either sleeping
+/// [`HANDSHAKE_TIMEOUT`] wall-clock seconds or fighting tokio's paused/
+/// advanceable virtual clock against a task that also does real loopback
+/// socket I/O.
+#[allow(dead_code)] // consumed by W6; not wired yet
+async fn terminate_and_forward_with_timeout(
+    client: TcpStream,
+    leftover: Vec<u8>,
+    host: &str,
+    dial_addr: SocketAddr,
+    config: &TlsInterceptConfig,
+    handshake_timeout: Duration,
+) -> Result<(), TlsInterceptError> {
     let issued =
         config
             .ca
@@ -304,32 +346,49 @@ pub(crate) async fn terminate_and_forward(
     let server_config = build_server_config(&issued.certificate)?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let client_with_leftover = LeadingBytes::new(leftover, client);
-    let mut client_tls = acceptor
-        .accept(client_with_leftover)
-        .await
-        .map_err(|error| TlsInterceptError::ClientHandshakeFailed(error.to_string()))?;
+    let mut client_tls =
+        tokio::time::timeout(handshake_timeout, acceptor.accept(client_with_leftover))
+            .await
+            .map_err(|_| {
+                TlsInterceptError::ClientHandshakeFailed(format!(
+                    "client handshake timed out after {handshake_timeout:?}"
+                ))
+            })?
+            .map_err(|error| TlsInterceptError::ClientHandshakeFailed(error.to_string()))?;
 
     // Only reachable once the client trusts our leaf and completed its
     // handshake — a client-side failure above never gets this far, so an
     // unbound/failed interception never opens an origin socket either.
-    let origin_stream = TcpStream::connect(dial_addr).await.map_err(|error| {
-        TlsInterceptError::OriginDialFailed {
+    let origin_stream = tokio::time::timeout(handshake_timeout, TcpStream::connect(dial_addr))
+        .await
+        .map_err(|_| TlsInterceptError::OriginDialFailed {
+            dial_addr,
+            reason: format!("dial timed out after {handshake_timeout:?}"),
+        })?
+        .map_err(|error| TlsInterceptError::OriginDialFailed {
             dial_addr,
             reason: error.to_string(),
-        }
-    })?;
+        })?;
     let server_name = ServerName::try_from(host.to_string()).map_err(|error| {
         TlsInterceptError::InvalidSniHost {
             host: host.to_string(),
             reason: error.to_string(),
         }
     })?;
-    let mut origin_tls = config
-        .origin_connector
-        .connector()
-        .connect(server_name, origin_stream)
-        .await
-        .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
+    let mut origin_tls = tokio::time::timeout(
+        handshake_timeout,
+        config
+            .origin_connector
+            .connector()
+            .connect(server_name, origin_stream),
+    )
+    .await
+    .map_err(|_| {
+        TlsInterceptError::OriginHandshakeFailed(format!(
+            "origin handshake timed out after {handshake_timeout:?}"
+        ))
+    })?
+    .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
 
     copy_bidirectional(&mut client_tls, &mut origin_tls)
         .await
@@ -435,7 +494,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for LeadingBytes<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -479,7 +541,13 @@ mod tests {
     /// distinguish "chains to our CA" from "chains to the origin's own
     /// cert." Echoes back whatever it receives once, then closes — enough
     /// to prove decrypted bytes actually reach the origin and come back.
-    async fn spawn_fake_tls_origin(host: &str) -> (SocketAddr, String) {
+    ///
+    /// The returned `AtomicBool` flips to `true` iff the origin's TLS
+    /// handshake completed *and* it read at least one byte of plaintext —
+    /// the assertion surface tests use to prove that a failure elsewhere in
+    /// `terminate_and_forward` (e.g. the origin handshake itself failing)
+    /// never lets any decrypted application data reach the origin.
+    async fn spawn_fake_tls_origin(host: &str) -> (SocketAddr, String, Arc<AtomicBool>) {
         let origin_ca = SandboxCertificateAuthority::generate().expect("origin ca generates");
         let issued = origin_ca
             .issue_leaf_for_host(host)
@@ -492,20 +560,29 @@ mod tests {
             .await
             .expect("origin listener binds");
         let addr = listener.local_addr().expect("origin listener has an addr");
+        let received_plaintext = Arc::new(AtomicBool::new(false));
+        let received_plaintext_writer = Arc::clone(&received_plaintext);
 
         tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await
                 && let Ok(mut tls) = acceptor.accept(stream).await
             {
                 let mut buf = [0u8; 256];
-                if let Ok(n) = tls.read(&mut buf).await {
+                if let Ok(n) = tls.read(&mut buf).await
+                    && n > 0
+                {
+                    received_plaintext_writer.store(true, Ordering::SeqCst);
                     let _ = tls.write_all(&buf[..n]).await;
                     let _ = tls.shutdown().await;
                 }
             }
         });
 
-        (addr, origin_ca.root_certificate_pem().to_string())
+        (
+            addr,
+            origin_ca.root_certificate_pem().to_string(),
+            received_plaintext,
+        )
     }
 
     fn parse<'a>(pem: &'a str) -> X509Certificate<'a> {
@@ -539,10 +616,21 @@ mod tests {
     /// origin's own CA), and the decrypted bytes it sends still reach the
     /// origin and echo back — proving both the MITM cert swap and the
     /// relay work, not just the handshake.
+    ///
+    /// Also exercises `LeadingBytes` replay (`leftover` non-empty), the
+    /// "eager client" case the module doc describes: the server task reads
+    /// a small prefix directly off the accepted socket — standing in for
+    /// bytes `egress_proxy`'s own `BufReader` would have already buffered
+    /// past the CONNECT request — and hands it to `terminate_and_forward`
+    /// as `leftover` instead of leaving it on the socket for the acceptor
+    /// to read itself. If the replay were broken, the acceptor would be
+    /// missing the first bytes of the `ClientHello` and the handshake below
+    /// would fail instead of completing.
     #[tokio::test]
     async fn bound_host_is_intercepted_with_our_ca_and_relays_bytes() {
         let host = "bound.example.com";
-        let (origin_addr, origin_root_pem) = spawn_fake_tls_origin(host).await;
+        let (origin_addr, origin_root_pem, _origin_received_plaintext) =
+            spawn_fake_tls_origin(host).await;
 
         let ca = SandboxCertificateAuthority::generate().unwrap();
         let our_root_pem = ca.root_certificate_pem().to_string();
@@ -553,8 +641,18 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
-            let (stream, _) = proxy_listener.accept().await.unwrap();
-            terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+            let (mut stream, _) = proxy_listener.accept().await.unwrap();
+            // Peel a small prefix of the client's `ClientHello` off the raw
+            // socket ourselves, exactly as `egress_proxy`'s `BufReader`
+            // would if it had already buffered these bytes while parsing
+            // the CONNECT request. The rest of the `ClientHello` is still
+            // sitting on the socket for the acceptor to read normally.
+            let mut leftover = [0u8; 4];
+            stream
+                .read_exact(&mut leftover)
+                .await
+                .expect("reads the buffered ClientHello prefix");
+            terminate_and_forward(stream, leftover.to_vec(), host, origin_addr, &config).await
         });
 
         // The "container" side: a real rustls client, trusting only OUR
@@ -689,6 +787,130 @@ mod tests {
         );
     }
 
+    /// Fail-closed on the *other* handshake leg: the client's handshake with
+    /// the proxy succeeds fine (the proxy serves a leaf the client trusts),
+    /// but re-originating TLS to the origin fails because `origin_connector`
+    /// (deliberately `connector_trusting_nothing()` here) does not trust the
+    /// fake origin's self-signed cert. `terminate_and_forward` must return
+    /// `OriginHandshakeFailed` and — the invariant this test exists to pin —
+    /// the origin must never receive a single byte of decrypted application
+    /// data: a TLS handshake failure happens strictly before any application
+    /// data would be exchanged, so there is no window where a partial relay
+    /// could leak plaintext.
+    #[tokio::test]
+    async fn origin_handshake_failure_never_leaks_plaintext_to_the_origin() {
+        let host = "bound.example.com";
+        let (origin_addr, _origin_root_pem_untrusted_on_purpose, origin_received_plaintext) =
+            spawn_fake_tls_origin(host).await;
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let our_root_pem = ca.root_certificate_pem().to_string();
+        let bound_hosts = HashSet::from([host.to_string()]);
+        // `connector_trusting_nothing()` is the deterministic fail-closed
+        // lever: the origin's cert chains to a throwaway CA no root store
+        // trusts, so the origin handshake below must fail certificate
+        // verification.
+        let config = TlsInterceptConfig::new(ca, bound_hosts, connector_trusting_nothing());
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = proxy_listener.accept().await.unwrap();
+            terminate_and_forward(stream, Vec::new(), host, origin_addr, &config).await
+        });
+
+        // The "container" side trusts OUR ca, so its own handshake with the
+        // proxy succeeds regardless of what happens next between the proxy
+        // and the origin — this test's assertions are on
+        // `terminate_and_forward`'s return value and the origin's receipt,
+        // not on the client's own view of its handshake.
+        let mut our_roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
+            our_roots.add(cert.unwrap()).unwrap();
+        }
+        ensure_crypto_provider_installed();
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(our_roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+        let server_name = ServerName::try_from(host.to_string()).unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, raw_client),
+        )
+        .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic");
+        assert!(
+            matches!(result, Err(TlsInterceptError::OriginHandshakeFailed(_))),
+            "expected an origin handshake failure, got: {result:?}"
+        );
+        assert!(
+            !origin_received_plaintext.load(Ordering::SeqCst),
+            "origin must never receive decrypted application data when the origin handshake \
+             itself fails — that would mean a partial relay leaked plaintext despite the \
+             fail-closed contract"
+        );
+    }
+
+    /// The untrusted-client DoS this seam must not be vulnerable to: a peer
+    /// that opens the socket and then never sends a `ClientHello` (or stalls
+    /// mid-handshake) must not be able to pin this task and its client
+    /// socket open forever. Drives `terminate_and_forward_with_timeout`
+    /// directly with a short real duration (rather than
+    /// `HANDSHAKE_TIMEOUT`'s production value) so the test proves the
+    /// timeout wiring itself without sleeping tens of seconds of real wall
+    /// clock.
+    #[tokio::test]
+    async fn client_handshake_times_out_instead_of_hanging_forever() {
+        let host = "bound.example.com";
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let config = TlsInterceptConfig::new(
+            ca,
+            HashSet::from([host.to_string()]),
+            connector_trusting_nothing(),
+        );
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        // Never dialed: the client handshake times out well before
+        // `terminate_and_forward` would reach the origin-dial step.
+        let unreachable_origin_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = proxy_listener.accept().await.unwrap();
+            terminate_and_forward_with_timeout(
+                stream,
+                Vec::new(),
+                host,
+                unreachable_origin_addr,
+                &config,
+                Duration::from_millis(200),
+            )
+            .await
+        });
+
+        // Connects but never sends a byte.
+        let _raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish (the timeout must fire, not hang forever)")
+            .expect("server task did not panic");
+        match result {
+            Err(TlsInterceptError::ClientHandshakeFailed(reason)) => {
+                assert!(
+                    reason.contains("timed out"),
+                    "expected a timeout reason, got: {reason}"
+                );
+            }
+            other => panic!("expected a client-handshake timeout, got: {other:?}"),
+        }
+    }
+
     /// **This is the test that must not be faked.** Every other test in this
     /// file builds its own `VerifiedOriginConnector::for_test` connector —
     /// correct for those tests, but it proves nothing about
@@ -706,7 +928,8 @@ mod tests {
     #[tokio::test]
     async fn from_system_roots_rejects_an_untrusted_origin_certificate() {
         let host = "untrusted-origin.example.com";
-        let (origin_addr, _origin_root_pem_unused_on_purpose) = spawn_fake_tls_origin(host).await;
+        let (origin_addr, _origin_root_pem_unused_on_purpose, _origin_received_plaintext) =
+            spawn_fake_tls_origin(host).await;
 
         let connector = VerifiedOriginConnector::from_system_roots()
             .expect("system trust store must load on the test host");
@@ -722,12 +945,23 @@ mod tests {
         .await
         .expect("handshake must not hang");
 
+        let error = result.expect_err(
+            "from_system_roots() must reject a certificate from a CA no real trust store \
+             recognizes — an Ok here means the production connector verifies against \
+             nothing, which is exactly the MITM this type exists to prevent",
+        );
+        // Not just "any I/O error": pin that this is specifically a
+        // certificate-verification rejection (`rustls::Error`, the type
+        // `tokio-rustls` wraps as the `io::Error`'s source), so this test
+        // can't be satisfied by an unrelated TCP/protocol failure that
+        // happens to also return `Err`.
+        let source = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<rustls::Error>());
         assert!(
-            result.is_err(),
-            "from_system_roots() must reject a certificate from a CA no real \
-             trust store recognizes — an Ok here means the production \
-             connector verifies against nothing, which is exactly the MITM \
-             this type exists to prevent"
+            matches!(source, Some(rustls::Error::InvalidCertificate(_))),
+            "expected a certificate-verification rejection (rustls::Error::InvalidCertificate), \
+             got: {error:?}"
         );
     }
 
