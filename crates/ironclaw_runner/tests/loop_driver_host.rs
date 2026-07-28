@@ -8522,6 +8522,7 @@ fn host_runtime_surface_with_version(
             .into_iter()
             .map(|descriptor| VisibleCapability {
                 descriptor,
+                description_trust: Default::default(),
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),
             })
