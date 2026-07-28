@@ -117,6 +117,33 @@ fn truncate_at_inline_test_module(contents: &str) -> &str {
 /// *and string literal contents* stripped (`strip_comments_and_strings`), so
 /// a format string like `"...: {error}"` contributes no stray braces to the
 /// count — only real code braces are left to track.
+///
+/// The name match is on the **exact** identifier, not a prefix. A substring
+/// test would also match a hostile look-alike such as
+/// `fn from_system_roots_untrusted`, handing its whole body the carve-out and
+/// letting a `dangerous()` call inside it pass the gate unnoticed. That would
+/// make this test a guard with a hole in exactly the shape it exists to
+/// close, so `declares_from_system_roots` requires the next character after
+/// the identifier to be a non-identifier character.
+fn declares_from_system_roots(line: &str) -> bool {
+    const NEEDLE: &str = "fn from_system_roots";
+    let mut search_from = 0usize;
+    while let Some(found) = line[search_from..].find(NEEDLE) {
+        let start = search_from + found;
+        let after = start + NEEDLE.len();
+        // Exact identifier: whatever follows must not extend the name.
+        let extends_identifier = line[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !extends_identifier {
+            return true;
+        }
+        search_from = after;
+    }
+    false
+}
+
 fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSet<usize> {
     let mut sanctioned = HashSet::new();
     if !relative.ends_with("sandbox_process/tls_intercept.rs") {
@@ -126,7 +153,7 @@ fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSe
     let mut inside = false;
     for (number, line) in code_only.lines().enumerate() {
         if !inside {
-            if line.contains("fn from_system_roots") {
+            if declares_from_system_roots(line) {
                 inside = true;
             } else {
                 continue;
@@ -293,6 +320,50 @@ fn sanctioned_call_site_is_scoped_to_the_one_function_not_the_whole_file() {
         1,
         "the sanctioned line span should cover exactly the one \
          `RootCertStore::empty()` call inside `from_system_roots`"
+    );
+}
+
+/// The carve-out must key off the **exact** function identifier. Before this,
+/// the match was `line.contains("fn from_system_roots")`, so a look-alike such
+/// as `from_system_roots_untrusted` inherited the exemption for its whole body
+/// — anyone could have parked a `dangerous()` call inside a plausibly-named
+/// helper and this gate would have reported clean. Since the gate exists
+/// precisely to stop a permissive verifier reaching production, a hole shaped
+/// like the thing it guards is the worst kind, so it is pinned here.
+#[test]
+fn the_carve_out_matches_the_exact_function_name_not_a_prefix() {
+    assert!(
+        declares_from_system_roots("    pub(crate) fn from_system_roots() -> Result<Self> {"),
+        "the real declaration must be recognised"
+    );
+    assert!(
+        declares_from_system_roots("fn from_system_roots(){"),
+        "no space before the parameter list is still the same function"
+    );
+
+    for impostor in [
+        "    fn from_system_roots_untrusted() -> Self {",
+        "    fn from_system_roots_no_verify() -> Self {",
+        "    fn from_system_roots2() -> Self {",
+    ] {
+        assert!(
+            !declares_from_system_roots(impostor),
+            "a look-alike must NOT inherit the carve-out: {impostor}"
+        );
+    }
+
+    // End to end: a file containing only the impostor gets no sanctioned
+    // lines, so a banned call inside it stays visible to the scan.
+    let impostor_body = "fn from_system_roots_untrusted() -> Self {\n    \
+         RootCertStore::empty()\n}\n";
+    let sanctioned = sanctioned_from_system_roots_lines(
+        "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        impostor_body,
+    );
+    assert!(
+        sanctioned.is_empty(),
+        "an impostor function must receive no sanctioned lines, so its \
+         `RootCertStore::empty()` is still reported; got {sanctioned:?}"
     );
 }
 
