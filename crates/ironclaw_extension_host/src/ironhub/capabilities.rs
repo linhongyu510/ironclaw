@@ -203,8 +203,10 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
         )
         .await
         .map_err(capability_error)?;
-        let output = serde_json::to_value(response)
-            .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
+        let output = serde_json::to_value(response).map_err(|error| {
+            tracing::debug!(%error, "failed to serialize IronHub capability response");
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+        })?;
         Ok(FirstPartyCapabilityResult::new(
             output,
             ResourceUsage {
@@ -219,8 +221,10 @@ fn parse_input<T>(input: serde_json::Value) -> Result<T, FirstPartyCapabilityErr
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_value(input)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
+    serde_json::from_value(input).map_err(|error| {
+        tracing::debug!(%error, "failed to deserialize IronHub capability input");
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+    })
 }
 
 fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {

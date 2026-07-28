@@ -1010,7 +1010,8 @@ impl ExtensionLifecycleManager {
             }
         }
 
-        let had_installation = self.search_installation(&extension_id).await?.is_some()
+        let previous_installation = self.search_installation(&extension_id).await?;
+        let had_installation = previous_installation.is_some()
             || self
                 .installation_store
                 .get_manifest(&extension_id)
@@ -1074,6 +1075,15 @@ impl ExtensionLifecycleManager {
                     if let Err(restore_error) = restore {
                         return Err(compensation_failure(
                             "registry replacement failed and the previous install could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if let Some(installation) = &previous_installation
+                        && let Err(restore_error) = self.restore_installation(installation).await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous installation scope could not be restored",
                             original_error,
                             restore_error,
                         ));

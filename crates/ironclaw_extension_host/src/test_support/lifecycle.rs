@@ -13,17 +13,19 @@ use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
-    ExtensionHostAssemblyConfig, MountAlias, MountGrant, MountPermissions, MountView, Obligations,
-    Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId, VirtualPath,
+    ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
+    Obligations, Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
     HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::LifecycleProductSurfaceContext;
@@ -46,8 +48,8 @@ use crate::{
 };
 use ironclaw_skills::ScopedSkillManagementPort;
 
-pub type TestApprovalRequestStore = ApprovalRequestStore<InMemoryBackend>;
-pub type TestCapabilityLeaseStore = CapabilityLeaseStore<InMemoryBackend>;
+pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
+pub type TestCapabilityLeaseStore = CapabilityLeaseStore<FaultInjecting<InMemoryBackend>>;
 
 pub struct ExtensionLifecycleTestServices {
     pub host_runtime: Arc<dyn HostRuntime>,
@@ -55,6 +57,7 @@ pub struct ExtensionLifecycleTestServices {
     pub extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub skill_management: Arc<ScopedSkillManagementPort>,
     pub filesystem: Arc<dyn RootFilesystem>,
+    filesystem_faults: Arc<FaultInjecting<InMemoryBackend>>,
     pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
@@ -65,6 +68,10 @@ impl ExtensionLifecycleTestServices {
     pub fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
+
+    pub fn add_filesystem_fault(&self, fault: Fault) {
+        self.filesystem_faults.add_fault(fault);
+    }
 }
 
 pub async fn build_lifecycle_test_services(
@@ -73,7 +80,7 @@ pub async fn build_lifecycle_test_services(
     google_oauth_configured: bool,
 ) -> ExtensionLifecycleTestServices {
     let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
-    let filesystem = Arc::new(InMemoryBackend::new());
+    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher> =
@@ -279,6 +286,7 @@ pub async fn build_lifecycle_test_services(
         extension_management: Arc::clone(&extension_management),
         skill_management,
         filesystem: extension_filesystem,
+        filesystem_faults: filesystem,
         lifecycle_service: Arc::new(lifecycle_service),
         approval_requests,
         capability_leases,
@@ -291,7 +299,7 @@ pub async fn invoke_json_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
+) -> Result<serde_json::Value, FailureKind> {
     match invoke_with_local_dev_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
