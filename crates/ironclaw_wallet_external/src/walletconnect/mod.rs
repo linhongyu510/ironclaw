@@ -282,11 +282,7 @@ impl SigningProvider for WalletConnectSigningProvider {
         // PR10: hand the verified proof back to the gate / runner for the
         // deterministic post-approval continuation (broadcast via
         // ironclaw_chain_signing). PR9 stops at the verified-proof boundary.
-        Ok(VerifiedProof::new(
-            ProviderId::WalletConnect,
-            *approved_tx_hash,
-            proof.clone(),
-        ))
+        Ok(VerifiedProof::new(self, *approved_tx_hash, proof.clone()))
     }
 }
 

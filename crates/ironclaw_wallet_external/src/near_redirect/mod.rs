@@ -305,11 +305,7 @@ impl SigningProvider for NearRedirectSigningProvider {
         let key = GrantKey::from_context(context, *approved_tx_hash);
         self.grants.claim(&key).await.map_err(map_grant_error)?;
 
-        Ok(VerifiedProof::new(
-            ProviderId::NearRedirect,
-            *approved_tx_hash,
-            proof.clone(),
-        ))
+        Ok(VerifiedProof::new(self, *approved_tx_hash, proof.clone()))
     }
 }
 
