@@ -101,56 +101,113 @@ pub(crate) enum TlsInterceptError {
     InvalidSniHost { host: String, reason: String },
     #[error("sandbox tls intercept: relaying decrypted bytes failed: {0}")]
     RelayFailed(String),
+    #[error("sandbox tls intercept: failed to load system trust roots: {0}")]
+    TrustRootsUnavailable(String),
+}
+
+/// A [`TlsConnector`] whose trust store is guaranteed to be the real
+/// platform root-of-trust — never empty, never `dangerous()`, never a
+/// custom verifier that skips or weakens certificate verification.
+///
+/// This wraps the invariant the struct-level `# WARNING` on
+/// [`TlsInterceptConfig`] used to only document: `origin_connector` is what
+/// the proxy uses to verify the origin it re-originates TLS to, on behalf
+/// of a sandboxed container that is deliberately never given the real
+/// secret. If that connector's trust store is ever empty or permissive, the
+/// interception seam stops being a credential firewall and becomes a
+/// working, silent MITM against our own users' egress traffic to every
+/// bound host.
+///
+/// [`from_system_roots`](Self::from_system_roots) is the **only** door in a
+/// production build — there is no way to build one from a caller-supplied
+/// `TlsConnector`, `RootCertStore`, or verifier outside `#[cfg(test)]`. This
+/// makes the mistake this type exists to prevent (an empty or permissive
+/// connector reaching `TlsInterceptConfig::new`) a compile error for any
+/// non-test caller, not merely a documented review requirement.
+#[allow(dead_code)] // consumed by W6; not wired to a production caller yet
+pub(crate) struct VerifiedOriginConnector(TlsConnector);
+
+impl VerifiedOriginConnector {
+    /// Builds the connector from the platform's real trust anchors via
+    /// `rustls-native-certs` (the same crate and pattern
+    /// `ironclaw_reborn_event_store::make_rustls_connector` already uses in
+    /// this workspace for remote Postgres TLS). An empty or unreadable
+    /// system trust store is a returned `Err`, never a silent `Ok` with
+    /// zero roots — that empty-store case is exactly the bug this type
+    /// exists to make unrepresentable, so it must fail closed rather than
+    /// hand back a connector that verifies against nothing.
+    #[allow(dead_code)] // consumed by W6; not wired to a production caller yet
+    pub(crate) fn from_system_roots() -> Result<Self, TlsInterceptError> {
+        ensure_crypto_provider_installed();
+        let mut root_store = rustls::RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for error in &native.errors {
+            tracing::warn!("sandbox tls intercept: error loading system root certs: {error}");
+        }
+        for cert in native.certs {
+            if let Err(error) = root_store.add(cert) {
+                tracing::warn!("sandbox tls intercept: skipping invalid system root cert: {error}");
+            }
+        }
+        if root_store.is_empty() {
+            return Err(TlsInterceptError::TrustRootsUnavailable(
+                "system trust store yielded zero usable root certificates".to_string(),
+            ));
+        }
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        Ok(Self(TlsConnector::from(Arc::new(client_config))))
+    }
+
+    /// Test-only escape hatch: wrap an arbitrary connector (e.g. one
+    /// trusting only a fake origin's root, or trusting nothing at all, to
+    /// force the fail-closed path deterministically). `#[cfg(test)]` means
+    /// this constructor does not exist in a production build — a
+    /// production caller reaching for a permissive connector gets a
+    /// compile error, not a review comment.
+    #[cfg(test)]
+    pub(crate) fn for_test(connector: TlsConnector) -> Self {
+        Self(connector)
+    }
 }
 
 /// Shared, per-proxy-instance TLS-interception configuration:
 /// [`super::ca::SandboxCertificateAuthority`] to mint leaf certs from, the
 /// flat set of hosts to terminate (see the module doc's "binding decision"),
-/// and a pre-built [`TlsConnector`] for re-originating a TLS connection to
-/// the real upstream once decrypted. The `TlsConnector`'s trust roots are a
-/// caller decision (production would use system roots; this phase leaves
-/// that to whoever eventually wires a production caller) — this type only
-/// carries whatever connector it is given.
+/// and a [`VerifiedOriginConnector`] for re-originating a TLS connection to
+/// the real upstream once decrypted.
 ///
 /// # WARNING: `origin_connector`'s trust store is a production security
 /// boundary, not a test convenience
 ///
-/// Every `TlsInterceptConfig` constructed anywhere in this crate today comes
-/// from a test, and every one of those tests hands it a `TlsConnector` built
-/// from a real (test) root store. **There is no production constructor yet.**
-/// When one is wired (composition, phase 2+), the `origin_connector` it
-/// builds MUST be backed by a real trusted root store — the pattern
-/// `ironclaw_reborn_event_store` already uses in this workspace via
-/// `rustls-native-certs` — and MUST NEVER be:
+/// This is now **type-enforced**, not just documented: [`new`](Self::new)
+/// takes a [`VerifiedOriginConnector`], whose only production constructor
+/// ([`VerifiedOriginConnector::from_system_roots`]) builds from the
+/// platform's real trust anchors and fails closed on an empty or unreadable
+/// store. The test-only escape hatch
+/// ([`VerifiedOriginConnector::for_test`]) is `#[cfg(test)]`, so it does not
+/// exist in a production build — there is no bare `TlsConnector` overload
+/// for a production caller to reach for `dangerous()`,
+/// `with_custom_certificate_verifier`, or an empty `RootCertStore` with.
 ///
-/// - built with `rustls::ClientConfig::dangerous()` or any verifier that
-///   skips or weakens certificate verification,
-/// - given a custom `ServerCertVerifier` that always accepts,
-/// - built with an empty `RootCertStore` (equivalent to trusting nothing on
-///   paper, but see below — the actual production risk is the opposite
-///   mistake: trusting *everything*).
-///
-/// This module re-originates a TLS connection to the real upstream on behalf
-/// of the sandboxed container, using the same host/port the container
-/// thought it was dialing. If `origin_connector` ever fails to verify the
-/// origin's certificate against a real root store, this seam stops being a
+/// The invariant this protects has not changed: this module re-originates a
+/// TLS connection to the real upstream on behalf of the sandboxed
+/// container, using the same host/port the container thought it was
+/// dialing. If `origin_connector` ever fails to verify the origin's
+/// certificate against a real root store, this seam stops being a
 /// credential firewall and becomes a working, silent MITM against our own
 /// users' egress traffic to every "bound" host — the exact opposite of what
-/// W6 exists to build. Every test in this file supplies its own real or
-/// deliberately-empty root store, so **no existing test would catch a
-/// permissive production connector** being wired in; this is a wiring-time
-/// requirement the composition PR that adds a production constructor must be
-/// reviewed against, not something this phase's test suite enforces.
+/// W6 exists to build. `crates/ironclaw_architecture` also bans the escape
+/// hatches (`dangerous(`, `with_custom_certificate_verifier`,
+/// `RootCertStore::empty()`) from non-test code under
+/// `sandbox_process/`, so a caller can no longer route around this type and
+/// hand-roll a permissive connector either.
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
-    /// See the struct-level `# WARNING` above: this MUST be built from a
-    /// real trusted root store in production (e.g. `rustls-native-certs`),
-    /// and MUST NEVER use `dangerous()`, a verifier that skips verification,
-    /// or an empty root store. Getting this wrong turns the whole TLS
-    /// interception seam into a silent MITM against our own users.
-    origin_connector: TlsConnector,
+    origin_connector: VerifiedOriginConnector,
 }
 
 impl TlsInterceptConfig {
@@ -158,7 +215,7 @@ impl TlsInterceptConfig {
     pub(crate) fn new(
         ca: SandboxCertificateAuthority,
         bound_hosts: HashSet<String>,
-        origin_connector: TlsConnector,
+        origin_connector: VerifiedOriginConnector,
     ) -> Self {
         Self {
             ca,
@@ -250,6 +307,7 @@ pub(crate) async fn terminate_and_forward(
     })?;
     let mut origin_tls = config
         .origin_connector
+        .0
         .connect(server_name, origin_stream)
         .await
         .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
@@ -365,12 +423,13 @@ mod tests {
     };
     use x509_parser::prelude::*;
 
-    /// Builds a `TlsConnector` that trusts exactly one extra root — the
-    /// test seam standing in for "production would use system roots"
-    /// (see the module doc). Used to make a fake local origin TLS server
-    /// trusted by the connector under test without depending on any real
-    /// certificate authority.
-    fn connector_trusting_only(root_pem: &str) -> TlsConnector {
+    /// Builds a [`VerifiedOriginConnector`] (via the `#[cfg(test)]`-only
+    /// [`VerifiedOriginConnector::for_test`] escape hatch) that trusts
+    /// exactly one extra root — the test seam standing in for "production
+    /// would use system roots" (see the module doc). Used to make a fake
+    /// local origin TLS server trusted by the connector under test without
+    /// depending on any real certificate authority.
+    fn connector_trusting_only(root_pem: &str) -> VerifiedOriginConnector {
         ensure_crypto_provider_installed();
         let mut roots = rustls::RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(root_pem.as_bytes()) {
@@ -381,19 +440,19 @@ mod tests {
         let client_config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        TlsConnector::from(Arc::new(client_config))
+        VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
     }
 
-    /// A `TlsConnector` with an empty trust store — every origin handshake
-    /// through it fails certificate verification. Used to force the
-    /// fail-closed path deterministically without relying on network
-    /// conditions.
-    fn connector_trusting_nothing() -> TlsConnector {
+    /// A [`VerifiedOriginConnector`] with an empty trust store — every
+    /// origin handshake through it fails certificate verification. Used to
+    /// force the fail-closed path deterministically without relying on
+    /// network conditions.
+    fn connector_trusting_nothing() -> VerifiedOriginConnector {
         ensure_crypto_provider_installed();
         let client_config = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        TlsConnector::from(Arc::new(client_config))
+        VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
     }
 
     /// Spins up a local TLS "origin" server on loopback, using its own
@@ -608,6 +667,48 @@ mod tests {
             origin_result.is_err(),
             "origin must never be dialed after a failed client handshake (fail-closed, no \
              plaintext fallback)"
+        );
+    }
+
+    /// **This is the test that must not be faked.** Every other test in this
+    /// file builds its own `VerifiedOriginConnector::for_test` connector —
+    /// correct for those tests, but it proves nothing about
+    /// `VerifiedOriginConnector::from_system_roots` itself, which is the
+    /// only production door and the one a wiring bug could actually reach.
+    /// This test drives `from_system_roots` directly: it builds a connector
+    /// from the platform's real trust anchors, points it at a loopback
+    /// origin serving a certificate from a throwaway self-signed CA that no
+    /// real trust store has ever heard of (the same `spawn_fake_tls_origin`
+    /// helper other tests use, minus handing the connector its root PEM),
+    /// and asserts the handshake fails. If `from_system_roots` ever silently
+    /// trusted everything (an empty root store that verifies nothing, or a
+    /// `dangerous()` verifier), this is the test that would start passing
+    /// against a real MITM instead of catching it.
+    #[tokio::test]
+    async fn from_system_roots_rejects_an_untrusted_origin_certificate() {
+        let host = "untrusted-origin.example.com";
+        let (origin_addr, _origin_root_pem_unused_on_purpose) = spawn_fake_tls_origin(host).await;
+
+        let connector = VerifiedOriginConnector::from_system_roots()
+            .expect("system trust store must load on the test host");
+
+        let origin_stream = TcpStream::connect(origin_addr)
+            .await
+            .expect("tcp connect to the fake origin must succeed");
+        let server_name = ServerName::try_from(host.to_string()).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.0.connect(server_name, origin_stream),
+        )
+        .await
+        .expect("handshake must not hang");
+
+        assert!(
+            result.is_err(),
+            "from_system_roots() must reject a certificate from a CA no real \
+             trust store recognizes — an Ok here means the production \
+             connector verifies against nothing, which is exactly the MITM \
+             this type exists to prevent"
         );
     }
 }

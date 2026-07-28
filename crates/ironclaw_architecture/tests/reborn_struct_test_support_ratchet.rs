@@ -90,12 +90,14 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     },
     // W6 phase 1's TLS-termination seam: `egress_proxy` (a separate slice,
     // not yet landed) is the only production caller. Same retirement
-    // trigger as the `ca.rs`/`credential_firewall.rs` entries above.
+    // trigger as the `ca.rs`/`credential_firewall.rs` entries above. Bumped
+    // 4 -> 5 for `VerifiedOriginConnector::from_system_roots`, the type's
+    // only production constructor — unwired for the same reason.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 4,
+        count: 5,
     },
     FrozenPathCount {
         category: "dead-code",
@@ -277,11 +279,14 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
         count: 1,
     },
+    // Bumped 1 -> 2 for `VerifiedOriginConnector::for_test`, the
+    // `#[cfg(test)]`-only escape hatch that keeps a permissive connector
+    // unreachable from a production build.
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
-        count: 1,
+        count: 2,
     },
     FrozenPathCount {
         category: "test-support",
