@@ -92,7 +92,6 @@ impl IronHubManifest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct IronHubToolEntry {
     pub(crate) name: String,
-    pub(crate) crate_name: String,
     pub(crate) version: String,
     #[serde(default)]
     pub(crate) description: String,
@@ -100,6 +99,14 @@ pub(crate) struct IronHubToolEntry {
     pub(crate) provenance: IronHubProvenance,
     pub(crate) wasm: IronHubArtifact,
     pub(crate) capabilities: IronHubArtifact,
+    /// The extension manifest the registry published for this tool.
+    ///
+    /// Optional so a catalog predating published manifests still deserializes
+    /// and still lists every tool; installing one of those tools is what fails,
+    /// with a message naming the cause. Making it required would turn one stale
+    /// catalog into zero visible tools.
+    #[serde(default)]
+    pub(crate) manifest: Option<IronHubArtifact>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

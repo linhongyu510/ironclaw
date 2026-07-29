@@ -194,7 +194,7 @@ impl std::fmt::Display for HttpsEndpoint {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum VendorAuthRecipe {
     Oauth2Code(Box<OAuth2CodeRecipe>),
-    ApiKey(ApiKeyRecipe),
+    ApiKey(Box<ApiKeyRecipe>),
 }
 
 impl VendorAuthRecipe {
@@ -302,6 +302,16 @@ pub struct OAuth2CodeRecipe {
     pub refresh: Option<RefreshRecipe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoke: Option<RevokeRecipe>,
+    /// What a user has to arrange before the consent screen will work — an app
+    /// registered with the vendor, a redirect URI allowlisted. An OAuth flow that
+    /// fails for a missing prerequisite is otherwise indistinguishable from a
+    /// broken integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Where that arranging happens. `HttpsEndpoint` because this becomes a link
+    /// the user is invited to follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<HttpsEndpoint>,
 }
 
 impl OAuth2CodeRecipe {
@@ -483,6 +493,16 @@ pub struct ApiKeyRecipe {
     pub fields: Vec<RecipeSecretField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<ApiKeyValidationProbe>,
+    /// How a user obtains this credential, in the vendor's own terms — "open
+    /// Workspace Settings > Developers, create an access token". Without it the
+    /// host can say a secret is required but not where it comes from, and a
+    /// model asked to help will invent the steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Where those steps happen. `HttpsEndpoint` because this becomes a link the
+    /// user is invited to follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<HttpsEndpoint>,
 }
 
 impl ApiKeyRecipe {

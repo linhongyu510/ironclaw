@@ -375,6 +375,22 @@ impl IronHubService {
                     let entry = manifest
                         .find_tool(name)
                         .ok_or_else(|| catalog("tool not found"))?;
+                    // Digest-verified like every other artifact, and covered by
+                    // the same catalog signature.
+                    let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
+                        catalog(format!(
+                            "'{}' publishes no extension manifest; its catalog entry predates \
+                             published manifests, so refresh the catalog",
+                            entry.name
+                        ))
+                    })?;
+                    let tool_manifest = self
+                        .download_verified(
+                            manifest_artifact,
+                            MAX_METADATA_BYTES,
+                            private_origin.as_ref(),
+                        )
+                        .await?;
                     let wasm = self
                         .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
                         .await?;
@@ -389,7 +405,8 @@ impl IronHubService {
                         .extension_management
                         .reserved_bundled_extension_ids()
                         .await;
-                    let package = ironhub_tool_package(entry, wasm, capabilities, &reserved)?;
+                    let package =
+                        ironhub_tool_package(entry, tool_manifest, wasm, capabilities, &reserved)?;
                     self.extension_management
                         .install_registry_package(
                             package,

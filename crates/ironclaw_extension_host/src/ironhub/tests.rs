@@ -423,6 +423,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let manifest_url = "https://hub.ironclaw.com/tests/native-install/manifest.json";
     let tool_url = "https://hub.ironclaw.com/tests/native-install/tool.wasm";
     let capabilities_url = "https://hub.ironclaw.com/tests/native-install/capabilities.json";
+    let tool_manifest_url = "https://hub.ironclaw.com/tests/native-install/manifest.toml";
     let skill_url = "https://hub.ironclaw.com/tests/native-install/SKILL.md";
     let tool_bytes = include_bytes!(
         "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
@@ -443,6 +444,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             skill_url,
             skill_size: skill_bytes.len(),
             skill_sha: &sha256_hex(&skill_bytes),
+            tool_manifest_url,
         }),
         &test_signing_key(),
     );
@@ -450,6 +452,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         (manifest_url, manifest),
         (tool_url, tool_bytes),
         (capabilities_url, capabilities_bytes),
+        (tool_manifest_url, published_tool_manifest("0.1.0")),
         (skill_url, skill_bytes),
     ]));
     let service = configure_test_catalog(
@@ -529,7 +532,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     assert!(installed_skill.content.contains("# Installed"));
 
     let requests = egress.requests();
-    assert_eq!(requests.len(), 4);
+    // Catalog, then the tool's manifest, wasm, and capabilities, then the skill.
+    assert_eq!(requests.len(), 5);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
@@ -1035,6 +1039,8 @@ async fn fail_forced_tool_replacement(
     let old_tool_url = format!("https://hub.ironclaw.com/tests/{fixture}/old-tool.wasm");
     let old_capabilities_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/old-capabilities.json");
+    let old_tool_manifest_url =
+        format!("https://hub.ironclaw.com/tests/{fixture}/old-manifest.toml");
     let old_manifest = signed_manifest(
         tool_manifest_json(ToolManifestFixture {
             generated_at: "2026-01-03T00:00:00Z",
@@ -1045,6 +1051,7 @@ async fn fail_forced_tool_replacement(
             capabilities_url: &old_capabilities_url,
             capabilities_size: capabilities_bytes.len(),
             capabilities_sha: &sha256_hex(&capabilities_bytes),
+            tool_manifest_url: &old_tool_manifest_url,
         }),
         &test_signing_key(),
     );
@@ -1055,6 +1062,10 @@ async fn fail_forced_tool_replacement(
             (old_manifest_url.as_str(), old_manifest),
             (old_tool_url.as_str(), tool_bytes.clone()),
             (old_capabilities_url.as_str(), capabilities_bytes.clone()),
+            (
+                old_tool_manifest_url.as_str(),
+                published_tool_manifest("0.1.0"),
+            ),
         ])),
         scope.clone(),
         &old_manifest_url,
@@ -1088,6 +1099,8 @@ async fn fail_forced_tool_replacement(
     let new_tool_url = format!("https://hub.ironclaw.com/tests/{fixture}/new-tool.wasm");
     let new_capabilities_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/new-capabilities.json");
+    let new_tool_manifest_url =
+        format!("https://hub.ironclaw.com/tests/{fixture}/new-manifest.toml");
     let new_manifest = signed_manifest(
         tool_manifest_json(ToolManifestFixture {
             generated_at: "2026-01-04T00:00:00Z",
@@ -1098,6 +1111,7 @@ async fn fail_forced_tool_replacement(
             capabilities_url: &new_capabilities_url,
             capabilities_size: capabilities_bytes.len(),
             capabilities_sha: &sha256_hex(&capabilities_bytes),
+            tool_manifest_url: &new_tool_manifest_url,
         }),
         &test_signing_key(),
     );
@@ -1108,6 +1122,10 @@ async fn fail_forced_tool_replacement(
             (new_manifest_url.as_str(), new_manifest),
             (new_tool_url.as_str(), tool_bytes),
             (new_capabilities_url.as_str(), capabilities_bytes),
+            (
+                new_tool_manifest_url.as_str(),
+                published_tool_manifest("0.2.0"),
+            ),
         ])),
         scope.clone(),
         &new_manifest_url,
@@ -1320,6 +1338,7 @@ struct MixedManifestFixture<'a> {
     skill_url: &'a str,
     skill_size: usize,
     skill_sha: &'a str,
+    tool_manifest_url: &'a str,
 }
 
 fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
@@ -1333,6 +1352,7 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
         skill_url,
         skill_size,
         skill_sha,
+        tool_manifest_url,
     } = fixture;
     serde_json::json!({
         "version": "1",
@@ -1354,7 +1374,8 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
                 "url": capabilities_url,
                 "size_bytes": capabilities_size,
                 "sha256": capabilities_sha
-            }
+            },
+            "manifest": published_tool_manifest_artifact(tool_manifest_url, "0.1.0")
         }],
         "skills": [{
             "name": "installed-skill",
@@ -1380,6 +1401,45 @@ struct ToolManifestFixture<'a> {
     capabilities_url: &'a str,
     capabilities_size: usize,
     capabilities_sha: &'a str,
+    tool_manifest_url: &'a str,
+}
+
+/// The extension manifest IronHub publishes for the fixture tool, shaped like
+/// what `scripts/generate-extension-manifest.py` emits in that repository.
+pub(crate) fn published_tool_manifest(version: &str) -> Vec<u8> {
+    format!(
+        r#"schema_version = "reborn.extension_manifest.v3"
+id = "installed-tool"
+name = "installed-tool"
+version = "{version}"
+description = "test tool"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/installed-tool.wasm"
+
+[[tools]]
+origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
+id = "installed-tool.invoke"
+description = "test tool"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/installed-tool/invoke.input.v1.json"
+output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
+"#
+    )
+    .into_bytes()
+}
+
+fn published_tool_manifest_artifact(url: &str, version: &str) -> serde_json::Value {
+    let bytes = published_tool_manifest(version);
+    serde_json::json!({
+        "url": url,
+        "size_bytes": bytes.len(),
+        "sha256": sha256_hex(&bytes),
+    })
 }
 
 fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
@@ -1392,6 +1452,7 @@ fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
         capabilities_url,
         capabilities_size,
         capabilities_sha,
+        tool_manifest_url,
     } = fixture;
     serde_json::json!({
         "version": "1",
@@ -1413,7 +1474,8 @@ fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
                 "url": capabilities_url,
                 "size_bytes": capabilities_size,
                 "sha256": capabilities_sha
-            }
+            },
+            "manifest": published_tool_manifest_artifact(tool_manifest_url, version)
         }],
         "skills": []
     })

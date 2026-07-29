@@ -5,7 +5,9 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
+use ironclaw_host_api::{
+    ExtensionId, LifecycleExtensionOnboarding, RuntimeKind, VendorAuthRecipe, VirtualPath,
+};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 
 use crate::product_extension_host_api_contract_registry;
@@ -173,6 +175,39 @@ pub fn registry_extension_package(
     )
 }
 
+/// Parse an extension manifest at the import boundary.
+///
+/// Exposed so a caller that downloads a manifest and its assets as separate
+/// artifacts can read the paths the manifest declares and place each asset
+/// where it says, instead of agreeing a path convention with the publisher out
+/// of band. Applies the same host port catalog and contract registry the
+/// package build applies, so what parses here is what installs.
+pub fn parse_imported_manifest(
+    manifest_toml: &str,
+    source: ManifestSource,
+) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("host port catalog rejected imported extension: {error}"),
+        }
+    })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected imported extension: {error}"),
+        }
+    })?;
+    // Uploaded and registry packages are both untrusted host inputs. Only
+    // binary-compiled packages may claim the HostBundled trust/runtime tier.
+    ExtensionManifestRecord::from_toml(
+        manifest_toml.to_string(),
+        source,
+        &host_ports,
+        None,
+        &contracts,
+    )
+    .map_err(map_binding_error)
+}
+
 fn extension_package_from_files(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
@@ -187,21 +222,7 @@ fn extension_package_from_files(
                 map_binding_error(format!("imported manifest.toml is not UTF-8: {error}"))
             })
         })?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected imported extension: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected imported extension: {error}"),
-        }
-    })?;
-    // Uploaded and registry packages are both untrusted host inputs. Only
-    // binary-compiled packages may claim the HostBundled trust/runtime tier.
-    let record =
-        ExtensionManifestRecord::from_toml(manifest_toml, source, &host_ports, None, &contracts)
-            .map_err(map_binding_error)?;
+    let record = parse_imported_manifest(&manifest_toml, source)?;
     let runtime_kind = record.manifest().runtime.kind();
     if runtime_kind != RuntimeKind::Wasm {
         return Err(map_binding_error(format!(
@@ -270,9 +291,49 @@ fn extension_package_from_files(
         channel_directions: None,
         channel_presentation: None,
         assets,
-        onboarding_override: None,
+        onboarding_override: onboarding_from_auth_recipes(record.resolved()),
         oauth_setup_override: None,
         search_aliases: Vec::new(),
+    })
+}
+
+/// Carry the vendor's own account-setup copy out of the manifest so an installed
+/// extension can tell the user how to obtain the secret it is asking for.
+///
+/// Without this an imported package surfaces "this needs a credential" and
+/// nothing else: the user has no steps to follow, and a model asked for help has
+/// no grounded source and invents them. The copy is authored by whoever authored
+/// the manifest, so it is descriptive text only — it grants nothing and is
+/// rendered, never executed.
+///
+/// Only the first vendor that carries copy is used. Every registry tool today
+/// declares exactly one, and concatenating several vendors' instructions would
+/// produce guidance for a credential the user was not asked for.
+fn onboarding_from_auth_recipes(
+    manifest: &ironclaw_extensions::ResolvedExtensionManifest,
+) -> Option<LifecycleExtensionOnboarding> {
+    manifest.auth.iter().find_map(|surface| {
+        let (display_name, instructions, setup_url) = match surface.recipe.as_ref()? {
+            VendorAuthRecipe::ApiKey(recipe) => (
+                &recipe.display_name,
+                recipe.instructions.as_ref(),
+                recipe.setup_url.as_ref(),
+            ),
+            VendorAuthRecipe::Oauth2Code(recipe) => (
+                &recipe.display_name,
+                recipe.instructions.as_ref(),
+                recipe.setup_url.as_ref(),
+            ),
+        };
+        let instructions = instructions?;
+        Some(LifecycleExtensionOnboarding {
+            instructions: instructions.clone(),
+            credential_instructions: Some(instructions.clone()),
+            setup_url: setup_url.map(|url| url.as_str().to_string()),
+            credential_next_step: Some(format!(
+                "Add the {display_name} credential to finish activating this extension."
+            )),
+        })
     })
 }
 
