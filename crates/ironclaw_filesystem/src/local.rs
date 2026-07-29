@@ -636,6 +636,13 @@ mod tests {
     }
 
     fn make_fifo(path: &std::path::Path) {
+        // Deliberately *not* `rustix::fs::mkfifoat` (review suggestion):
+        // that function is `#[cfg(not(apple, ...))]` in the pinned rustix
+        // `1.1.4` — unavailable on macOS, a platform this module's own
+        // fallback path explicitly supports (see the module doc). Shelling
+        // out to the portable `mkfifo(1)` binary (present on every
+        // Unix-like CI/dev image this crate targets) is the one that
+        // actually works everywhere `cargo test` runs for this crate.
         let status = std::process::Command::new("mkfifo")
             .arg(path)
             .status()
