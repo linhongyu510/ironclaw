@@ -1,5 +1,5 @@
 // arch-exempt: large_file, the three-state lifecycle collapse remains with the installation aggregate pending its planned split, plan #6175
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -177,12 +177,20 @@ impl ExtensionManifestRecord {
     /// The single manifest parse entry point: dispatches on the declared
     /// `schema_version` (v2 or v3) and normalizes both into the same
     /// resolved model.
+    /// `root` is the extension's package root, when the caller already knows
+    /// it (e.g. materializing a filesystem/import package at a stable path).
+    /// It is an explicit required parameter — not a `with_root()` builder —
+    /// so every call site is forced to decide `Some(root)` or `None` rather
+    /// than silently inheriting a default a site forgot to set. `None`
+    /// callers accept the loader's historical `/system/extensions/{id}`
+    /// fabrication (`CompositionExtensionLoader::load`).
     pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
         manifest_hash: Option<ManifestHash>,
         contracts: &HostApiContractRegistry,
+        root: Option<VirtualPath>,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
         let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
@@ -190,19 +198,20 @@ impl ExtensionManifestRecord {
                 reason: format!("failed to parse extension manifest: {error}"),
             }
         })?;
-        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
-        {
-            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
-                ExtensionInstallationError::InvalidManifest {
-                    reason: error.to_string(),
-                }
-            })?
-        } else {
-            let manifest =
-                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
-            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
-            (manifest, resolved)
-        };
+        let (manifest, mut resolved) =
+            if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3 {
+                crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                    ExtensionInstallationError::InvalidManifest {
+                        reason: error.to_string(),
+                    }
+                })?
+            } else {
+                let manifest =
+                    ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+                let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+                (manifest, resolved)
+            };
+        resolved.root = root;
         Ok(Self {
             raw_toml,
             manifest,
@@ -1151,6 +1160,8 @@ impl ExtensionInstallationStore {
                     &self.host_ports,
                     wire.manifest_hash,
                     &self.contracts,
+                    // Legacy pre-REC-1 row: no root was ever persisted for it.
+                    None,
                 )?
                 .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
                 match self
@@ -2292,6 +2303,93 @@ impl ExtensionInstallationStore {
             ));
         }
         let all_memberships = self.query_v2_memberships(&core.installation_id).await?;
+        let all_bindings = self
+            .query_v2_credential_bindings(&core.installation_id)
+            .await?;
+        Self::assemble_v2_installation(core, all_memberships, all_bindings)
+    }
+
+    /// Group every membership row under the shared prefix by its installation.
+    ///
+    /// One query for the whole collection instead of one per installation:
+    /// listing is a hot read and the per-installation shape made it O(N)
+    /// round trips.
+    async fn query_v2_memberships_by_installation(
+        &self,
+    ) -> Result<HashMap<ExtensionInstallationId, Vec<V2MembershipRecord>>, ExtensionInstallationError>
+    {
+        let rows = query_all(&self.filesystem, &self.v2_memberships_root()?, &Filter::All).await?;
+        let mut grouped: HashMap<ExtensionInstallationId, Vec<V2MembershipRecord>> = HashMap::new();
+        for row in rows {
+            let path = row.path.clone();
+            let record = parse_v2_membership_entry(row.entry, &path)?;
+            // Same integrity check the per-installation read makes: the body's
+            // installation id must agree with the parent the row is filed under.
+            // Match the full directory boundary, not a bare string prefix.
+            // Today's row tokens are fixed-length hashes so a prefix collision
+            // is unreachable, but that is a property of the path scheme rather
+            // than of this check -- pin the boundary so the check stays exact
+            // if the scheme ever changes.
+            let expected_root = format!("{}/", self.v2_membership_root(&record.installation_id)?);
+            if !path.as_str().starts_with(&expected_root) {
+                return Err(invalid_installation_error(
+                    "v2 membership row installation id did not match its parent",
+                ));
+            }
+            grouped
+                .entry(record.installation_id.clone())
+                .or_default()
+                .push(record);
+        }
+        Ok(grouped)
+    }
+
+    /// Credential-binding counterpart of
+    /// [`Self::query_v2_memberships_by_installation`].
+    async fn query_v2_credential_bindings_by_installation(
+        &self,
+    ) -> Result<
+        HashMap<ExtensionInstallationId, Vec<V2CredentialBindingRecord>>,
+        ExtensionInstallationError,
+    > {
+        let rows = query_all(
+            &self.filesystem,
+            &self.v2_credential_bindings_root()?,
+            &Filter::All,
+        )
+        .await?;
+        let mut grouped: HashMap<ExtensionInstallationId, Vec<V2CredentialBindingRecord>> =
+            HashMap::new();
+        for row in rows {
+            let path = row.path.clone();
+            let record = parse_v2_credential_binding_entry(row.entry, &path)?;
+            let expected_root = format!(
+                "{}/",
+                self.v2_credential_binding_root(&record.installation_id)?
+            );
+            if !path.as_str().starts_with(&expected_root) {
+                return Err(invalid_installation_error(
+                    "v2 credential binding installation id did not match its parent",
+                ));
+            }
+            grouped
+                .entry(record.installation_id.clone())
+                .or_default()
+                .push(record);
+        }
+        Ok(grouped)
+    }
+
+    /// Rebuild one aggregate from a core row and its already-loaded children.
+    ///
+    /// Pure assembly: the caller decides whether the children came from a
+    /// per-installation read or a batched one, so a list can load every child
+    /// collection once.
+    fn assemble_v2_installation(
+        core: &V2InstallationRecord,
+        all_memberships: Vec<V2MembershipRecord>,
+        all_bindings: Vec<V2CredentialBindingRecord>,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
         let membership_updated_at = all_memberships.iter().map(|record| record.updated_at).max();
         let memberships = all_memberships
             .into_iter()
@@ -2307,9 +2405,6 @@ impl ExtensionInstallationStore {
                     .collect(),
             )?
         };
-        let all_bindings = self
-            .query_v2_credential_bindings(&core.installation_id)
-            .await?;
         let binding_updated_at = all_bindings.iter().map(|record| record.updated_at).max();
         let mut bindings = all_bindings
             .into_iter()
@@ -2343,17 +2438,39 @@ impl ExtensionInstallationStore {
         })
     }
 
+    /// Load every visible installation with a constant number of queries.
+    ///
+    /// The normalized layout stores each aggregate's members and credential
+    /// bindings as child rows, so reconstructing them one installation at a
+    /// time costs `1 + 2N` round trips. That is invisible on a local disk and
+    /// dominates on network-attached storage, so both child collections are
+    /// read once and joined in memory instead.
     async fn query_v2_installations(
         &self,
         filter: &Filter,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
         let rows = query_all(&self.filesystem, &self.v2_installations_root()?, filter).await?;
-        let mut installations = Vec::new();
+        let mut cores = Vec::new();
         for row in rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
             if core.is_visible() {
-                installations.push(self.reconstruct_v2_installation(&core).await?);
+                cores.push(core);
             }
+        }
+        if cores.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut memberships = self.query_v2_memberships_by_installation().await?;
+        let mut bindings = self.query_v2_credential_bindings_by_installation().await?;
+        let mut installations = Vec::with_capacity(cores.len());
+        for core in &cores {
+            installations.push(Self::assemble_v2_installation(
+                core,
+                memberships
+                    .remove(&core.installation_id)
+                    .unwrap_or_default(),
+                bindings.remove(&core.installation_id).unwrap_or_default(),
+            )?);
         }
         Ok(installations)
     }
@@ -3568,6 +3685,7 @@ mod tests {
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
             &capability_provider_contracts(),
+            None,
         )
         .expect("manifest record")
     }

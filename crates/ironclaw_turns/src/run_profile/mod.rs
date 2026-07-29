@@ -63,12 +63,13 @@ pub use host::{
     LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef,
     LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
     LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, StageCheckpointPayloadRequest,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    sanitize_model_visible_text, validate_model_route_component_value,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
+    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
+    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -91,11 +92,10 @@ pub use model::{
     NoOpBudgetAccountant, NoOpPolicyGuard,
 };
 pub use model_observation::{
-    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
     MODEL_OBSERVATION_DETAIL_MAX_BYTES, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint,
-    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
-    validate_model_observation_detail,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation, validate_model_observation_detail,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{
