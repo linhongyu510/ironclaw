@@ -224,12 +224,25 @@ fn parent_gates_tests_module_behind_cfg_test(root: &Path, relative: &str) -> io:
 /// along with the real test module. Tracking the inline body's brace depth
 /// to find its true end, and continuing to scan whatever follows, closes
 /// that hole without having to assume anything about file layout.
+///
+/// Brace depth is counted from a comment/string-stripped copy of each line
+/// (via `ratchet_support::strip_comments_and_strings`, called once up front
+/// on the whole file so line numbers stay aligned), not from raw bytes: a
+/// string literal inside the inline module's own body containing a literal
+/// `{` with no matching `}` on the same line (e.g. `let s = "{";`) would
+/// otherwise unbalance the raw count so `depth` never returns to zero,
+/// making the "read until the module's own closing brace" loop consume
+/// every remaining line in the file — silently dropping whatever production
+/// code follows, including a banned escape-hatch call. The *output* still
+/// uses the original, unstripped lines — this only changes what decides
+/// where the module ends.
 fn truncate_at_inline_test_module(contents: &str) -> String {
+    let stripped = strip_comments_and_strings(contents);
     let mut previous_was_cfg_test = false;
     let mut result = String::with_capacity(contents.len());
-    let mut lines = contents.lines().peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
+    let mut lines = contents.lines().zip(stripped.lines()).peekable();
+    while let Some((line, stripped_line)) = lines.next() {
+        let trimmed = stripped_line.trim();
         // Exact match only: `mod tests;` (external-file form) or
         // `mod tests {` (inline-body form). A prefix check
         // (`starts_with("mod tests")`) would also match an unrelated
@@ -242,11 +255,12 @@ fn truncate_at_inline_test_module(contents: &str) -> String {
             continue;
         }
         if previous_was_cfg_test && trimmed.starts_with("mod tests {") {
-            // Track brace depth from this line's own braces to find where
-            // the inline module body actually ends, then drop every line in
-            // between (but keep scanning whatever follows).
+            // Track brace depth from this line's *stripped* form to find
+            // where the inline module body actually ends, then drop every
+            // (original) line in between — but keep scanning whatever
+            // follows.
             let mut depth: i64 = 0;
-            for byte in line.bytes() {
+            for byte in stripped_line.bytes() {
                 match byte {
                     b'{' => depth += 1,
                     b'}' => depth -= 1,
@@ -254,8 +268,10 @@ fn truncate_at_inline_test_module(contents: &str) -> String {
                 }
             }
             while depth > 0 {
-                let Some(inner) = lines.next() else { break };
-                for byte in inner.bytes() {
+                let Some((_, inner_stripped)) = lines.next() else {
+                    break;
+                };
+                for byte in inner_stripped.bytes() {
                     match byte {
                         b'{' => depth += 1,
                         b'}' => depth -= 1,
@@ -976,5 +992,52 @@ fn gate_catches_production_code_that_follows_an_inline_test_module_body() {
         "a banned call in production code placed after an inline \
          `mod tests {{ ... }}` block's own closing brace must still be \
          caught, not silently dropped along with the test module it follows"
+    );
+}
+
+/// Regression for the eighth near-miss: `truncate_at_inline_test_module`
+/// counted brace depth from the **raw** line bytes, before
+/// `strip_comments_and_strings` ever runs (that stripping only happens
+/// afterward, in `scan_dir`, on the already-truncated output). A string
+/// literal inside the inline test module's own body that contains a literal
+/// `{` (with no matching `}` on the same line) throws off that raw count —
+/// the body never reaches `depth == 0`, so the "read until the inline
+/// module's own closing brace" loop keeps consuming lines past the test
+/// module's real end, swallowing whatever production code follows,
+/// including a banned escape-hatch call — the same class of hole the
+/// seventh near-miss closed for the marker-line case, but reachable here
+/// even though the marker line itself is matched correctly. Counting depth
+/// from the comment/string-stripped line closes it.
+#[test]
+fn gate_catches_production_code_after_a_test_module_body_containing_a_literal_brace_in_a_string() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             fn harmless() {\n        \
+                 let _ = \"{\";\n    \
+             }\n\
+         }\n\n\
+         pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n\
+         }\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a banned call in production code placed after an inline test \
+         module whose body contains a string literal with an unbalanced \
+         literal brace must still be caught, not silently dropped because \
+         raw byte brace-counting mistook the string's contents for real \
+         code structure"
     );
 }
