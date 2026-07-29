@@ -193,6 +193,31 @@ fn io_err(errno: Errno) -> ResolveError {
 /// symlink and this module's own bounded walk
 /// ([`follow_symlink_component`]) resolves it — fd-anchored at every step,
 /// per the module invariant.
+///
+/// **Every `open`/`openat2` call this function (transitively) makes —
+/// including `open_one_beneath_no_symlinks`, the portable `openat` in
+/// `open_one_inner`, and `remove_dir_all_fd`'s own directory open — passes
+/// `O_NONBLOCK` (PR #6817 review follow-up).** Without it, opening a FIFO
+/// with no writer present blocks the calling thread indefinitely — and
+/// because every caller here runs on the tokio *blocking pool*
+/// (`spawn_blocking`, see `run_blocking` in `local.rs`), that thread is gone
+/// for good from the pool's perspective; a handful of concurrent requests
+/// against attacker-plantable FIFOs (any writable mount, any path
+/// component — a FIFO can sit at an intermediate directory-walk position
+/// too, since the kernel's own FIFO-open blocking happens before the
+/// `O_DIRECTORY`/`ENOTDIR` check completes) exhausts the pool and wedges the
+/// whole process. `O_NONBLOCK` is a documented no-op for regular files and
+/// directories (the kernel never blocks opening or reading/writing them for
+/// this reason), so it costs nothing on the overwhelmingly common path; it
+/// only changes behavior for FIFOs (open returns immediately — successfully
+/// for O_RDONLY with no writer, or with `ENXIO` for O_WRONLY with no
+/// reader — instead of blocking) and certain blocking character devices.
+/// Every caller that goes on to read/write the resulting fd already
+/// classifies it via an `AT_SYMLINK_NOFOLLOW` `fstat`/`statat` and rejects
+/// anything that isn't the expected type before touching its data (see
+/// `read_file`/`read_file_bounded` in `local.rs`), so a FIFO that manages to
+/// open non-blocking is still refused — just without ever blocking a thread
+/// to find that out.
 pub(super) fn open_one(
     root: BorrowedFd<'_>,
     ancestors: &[OwnedFd],
@@ -252,7 +277,7 @@ fn open_one_beneath_no_symlinks(
         match openat2(
             dir,
             name,
-            oflags | OFlags::CLOEXEC,
+            oflags | OFlags::CLOEXEC | OFlags::NONBLOCK,
             mode,
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
         ) {
@@ -308,7 +333,12 @@ fn open_one_inner(
             FastOpenOutcome::Unsupported => {}
         }
     }
-    match rustix::fs::openat(dir, name, oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC, mode) {
+    match rustix::fs::openat(
+        dir,
+        name,
+        oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        mode,
+    ) {
         Ok(fd) => Ok(fd),
         // With `O_NOFOLLOW` set, `ELOOP` from a single-component open
         // unambiguously means "this entry is a symlink" (the kernel never
@@ -543,25 +573,30 @@ pub(super) fn resolve_walk(
 }
 
 /// Walks `components` from `root`, creating any missing directory along the
-/// way (`mkdir -p` semantics), and returns the final directory's fd. Used by
-/// `write_file`/`append_file` (parent-only — matching the previous
-/// implementation's "always create the parent chain" behavior) and by
-/// `create_dir_all` (full path, leaf included).
+/// way (`mkdir -p` semantics), and returns the final directory's fd *plus*
+/// the ancestor stack that got it there (root-first, not including the
+/// returned fd itself — the same shape [`open_one`]'s `ancestors` parameter
+/// expects). Used by `write_file`/`append_file` (parent-only — matching the
+/// previous implementation's "always create the parent chain" behavior) and
+/// by `create_dir_all` (full path, leaf included).
 ///
-/// Builds its own ancestor stack internally (root-first, not including the
-/// returned fd) so its *own* walk can answer a `..` inside any symlink it
-/// follows along the way by popping an already-open fd rather than a live
-/// `openat(fd, "..")` lookup (see [`walk_symlink_target`]) — but does not
-/// expose that stack to the caller: the only two callers that chase a
-/// symlink chain past the fd this returns
-/// ([`resolve_write_leaf`]/`append_file`'s own `open_one` call, both in
-/// `local.rs`) pass an empty ancestor slice instead, which means a `..` in a
-/// symlink discovered *at that position* fails closed rather than
-/// (correctly, but not yet wired end to end) resolving past this
-/// directory's own parent. No existing symlink test exercises a `..` at a
-/// write-leaf/append position, so this is a conservative gap, not a
-/// regression — see the module's write-side call sites in `local.rs` for
-/// the exact scope.
+/// **PR #6817 review follow-up (`mount_registry.rs`, `local.rs`,
+/// `fd_resolve.rs`, `filesystem_contract.rs` review threads — one root
+/// cause, fixed together here):** this function used to build the ancestor
+/// stack purely for its *own* internal `..`-in-a-followed-symlink resolution
+/// and then discard it, returning only the final fd. That forced
+/// `write_file`/`append_file`'s own leaf resolution
+/// ([`resolve_write_leaf`]/`open_one`, both called from `local.rs`) to pass
+/// an empty ancestor slice, so a `..` inside a symlink discovered *at the
+/// write leaf itself* failed closed instead of resolving past the parent
+/// directory `descend_creating` had already opened and verified — a
+/// (deliberate, documented, but no longer necessary) usability gap: it fails
+/// closed, so it was never a containment hole, just a spurious rejection of
+/// an otherwise-legitimate layout. Returning the stack lets every write-side
+/// caller thread it into its own leaf resolution, closing the gap. Every
+/// existing caller of this function that only needed the final fd
+/// (`create_dir_all`, `ensure_scoped_mount_dynamic`) simply takes `.0` and
+/// ignores `.1` — this is purely additive.
 ///
 /// Each level is still resolved through [`open_one`], so a symlink swapped
 /// into any not-yet-existing ancestor between one level's `mkdirat` and the
@@ -576,7 +611,7 @@ pub(super) fn resolve_walk(
 pub(super) fn descend_creating(
     root: BorrowedFd<'_>,
     components: &[OsString],
-) -> Result<OwnedFd, ResolveError> {
+) -> Result<(OwnedFd, Vec<OwnedFd>), ResolveError> {
     let budget = SymlinkBudget::new();
     let mut cur = dup_fd(root)?;
     let mut ancestors: Vec<OwnedFd> = Vec::new();
@@ -620,7 +655,7 @@ pub(super) fn descend_creating(
             Err(other) => return Err(other),
         };
     }
-    Ok(cur)
+    Ok((cur, ancestors))
 }
 
 /// Resolves `leaf` under `parent` to the `(parent, leaf-name)` pair a write
@@ -769,7 +804,7 @@ fn remove_dir_all_fd_bounded(
     let dir_fd = rustix::fs::openat(
         parent,
         name,
-        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(std::io::Error::from)?;

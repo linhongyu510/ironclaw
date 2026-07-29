@@ -100,7 +100,7 @@ fn anchor_for_target(
     };
     let leaf_components = std::slice::from_ref(leaf);
     let anchor = if create_if_missing {
-        descend_creating(target.root_fd.as_fd(), leaf_components)?
+        descend_creating(target.root_fd.as_fd(), leaf_components)?.0
     } else {
         open_one(
             target.root_fd.as_fd(),
@@ -247,7 +247,7 @@ impl RootFilesystem for DiskFilesystem {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
             })?;
             let (parent_components, leaf) = split_leaf(&rest, &path)?;
-            let parent_fd =
+            let (parent_fd, parent_ancestors) =
                 descend_creating(anchor.as_fd(), &parent_components).map_err(|error| {
                     resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
                 })?;
@@ -255,13 +255,13 @@ impl RootFilesystem for DiskFilesystem {
             // transparently (unlike `write_file`'s rename-based atomic
             // install, a plain `open`-and-append writes straight through
             // one), so no separate `resolve_write_leaf` chase is needed here.
-            // Empty ancestors: `descend_creating` does not expose its own
-            // internal ancestor stack past `parent_fd` (see its doc comment)
-            // — a `..` in a symlink discovered at `leaf` fails closed rather
-            // than resolving past `parent_fd`'s own parent.
+            // `parent_ancestors` is `parent_fd`'s own ancestor stack
+            // (PR #6817 review follow-up — `descend_creating` now returns
+            // it): a `..` in a symlink discovered at `leaf` resolves past
+            // `parent_fd`'s own parent instead of failing closed.
             let fd = open_one(
                 anchor.as_fd(),
-                &[],
+                &parent_ancestors,
                 parent_fd.as_fd(),
                 &leaf,
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
@@ -444,7 +444,7 @@ impl RootFilesystem for DiskFilesystem {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::CreateDirAll, error)
             })?;
             descend_creating(anchor.as_fd(), &rest)
-                .map(|_fd| ())
+                .map(|(_fd, _ancestors)| ())
                 .map_err(|error| {
                     resolve_error_to_filesystem_error(
                         &path,
@@ -484,7 +484,7 @@ impl DiskFilesystem {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
             })?;
             let (parent_components, leaf) = split_leaf(&rest, &path)?;
-            let parent_fd =
+            let (parent_fd, parent_ancestors) =
                 descend_creating(anchor.as_fd(), &parent_components).map_err(|error| {
                     resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
                 })?;
@@ -492,19 +492,20 @@ impl DiskFilesystem {
             // follow a symlink at the destination name — resolve any
             // in-bounds symlink chain at `leaf` ourselves first so the
             // install lands at the symlink's ultimate target, not over the
-            // symlink entry itself. Empty ancestors: see the empty-slice
-            // note at `append_file`'s `open_one` call above — `parent_fd`'s
-            // own ancestor stack past itself is not exposed by
-            // `descend_creating`.
-            let (write_parent_fd, write_leaf) = resolve_write_leaf(
-                anchor.as_fd(),
-                &[],
-                parent_fd.as_fd(),
-                &leaf,
-            )
-            .map_err(|error| {
-                resolve_error_to_filesystem_error(&path, FilesystemOperation::WriteFile, error)
-            })?;
+            // symlink entry itself. `parent_ancestors` is `parent_fd`'s own
+            // ancestor stack (PR #6817 review follow-up — `descend_creating`
+            // now returns it): a `..` in a symlink discovered at `leaf`
+            // resolves past `parent_fd`'s own parent instead of failing
+            // closed.
+            let (write_parent_fd, write_leaf) =
+                resolve_write_leaf(anchor.as_fd(), &parent_ancestors, parent_fd.as_fd(), &leaf)
+                    .map_err(|error| {
+                        resolve_error_to_filesystem_error(
+                            &path,
+                            FilesystemOperation::WriteFile,
+                            error,
+                        )
+                    })?;
             atomic_write_file(&path, write_parent_fd.as_fd(), &write_leaf, &bytes, cas)
         })
         .await
@@ -632,5 +633,87 @@ mod tests {
 
         assert!(matches!(error, FilesystemError::Backend { .. }));
         assert!(logs_contain("local filesystem backend error"));
+    }
+
+    fn make_fifo(path: &std::path::Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo command must be available on this platform");
+        assert!(status.success(), "mkfifo failed for {path:?}");
+    }
+
+    /// PR #6817 review follow-up: `resolve_walk`'s leaf open used to be a
+    /// plain blocking `OFlags::RDONLY` open with no `O_NONBLOCK`. A FIFO with
+    /// no writer, planted under any writable mount, blocks the tokio
+    /// blocking-pool thread that opens it *indefinitely* — repeated, that
+    /// exhausts the pool and wedges the whole process. This pins that
+    /// `read_file` must not block on a no-writer FIFO: it must either error
+    /// promptly (the expected outcome — the FIFO fails the "must be a
+    /// regular file" check right after open) within a small, generous
+    /// timeout, never hang.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_file_on_fifo_with_no_writer_does_not_block_forever() {
+        let storage = tempdir().unwrap();
+        let fifo_path = storage.path().join("blocking.fifo");
+        make_fifo(&fifo_path);
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            root.read_file(&VirtualPath::new("/projects/blocking.fifo").unwrap()),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "read_file on a FIFO with no writer must not block the blocking-pool \
+             thread indefinitely (timed out — this is the FIFO-DoS regression)"
+        );
+        // The FIFO is rejected as "not a file" once opened non-blocking — the
+        // point being pinned here is that we *get an answer promptly*, not
+        // which particular error variant it is.
+        assert!(outcome.unwrap().is_err());
+    }
+
+    /// Same DoS shape as `read_file_on_fifo_with_no_writer_does_not_block_forever`,
+    /// but for the write path: `append_file`'s leaf `open_one` call
+    /// (`O_WRONLY | O_APPEND | O_CREATE`) is just as exposed — opening a FIFO
+    /// for write-only with no reader present blocks under the same missing
+    /// `O_NONBLOCK`. A fix that only covers the read side is not a fix.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_file_on_fifo_with_no_reader_does_not_block_forever() {
+        let storage = tempdir().unwrap();
+        let fifo_path = storage.path().join("blocking-write.fifo");
+        make_fifo(&fifo_path);
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            root.append_file(
+                &VirtualPath::new("/projects/blocking-write.fifo").unwrap(),
+                b"payload",
+            ),
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "append_file on a FIFO with no reader must not block the blocking-pool \
+             thread indefinitely (timed out — this is the FIFO-DoS regression)"
+        );
+        assert!(outcome.unwrap().is_err());
     }
 }

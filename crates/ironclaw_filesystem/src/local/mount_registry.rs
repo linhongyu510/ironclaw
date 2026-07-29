@@ -439,6 +439,7 @@ impl DiskFilesystem {
         let anchor_fd =
             super::run_blocking(path.clone(), FilesystemOperation::MountLocal, move || {
                 super::fd_resolve::descend_creating(target.root_fd.as_fd(), &target.components)
+                    .map(|(fd, _ancestors)| fd)
                     .map_err(|error| {
                         super::fd_resolve::resolve_error_to_filesystem_error(
                             &path,
