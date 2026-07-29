@@ -729,9 +729,11 @@ where
 /// so no consumer — the skill-management port, a future `MountGrant`-scoped
 /// store, anything holding a `ScopedFilesystem` — can reach the backend
 /// without the backend first anchoring to the caller's own granted subtree.
-/// For backends without OS-level containment to narrow (Postgres, libSQL,
-/// in-memory), `ensure_scoped_mount`'s default no-op makes this an
-/// unconditional but free extra call.
+/// `ensure_scoped_mount` has no default implementation — every
+/// `RootFilesystem` implementor, including backends without OS-level
+/// containment to narrow (Postgres, libSQL, in-memory), must supply its own
+/// (typically an explicit `Ok(())`), so this call is unconditional but free
+/// for those backends rather than silently inherited.
 async fn resolve_with_permission_view<F>(
     root: &F,
     view: &MountView,
