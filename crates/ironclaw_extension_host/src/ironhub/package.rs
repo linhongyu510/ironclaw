@@ -163,12 +163,17 @@ fn credential_blocks(entry: &IronHubToolEntry, credentials: &[MappedCredential])
 /// recipe ("credential vendor `attio` has no [auth.attio] recipe"), so emitting
 /// credentials without this makes the package uninstallable.
 ///
-/// `method = "api_key"` is what maps to `RuntimeCredentialAccountSetup::ManualToken`,
-/// which is the flow that renders the masked in-chat credential card. The label
-/// and display name come from the tool's own published `setup`/`auth` blocks so
-/// the user sees the vendor's wording rather than a synthesised placeholder.
-/// `validation` is deliberately omitted: it is optional, and a probe URL the host
-/// invents could fail against a tool it has never talked to.
+/// The method is taken from what the tool published, NOT hardcoded. A tool
+/// carrying `auth.oauth` gets an `oauth2_code` recipe; one without gets
+/// `api_key`, which maps to `RuntimeCredentialAccountSetup::ManualToken` and
+/// renders the masked in-chat credential card. Forcing `api_key` on an OAuth
+/// vendor would make the user paste an access token by hand that then expires
+/// with no refresh — several catalog tools promise host-managed refresh.
+///
+/// Display name and field labels come from the tool's own `auth`/`setup` blocks
+/// so the user sees the vendor's wording. `validation` is deliberately omitted:
+/// it is optional, and a probe the host invents could fail against a service it
+/// has never contacted.
 fn auth_recipe_block(
     entry: &IronHubToolEntry,
     credentials: &[MappedCredential],
@@ -178,12 +183,17 @@ fn auth_recipe_block(
         return String::new();
     }
     let parsed = serde_json::from_slice::<serde_json::Value>(capabilities).unwrap_or_default();
-    let display_name = parsed
-        .get("auth")
+    let auth = parsed.get("auth");
+    let display_name = auth
         .and_then(|auth| auth.get("display_name"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or(entry.name.as_str())
         .to_string();
+
+    if let Some(oauth) = auth.and_then(|auth| auth.get("oauth")) {
+        return oauth_recipe_block(entry, &display_name, oauth);
+    }
+
     let prompts = parsed
         .get("setup")
         .and_then(|setup| setup.get("required_secrets"))
@@ -217,6 +227,84 @@ fn auth_recipe_block(
         "\n[auth.{vendor}]\nmethod = \"api_key\"\ndisplay_name = {display_name}\nfields = [ {fields} ]\n",
         vendor = entry.name,
         display_name = toml_string(display_name),
+    )
+}
+
+/// Map a published `auth.oauth` block onto an `oauth2_code` recipe.
+///
+/// `client_id_env` / `client_secret_env` name the deployment-level client
+/// credentials the operator provisions; they become secret handles rather than
+/// values, so nothing secret enters the manifest.
+fn oauth_recipe_block(
+    entry: &IronHubToolEntry,
+    display_name: &str,
+    oauth: &serde_json::Value,
+) -> String {
+    let string_field = |key: &str| {
+        oauth
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let scopes = oauth
+        .get("scopes")
+        .and_then(serde_json::Value::as_array)
+        .map(|scopes| {
+            scopes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|scope| toml_string(scope.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    // PKCE defaults to S256 in the recipe; only an explicit opt-out is declared.
+    let pkce = if oauth
+        .get("use_pkce")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+    {
+        String::new()
+    } else {
+        "pkce = \"none\"\n".to_string()
+    };
+    let client_id = string_field("client_id_env").to_ascii_lowercase();
+    let client_secret = string_field("client_secret_env").to_ascii_lowercase();
+    let client_credentials = if client_id.is_empty() {
+        // Absent client credentials means dynamic client registration, which
+        // the host auth engine implements generically.
+        String::new()
+    } else if client_secret.is_empty() {
+        format!(
+            "client_credentials = {{ client_id_handle = {} }}\n",
+            toml_string(client_id)
+        )
+    } else {
+        format!(
+            "client_credentials = {{ client_id_handle = {}, client_secret_handle = {} }}\n",
+            toml_string(client_id),
+            toml_string(client_secret)
+        )
+    };
+
+    // `token_response` is required by the recipe but not published in the
+    // capabilities artifact. Unlike `validation` (a probe URL only the vendor
+    // can know), the token-response shape is defined by RFC 6749 §5.1:
+    // `access_token`, `refresh_token`, `expires_in` are the spec field names,
+    // and every OAuth2 vendor in the catalog implements them. Declaring the
+    // pointers says where to look, not that the fields must be present.
+    let token_response = format!(
+        "\n[auth.{vendor}.token_response]\naccess_token = \"/access_token\"\nrefresh_token = \"/refresh_token\"\nexpires_in = \"/expires_in\"\n",
+        vendor = entry.name,
+    );
+
+    format!(
+        "\n[auth.{vendor}]\nmethod = \"oauth2_code\"\ndisplay_name = {display_name}\nauthorization_endpoint = {authorize}\ntoken_endpoint = {token}\nscopes = [ {scopes} ]\n{pkce}{client_credentials}{token_response}",
+        vendor = entry.name,
+        display_name = toml_string(display_name.to_string()),
+        authorize = toml_string(string_field("authorization_url")),
+        token = toml_string(string_field("token_url")),
     )
 }
 
@@ -445,6 +533,62 @@ mod tests {
         );
     }
 
+    /// A tool that publishes an `auth.oauth` block must get an OAuth recipe, not
+    /// a manual-token one. Forcing `api_key` would make the user paste an access
+    /// token by hand that then expires with no refresh — gitlab's own
+    /// description promises "host-managed token refresh".
+    #[test]
+    fn oauth_tools_get_an_oauth_recipe_not_a_pasted_token() {
+        let entry = entry_named("gitlab");
+        let capabilities = br#"{"http":{"credentials":{"gitlab_oauth_token":{"location":{"type":"bearer"},"host_patterns":["gitlab.com"]}}},"auth":{"display_name":"GitLab","oauth":{"authorization_url":"https://gitlab.com/oauth/authorize","token_url":"https://gitlab.com/oauth/token","client_id_env":"GITLAB_OAUTH_CLIENT_ID","client_secret_env":"GITLAB_OAUTH_CLIENT_SECRET","scopes":["api","read_user"],"use_pkce":true}}}"#
+            .to_vec();
+
+        let manifest = generic_tool_manifest_with_credentials(
+            &entry,
+            "wasm/gitlab_tool.wasm",
+            "in.json",
+            "out.json",
+            &capabilities,
+        )
+        .expect("oauth tool maps");
+
+        assert!(
+            manifest.contains(r#"method = "oauth2_code""#),
+            "an oauth tool must not be downgraded to a pasted token: {manifest}"
+        );
+        assert!(
+            manifest.contains("https://gitlab.com/oauth/authorize"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("https://gitlab.com/oauth/token"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(r#""api""#),
+            "scopes must carry through: {manifest}"
+        );
+    }
+
+    /// attio publishes no `auth.oauth`, so it stays a manual token — the flow
+    /// that renders the masked in-chat card.
+    #[test]
+    fn api_key_tools_stay_manual_token() {
+        let entry = entry_named("attio");
+        let manifest = generic_tool_manifest_with_credentials(
+            &entry,
+            "wasm/attio_tool.wasm",
+            "in.json",
+            "out.json",
+            &caps(
+                r#"{"attio_api_key":{"location":{"type":"bearer"},"host_patterns":["api.attio.com"]}}"#,
+            ),
+        )
+        .expect("api key tool maps");
+        assert!(manifest.contains(r#"method = "api_key""#), "{manifest}");
+        assert!(!manifest.contains("oauth2_code"), "{manifest}");
+    }
+
     /// The REAL seam: the generated manifest must survive
     /// `registry_extension_package`, which runs the production v3 parser and
     /// package validation. The TOML-parse test above is not sufficient — it
@@ -463,8 +607,17 @@ mod tests {
         )
         .expect("bundled component fixture is readable");
 
-        if let Err(error) = ironhub_tool_package(&entry, module, capabilities, &[]) {
+        if let Err(error) = ironhub_tool_package(&entry, module.clone(), capabilities, &[]) {
             panic!("attio must install; production validator rejected it: {error}");
+        }
+
+        // The OAuth arm must clear the same validator: an oauth2_code recipe has
+        // stricter requirements (endpoints, scope ceiling, PKCE) than api_key,
+        // and a string-only assertion would not catch a malformed one.
+        let gitlab = entry_named("gitlab");
+        let gitlab_caps = br#"{"http":{"credentials":{"gitlab_oauth_token":{"location":{"type":"bearer"},"host_patterns":["gitlab.com"]}}},"auth":{"display_name":"GitLab","oauth":{"authorization_url":"https://gitlab.com/oauth/authorize","token_url":"https://gitlab.com/oauth/token","client_id_env":"GITLAB_OAUTH_CLIENT_ID","client_secret_env":"GITLAB_OAUTH_CLIENT_SECRET","scopes":["api","read_user"],"use_pkce":true}}}"#.to_vec();
+        if let Err(error) = ironhub_tool_package(&gitlab, module, gitlab_caps, &[]) {
+            panic!("an oauth tool must install; production validator rejected it: {error}");
         }
     }
 
