@@ -474,28 +474,28 @@ pub struct PutToolResultRecordRequest {
 /// this value; raising it here raises that ceiling too.
 /// Compile-time CEILING on a single `result_read` request.
 ///
-/// 64 KiB, raised from 24 KiB. The model-observation envelope in
-/// `tool_result_reference.rs` is DERIVED from this (`* 2`) and asserted at compile
-/// time, so this also sets that envelope to 128 KiB — the reason not to go higher.
+/// 64 KiB. This is only the highest value the env override may reach — it is NOT the
+/// default (see [`TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES`]). The model-observation
+/// envelope in `tool_result_reference.rs` is DERIVED from this (`* 2`) and asserted at
+/// compile time, so this pins that envelope at 128 KiB — the reason not to go higher.
 pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 64 * 1024;
 
-/// Effective per-request cap: 64 KiB, up from the historical 24 KiB.
+/// Effective per-request cap: 24 KiB — unchanged from the historical default.
 ///
-/// Override with `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
-/// `[4, TOOL_RESULT_RECORD_READ_MAX_BYTES]` — it can
-/// never exceed the compile-time ceiling, so the observation envelope is always
-/// large enough for whatever a read returns.
+/// A larger cap was briefly tried on the theory that a small one turns a big file into
+/// a paging loop (on `manufacturing_equipment_maintenance`, nearai/benchmarks#287,
+/// reborn made 8 `read_file` calls and zero shell calls, then spent the turn on
+/// `result_read` at offset 24576). That is a real trace, but the change was NEVER
+/// ISOLATED — it shipped in an arm alongside two other switches, so there is no
+/// evidence it helped. Defaulting back to 24 KiB keeps this crate's behavior
+/// byte-identical to before and leaves the knob for anyone who wants to measure it
+/// properly.
 ///
-/// Why it is worth raising: a small cap turns one large file into a paging loop.
-/// On `manufacturing_equipment_maintenance` (nearai/benchmarks#287) reborn made 8
-/// `read_file` calls and ZERO shell calls, hit this cap, spent the turn on
-/// `result_read` at offset 24576 plus `handbook.pdf` at offsets 400/800/1200, and
-/// never computed anything — `outputs_exist=0.00`.
-///
-/// 64 KiB is a deliberate middle ground: enough that a typical data file or
-/// document page arrives in one read instead of a paging loop, without the 128 KiB
-/// observation envelope a larger cap would force.
-pub const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+/// Raise with `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
+/// `[4, TOOL_RESULT_RECORD_READ_MAX_BYTES]` — an override can never exceed the
+/// compile-time ceiling, so the observation envelope is always large enough for
+/// whatever a read returns.
+pub const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
 
 /// Env var controlling [`effective_tool_result_read_max_bytes`].
 pub const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
@@ -954,12 +954,16 @@ mod tool_result_read_cap_tests {
     /// 64 KiB, up from the historical 24 KiB, and never above the ceiling the
     /// observation envelope is derived from.
     #[test]
-    fn default_is_64k_and_within_the_ceiling() {
-        assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 64 * 1024);
+    fn default_is_24k_and_within_the_ceiling() {
+        // Behavior-preserving: 24 KiB is the historical default. The raise to 64 KiB was
+        // never isolated from the other switches it shipped with, so it is available
+        // only via the env override, not as a default.
+        assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 24 * 1024);
         assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES);
     }
 
-    /// The ceiling is what the model-observation envelope is derived from
+    /// The ceiling bounds only what the ENV OVERRIDE may reach; it is not the default.
+    /// The model-observation envelope is derived from it
     /// (`* 2`, asserted at compile time in tool_result_reference.rs), so 64 KiB here
     /// means a 128 KiB envelope. An env override can never exceed the ceiling, so
     /// the envelope always fits whatever a read returns.
