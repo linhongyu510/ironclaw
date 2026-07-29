@@ -102,6 +102,13 @@ fn anchor_for_target(
     let anchor = if create_if_missing {
         descend_creating(target.root_fd.as_fd(), leaf_components)?.0
     } else {
+        // PR #6817 follow-up (macOS `RESOLVE_NO_XDEV` parity): the shared
+        // mount root's own device, captured once here — the same
+        // once-per-resolution shape `resolve_walk`/`descend_creating` use
+        // internally for their own anchor.
+        let anchor_dev = rustix::fs::fstat(target.root_fd.as_fd())
+            .map_err(|errno| ResolveError::Io(errno.into()))?
+            .st_dev;
         open_one(
             target.root_fd.as_fd(),
             &[],
@@ -110,6 +117,7 @@ fn anchor_for_target(
             OFlags::DIRECTORY,
             Mode::empty(),
             &SymlinkBudget::new(),
+            anchor_dev,
         )?
     };
     Ok((anchor, rest.to_vec()))
@@ -259,6 +267,17 @@ impl RootFilesystem for DiskFilesystem {
             // (PR #6817 review follow-up — `descend_creating` now returns
             // it): a `..` in a symlink discovered at `leaf` resolves past
             // `parent_fd`'s own parent instead of failing closed.
+            // PR #6817 follow-up (macOS `RESOLVE_NO_XDEV` parity): `anchor`'s
+            // own device, captured once here — mirroring `resolve_walk`/
+            // `descend_creating`'s internal once-per-resolution capture,
+            // since this leaf open is itself a one-component resolution
+            // anchored at `anchor` (via `parent_fd`).
+            let anchor_dev = rustix::fs::fstat(anchor.as_fd())
+                .map_err(|errno| ResolveError::Io(errno.into()))
+                .map_err(|error| {
+                    resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
+                })?
+                .st_dev;
             let fd = open_one(
                 anchor.as_fd(),
                 &parent_ancestors,
@@ -267,6 +286,7 @@ impl RootFilesystem for DiskFilesystem {
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
                 new_file_mode(),
                 &SymlinkBudget::new(),
+                anchor_dev,
             )
             .map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)

@@ -73,7 +73,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ironclaw_host_api::VirtualPath;
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, Dev, Mode, OFlags};
 use rustix::io::Errno;
 
 use crate::{CasExpectation, FileType, FilesystemError, FilesystemOperation, RecordVersion};
@@ -150,6 +150,7 @@ impl SymlinkBudget {
 /// (replace the symlink with a relative one) — see
 /// `resolve_error_to_filesystem_error` and
 /// `FilesystemError::SymlinkEscape`'s `detail` field.
+#[derive(Debug)]
 pub(super) enum ResolveError {
     Escape,
     AbsoluteSymlinkTarget {
@@ -187,6 +188,29 @@ pub(super) fn resolve_error_to_filesystem_error(
 
 fn io_err(errno: Errno) -> ResolveError {
     ResolveError::Io(errno.into())
+}
+
+/// Rejects `fd` (fail closed, `ResolveError::Escape`) if its device differs
+/// from `anchor_dev` — the portable-fallback (macOS, and the Linux
+/// `openat2`-unsupported fallback) equivalent of Linux's
+/// `openat2(RESOLVE_BENEATH)`, which implies `RESOLVE_NO_XDEV` and rejects a
+/// mount crossing at the kernel level (PR #6817 follow-up: macOS
+/// `RESOLVE_NO_XDEV` parity). Without this, a bind mount or mounted volume
+/// nested anywhere inside a mount's root — lexically "beneath" it, so every
+/// other check in this module accepts it — was silently traversable on
+/// macOS (and on the Linux fallback) while an identical layout is rejected
+/// on the Linux fast path, a platform-dependent containment gap.
+///
+/// One extra `fstat` per opened fd, called from [`open_one_inner`]'s
+/// portable `openat` branch — the single choke point every fresh open in
+/// this module's portable path goes through — so every directory hop and
+/// every leaf, not just the final component, is checked.
+fn check_same_device(anchor_dev: Dev, fd: BorrowedFd<'_>) -> Result<(), ResolveError> {
+    let stat = rustix::fs::fstat(fd).map_err(io_err)?;
+    if stat.st_dev != anchor_dev {
+        return Err(ResolveError::Escape);
+    }
+    Ok(())
 }
 
 /// Opens exactly one path component beneath `dir`, following it if it is a
@@ -258,8 +282,9 @@ pub(super) fn open_one(
     oflags: OFlags,
     mode: Mode,
     budget: &SymlinkBudget,
+    anchor_dev: Dev,
 ) -> Result<OwnedFd, ResolveError> {
-    open_one_inner(root, ancestors, dir, name, oflags, mode, budget)
+    open_one_inner(root, ancestors, dir, name, oflags, mode, budget, anchor_dev)
 }
 
 /// Outcome of the Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`
@@ -351,13 +376,20 @@ fn open_one_inner(
     oflags: OFlags,
     mode: Mode,
     budget: &SymlinkBudget,
+    anchor_dev: Dev,
 ) -> Result<OwnedFd, ResolveError> {
     #[cfg(target_os = "linux")]
     {
+        // `openat2(RESOLVE_BENEATH)` implies `RESOLVE_NO_XDEV` (see
+        // `open_one_beneath_no_symlinks`'s `Errno::XDEV` arm), so the kernel
+        // itself already rejects a mount crossing on this fast path — no
+        // additional `check_same_device` call is needed here.
         match open_one_beneath_no_symlinks(dir, name, oflags, mode) {
             FastOpenOutcome::Opened(fd) => return Ok(fd),
             FastOpenOutcome::IsSymlink => {
-                return follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget);
+                return follow_symlink_component(
+                    root, ancestors, dir, name, oflags, mode, budget, anchor_dev,
+                );
             }
             FastOpenOutcome::Failed(error) => return Err(error),
             // Fall through to the portable per-component path below instead
@@ -371,13 +403,22 @@ fn open_one_inner(
         oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         mode,
     ) {
-        Ok(fd) => Ok(fd),
+        // Portable fallback (macOS always; Linux when `openat2` is
+        // unsupported) — no kernel-enforced `RESOLVE_NO_XDEV` here, so this
+        // module must check the opened fd's device itself before handing it
+        // back (PR #6817 follow-up: macOS `RESOLVE_NO_XDEV` parity). Fails
+        // closed exactly like every other containment rejection in this
+        // module — never falls back to a wider root or a path-string check.
+        Ok(fd) => {
+            check_same_device(anchor_dev, fd.as_fd())?;
+            Ok(fd)
+        }
         // With `O_NOFOLLOW` set, `ELOOP` from a single-component open
         // unambiguously means "this entry is a symlink" (the kernel never
         // attempts to expand it, so a genuine cycle cannot be observed
         // here) — follow it ourselves, fd-anchored and budget-bounded.
         Err(Errno::LOOP) => {
-            follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget)
+            follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget, anchor_dev)
         }
         // Some platforms (observed on macOS) report `ENOTDIR` rather than
         // `ELOOP` when `O_DIRECTORY | O_NOFOLLOW` hits a symlink — the
@@ -392,7 +433,9 @@ fn open_one_inner(
                     if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                         == rustix::fs::FileType::Symlink =>
                 {
-                    follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget)
+                    follow_symlink_component(
+                        root, ancestors, dir, name, oflags, mode, budget, anchor_dev,
+                    )
                 }
                 _ => Err(io_err(Errno::NOTDIR)),
             }
@@ -416,11 +459,19 @@ fn follow_symlink_component(
     oflags: OFlags,
     mode: Mode,
     budget: &SymlinkBudget,
+    anchor_dev: Dev,
 ) -> Result<OwnedFd, ResolveError> {
     budget.consume()?;
     let target = rustix::fs::readlinkat(dir, name, Vec::new()).map_err(io_err)?;
-    let (new_ancestors, anchor, last) =
-        walk_symlink_target(root, ancestors, dir, name, target.as_bytes(), budget)?;
+    let (new_ancestors, anchor, last) = walk_symlink_target(
+        root,
+        ancestors,
+        dir,
+        name,
+        target.as_bytes(),
+        budget,
+        anchor_dev,
+    )?;
     match last {
         Some(final_name) => open_one_inner(
             root,
@@ -430,6 +481,7 @@ fn follow_symlink_component(
             oflags,
             mode,
             budget,
+            anchor_dev,
         ),
         // Target had no final component (e.g. "/" or ""): it resolves to
         // the anchor directory itself.
@@ -499,6 +551,7 @@ fn walk_symlink_target(
     symlink_name: &OsStr,
     target: &[u8],
     budget: &SymlinkBudget,
+    anchor_dev: Dev,
 ) -> Result<(Vec<OwnedFd>, OwnedFd, Option<OsString>), ResolveError> {
     if target.starts_with(b"/") {
         // PR #6817 review follow-up: report exactly which symlink and
@@ -548,6 +601,7 @@ fn walk_symlink_target(
             OFlags::DIRECTORY,
             Mode::empty(),
             budget,
+            anchor_dev,
         )?;
         stack.push(cur);
         cur = next;
@@ -586,6 +640,16 @@ pub(super) fn resolve_walk(
         return Ok((dup_fd(root)?, None));
     };
     let budget = SymlinkBudget::new();
+    // Captured once per resolution, not re-`fstat`'d per component (PR
+    // #6817 follow-up: macOS `RESOLVE_NO_XDEV` parity) — mirroring
+    // `SymlinkBudget`'s own per-resolution-not-per-component construction
+    // just above. Caching this at mount-open time instead (on `LocalMount`)
+    // would not actually save anything: a `leaf_scoped` mount's anchor is a
+    // *fresh* fd opened per call (see `anchor_for_target` in `local.rs`), so
+    // its device still has to be read per resolution regardless of where the
+    // non-leaf-scoped case's value came from. One `fstat` per request is the
+    // real floor either way.
+    let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
     let mut cur = dup_fd(root)?;
     let mut ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestor_components.len());
     for component in ancestor_components {
@@ -597,6 +661,7 @@ pub(super) fn resolve_walk(
             OFlags::DIRECTORY,
             Mode::empty(),
             &budget,
+            anchor_dev,
         )?;
         ancestors.push(cur);
         cur = next;
@@ -609,6 +674,7 @@ pub(super) fn resolve_walk(
         final_oflags,
         Mode::empty(),
         &budget,
+        anchor_dev,
     )?;
     Ok((fd, Some((cur, leaf.clone()))))
 }
@@ -654,6 +720,9 @@ pub(super) fn descend_creating(
     components: &[OsString],
 ) -> Result<(OwnedFd, Vec<OwnedFd>), ResolveError> {
     let budget = SymlinkBudget::new();
+    // See `resolve_walk`'s matching comment: captured once per resolution,
+    // not per component.
+    let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
     let mut cur = dup_fd(root)?;
     let mut ancestors: Vec<OwnedFd> = Vec::new();
     for component in components {
@@ -665,6 +734,7 @@ pub(super) fn descend_creating(
             OFlags::DIRECTORY,
             Mode::empty(),
             &budget,
+            anchor_dev,
         ) {
             Ok(fd) => {
                 ancestors.push(cur);
@@ -689,6 +759,7 @@ pub(super) fn descend_creating(
                     OFlags::DIRECTORY,
                     Mode::empty(),
                     &budget,
+                    anchor_dev,
                 )?;
                 ancestors.push(cur);
                 fd
@@ -736,6 +807,9 @@ pub(super) fn resolve_write_leaf(
     leaf: &OsStr,
 ) -> Result<(OwnedFd, OsString), ResolveError> {
     let budget = SymlinkBudget::new();
+    // See `resolve_walk`'s matching comment: captured once per resolution,
+    // not per component.
+    let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
     let mut cur_ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestors.len());
     for ancestor in ancestors {
         cur_ancestors.push(dup_fd(ancestor.as_fd())?);
@@ -771,6 +845,7 @@ pub(super) fn resolve_write_leaf(
             &cur_leaf,
             target.as_bytes(),
             &budget,
+            anchor_dev,
         )?;
         let Some(new_leaf) = new_leaf else {
             // Symlink target has no final path component (e.g. "/" or ""):
@@ -1065,6 +1140,144 @@ mod tests {
     use tempfile::tempdir;
 
     use super::remove_dir_all_fd;
+
+    /// Deterministic, platform-independent pin on the mount-crossing check's
+    /// own contract (PR #6817 follow-up, macOS `RESOLVE_NO_XDEV` parity):
+    /// given an anchor device that differs from an opened fd's device, the
+    /// resolver must fail closed with `ResolveError::Escape` — never fall
+    /// back to a path-string check or a wider root. This does not exercise a
+    /// *real* mount crossing (see the `#[cfg(target_os = "macos")]` test
+    /// below for that); it pins `check_same_device`'s own logic so the
+    /// contract is covered even on a CI runner where a real bind mount can't
+    /// be constructed.
+    #[test]
+    fn check_same_device_rejects_mismatched_device() {
+        let storage = tempdir().unwrap();
+        let fd = openat(
+            rustix::fs::CWD,
+            storage.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .unwrap();
+        let real_dev = rustix::fs::fstat(&fd).unwrap().st_dev;
+
+        // Same device: must pass.
+        assert!(super::check_same_device(real_dev, fd.as_fd()).is_ok());
+
+        // A device value that cannot match the real one: must fail closed.
+        let bogus_dev = real_dev.wrapping_add(1).max(1);
+        assert!(matches!(
+            super::check_same_device(bogus_dev, fd.as_fd()),
+            Err(super::ResolveError::Escape)
+        ));
+    }
+
+    /// Real cross-device traversal regression for the macOS/portable-fallback
+    /// `RESOLVE_NO_XDEV` parity gap (PR #6817 follow-up): on Linux,
+    /// `openat2(RESOLVE_BENEATH)` implies `RESOLVE_NO_XDEV` and rejects a
+    /// bind-mount crossing inside the resolution root — but the portable
+    /// fallback `open_one_inner` uses on macOS (and as the Linux
+    /// `openat2`-unsupported fallback) had zero `st_dev` check, so a mounted
+    /// volume nested inside a mount's root was traversable there and
+    /// rejected on Linux for an identical layout.
+    ///
+    /// This mounts a real APFS disk image (via `hdiutil`, no root required)
+    /// at a subdirectory of a tempdir-backed resolution root, then asserts
+    /// `resolve_walk` refuses to walk into it. A genuine, kernel-level device
+    /// boundary — not a simulated one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_walk_rejects_real_mount_crossing_on_macos() {
+        use std::os::unix::fs::MetadataExt;
+        use std::process::Command;
+
+        let storage = tempdir().unwrap();
+        let root_path = storage.path();
+        let mount_point = root_path.join("crossing");
+        std::fs::create_dir_all(&mount_point).unwrap();
+
+        let dmg_dir = tempdir().unwrap();
+        let dmg_path = dmg_dir.path().join("xdev_test.dmg");
+
+        let create_status = Command::new("hdiutil")
+            .args([
+                "create",
+                "-size",
+                "5m",
+                "-fs",
+                "APFS",
+                "-volname",
+                "xdevtest",
+                dmg_path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("hdiutil create must run on macOS test hosts");
+        assert!(create_status.success(), "hdiutil create failed");
+
+        // `hdiutil create` appends `.dmg` if not already present in some
+        // macOS versions' output naming; locate the actual produced file.
+        let actual_dmg = if dmg_path.exists() {
+            dmg_path
+        } else {
+            dmg_dir.path().join("xdev_test.dmg.dmg")
+        };
+
+        let attach_status = Command::new("hdiutil")
+            .args([
+                "attach",
+                actual_dmg.to_str().unwrap(),
+                "-mountpoint",
+                mount_point.to_str().unwrap(),
+                "-nobrowse",
+            ])
+            .status()
+            .expect("hdiutil attach must run on macOS test hosts");
+        assert!(attach_status.success(), "hdiutil attach failed");
+
+        // Ensure the volume is detached even if an assertion below panics.
+        struct DetachGuard(std::path::PathBuf);
+        impl Drop for DetachGuard {
+            fn drop(&mut self) {
+                let _ = Command::new("hdiutil")
+                    .args(["detach", self.0.to_str().unwrap(), "-force"])
+                    .status();
+            }
+        }
+        let _detach = DetachGuard(mount_point.clone());
+
+        // Sanity-check the mount actually crossed a device boundary before
+        // trusting the resolver's rejection of it.
+        let root_dev = std::fs::metadata(root_path).unwrap().dev();
+        let mounted_dev = std::fs::metadata(&mount_point).unwrap().dev();
+        assert_ne!(
+            root_dev, mounted_dev,
+            "test setup did not actually cross a device boundary"
+        );
+
+        let root_fd = openat(
+            rustix::fs::CWD,
+            root_path,
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .unwrap();
+
+        let result = super::resolve_walk(
+            root_fd.as_fd(),
+            &[
+                std::ffi::OsString::from("crossing"),
+                std::ffi::OsString::from("anything"),
+            ],
+            OFlags::RDONLY,
+        );
+
+        assert!(
+            matches!(result, Err(super::ResolveError::Escape)),
+            "resolving into a mounted volume nested inside the resolution root must fail \
+             closed with Escape, matching Linux's RESOLVE_NO_XDEV behavior — got {result:?}"
+        );
+    }
 
     /// Deterministic (non-timing-dependent) regression for the recursive
     /// `delete` symlink race flagged in PR #6817 review: `remove_dir_all_fd`
