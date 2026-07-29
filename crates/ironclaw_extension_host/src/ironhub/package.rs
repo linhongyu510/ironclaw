@@ -157,6 +157,69 @@ fn credential_blocks(entry: &IronHubToolEntry, credentials: &[MappedCredential])
         .collect()
 }
 
+/// Emit the `[auth.<vendor>]` recipe every referenced vendor must declare.
+///
+/// v3 validation rejects a manifest whose credential names a vendor with no
+/// recipe ("credential vendor `attio` has no [auth.attio] recipe"), so emitting
+/// credentials without this makes the package uninstallable.
+///
+/// `method = "api_key"` is what maps to `RuntimeCredentialAccountSetup::ManualToken`,
+/// which is the flow that renders the masked in-chat credential card. The label
+/// and display name come from the tool's own published `setup`/`auth` blocks so
+/// the user sees the vendor's wording rather than a synthesised placeholder.
+/// `validation` is deliberately omitted: it is optional, and a probe URL the host
+/// invents could fail against a tool it has never talked to.
+fn auth_recipe_block(
+    entry: &IronHubToolEntry,
+    credentials: &[MappedCredential],
+    capabilities: &[u8],
+) -> String {
+    if credentials.is_empty() {
+        return String::new();
+    }
+    let parsed = serde_json::from_slice::<serde_json::Value>(capabilities).unwrap_or_default();
+    let display_name = parsed
+        .get("auth")
+        .and_then(|auth| auth.get("display_name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(entry.name.as_str())
+        .to_string();
+    let prompts = parsed
+        .get("setup")
+        .and_then(|setup| setup.get("required_secrets"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let fields = credentials
+        .iter()
+        .map(|credential| {
+            let label = prompts
+                .iter()
+                .find(|secret| {
+                    secret.get("name").and_then(serde_json::Value::as_str)
+                        == Some(credential.handle.as_str())
+                })
+                .and_then(|secret| secret.get("prompt"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(credential.handle.as_str())
+                .to_string();
+            format!(
+                "{{ handle = {handle}, label = {label}, secret = true }}",
+                handle = toml_string(credential.handle.clone()),
+                label = toml_string(label),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "\n[auth.{vendor}]\nmethod = \"api_key\"\ndisplay_name = {display_name}\nfields = [ {fields} ]\n",
+        vendor = entry.name,
+        display_name = toml_string(display_name),
+    )
+}
+
 fn generic_tool_manifest_with_credentials(
     entry: &IronHubToolEntry,
     module_path: &str,
@@ -171,7 +234,7 @@ fn generic_tool_manifest_with_credentials(
         r#"["network", "use_secret"]"#
     };
     Ok(format!(
-        "{}{}",
+        "{}{}{}",
         generic_tool_manifest(
             entry,
             module_path,
@@ -180,6 +243,7 @@ fn generic_tool_manifest_with_credentials(
             effects,
         ),
         credential_blocks(entry, &credentials),
+        auth_recipe_block(entry, &credentials, capabilities),
     ))
 }
 
@@ -379,6 +443,29 @@ mod tests {
                 .any(|effect| effect.as_str() == Some("use_secret")),
             "the tool must declare use_secret: {effects:?}"
         );
+    }
+
+    /// The REAL seam: the generated manifest must survive
+    /// `registry_extension_package`, which runs the production v3 parser and
+    /// package validation. The TOML-parse test above is not sufficient — it
+    /// proved the string was well-formed TOML, not that the host accepts it.
+    #[test]
+    fn attio_package_builds_through_the_production_package_validator() {
+        let entry = entry_named("attio");
+        let capabilities = caps(
+            r#"{"attio_api_key":{"secret_name":"attio_api_key","location":{"type":"bearer"},"host_patterns":["api.attio.com"]}}"#,
+        );
+        // A real WASI component: the validator rejects core modules, and a stub
+        // would fail for that reason instead of exercising manifest validation.
+        let module = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
+        )
+        .expect("bundled component fixture is readable");
+
+        if let Err(error) = ironhub_tool_package(&entry, module, capabilities, &[]) {
+            panic!("attio must install; production validator rejected it: {error}");
+        }
     }
 
     /// A tool with no credentials keeps the previous shape exactly.
