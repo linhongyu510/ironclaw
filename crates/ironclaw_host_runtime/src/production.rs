@@ -489,7 +489,7 @@ impl HostRuntime for DefaultHostRuntime {
         // that `DefaultHostRuntime` maps to `AttestedSigningRequired` — the
         // same shape `ApprovalRequired` / `AuthRequired` already use (authority
         // first, typed suspension after). The kernel stays free of any
-        // attested/chain/crypto types. Tracked separately; until it lands,
+        // attested/chain/crypto types. Tracked in nearai/ironclaw#6860; until it lands,
         // `attested_raise_hook` is held but intentionally not dispatched.
 
         // Credential pre-flight and the persistent-approval re-authorize fold now
