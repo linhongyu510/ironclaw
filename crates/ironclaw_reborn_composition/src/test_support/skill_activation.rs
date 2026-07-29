@@ -7,15 +7,15 @@
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
 /// Opaque handle (E-SKILL seam) carrying the built local-dev skill context
-/// source. Hides the crate-private `LocalDevSelectableSkillContextSource` from
+/// source. Hides the crate-private `ComposedSelectableSkillContextSource` from
 /// the integration-test crate, which cannot name it. Exposes the
 /// `HostSkillContextSource` for runtime wiring; the activation source travels
-/// inside for the harness's `RefreshingLocalDevCapabilityPortTestParts`. Tests
+/// inside for the harness's `RefreshingCapabilityPortTestParts`. Tests
 /// only.
 #[cfg(feature = "test-support")]
 pub struct SkillActivationTestSource {
     source: std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource>,
-    activation_source: std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource>,
+    activation_source: std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource>,
 }
 
 #[cfg(feature = "test-support")]
@@ -29,12 +29,12 @@ impl SkillActivationTestSource {
 
     /// Crate-internal accessor for the wrapped activation source. Kept
     /// `pub(crate)` (never `pub`) so the crate-private
-    /// `LocalDevSelectableSkillContextSource` type never appears in this
+    /// `ComposedSelectableSkillContextSource` type never appears in this
     /// crate's public API; only `runtime::local_dev`'s test-support
     /// constructor (which already names the type) may call this.
     pub(crate) fn activation_source(
         &self,
-    ) -> std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource> {
+    ) -> std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource> {
         self.activation_source.clone()
     }
 }
@@ -46,27 +46,13 @@ impl SkillActivationTestSource {
 /// composed. Mirrors `build_user_profile_source_for_test` (E-SKILL seam).
 /// Tests only.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_skill_context_source_for_test(
-    services: &crate::RebornServices,
-    tenant_id: &ironclaw_host_api::TenantId,
-    regex_skill_activation_enabled: bool,
+pub fn build_skill_context_source_for_test(
+    runtime: &crate::RebornRuntime,
+    _tenant_id: &ironclaw_host_api::TenantId,
+    _regex_skill_activation_enabled: bool,
 ) -> Option<SkillActivationTestSource> {
-    let local_runtime = services.local_runtime.as_ref()?;
-    // `None` means "no local runtime composed" (a legitimate backend shape,
-    // handled by the `?` above). A build *error* is a genuine misconfiguration
-    // of the local-dev skill filesystem, so surface it loudly rather than
-    // masking it as an un-wired skill source (which would fail a skill test at
-    // a confusing, far-removed assertion instead of here). Test-only code, so a
-    // panic is the right failure mode.
-    let (source, activation_source) =
-        crate::runtime::local_dev_filesystem_skill_context_source_for_test(
-            local_runtime,
-            tenant_id,
-            regex_skill_activation_enabled,
-        )
-        .unwrap_or_else(|error| panic!("build local-dev skill context source for test: {error}"));
     Some(SkillActivationTestSource {
-        source,
-        activation_source,
+        source: runtime.skill_context_source.clone()?,
+        activation_source: runtime.skill_activation_source.clone()?,
     })
 }

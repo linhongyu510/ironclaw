@@ -1,6 +1,6 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
-//! Unlike the crate-tier facade tests (which drive `RebornServicesApi` against
+//! Unlike the crate-tier service tests (which drive `ProductSurface` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner + a signed
 //! session-store token minter), composes the full `webui_v2_app` with a real
@@ -10,11 +10,11 @@
 //! The flagship proof: an admin (operator bearer) creates a user, receives the
 //! one-time `api_token`, and that token then authenticates a follow-up request
 //! AS the new user — exercising the entire mint → return → validate chain
-//! (facade → composition adapter → identity store → minter → the session
+//! (service → composition adapter → identity store → minter → the session
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,13 +32,13 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, build_webui_services, webui_v2_app,
+    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, build_reborn_runtime,
 };
-use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
+use ironclaw_webui::{
+    EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
 };
+use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -70,14 +70,19 @@ impl HostManagedModelGateway for NoOpGateway {
 // ─── token minter (mirrors production's serve-layer minter) ───────────────
 
 struct SessionTokenMinter {
-    store: Arc<dyn SessionStore>,
+    store: Arc<SignedTokenSessionStore>,
 }
 
 #[async_trait]
 impl AdminApiTokenMinter for SessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.store
-            .create_session(tenant.clone(), user_id.clone(), chrono::Duration::days(365))
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(365),
+                false,
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -133,6 +138,22 @@ struct AdminHarness {
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root: PathBuf = root.path().join("local-dev");
+    let build_input =
+        ironclaw_reborn_composition::local_dev_build_input(OPERATOR_USER, storage_root)
+            .with_runtime_policy(local_dev_effective_policy());
+    build_admin_harness_from(root, build_input).await
+}
+
+/// Assemble the full admin HTTP harness over a caller-supplied
+/// `RebornHostBindings` (already carrying its profile, policy, trust, and process
+/// binding). Everything above the substrate — the shared signed session store /
+/// minter / authenticator, the product surface, and the composed router — is
+/// profile-agnostic, so the local-dev and production-shaped runs share it and
+/// only differ in the build input.
+async fn build_admin_harness_from(
+    root: tempfile::TempDir,
+    build_input: RebornHostBindings,
+) -> AdminHarness {
     let tenant = TenantId::new(TENANT).expect("tenant");
 
     // One signed session store, shared by the minter (issues bearers) and the
@@ -144,25 +165,22 @@ async fn build_admin_harness() -> AdminHarness {
         store: session_store.clone(),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(OPERATOR_USER, storage_root)
-            .with_runtime_policy(local_dev_effective_policy()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: TENANT.to_string(),
-        agent_id: AGENT.to_string(),
-        source_binding_id: "admin-e2e-source".to_string(),
-        reply_target_binding_id: "admin-e2e-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: std::time::Duration::from_millis(10),
-        max_total: std::time::Duration::from_secs(10),
-    })
-    .with_model_gateway_override(Arc::new(NoOpGateway))
-    .with_admin_api_token_minter(minter);
+    let input = RebornRuntimeInput::from_build_input(build_input)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "admin-e2e-source".to_string(),
+            reply_target_binding_id: "admin-e2e-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: std::time::Duration::from_millis(10),
+            max_total: std::time::Duration::from_secs(10),
+        })
+        .with_model_gateway_override(Arc::new(NoOpGateway))
+        .with_admin_api_token_minter(minter);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
 
     let env =
         EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
@@ -176,7 +194,7 @@ async fn build_admin_harness() -> AdminHarness {
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     AdminHarness {
         router,
@@ -507,7 +525,7 @@ async fn admin_last_admin_protection_over_http() {
 /// bearers that validate under the harness's own authenticator (the exact
 /// property `signed_session_store`'s doc-comment guarantees); a store built with
 /// a *different* secret derives a different HMAC key, so its tokens fail closed.
-fn session_store_with_secret(secret: &str) -> Arc<dyn SessionStore> {
+fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
     signed_session_store(
         &SecretString::from(secret.to_string()),
         &TenantId::new(TENANT).expect("tenant"),
@@ -635,7 +653,7 @@ async fn admin_session_bearer_cannot_reach_operator_routes() {
 }
 
 /// 4. Forged / tampered / expired tokens are rejected at the auth boundary with
-///    a 401 — they never reach the admin facade.
+///    a 401 — they never reach the admin service.
 #[tokio::test]
 async fn forged_and_expired_tokens_are_rejected() {
     let harness = build_admin_harness().await;
@@ -659,7 +677,12 @@ async fn forged_and_expired_tokens_are_rejected() {
     // Mint a genuine, in-secret bearer (validates under the harness).
     let good_store = session_store_with_secret(OPERATOR_TOKEN);
     let good_token = good_store
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::days(1),
+            false,
+        )
         .await
         .expect("mint valid token")
         .expose_secret()
@@ -683,7 +706,12 @@ async fn forged_and_expired_tokens_are_rejected() {
 
     // (c) a token minted under a DIFFERENT operator secret → 401 (foreign key).
     let foreign_token = session_store_with_secret("a-totally-different-operator-secret")
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::days(1),
+            false,
+        )
         .await
         .expect("mint foreign token")
         .expose_secret()
@@ -704,14 +732,19 @@ async fn forged_and_expired_tokens_are_rejected() {
     // minimum 1s token and let it lapse (exp is second-granularity, so wait
     // past the next whole second).
     let zero = good_store
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::zero())
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::zero(),
+            false,
+        )
         .await;
     assert!(
         zero.is_err(),
         "create_session refuses a zero/negative lifetime rather than minting a dead token"
     );
     let expiring = good_store
-        .create_session(tenant, user, chrono::Duration::seconds(1))
+        .create_session(tenant, user, chrono::Duration::seconds(1), false)
         .await
         .expect("mint short-lived token")
         .expose_secret()
@@ -729,7 +762,7 @@ async fn forged_and_expired_tokens_are_rejected() {
 }
 
 /// 5. An oversized create-user body is rejected with 413 by the descriptor
-///    body-limit middleware BEFORE the facade runs. The `admin_create_user`
+///    body-limit middleware BEFORE the service runs. The `admin_create_user`
 ///    route declares a 16 KiB per-route cap.
 #[tokio::test]
 async fn oversized_create_body_is_rejected_with_413() {
@@ -807,7 +840,7 @@ async fn malformed_inputs_are_4xx_not_500() {
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
     // A malformed `{user_id}` path segment (whitespace/control) → 400 from the
-    // handler's `parse_admin_user_id` before the facade is touched.
+    // handler's `parse_admin_user_id` before the service is touched.
     let (status, _) = operator
         .send(
             Method::GET,
@@ -847,5 +880,165 @@ async fn malformed_inputs_are_4xx_not_500() {
     assert!(
         status.is_client_error() && status != StatusCode::INTERNAL_SERVER_ERROR,
         "an invalid status enum is a 4xx (got {status}), never a 500"
+    );
+}
+
+// ─── production-profile admin surface (bucket-2 parity: secret provisioner) ──
+//
+// The harness above builds a local-dev runtime. These cover the production
+// store graph (`local_runtime: None`, `production_runtime: Some`), where the
+// admin user service is wired only when BOTH the identity directory (#6395) and
+// the admin secret provisioner are sourced from that graph. Gated on `libsql`
+// because the production-runtime path requires the libSQL substrate.
+
+#[derive(Debug)]
+struct RecordingSandboxTransport;
+
+#[async_trait]
+impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        _request: ironclaw_host_runtime::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_runtime::CommandExecutionOutput,
+        ironclaw_host_runtime::RuntimeProcessError,
+    > {
+        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+            output: String::new(),
+            saved_output: None,
+            exit_code: 0,
+            sandboxed: true,
+            duration: std::time::Duration::ZERO,
+        })
+    }
+}
+
+fn production_effective_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
+
+async fn build_admin_harness_production() -> AdminHarness {
+    use ironclaw_reborn_composition::{RebornCompositionProfile, RebornRuntimeProcessBinding};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(root.path().join("reborn.db"))
+            .build()
+            .await
+            .expect("libsql db"),
+    );
+    let events = root.path().join("events.db").to_string_lossy().to_string();
+    let build_input = RebornHostBindings::libsql(
+        RebornCompositionProfile::Production,
+        OPERATOR_USER,
+        db,
+        events,
+        None,
+        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+    )
+    .with_first_party_bundles(first_party_support::test_first_party_bundles())
+    .with_runtime_policy(production_effective_policy())
+    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+        ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
+    )));
+    build_admin_harness_from(root, build_input).await
+}
+
+/// Regression for the bucket-2 admin-secret-provisioner parity gap. On a
+/// production-shaped runtime the admin user service is `RejectingAdminUserService`
+/// unless the identity directory (#6395) AND the admin secret provisioner are
+/// both sourced from the production store graph. Before the provisioner
+/// production fallback, `reborn_admin_secret_provisioner` returned `None`, so
+/// every admin op — including these — returned service-unavailable. Drives the
+/// full HTTP admin surface and asserts create-user + per-user secret
+/// provisioning work and are isolated across users.
+#[tokio::test]
+async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
+    let harness = build_admin_harness_production().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    // The admin surface is reachable on production (not `RejectingAdminUserService`).
+    let (status, users) = operator.list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin user surface must be wired on production; got {users:?}"
+    );
+
+    // create_user needs the identity directory (#6395); its success confirms
+    // the directory half of the trio is sourced from the production graph.
+    let (status, user_a) = operator
+        .create_user(Some("a@prod.test"), "User A", "member")
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "operator creates a user on production"
+    );
+    let user_a = user_id_of(&user_a);
+    let (status, user_b) = operator
+        .create_user(Some("b@prod.test"), "User B", "member")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let user_b = user_id_of(&user_b);
+
+    // The admin secret provisioner (this change) accepts a per-user secret over
+    // the production secret substrate — the direct regression assertion.
+    let (status, put) = operator
+        .put_secret(&user_a, "openai_key", "sk-prod-secret-value")
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin secret provisioner must be wired on production; got {put:?}"
+    );
+    assert_eq!(put["secret"]["handle"].as_str(), Some("openai_key"));
+    assert!(
+        !put.to_string().contains("sk-prod-secret-value"),
+        "the secret material must never be echoed back"
+    );
+
+    // Per-user isolation: A's secret lists for A and NOT for B.
+    let (status, a_secrets) = operator.list_secrets(&user_a).await;
+    assert_eq!(status, StatusCode::OK);
+    let a_handles: Vec<&str> = a_secrets["secrets"]
+        .as_array()
+        .expect("secrets list")
+        .iter()
+        .filter_map(|entry| entry["handle"].as_str())
+        .collect();
+    assert!(
+        a_handles.contains(&"openai_key"),
+        "user A sees its provisioned secret"
+    );
+
+    let (status, b_secrets) = operator.list_secrets(&user_b).await;
+    assert_eq!(status, StatusCode::OK);
+    let b_handles: Vec<&str> = b_secrets["secrets"]
+        .as_array()
+        .expect("secrets list")
+        .iter()
+        .filter_map(|entry| entry["handle"].as_str())
+        .collect();
+    assert!(
+        !b_handles.contains(&"openai_key"),
+        "user B must NOT see user A's secret (per-user provisioner isolation)"
+    );
+    assert!(
+        !b_secrets.to_string().contains("sk-prod-secret-value"),
+        "no cross-user secret material leak"
     );
 }

@@ -9,14 +9,15 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
     HostApiContractRegistry, ManifestSource,
 };
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
@@ -36,8 +37,7 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let first = dispatcher
@@ -89,8 +89,8 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
     let registry = Arc::new(registry_with_package(WASM_TRAP_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -102,7 +102,7 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -153,8 +153,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
         WitToolHost::deny_all().with_http(wasm_http),
     ));
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -169,7 +168,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     let http_requests = http.requests.lock().unwrap();
@@ -207,8 +206,7 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -223,7 +221,7 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::FilesystemDenied,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(adapter.prepare_count(), 0);
@@ -253,8 +251,8 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -269,7 +267,7 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Manifest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -312,8 +310,8 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -328,7 +326,7 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::OutputDecode,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -361,8 +359,7 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -379,7 +376,7 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
             kind: RuntimeDispatchErrorKind::Manifest
                 | RuntimeDispatchErrorKind::MethodMissing
                 | RuntimeDispatchErrorKind::Executor,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(adapter.prepare_count(), 0);
@@ -421,8 +418,8 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
             .with_fuel(100_000)
             .with_timeout(Duration::from_secs(5)),
     });
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+    let adapter = Arc::new(adapter);
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -438,7 +435,7 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
             err,
             DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory,
-                safe_summary: None,
+                ..
             }
         ),
         "unexpected memory-growth-bound dispatch error: {err:?}"
@@ -497,8 +494,8 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
                 .with_timeout(Duration::from_millis(20)),
         },
     );
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+    let adapter = Arc::new(adapter);
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
@@ -513,7 +510,7 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(http.requests.lock().unwrap().len(), 1);
@@ -627,18 +624,17 @@ impl WasmRuntimeAdapter {
     }
 }
 
-#[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAdapter {
-    async fn dispatch_json(
+impl WasmRuntimeAdapter {
+    async fn dispatch_lane(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: LocalLaneRequest<'_>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
                 .resolve_under(&request.package.root)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -647,7 +643,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    safe_summary: None,
+                    model_visible_cause: None,
                 });
             }
         };
@@ -666,14 +662,14 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         let prepared = Arc::new(
             self.runtime
                 .prepare(request.capability_id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         );
         let prepared = {
@@ -690,15 +686,99 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
     }
 }
 
+/// The per-invocation slice of the old lane request: everything else is
+/// captured by the prebound `RegistryBoundWasmCapability` at binding time.
+struct LocalLaneRequest<'a> {
+    package: &'a ExtensionPackage,
+    capability_id: &'a CapabilityId,
+    filesystem: &'a DiskFilesystem,
+    governor: &'a InMemoryResourceGovernor,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    resource_reservation: Option<ResourceReservation>,
+    input: Value,
+}
+
+/// Prebinds every registry capability to the file-local WASM lane adapter,
+/// mirroring the production registry-lane resolver's shape at test scale.
+fn dispatcher_for(
+    registry: &ironclaw_extensions::ExtensionRegistry,
+    filesystem: Arc<DiskFilesystem>,
+    governor: Arc<InMemoryResourceGovernor>,
+    adapter: &Arc<WasmRuntimeAdapter>,
+) -> RuntimeDispatcher<'static, InMemoryResourceGovernor> {
+    let bindings = registry
+        .capabilities()
+        .map(|descriptor| {
+            let package = registry
+                .get_extension(&descriptor.provider)
+                .expect("registry package for descriptor");
+            (
+                descriptor.id.clone(),
+                ResolvedCapability {
+                    provider: descriptor.provider.clone(),
+                    runtime: descriptor.runtime,
+                    adapter: Arc::new(RegistryBoundWasmCapability {
+                        package: Arc::new(package.clone()),
+                        adapter: Arc::clone(adapter),
+                        filesystem: Arc::clone(&filesystem),
+                        governor: Arc::clone(&governor),
+                    }) as Arc<dyn BoundCapabilityAdapter>,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(MapResolver { bindings });
+    RuntimeDispatcher::from_arcs(resolver, governor)
+}
+
+struct MapResolver {
+    bindings: HashMap<CapabilityId, ResolvedCapability>,
+}
+
+impl ToolResolver for MapResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        self.bindings.get(capability_id).cloned()
+    }
+}
+
+struct RegistryBoundWasmCapability {
+    package: Arc<ExtensionPackage>,
+    adapter: Arc<WasmRuntimeAdapter>,
+    filesystem: Arc<DiskFilesystem>,
+    governor: Arc<InMemoryResourceGovernor>,
+}
+
+#[async_trait]
+impl BoundCapabilityAdapter for RegistryBoundWasmCapability {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        self.adapter
+            .dispatch_lane(LocalLaneRequest {
+                package: &self.package,
+                capability_id: &request.capability_id,
+                filesystem: self.filesystem.as_ref(),
+                governor: self.governor.as_ref(),
+                scope: request.scope,
+                estimate: request.estimate,
+                resource_reservation: request.resource_reservation,
+                input: request.input,
+            })
+            .await
+    }
+}
+
 fn execute_prepared_wasm(
     runtime: &WitToolRuntime,
     prepared: &PreparedWitTool,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    request: LocalLaneRequest<'_>,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::InputEncode,
-        safe_summary: None,
+        model_visible_cause: None,
     })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
@@ -707,7 +787,7 @@ fn execute_prepared_wasm(
             .reserve(request.scope, request.estimate)
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?,
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
@@ -718,7 +798,7 @@ fn execute_prepared_wasm(
                     release_wasm_reservation(request.governor, reservation.id);
                     return Err(DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Resource,
-                        safe_summary: None,
+                        model_visible_cause: None,
                     });
                 }
             } else {
@@ -726,7 +806,7 @@ fn execute_prepared_wasm(
             }
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -734,14 +814,14 @@ fn execute_prepared_wasm(
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     }
     let Some(output_json) = execution.output_json else {
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     };
     let output = match serde_json::from_str::<Value>(&output_json) {
@@ -750,7 +830,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -763,7 +843,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -809,7 +889,7 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -828,9 +908,9 @@ fn capability_provider_contracts() -> HostApiContractRegistry {
     contracts
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -843,7 +923,7 @@ async fn filesystem_with_wasm_component(
     extension_id: &str,
     module_path: &str,
     wasm_bytes: &[u8],
-) -> LocalFilesystem {
+) -> DiskFilesystem {
     let fs = mounted_empty_extension_root();
     let path =
         VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();
@@ -865,19 +945,29 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        capability_id: CapabilityId::new(capability).unwrap(),
-        scope: sample_scope(),
-        authenticated_actor_user_id: None,
-        estimate: ResourceEstimate::default()
-            .set_concurrency_slots(1)
-            .set_process_count(1)
-            .set_output_bytes(10_000),
-        mounts: None,
-        resource_reservation: None,
-        input,
-    }
+fn dispatch_request(capability: &str, input: Value) -> Authorized {
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
+    Authorized::seal_for_test(
+        Invocation {
+            activity_id: ActivityId::new(),
+            capability: CapabilityId::new(capability).unwrap(),
+            input,
+            scope: sample_scope(),
+            actor: Actor::System,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            estimate,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+        },
+        RuntimeLane::Wasm,
+        MountView::default(),
+        None,
+        Timestamp::MAX_UTC,
+    )
 }
 
 fn sample_scope() -> ResourceScope {

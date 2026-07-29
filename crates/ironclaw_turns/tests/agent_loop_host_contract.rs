@@ -5,28 +5,27 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+    AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnStatus,
+    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
         ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
-        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+        DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
+        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
+        InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -37,11 +36,13 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
+        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
+        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
         LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -99,11 +100,14 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
         effective_model_profile_id: host.context.resolved_run_profile.model_profile_id.clone(),
         usage: None,
     });
-    host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
-        gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
-        safe_summary: "approval required".to_string(),
-        approval_resume: None,
-    });
+    host.push_capability_outcome(
+        resolution::approval_required(
+            LoopGateRef::new("gate:approval-needed").unwrap(),
+            "approval required".to_string(),
+            None,
+        )
+        .resolution,
+    );
 
     let reply_exit = ReplyDriver
         .run(driver_run_request(&host), host.as_ref())
@@ -400,7 +404,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                     safe_summary: "alpha skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "alpha".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 },
                 LoopContextSnippet {
@@ -593,6 +597,85 @@ async fn instruction_bundle_renders_runtime_context_section() {
     assert!(
         runtime_msg_idx < instruction_idx,
         "runtime must be before first instruction snippet"
+    );
+}
+
+/// Tier 1 (rendering): a `LoopContextBundle` carrying a non-empty
+/// `memory_snippets` must render a model-visible "memory" section (`msg:memory.*`)
+/// in the instruction bundle, PRESERVING the host's insertion order so the
+/// short-term (active-thread) lane stays ahead of the long-term lane at the render
+/// boundary. This is the surface that makes proactive memory reach the model, so
+/// it must materialize from the bundle just like the instruction and runtime
+/// sections — without re-sorting the snippets by opaque ref (which would scramble
+/// the lane priority the host deliberately built).
+#[tokio::test]
+async fn instruction_bundle_renders_memory_section_from_memory_snippets() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    // The host concatenates short-term BEFORE long-term. Refs are chosen so an
+    // alphabetical re-sort ("memory:long-term" < "memory:short-term") would REVERSE
+    // the insertion order — the rendered order proves whether the builder preserves
+    // it or re-sorts.
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: vec![
+                LoopContextSnippet {
+                    snippet_ref: "memory:short-term".to_string(),
+                    model_content: "Untrusted memory content: active thread note".to_string(),
+                    safe_summary: "Untrusted memory content: active thread note".to_string(),
+                    metadata: None,
+                },
+                LoopContextSnippet {
+                    snippet_ref: "memory:long-term".to_string(),
+                    model_content: "Untrusted memory content: durable user fact".to_string(),
+                    safe_summary: "Untrusted memory content: durable user fact".to_string(),
+                    metadata: None,
+                },
+            ],
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    };
+
+    let bundle = builder.build(request).unwrap();
+
+    let memory_idx = bundle
+        .materialized_messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:memory."))
+        .expect("memory section message must exist when memory_snippets is non-empty");
+    assert_eq!(bundle.materialized_messages[memory_idx].role, "system");
+
+    // The rendered memory section must keep the host's insertion order (short-term
+    // lane first), NOT the alphabetical ref order.
+    let memory_contents: Vec<&str> = bundle
+        .materialized_messages
+        .iter()
+        .filter(|m| m.content_ref.as_str().starts_with("msg:memory."))
+        .map(|m| m.model_content.as_str())
+        .collect();
+    assert_eq!(
+        memory_contents,
+        vec![
+            "Untrusted memory content: active thread note",
+            "Untrusted memory content: durable user fact",
+        ],
+        "memory snippets must render in host insertion order (short-term lane \
+         first), not re-sorted by opaque ref"
+    );
+
+    assert!(
+        bundle
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:memory.")),
+        "the memory section must appear in the model-visible messages list"
     );
 }
 
@@ -1009,7 +1092,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
                     safe_summary: "GitHub skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "github".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1033,7 +1116,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
 fn skill_instruction_request(
     model_content: impl Into<String>,
     safe_summary: impl Into<String>,
-    trust_level: &str,
+    trust_level: SkillTrustLevel,
 ) -> InstructionBundleRequest {
     InstructionBundleRequest {
         context_bundle: LoopContextBundle {
@@ -1046,7 +1129,7 @@ fn skill_instruction_request(
                 safe_summary: safe_summary.into(),
                 metadata: Some(LoopContextSnippetMetadata {
                     source_name: "github".to_string(),
-                    trust_level: trust_level.to_string(),
+                    trust_level,
                 }),
             }],
             memory_snippets: Vec::new(),
@@ -1073,7 +1156,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
                     safe_summary: "empty skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "empty".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1107,7 +1190,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
                     safe_summary: "oversized skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "oversized".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1139,7 +1222,7 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
         .build(skill_instruction_request(
             model_content.clone(),
             "Security review skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap();
 
@@ -1164,7 +1247,7 @@ async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
         .build(skill_instruction_request(
             body.clone(),
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 
@@ -1184,7 +1267,7 @@ async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 }
@@ -1196,7 +1279,7 @@ async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization header.",
             "Use Authorization: Bearer",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap_err();
 
@@ -1210,7 +1293,7 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization: Bearer header.",
             "GitHub skill",
-            "installed",
+            SkillTrustLevel::Installed,
         ))
         .unwrap_err();
 
@@ -1238,7 +1321,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "code-review skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "code-review".to_string(),
-                            trust_level: "trusted".to_string(),
+                            trust_level: SkillTrustLevel::Trusted,
                         }),
                     },
                     LoopContextSnippet {
@@ -1248,7 +1331,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "github companion skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "github".to_string(),
-                            trust_level: "installed".to_string(),
+                            trust_level: SkillTrustLevel::Installed,
                         }),
                     },
                 ],
@@ -1275,7 +1358,11 @@ async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value()
         "Use Authorization: Bearer ghp_secretvalue123",
     ] {
         let error = InstructionBundleBuilder::new(context.clone())
-            .build(skill_instruction_request(body, "GitHub skill", "installed"))
+            .build(skill_instruction_request(
+                body,
+                "GitHub skill",
+                SkillTrustLevel::Installed,
+            ))
             .unwrap_err();
         assert_eq!(
             error.kind,
@@ -1322,13 +1409,18 @@ async fn instruction_bundle_allows_trusted_skill_host_path() {
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass the host-path check after #5169");
 }
 
+/// CR review (lane priority at the render boundary): memory snippets render in the
+/// host's insertion order and are NOT re-sorted by ref/summary/model_content. Two
+/// snippets that collide on ref AND summary therefore keep their insertion order
+/// (here "zeta", inserted first, stays first) rather than being reordered by
+/// model_content as the pre-CR sort did.
 #[tokio::test]
-async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matches() {
+async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
     let context = claimed_run_context().await;
 
     let bundle = InstructionBundleBuilder::new(context)
@@ -1367,7 +1459,9 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
         .collect();
     assert_eq!(
         model_contents,
-        ["alpha model content", "zeta model content"]
+        ["zeta model content", "alpha model content"],
+        "memory snippets must keep host insertion order even when ref and summary \
+         collide — no model_content re-sort"
     );
 }
 
@@ -1466,7 +1560,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
             },
         ],
     };
-    let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -1733,7 +1827,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         host.milestone_sink.clone(),
     )
     .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
+        EphemeralInstructionMaterializationStore::default(),
     ));
 
     let bundle = port
@@ -1769,7 +1863,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             if skill_context.as_slice() == [PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "trusted".to_string(),
+                trust_level: SkillTrustLevel::Trusted,
             }]
     ));
 }
@@ -2049,7 +2143,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -2366,7 +2460,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
     let foreign = CapabilityId::new("demo.foreign").unwrap();
 
     let error = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
@@ -2446,7 +2540,7 @@ fn loop_host_refs_validate_when_deserialized() {
         "capability_id": "demo.echo",
         "input_ref": {"raw": "RAW_AGENT_LOOP_HOST_SENTINEL"}
     });
-    assert!(serde_json::from_value::<CapabilityInvocation>(invalid_invocation).is_err());
+    assert!(serde_json::from_value::<LoopRequest>(invalid_invocation).is_err());
 
     let invalid_checkpoint = serde_json::json!({
         "kind": "before_block",
@@ -2470,43 +2564,32 @@ fn loop_host_refs_validate_when_deserialized() {
 
 #[test]
 fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
-    let denied = CapabilityDenied {
-        reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-        safe_summary: "no capabilities are available to this loop".to_string(),
-    };
-
-    let wire = serde_json::to_string(&denied).unwrap();
-    assert!(wire.contains(r#""reason_kind":"empty_surface""#));
-
-    let legacy = serde_json::json!({
-        "reason_kind": "empty_surface",
-        "safe_summary": "no capabilities are available to this loop"
-    });
-    let decoded = serde_json::from_value::<CapabilityDenied>(legacy).unwrap();
+    // The producer-facing `resolution::denied` consumes `CapabilityDeniedReasonKind`;
+    // its open-set wire compatibility (fixed tags + free-form `Unknown`, secret
+    // markers rejected) is the loop contract that survives the §5.3 collapse.
     assert_eq!(
-        decoded.reason_kind,
-        CapabilityDeniedReasonKind::EmptySurface
+        serde_json::to_string(&CapabilityDeniedReasonKind::EmptySurface).unwrap(),
+        r#""empty_surface""#
     );
-    assert_eq!(decoded.reason_kind.as_str(), "empty_surface");
-    assert_eq!(decoded.reason_kind.to_string(), "empty_surface");
 
-    let historical_unknown = serde_json::json!({
-        "reason_kind": "host_policy_denied",
-        "safe_summary": "capability denied by host policy"
-    });
-    let decoded_unknown = serde_json::from_value::<CapabilityDenied>(historical_unknown).unwrap();
-    assert_eq!(decoded_unknown.reason_kind.as_str(), "host_policy_denied");
-    assert_eq!(
-        decoded_unknown.reason_kind.to_string(),
-        "host_policy_denied"
-    );
+    let decoded: CapabilityDeniedReasonKind =
+        serde_json::from_value(serde_json::json!("empty_surface")).unwrap();
+    assert_eq!(decoded, CapabilityDeniedReasonKind::EmptySurface);
+    assert_eq!(decoded.as_str(), "empty_surface");
+    assert_eq!(decoded.to_string(), "empty_surface");
+
+    let decoded_unknown: CapabilityDeniedReasonKind =
+        serde_json::from_value(serde_json::json!("host_policy_denied")).unwrap();
+    assert_eq!(decoded_unknown.as_str(), "host_policy_denied");
+    assert_eq!(decoded_unknown.to_string(), "host_policy_denied");
     assert!(matches!(
-        decoded_unknown.reason_kind,
+        decoded_unknown,
         CapabilityDeniedReasonKind::Unknown(_)
     ));
-
-    let unknown_wire = serde_json::to_string(&decoded_unknown).unwrap();
-    assert!(unknown_wire.contains(r#""reason_kind":"host_policy_denied""#));
+    assert_eq!(
+        serde_json::to_string(&decoded_unknown).unwrap(),
+        r#""host_policy_denied""#
+    );
 
     let constructed_unknown = CapabilityDeniedReasonKind::unknown("host_policy_denied").unwrap();
     assert_eq!(constructed_unknown.as_str(), "host_policy_denied");
@@ -2515,43 +2598,15 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
 }
 
 #[test]
-fn capability_result_message_byte_len_round_trips() {
-    let json = serde_json::json!({
-        "result_ref": "result:big",
-        "safe_summary": "big result",
-        "byte_len": 33_001u64
-    });
-    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(decoded.byte_len, 33_001);
-}
-
-#[test]
-fn capability_result_message_byte_len_defaults_to_zero_for_legacy_payload() {
-    // Legacy hosts that don't yet emit byte_len must still decode cleanly.
-    let json = serde_json::json!({
-        "result_ref": "result:legacy",
-        "safe_summary": "no byte_len field"
-    });
-    let decoded: CapabilityResultMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(decoded.byte_len, 0);
-}
-
-#[test]
 fn capability_progress_accepts_legacy_complete_wire_value() {
-    let legacy_result = serde_json::json!({
-        "result_ref": "result:legacy-complete",
-        "safe_summary": "legacy host completed the requested objective",
-        "progress": "complete"
-    });
-
-    let decoded = serde_json::from_value::<CapabilityResultMessage>(legacy_result).unwrap();
-
-    assert_eq!(
-        decoded.result_ref,
-        LoopResultRef::new("result:legacy-complete").unwrap()
-    );
-    assert_eq!(decoded.progress, CapabilityProgress::MadeProgress);
-    assert!(!decoded.terminate_hint);
+    // `CapabilityProgress` is consumed by `resolution::completed`; its legacy
+    // "complete" alias must still decode to `MadeProgress`.
+    let decoded: CapabilityProgress =
+        serde_json::from_value(serde_json::json!("complete")).unwrap();
+    assert_eq!(decoded, CapabilityProgress::MadeProgress);
+    let decoded: CapabilityProgress =
+        serde_json::from_value(serde_json::json!("made_progress")).unwrap();
+    assert_eq!(decoded, CapabilityProgress::MadeProgress);
 }
 
 #[tokio::test]
@@ -2683,7 +2738,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .await
             .map_err(driver_error)?;
         let outcome = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
@@ -2693,12 +2748,21 @@ impl AgentLoopDriver for CapabilityDriver {
             })
             .await
             .map_err(driver_error)?;
-        let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
+        let Resolution::Blocked(Blocked::Approval(waypoint)) = outcome else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "expected_approval".to_string(),
                 detail: None,
             });
         };
+        // Reconstruct the loop gate ref from the channel's preserved origin.
+        let gate_ref = waypoint
+            .origin
+            .as_ref()
+            .and_then(|origin| ironclaw_turns::LoopGateRef::new(origin.as_str()).ok())
+            .ok_or(AgentLoopDriverError::Failed {
+                reason_kind: "expected_approval".to_string(),
+                detail: None,
+            })?;
         let state_ref = LoopCheckpointStateRef::new("checkpoint:approval-state").unwrap();
         let checkpoint_id = host
             .checkpoint(LoopCheckpointRequest {
@@ -2839,6 +2903,30 @@ struct HangingLoopModelGateway {
     delay: std::time::Duration,
 }
 
+struct ProgressingLoopModelGateway;
+
+#[async_trait]
+impl LoopModelGateway for ProgressingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        _request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        panic!("progress-aware entry point must be used")
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        for text in ["one", "one two", "one two three"] {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            progress_sink.model_text_update(text.to_string()).await;
+        }
+        Ok(success_response(&request.context))
+    }
+}
+
 #[async_trait]
 impl LoopModelGateway for HangingLoopModelGateway {
     async fn stream_model(
@@ -2891,12 +2979,42 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        context.clone(),
+        Arc::new(ProgressingLoopModelGateway),
+        milestone_sink,
+    );
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            capability_view: None,
+        })
+        .await
+        .expect("progress must reset the model-call idle timeout");
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
+}
+
 struct RecordingAgentLoopHost {
     context: LoopRunContext,
     effects: Mutex<Vec<String>>,
     context_requests: Mutex<Vec<LoopContextRequest>>,
     model_responses: Mutex<Vec<LoopModelResponse>>,
-    capability_outcomes: Mutex<Vec<CapabilityOutcome>>,
+    capability_outcomes: Mutex<Vec<ironclaw_host_api::Resolution>>,
     visible_surface: VisibleCapabilitySurface,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     context_message_safe_summary: String,
@@ -2982,7 +3100,7 @@ impl RecordingAgentLoopHost {
                 .strip_prefix("skill:")
                 .map(|source_name| LoopContextSnippetMetadata {
                     source_name: source_name.to_string(),
-                    trust_level: "trusted".to_string(),
+                    trust_level: SkillTrustLevel::Trusted,
                 });
         self.context_instruction_snippets.push(LoopContextSnippet {
             snippet_ref,
@@ -3012,7 +3130,7 @@ impl RecordingAgentLoopHost {
         self.model_responses.lock().unwrap().push(response);
     }
 
-    fn push_capability_outcome(&self, outcome: CapabilityOutcome) {
+    fn push_capability_outcome(&self, outcome: ironclaw_host_api::Resolution) {
         self.capability_outcomes.lock().unwrap().push(outcome);
     }
 
@@ -3190,8 +3308,8 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        request: LoopRequest,
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
                 .visible_surface
@@ -3219,10 +3337,10 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability_batch(
         &self,
-        _request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        Ok(CapabilityBatchOutcome {
-            outcomes: Vec::new(),
+        _request: LoopRequestBatch,
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+        Ok(ironclaw_host_api::ResolutionBatch {
+            resolutions: Vec::new(),
             stopped_on_suspension: false,
         })
     }
@@ -3303,7 +3421,7 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
@@ -4230,6 +4348,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     name: "Slack".to_string(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: "#general".to_string(),

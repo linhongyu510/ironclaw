@@ -4,15 +4,16 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId, UserId};
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
 };
 use ironclaw_reborn_openai_compat::{
-    OpenAiCompatActorScope, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
-    OpenAiCompatProjectionRef, OpenAiCompatPublicId, OpenAiCompatRequestFingerprint,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID, OpenAiCompatActorScope,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatPublicId, OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
@@ -1160,14 +1161,13 @@ async fn read_run_output_in_progress_surfaces_tool_output_without_final_message(
     ));
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn provider_view(
     id: &str,
     default_model: &str,
     active: bool,
     active_model: Option<&str>,
-) -> ironclaw_product_workflow::LlmProviderView {
-    ironclaw_product_workflow::LlmProviderView {
+) -> ironclaw_product::LlmProviderView {
+    ironclaw_product::LlmProviderView {
         id: id.to_string(),
         description: String::new(),
         adapter: "open_ai_completions".to_string(),
@@ -1183,17 +1183,16 @@ fn provider_view(
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn model_entries_list_active_first_then_providers_deduped() {
-    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+    let snapshot = ironclaw_product::LlmConfigSnapshot {
         providers: vec![
             provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
             provider_view("anthropic", "claude-opus-4", false, None),
             // Duplicate model id (same default) must not be listed twice.
             provider_view("openai-mirror", "gpt-4o", false, None),
         ],
-        active: Some(ironclaw_product_workflow::LlmActiveSelection {
+        active: Some(ironclaw_product::LlmActiveSelection {
             provider_id: "openai".to_string(),
             model: Some("gpt-4o".to_string()),
         }),
@@ -1208,10 +1207,9 @@ fn model_entries_list_active_first_then_providers_deduped() {
     assert_eq!(entries[1].owned_by.as_deref(), Some("anthropic"));
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn model_entries_fall_back_to_default_model_when_no_active_selection() {
-    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+    let snapshot = ironclaw_product::LlmConfigSnapshot {
         providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
         active: None,
     };
@@ -1264,7 +1262,6 @@ fn response_usage_adds_cache_creation_on_top_of_input() {
     assert!(built.input_tokens_details.is_none());
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     // gpt-4o rates: input 0.0000025/tok, output 0.00001/tok; OpenAI cache-read
@@ -1289,7 +1286,6 @@ fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     assert_eq!(cost.total_cost_usd, "0.01");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_bills_cache_creation_at_full_input_rate() {
     // gpt-4o input rate 0.0000025/tok. cache_creation is a write-side count
@@ -1307,7 +1303,6 @@ fn response_cost_bills_cache_creation_at_full_input_rate() {
     assert_eq!(cost.cached_input_cost_usd, "0");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_applies_claude_cache_read_discount() {
     // claude-opus-4-6 input rate 0.000015/tok; the Claude cache-read discount is
@@ -1326,7 +1321,6 @@ fn response_cost_applies_claude_cache_read_discount() {
     assert_eq!(cost.cached_input_cost_usd, "0.003");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_falls_back_to_default_rate_for_unknown_model() {
     // Unknown models must not price at zero — the cost table default (~GPT-4o)

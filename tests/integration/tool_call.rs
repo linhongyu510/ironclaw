@@ -29,6 +29,34 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
+fn github_webhook_normalization_call() -> RebornScriptedReply {
+    RebornScriptedReply::tool_call(
+        "github.handle_webhook",
+        json!({
+            "webhook": {
+                "headers": {
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-capability-evidence"
+                },
+                "body_json": {
+                    "action": "opened",
+                    "repository": {
+                        "full_name": "nearai/ironclaw",
+                        "owner": {"login": "nearai"}
+                    },
+                    "pull_request": {
+                        "number": 6573,
+                        "state": "open",
+                        "base": {"ref": "main"},
+                        "head": {"ref": "codex/provider-evidence"}
+                    },
+                    "sender": {"login": "serrrfirat"}
+                }
+            }
+        }),
+    )
+}
+
 #[tokio::test]
 async fn runs_numeric_time_input_through_builtin_tools_group() {
     let g = RebornIntegrationGroup::builtin_tools()
@@ -109,10 +137,42 @@ async fn runs_http_tool_call_through_recorded_egress() {
         .expect("final reply finalized");
 }
 
+/// `github.handle_webhook` is local normalization rather than a provider API
+/// call. Drive it through the real bundled GitHub WASM capability and assert
+/// the emitted event plus the absence of network egress.
+#[tokio::test]
+async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_github_issue_tools()
+        .script([
+            github_webhook_normalization_call(),
+            RebornScriptedReply::text("webhook normalized"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("normalize this GitHub webhook")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("github.handle_webhook")
+        .await
+        .expect("bundled GitHub WASM capability ran");
+    h.assert_tool_result_contains(r#""event_type":"pr.opened""#)
+        .await
+        .expect("normalized event type reached the model-facing result");
+    h.assert_tool_result_contains(r#""delivery_id":"delivery-capability-evidence""#)
+        .await
+        .expect("delivery identity survived normalization");
+    h.assert_network_egress_count(0)
+        .await
+        .expect("local webhook normalization made no provider request");
+}
+
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.
-/// Once Slack is installed and activated, the refreshed tool definitions must
+/// Once Slack is installed and ready, the refreshed tool definitions must
 /// be authoritative and the same conversation must be able to dispatch a real
 /// bundled `slack.*` capability through the production extension runtime.
 #[tokio::test]
@@ -154,31 +214,23 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "slack"}),
-            ),
             RebornScriptedReply::text("Slack is ready."),
         ])
         .build()
         .await
         .expect("Slack lifecycle thread builds");
     lifecycle
-        .seed_capability_credential_account(
-            "slack_personal",
-            "itest Slack personal",
-            SLACK_PERSONAL_SCOPES,
-        )
+        .seed_capability_credential_account("slack", "itest Slack personal", SLACK_PERSONAL_SCOPES)
         .await
         .expect("Slack personal credential is seeded with real test material");
     lifecycle
-        .submit_turn("Install and activate Slack")
+        .submit_turn("Install Slack")
         .await
         .expect("Slack lifecycle turn completes");
     lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
-        .expect("Slack activation publishes its capability surface");
+        .expect("Slack install publishes its capability surface once ready");
 
     caller
         .submit_turn("Now list my Slack conversations")
@@ -193,7 +245,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_model_tools_contains("slack__list_conversations")
         .await
-        .expect("current model request advertises the activated Slack tool");
+        .expect("current model request advertises the active Slack tool");
     caller
         .assert_system_prompt_contains(
             "The current tool definitions are authoritative for this turn",
@@ -203,7 +255,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_tool_invoked("slack.list_conversations")
         .await
-        .expect("activated Slack capability dispatches through the real runtime");
+        .expect("active Slack capability dispatches through the real runtime");
     caller
         .assert_tool_result_contains("\"conversations\":[]")
         .await
@@ -457,11 +509,14 @@ async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
-/// (2048 bytes) once serialized, so both durable-projection tests below
-/// exercise truncation. Every line is distinct so `TAIL_MARKER` (the last
-/// line) can only appear once the raw payload's tail is reached.
-const DURABLE_CONTENT_LINES: usize = 400;
-const TAIL_MARKER: &str = "line-0399";
+/// once serialized, so both durable-projection tests below exercise
+/// truncation, while staying under `PROVIDER_ARGUMENTS_MAX_BYTES` (64 KiB) --
+/// this content also rides as the `write_file` tool CALL's arguments earlier
+/// in the same script, a separate cap on model-emitted tool-call size.
+/// Every line is distinct so `TAIL_MARKER` (the last line) can only appear
+/// once the raw payload's tail is reached.
+const DURABLE_CONTENT_LINES: usize = 1300;
+const TAIL_MARKER: &str = "line-1299";
 
 fn large_durable_file_content() -> String {
     (0..DURABLE_CONTENT_LINES)
@@ -471,7 +526,7 @@ fn large_durable_file_content() -> String {
 }
 
 /// Durable tool-result projection (issue #5838 / PR #5902): a `read_file`
-/// result routed through the REAL `LocalDevCapabilityIo`
+/// result routed through the REAL `StagedCapabilityIo`
 /// (`.with_durable_capability_io_file_tools()`, which wires
 /// `new_with_durable_previews` over this harness's own local-dev session
 /// thread service — mirrors production's `capability_wiring`) must reach the
@@ -525,7 +580,7 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
     // messages (not ANY role): the model's OWN `write_file` tool-call
     // arguments legitimately echo the full content elsewhere in history —
     // this asserts the absence specifically from the persisted TOOL RESULT
-    // side, which is what `LocalDevCapabilityIo` controls.
+    // side, which is what `StagedCapabilityIo` controls.
     assert!(
         h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, TAIL_MARKER)
             .await
@@ -658,13 +713,19 @@ async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
         .expect("model-visible observation carries a structured issue code, not just prose");
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"expected\":\"4..=2048\"",
+        &format!(
+            "\"expected\":\"4..={}\"",
+            ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES
+        ),
     )
     .await
     .expect("model-visible issue states the allowed range");
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"received\":\"2049\"",
+        &format!(
+            "\"received\":\"{}\"",
+            ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1
+        ),
     )
     .await
     .expect("model-visible issue echoes the offending value");
@@ -748,10 +809,10 @@ fn truncated_array_result_persists_item_count_to_model_transcript() {
 }
 
 async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
-    let items: Vec<String> = (0..600).map(|i| format!("item-{i:04}")).collect();
+    let items: Vec<String> = (0..4000).map(|i| format!("item-{i:04}")).collect();
     let array_json = serde_json::to_string(&items).expect("array fixture serializes");
     assert!(
-        array_json.len() > 2048,
+        array_json.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
         "fixture must exceed the preview cap so the truncated branch runs"
     );
     let h = RebornIntegrationHarness::test_default()
@@ -773,11 +834,11 @@ async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
 
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"item_count\":600",
+        "\"item_count\":4000",
     )
     .await
     .expect("persisted observation carries the structured item count");
-    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "600 items")
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "4000 items")
         .await
         .expect("persisted summary names the array's element count");
 }
@@ -806,4 +867,50 @@ where
     if let Err(panic) = handle.join() {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// #6284 item 1, at the seam that matters: a **caller-shaped capability port
+/// error ends the tool call, not the run**.
+///
+/// Before the capability-stage fix, `capability_host_error` mapped every
+/// non-`Cancelled` `AgentLoopHostError` from the port to a terminal
+/// `HostUnavailable{Capability}` — so an expired credential, a scope
+/// mismatch, or a malformed invocation killed a run the model could have
+/// recovered from. The executor now splits the port-error kinds exhaustively:
+/// caller-shaped ones (`InvalidInvocation` here) surface as a model-visible tool
+/// error and the loop continues; genuine host faults stay terminal.
+///
+/// Asserted at the durable seam — the persisted `ToolResultReference` envelope
+/// and the finalized reply — not on a completed status, so it proves the model
+/// actually saw the failure *and* kept working. Crate-tier coverage of the same
+/// split lives in `ironclaw_agent_loop`'s executor tests; this pins it through
+/// the production composition.
+#[tokio::test]
+async fn caller_shaped_capability_port_error_is_a_tool_error_not_a_dead_run() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_recoverable_port_error_for_test()
+        .script([
+            RebornScriptedReply::tool_call("test_echo", json!({"message": "hi"})),
+            RebornScriptedReply::text("the tool was refused, so here is what I can say instead"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("use the echo tool")
+        .await
+        .expect("turn completes");
+
+    // The model was told, in the durable envelope the next turn reads from.
+    h.assert_tool_error(
+        reborn_support::assertions::ToolErrorClass::Failed,
+        "input_encode",
+    )
+    .await
+    .expect("a caller-shaped port error reaches the model as a recoverable tool error");
+
+    // …and the run kept going rather than dying on the port error.
+    h.assert_reply_contains("here is what I can say instead")
+        .await
+        .expect("the run continues past a recoverable port error");
 }

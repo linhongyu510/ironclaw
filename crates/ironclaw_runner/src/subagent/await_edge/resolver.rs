@@ -1,3 +1,4 @@
+// arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_turn_state_store(), plan #6263
 //! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
@@ -24,7 +25,7 @@ use ironclaw_turns::{
 
 use super::{
     AwaitEdge, AwaitEdgeState, EdgeTerminalKind,
-    store::{CloseCrashHooks, FilesystemAwaitEdgeStore},
+    store::{AwaitEdgeStore, CloseCrashHooks},
 };
 use crate::subagent::spawn_result::{
     SpawnedChildRunPayload, SubagentSpawnMode as PayloadSpawnMode,
@@ -39,7 +40,7 @@ pub struct AwaitEdgeResolver<
     S: SessionThreadService + ?Sized,
     F: ironclaw_filesystem::RootFilesystem + ?Sized,
 > {
-    store: Arc<FilesystemAwaitEdgeStore<F>>,
+    store: Arc<AwaitEdgeStore<F>>,
     goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
     turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     // Deferred-bind, mirroring `coordinator` below: most callers have a
@@ -64,7 +65,7 @@ where
     F: ironclaw_filesystem::RootFilesystem + ?Sized,
 {
     pub fn new_unbound(
-        store: Arc<FilesystemAwaitEdgeStore<F>>,
+        store: Arc<AwaitEdgeStore<F>>,
         goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
         result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -89,7 +90,7 @@ where
     /// writer is only available after this resolver is already erased into
     /// `Arc<dyn AwaitEdgeSettler>`.
     pub fn new_unbound_deferred_result_writer(
-        store: Arc<FilesystemAwaitEdgeStore<F>>,
+        store: Arc<AwaitEdgeStore<F>>,
         goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
         thread_service: Arc<S>,
@@ -135,7 +136,7 @@ where
             })
     }
 
-    pub(super) fn store(&self) -> &Arc<FilesystemAwaitEdgeStore<F>> {
+    pub(super) fn store(&self) -> &Arc<AwaitEdgeStore<F>> {
         &self.store
     }
 
@@ -941,11 +942,11 @@ mod tests {
         ironclaw_threads::InMemorySessionThreadService,
         ironclaw_filesystem::InMemoryBackend,
     > {
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(recon_scoped_fs()));
+        let store = Arc::new(AwaitEdgeStore::new(recon_scoped_fs()));
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);
         AwaitEdgeResolver::new_unbound(
@@ -1354,7 +1355,7 @@ mod tests {
             DefaultTurnCoordinator, SubmitChildRunRequest, SubmitTurnRequest, TurnSpawnTreePort,
         };
 
-        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let tenant_id = ironclaw_host_api::TenantId::new("close-edge-tree-root-tenant").unwrap();
         let agent_id = ironclaw_host_api::AgentId::new("close-edge-tree-root-agent").unwrap();
@@ -1480,7 +1481,7 @@ mod tests {
         // child_run_id=leaf_run_id) with `tree_root_run_id: root_run_id` --
         // exactly what a real depth>1 spawn's `record_awaited_child` would
         // cache.
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(recon_scoped_fs()));
+        let store = Arc::new(AwaitEdgeStore::new(recon_scoped_fs()));
         let parent_context = ironclaw_agent_loop::test_support::test_run_context("tr-parent");
         let edge = AwaitEdge {
             child_scope: leaf_scope.clone(),
@@ -1524,7 +1525,7 @@ mod tests {
             .unwrap();
 
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store;
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);

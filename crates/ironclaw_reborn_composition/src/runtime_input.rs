@@ -1,9 +1,9 @@
 //! Input DTO for the assembled Reborn runtime (`build_reborn_runtime`).
 //!
-//! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
+//! `RebornRuntimeInput` extends `RebornHostBindings` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
-//! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
+//! - **LLM configuration** (optional).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
 //!   that satisfies the loop-host `HostManagedModelGateway` contract.
 //! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
@@ -29,7 +29,6 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
@@ -37,7 +36,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -126,75 +125,80 @@ pub trait TriggerFireAccessChecker: Send + Sync {
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
-#[cfg(feature = "root-llm-provider")]
-#[derive(Clone)]
-pub struct ResolvedRebornLlm {
-    provider_id: String,
-    model: String,
-    pub(crate) config: ironclaw_llm::LlmConfig,
-    /// Optional decorator applied to the provider the gateway builds from
-    /// `config`. `config` is always the construction source (so it stays the
-    /// single source of truth for `provider_id`/`model` and budget cost-table
-    /// derivation); the factory only *wraps* the built provider — e.g. a
-    /// benchmark harness layering token/reasoning instrumentation over it.
-    /// When `None` the gateway uses the config-built provider as-is.
-    pub(crate) provider_factory: Option<RebornProviderFactory>,
+/// A single fire-time access grant. The granted scope is exact (`None` project
+/// means "no project", never a wildcard), matching [`TriggerFireAccessCheck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFireAccessGrant {
+    /// A single static owner may fire triggers for the granted scope — the
+    /// env-token `serve` and CLI `run` owner grant. `owner` is the
+    /// caller-configured owner id (formerly seeded into the trigger-access
+    /// store); the check is a pure comparison, no persistence.
+    StaticOwner {
+        owner: UserId,
+        agent: AgentId,
+        project: Option<ProjectId>,
+    },
+    /// Any active member of the host tenant may fire triggers for the granted
+    /// scope — the SSO/WebUI deployment. Membership is resolved at fire time
+    /// from the canonical identity directory (the `StoredUser` records SSO
+    /// login persists), so a suspended or unknown creator is denied.
+    TenantMembership {
+        agent: AgentId,
+        project: Option<ProjectId>,
+    },
 }
 
-/// Decorator over the config-built LLM provider. See
-/// [`ResolvedRebornLlm::with_provider_factory`].
-#[cfg(feature = "root-llm-provider")]
-pub type RebornProviderFactory = Arc<
-    dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
->;
-
-// `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
-#[cfg(feature = "root-llm-provider")]
-impl std::fmt::Debug for ResolvedRebornLlm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedRebornLlm")
-            .field("provider_id", &self.provider_id)
-            .field("model", &self.model)
-            .field("provider_factory", &self.provider_factory.is_some())
-            .finish_non_exhaustive()
-    }
+/// How fire-time trigger access is authorized for this deployment — the set of
+/// grants that authorize a fire, OR-combined.
+///
+/// This is the config value that replaced the former `local_trigger_access`
+/// shadow store (arch-simplification §4.4): the owner grant is *data* resolved
+/// at the serve/run edge, and `build_reborn_runtime` builds the matching
+/// [`TriggerFireAccessChecker`] from it — no per-deployment store type. An empty
+/// policy wires no authorizer (poller disabled / authorization supplied out of
+/// band). A `serve` with both the operator owner and SSO carries both a
+/// `StaticOwner` and a `TenantMembership` grant, preserving the union the old
+/// single store expressed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TriggerFireAccessPolicy {
+    grants: Vec<TriggerFireAccessGrant>,
 }
 
-#[cfg(feature = "root-llm-provider")]
-impl ResolvedRebornLlm {
-    pub fn provider_id(&self) -> &str {
-        &self.provider_id
+impl TriggerFireAccessPolicy {
+    /// No fire-time authorizer.
+    pub fn disabled() -> Self {
+        Self::default()
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
-        Self {
-            provider_id: config.active_provider_id(),
-            model: config.active_model_name(),
-            config,
-            provider_factory: None,
-        }
-    }
-
-    /// Wrap the config-built provider with `factory` before the gateway drives
-    /// it — e.g. to layer token/reasoning/cost instrumentation over the real
-    /// provider.
-    ///
-    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
-    /// The composition still constructs the provider from `config` and hands it
-    /// to the factory, so `config` remains the single source of truth and the
-    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
-    /// wholesale through the facade — the caller only supplies a decorator over
-    /// a provider the composition built. `build_llm_gateway` applies the factory
-    /// and never re-exposes the provider.
-    pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
-        self.provider_factory = Some(factory);
+    /// Grant the caller-configured static owner access for the exact scope.
+    pub fn with_static_owner(
+        mut self,
+        owner: UserId,
+        agent: AgentId,
+        project: Option<ProjectId>,
+    ) -> Self {
+        self.grants.push(TriggerFireAccessGrant::StaticOwner {
+            owner,
+            agent,
+            project,
+        });
         self
     }
+
+    /// Grant any active member of the host tenant access for the exact scope.
+    pub fn with_tenant_membership(mut self, agent: AgentId, project: Option<ProjectId>) -> Self {
+        self.grants
+            .push(TriggerFireAccessGrant::TenantMembership { agent, project });
+        self
+    }
+
+    /// The declared grants, OR-combined at fire time by the build.
+    pub(crate) fn grants(&self) -> &[TriggerFireAccessGrant] {
+        &self.grants
+    }
 }
+
+pub use ironclaw_operator::{RebornProviderFactory, ResolvedRebornLlm};
 
 /// Configuration for the turn-runner worker spawned by the runtime.
 #[derive(Debug, Clone)]
@@ -272,73 +276,16 @@ impl Default for PollSettings {
     }
 }
 
-/// Configuration for the background Google OAuth credential keepalive worker.
-///
-/// The worker handles background keepalive refreshes (B2/B3): it periodically
-/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
-/// the 7-day refresh-token death window from expiring during periods of
-/// inactivity.
+/// Scheduling knobs for the engine-owned credential keepalive sweep
+/// ([`ironclaw_auth::keepalive`]). The idle threshold is deliberately NOT a
+/// deployment setting: vendors declare their idle lifetime in their auth
+/// recipe (`refresh.keepalive_idle_seconds`) and the engine sweeps every
+/// declaring vendor's accounts.
 ///
 /// The inline access-token expiry gate is controlled by the fixed
 /// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
 /// `product_auth_runtime_credentials.rs`; it is not configurable here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialRefreshSettings {
-    /// Whether the worker is enabled. Defaults to `false`; use
-    /// `CredentialRefreshSettings::enabled()` to turn on.
-    pub enabled: bool,
-    /// How often the worker wakes and sweeps for idle accounts.
-    ///
-    /// Default: 6 hours.
-    pub interval: Duration,
-    /// How old (by `updated_at`) an account must be before it is considered
-    /// idle and eligible for a proactive refresh.
-    ///
-    /// Default: 2 days — well under the 7-day refresh-token idle-death window,
-    /// with headroom for downtime or deployment gaps.
-    pub idle_threshold: Duration,
-    /// Maximum random jitter applied once at worker startup before the first
-    /// tick. Spreading startup jitter across the multi-process deployment
-    /// prevents a thundering herd at first boot. The advisory-lock wrapper
-    /// (A4) serializes concurrent refreshes, but jitter reduces unnecessary
-    /// contention. Default: `Duration::ZERO`.
-    pub startup_jitter_max: Duration,
-    /// Maximum random jitter appended to each inter-tick sleep.
-    /// Default: `Duration::ZERO`.
-    pub tick_jitter_max: Duration,
-    /// Maximum number of candidate accounts processed per tick. Bounds the
-    /// work done in a single sweep to avoid a large initial backfill
-    /// overloading the token endpoint.
-    ///
-    /// Default: 5.
-    pub max_per_tick: usize,
-}
-
-impl Default for CredentialRefreshSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            interval: Duration::from_secs(6 * 3600),
-            idle_threshold: Duration::from_secs(2 * 24 * 3600),
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-            max_per_tick: 5,
-        }
-    }
-}
-
-impl CredentialRefreshSettings {
-    /// Return a settings value with the worker enabled and all other fields at
-    /// their defaults.
-    pub fn enabled() -> Self {
-        Self {
-            enabled: true,
-            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
-            startup_jitter_max: Duration::from_secs(300),
-            ..Self::default()
-        }
-    }
-}
+pub use ironclaw_auth::KeepaliveSweepSettings;
 
 /// Configuration for the composition-owned scheduled-trigger poller.
 ///
@@ -403,19 +350,24 @@ impl TriggerPollerSettings {
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
 pub struct RebornRuntimeInput {
-    pub services: Option<RebornBuildInput>,
-    #[cfg(feature = "root-llm-provider")]
+    pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present (and `root-llm-provider` is on), the
-    /// WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the product surface composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
-    #[cfg(feature = "root-llm-provider")]
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
-    pub credential_refresh: CredentialRefreshSettings,
+    pub credential_refresh: KeepaliveSweepSettings,
+    /// Explicit fire-time access checker override. Primarily a test/advanced
+    /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
+    /// and let the build construct the checker. When set, it takes precedence
+    /// over the policy.
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
+    /// The deployment's fire-time access policy. `build_reborn_runtime` builds
+    /// the matching [`TriggerFireAccessChecker`] from this when the trigger
+    /// poller is enabled and no explicit checker override is supplied.
+    pub trigger_fire_access: TriggerFireAccessPolicy,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     /// Optional project scope for runtime-owned thread I/O. Channel adapters
@@ -450,7 +402,6 @@ pub struct RebornRuntimeInput {
     /// Mints the one-time API bearer returned when an admin creates a user. The
     /// serve layer supplies a session-store-backed minter; when unset, the admin
     /// user-management surface stays unwired (create reports unavailable).
-    #[cfg(feature = "webui-v2-beta")]
     pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
@@ -475,18 +426,17 @@ impl RebornRuntimeInput {
     /// provided — there is no in-memory-only fallback at this layer because
     /// the substrate decisions (local-dev root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
-    pub fn from_services(services: RebornBuildInput) -> Self {
+    pub fn from_build_input(services: RebornHostBindings) -> Self {
         Self {
             services: Some(services),
-            #[cfg(feature = "root-llm-provider")]
             llm: None,
-            #[cfg(feature = "root-llm-provider")]
             boot: None,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
-            credential_refresh: CredentialRefreshSettings::default(),
+            credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
+            trigger_fire_access: TriggerFireAccessPolicy::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             default_project_id: None,
@@ -496,7 +446,6 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
-            #[cfg(feature = "webui-v2-beta")]
             admin_api_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
@@ -505,6 +454,28 @@ impl RebornRuntimeInput {
             #[cfg(any(test, feature = "test-support"))]
             model_availability_retry_attempts_override: None,
         }
+    }
+
+    /// The declarative deployment config (Phase A) — the authoritative "what
+    /// deployment is this" input, read separately from the code-carrying
+    /// `services` bindings. It is sourced from the bindings the caller supplied
+    /// to [`from_build_input`](Self::from_build_input) (that is where the
+    /// profile preset and all declarative DATA are seeded), so existing callers
+    /// keep working while the runtime layer can treat config as a first-class,
+    /// bindings-independent value. Returns `None` only before services are set.
+    pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
+        self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Override the deployment config carried by the bindings. Lets a caller
+    /// install an accurately-resolved config (e.g. one built with the operator's
+    /// yolo host-access disclosure) after constructing the input, without
+    /// reaching into the bindings directly.
+    pub fn with_config(mut self, config: crate::deployment::DeploymentConfig) -> Self {
+        if let Some(services) = self.services.take() {
+            self.services = Some(services.with_deployment_config(config));
+        }
+        self
     }
 
     /// Supply pre-resolved budget defaults. The caller is responsible
@@ -534,7 +505,6 @@ impl RebornRuntimeInput {
     /// Install the admin API-token minter used when an admin creates a user.
     /// The serve layer builds a session-store-backed minter; without it the
     /// admin user-management surface stays unwired.
-    #[cfg(feature = "webui-v2-beta")]
     pub fn with_admin_api_token_minter(
         mut self,
         minter: Arc<dyn crate::AdminApiTokenMinter>,
@@ -591,15 +561,13 @@ impl RebornRuntimeInput {
         self
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
         self
     }
 
-    /// Supply the operator boot config so the WebUI facade can compose the
+    /// Supply the operator boot config so the product surface can compose the
     /// LLM-config settings service.
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);
         self
@@ -622,7 +590,7 @@ impl RebornRuntimeInput {
 
     pub fn with_credential_refresh_settings(
         mut self,
-        credential_refresh: CredentialRefreshSettings,
+        credential_refresh: KeepaliveSweepSettings,
     ) -> Self {
         self.credential_refresh = credential_refresh;
         self
@@ -633,6 +601,11 @@ impl RebornRuntimeInput {
         checker: Arc<dyn TriggerFireAccessChecker>,
     ) -> Self {
         self.trigger_fire_access_checker = Some(checker);
+        self
+    }
+
+    pub fn with_trigger_fire_access_policy(mut self, policy: TriggerFireAccessPolicy) -> Self {
+        self.trigger_fire_access = policy;
         self
     }
 

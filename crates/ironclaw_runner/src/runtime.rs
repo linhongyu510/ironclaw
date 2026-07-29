@@ -15,9 +15,10 @@ use ironclaw_loop_host::{
     SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
     SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
+use ironclaw_memory::MemoryService;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator,
+    AgentLoopDriverError, CheckpointStateStorePort, DefaultTurnCoordinator,
     DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
     TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
@@ -26,7 +27,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext,
+        LoopRunContext, MemoryPromptContextService,
     },
     runner::TurnRunTransitionPort,
 };
@@ -48,7 +49,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
-        goal_store::SubagentGoalStore, prompt_material::GateBackedSubagentPromptMaterialSource,
+        goal_store::SubagentGoalStorePort, prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
@@ -287,7 +288,7 @@ where
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
-    pub checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    pub checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     pub loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -318,6 +319,16 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9),
+    /// threaded to the turn executor so an auth block re-sources its
+    /// `credential_requirements` from the host record (render-from-record) after
+    /// the §5.3 flip moved them off the loop-facing channel. Must be the SAME
+    /// `Arc` the composition wired into the capability port's
+    /// `with_gate_record_store`, or the read scope/key will not find the saved
+    /// record. `None` only for helper/test compositions with no run-state
+    /// filesystem (they never raise a durable auth gate); a production `None` is
+    /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
+    pub gate_record_store: Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -328,6 +339,23 @@ where
     /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
     /// that do not yet wire a profile backend.
     pub user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// Proactive-memory source (#3537 / mem0 flow). Resolved once per run at the
+    /// first prompt build and surfaced into the prompt's "memory" section.
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// memory rather than failing the turn, the same optionality as
+    /// `user_profile_source`.
+    pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW bound memory
+    /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
+    /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
+    /// `Completed` run's full transcript to `record_interaction`, skipping only
+    /// runs with no user/assistant content (the provider decides what to retain).
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// after-turn recording rather than failing the turn (mirrors
+    /// `memory_context_service`).
+    pub after_turn_memory_writer: Option<Arc<dyn MemoryService>>,
     /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
     /// defaults these to no-op implementations so helper tests keep compiling.
     /// `build_product_live_planned_runtime` fails closed when any of them is
@@ -355,12 +383,12 @@ where
 }
 
 pub trait RuntimeSubagentGoalStore:
-    SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+    SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
 {
 }
 
 impl<T> RuntimeSubagentGoalStore for T where
-    T: SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+    T: SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
 {
 }
 
@@ -744,6 +772,17 @@ where
     let safety_context = parts
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);
+    // Build the after-turn memory recorder before `parts.thread_scope` is moved
+    // into the host factory below. Present only when a bound memory
+    // provider was resolved; it owner-rewrites the base thread scope per run
+    // before reading the just-finished exchange back.
+    let after_turn_memory_recorder = parts.after_turn_memory_writer.clone().map(|memory_writer| {
+        Arc::new(crate::after_turn_memory::AfterTurnMemoryRecorder::new(
+            Arc::clone(&parts.thread_service),
+            memory_writer,
+            parts.thread_scope.clone(),
+        ))
+    });
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
@@ -790,6 +829,9 @@ where
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
+    if let Some(service) = parts.memory_context_service {
+        host_factory = host_factory.with_memory_context_service(service);
+    }
     let host_factory = Arc::new(host_factory);
 
     let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
@@ -797,11 +839,16 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let mut executor = RebornTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
-    ));
+        parts.gate_record_store.clone(),
+    );
+    if let Some(recorder) = after_turn_memory_recorder {
+        executor = executor.with_after_turn_memory_recorder(recorder);
+    }
+    let executor = Arc::new(executor);
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
@@ -897,7 +944,10 @@ mod tests {
 
     use super::{SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, scheduler_permit_count};
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
+        ThreadId,
+    };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -905,11 +955,10 @@ mod tests {
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityBatchOutcome, CapabilityDescriptorView, CapabilityInvocation,
-            CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopRunContext, RunProfileResolutionRequest, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+            LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
+            VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
 
@@ -1048,8 +1097,8 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1058,8 +1107,8 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1104,16 +1153,16 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability_batch(request).await
         }
@@ -1231,8 +1280,8 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",
@@ -1241,8 +1290,8 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",

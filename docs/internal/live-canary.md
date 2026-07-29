@@ -10,7 +10,7 @@ IronClaw now has two complementary regression systems:
 
 The implementation lives in:
 
-- `.github/workflows/test.yml` for the normal blocking test lanes;
+- `.github/workflows/reborn-tests.yml` / `.github/workflows/reborn-e2e.yml` for the normal blocking test lanes (the v1 `test.yml` was removed under Tier B);
 - `.github/workflows/live-canary.yml` for scheduled and manual live lanes;
 - `scripts/live-canary/run.sh` for lane dispatch;
 - `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
@@ -35,7 +35,7 @@ account guide rather than introducing another bespoke runner layout.
 
 | Lane | Scope | Runner | Trigger | Blocking |
 | --- | --- | --- | --- | --- |
-| `deterministic-replay` | Replays `tests/e2e_live*.rs` fixtures without live LLM calls | GitHub-hosted | PR/staging via `test.yml`; manual via `live-canary.yml` | Yes in `test.yml` |
+| `deterministic-replay` | Retired under Tier B — its `tests/e2e_live*.rs` fixtures and the `test.yml` workflow were deleted with the v1 monolith. Reborn recorded-fixture replay is the `Reborn QA recorded fixtures` gate in `reborn-tests.yml`. (Live-canary lane rewire tracked in #6369.) | — | — | — |
 | `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
@@ -96,9 +96,10 @@ into `config.toml`. The generated Reborn config only enables Slack:
 enabled = true
 ```
 
-Bot installation setup is applied headlessly after `ironclaw-reborn serve`
-boots by calling `PUT /api/webchat/v2/channels/slack/setup` with the WebUI
-operator bearer token. Required repository variables:
+Bot installation setup is applied headlessly after `ironclaw serve`
+boots by saving the manifest-declared `extension.slack` group through the
+operator extension-configuration API with the WebUI operator bearer token.
+Required repository variables:
 
 - `REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID`
 - `REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID`
@@ -121,7 +122,8 @@ live Slack user account is already bound in Reborn product-auth state:
 
 `AUTH_LIVE_SLACK_ACCESS_TOKEN` must be a real Slack user token for the live QA
 Slack user. The harness validates it with Slack `auth.test`, then seeds the
-generated Reborn home with an encrypted `slack_personal` product-auth account.
+generated Reborn home with an encrypted manifest-provider `slack` product-auth
+account.
 
 ## Commands
 
