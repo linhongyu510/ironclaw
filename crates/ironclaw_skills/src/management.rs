@@ -109,14 +109,12 @@ impl RootFilesystem for SkillManagementRootFilesystem {
         self.inner.capabilities()
     }
 
-    /// Forwards to `self.inner` explicitly rather than inheriting the trait's
-    /// no-op default: `inner` is a type-erased `Arc<dyn RootFilesystem>` that
-    /// may be a `DiskFilesystem` with a real containment-narrowing override,
-    /// but the compiler cannot see through the erasure to prove that — if
-    /// this wrapper silently inherited the default instead of delegating,
-    /// every skill-management op would sail through with the mount never
-    /// narrowed, regardless of what `inner` actually does. Forwarding is
-    /// what makes `ScopedFilesystem`'s automatic call
+    /// Forwards to `self.inner` explicitly: `ensure_scoped_mount` has no
+    /// default implementation, and `inner` is a type-erased
+    /// `Arc<dyn RootFilesystem>` that may be a `DiskFilesystem` with a real
+    /// containment-narrowing override the compiler cannot see through the
+    /// erasure to reach on its own — this wrapper's own required override
+    /// is what makes `ScopedFilesystem`'s automatic call
     /// (`scoped.rs::resolve_with_permission_view`) actually reach
     /// `DiskFilesystem::ensure_scoped_mount` through this wrapper.
     async fn ensure_scoped_mount(&self, virtual_root: &VirtualPath) -> Result<(), FilesystemError> {
