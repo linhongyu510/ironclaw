@@ -39,7 +39,11 @@ const EGRESS_PROXY_BIND_ADDR: &str = "0.0.0.0:0";
 /// reachable.
 pub(crate) async fn spawn_sandbox_egress_proxy()
 -> Result<SandboxEgressProxyRuntimeHandle, RebornBuildError> {
-    let policy = ironclaw_host_runtime::sandbox_network_policy();
+    let policy = ironclaw_host_runtime::sandbox_network_policy().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("sandbox egress allowlist policy is invalid: {error}"),
+        }
+    })?;
     let bound = EgressAllowlistProxy::new(policy)
         .bind(EGRESS_PROXY_BIND_ADDR)
         .await

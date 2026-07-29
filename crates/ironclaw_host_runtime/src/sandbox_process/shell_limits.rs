@@ -5,6 +5,19 @@
 //! `first_party_tools::schemas` and `first_party_tools::shell_core`); this
 //! module owns the operator ceilings both values are clamped to before they
 //! reach the sandbox transport, plus the defaults used when unset.
+//!
+//! Only the two `*_DEFAULT_*` constants have a caller today — `sandbox_process`'s
+//! `DEFAULT_TIMEOUT`/`DEFAULT_MAX_OUTPUT_BYTES`, which previously carried the
+//! same numbers as bare literals. The ceilings, floors, and the two clamp
+//! functions are `#[allow(dead_code)]` until the per-call limits are wired,
+//! which happens in three named places at once: `process_port`'s
+//! `RuntimeProcessPort` request path, `sandbox_process`'s
+//! `execute_in_container`, and `first_party_tools::shell` /
+//! `first_party_tools::shell_core` (the `timeout` / `output_limit` schema
+//! fields). Wiring them is a behavior change — today the transport applies a
+//! model-supplied `timeout_secs` with no ceiling at all — so it ships with its
+//! own test, in its own PR, rather than being smuggled in behind this module's
+//! arrival.
 
 use std::time::Duration;
 
@@ -12,10 +25,12 @@ use std::time::Duration;
 pub(crate) const SHELL_TIMEOUT_DEFAULT_SECS: u64 = 120;
 /// Operator ceiling for `timeout`. Requests above this are clamped down,
 /// never rejected.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) const SHELL_TIMEOUT_MAX_SECS: u64 = 600;
 /// Floor for `timeout`; zero-second timeouts are rejected upstream by
 /// `shell_core::parse_timeout`, but the clamp still enforces the floor for
 /// any other caller of `clamp_shell_timeout_secs`.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) const SHELL_TIMEOUT_MIN_SECS: u64 = 1;
 
 /// Default captured-output cap (stdout+stderr) when the model omits
@@ -23,13 +38,16 @@ pub(crate) const SHELL_TIMEOUT_MIN_SECS: u64 = 1;
 pub(crate) const SHELL_OUTPUT_LIMIT_DEFAULT_BYTES: u64 = 64 * 1024;
 /// Operator ceiling for `output_limit`. Requests above this are clamped
 /// down, never rejected.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) const SHELL_OUTPUT_LIMIT_MAX_BYTES: u64 = 1024 * 1024;
 /// Floor for `output_limit`; requests below this are clamped up.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) const SHELL_OUTPUT_LIMIT_MIN_BYTES: u64 = 1024;
 
 /// Clamp a model-requested shell timeout (seconds) to
 /// `[SHELL_TIMEOUT_MIN_SECS, SHELL_TIMEOUT_MAX_SECS]`, defaulting to
 /// `SHELL_TIMEOUT_DEFAULT_SECS` when unset.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) fn clamp_shell_timeout_secs(requested: Option<u64>) -> Duration {
     let secs = requested
         .unwrap_or(SHELL_TIMEOUT_DEFAULT_SECS)
@@ -40,6 +58,7 @@ pub(crate) fn clamp_shell_timeout_secs(requested: Option<u64>) -> Duration {
 /// Clamp a model-requested output cap (bytes) to
 /// `[SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES]`,
 /// defaulting to `SHELL_OUTPUT_LIMIT_DEFAULT_BYTES` when unset.
+#[allow(dead_code)] // consumer: process_port / execute_in_container / first_party_tools::shell — see module doc
 pub(crate) fn clamp_shell_output_limit_bytes(requested: Option<u64>) -> usize {
     let bytes = requested
         .unwrap_or(SHELL_OUTPUT_LIMIT_DEFAULT_BYTES)

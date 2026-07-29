@@ -9,8 +9,9 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, FailureKind, GateRecord, GateRef, InvocationId,
-    InvocationOrigin, MountView, Principal, ProviderToolName, Resolution, ResolutionBatch,
-    ResourceEstimate, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
+    InvocationOrigin, ModelDiagnostic, MountView, Principal, ProviderToolName, Resolution,
+    ResolutionBatch, ResourceEstimate, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
+    sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -308,11 +309,8 @@ const GENERIC_CAPABILITY_FAILURE_SUMMARIES: [&str; 2] = [
 ///
 /// Returns `None` when neither is available, so the projection keeps its
 /// existing `tool failed: <kind>` fallback.
-fn failure_display_summary(
-    safe_summary: &str,
-    detail: &Option<CapabilityFailureDetail>,
-) -> Option<String> {
-    if let Some(CapabilityFailureDetail::InvalidInput { issues }) = detail.as_ref()
+fn failure_display_summary(safe_summary: &str, detail: &CapabilityFailureDetail) -> Option<String> {
+    if let CapabilityFailureDetail::InvalidInput { issues } = detail
         && !issues.is_empty()
     {
         let rendered = issues
@@ -1606,10 +1604,11 @@ impl HostRuntimeLoopCapabilityPort {
                 // model-visible so the driver can retry instead of terminalizing the host.
                 // INVARIANT: synthetic capabilities must not use InvalidInvocation for
                 // internal or host-fatal conditions.
+                let detail = diagnostic_detail_from_raw(&error.safe_summary);
                 return Ok(GatedResolution::bare(resolution::failed(
                     FailureKind::InputEncode,
                     error.safe_summary,
-                    None,
+                    detail,
                 )));
             }
             Err(error) => return Err(error),
@@ -2618,10 +2617,13 @@ impl HostRuntimeLoopCapabilityPort {
                             && is_provider_tool_call_input_ref(effective_input_ref) =>
                     {
                         let host_error = *error.error;
+                        let detail = error.detail.unwrap_or_else(|| {
+                            diagnostic_detail_from_raw(&host_error.safe_summary)
+                        });
                         let result = Ok(GatedResolution::bare(resolution::failed(
                             FailureKind::InputEncode,
                             host_error.safe_summary,
-                            error.detail,
+                            detail,
                         )));
                         guard.commit();
                         self.record_loop_completed(
@@ -3592,14 +3594,21 @@ async fn runtime_outcome_to_loop(
             }
             GatedResolution::bare(class.into_resolution())
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => GatedResolution::bare(resolution::failed(
-            FailureKind::from_tag(&unknown.kind),
-            runtime_safe_summary(
-                unknown.message,
-                "capability invocation returned an unknown outcome",
-            ),
-            None,
-        )),
+        RuntimeCapabilityOutcome::Unknown(unknown) => {
+            let detail = unknown
+                .message
+                .as_deref()
+                .and_then(model_visible_diagnostic_text)
+                .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+            GatedResolution::bare(resolution::failed(
+                FailureKind::from_tag(&unknown.kind),
+                runtime_safe_summary(
+                    unknown.message,
+                    "capability invocation returned an unknown outcome",
+                ),
+                CapabilityFailureDetail::Diagnostic { text: detail },
+            ))
+        }
     })
 }
 
@@ -3611,7 +3620,7 @@ enum LoopFailureClass {
     Failed {
         error_kind: FailureKind,
         safe_summary: String,
-        detail: Option<CapabilityFailureDetail>,
+        detail: CapabilityFailureDetail,
     },
     Denied {
         reason_kind: CapabilityDeniedReasonKind,
@@ -3690,10 +3699,8 @@ fn runtime_failure_to_loop(
             runtime_model_visible_failure_to_loop(failure)
         }
         CapabilityFailureDisposition::RetrySameCall => {
-            let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
-                Some(structured) => Some(structured),
-                None => runtime_failure_diagnostic_detail(&failure),
-            };
+            let detail = runtime_failure_detail_to_loop(failure.detail.clone())
+                .unwrap_or_else(|| runtime_failure_diagnostic_detail(&failure));
             Ok(LoopFailureClass::Failed {
                 error_kind: failure.kind,
                 safe_summary: runtime_failure_safe_summary(
@@ -3714,10 +3721,7 @@ fn runtime_failure_to_loop(
 /// ([`crate::scrub_model_visible_detail`]).
 fn runtime_failure_diagnostic_detail(
     failure: &RuntimeCapabilityFailure,
-) -> Option<CapabilityFailureDetail> {
-    if failure.detail.is_some() {
-        return None;
-    }
+) -> CapabilityFailureDetail {
     // Prefer the private in-process cause channel: the public `message` fails
     // closed (kind-only for wild raw causes), so the full descriptive cause
     // rides `model_visible_cause` and only becomes model-visible through this
@@ -3725,15 +3729,20 @@ fn runtime_failure_diagnostic_detail(
     let raw = failure
         .model_visible_cause()
         .map(str::to_owned)
-        .or_else(|| failure.safe_summary())?;
-    let text = if failure.kind == FailureKind::InputEncode
-        && is_process_sandbox_capability(&failure.capability_id)
-    {
-        sandbox_model_visible_diagnostic_text(&raw)
-    } else {
-        model_visible_diagnostic_text(&raw)
-    }?;
-    Some(CapabilityFailureDetail::Diagnostic { text })
+        .or_else(|| failure.safe_summary());
+    let text = raw
+        .as_deref()
+        .and_then(|raw| {
+            if failure.kind == FailureKind::InputEncode
+                && is_process_sandbox_capability(&failure.capability_id)
+            {
+                sandbox_model_visible_diagnostic_text(raw)
+            } else {
+                model_visible_diagnostic_text(raw)
+            }
+        })
+        .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+    CapabilityFailureDetail::Diagnostic { text }
 }
 
 /// Sandbox validation diagnostics still cross the legacy host-api verdict
@@ -3791,6 +3800,12 @@ fn model_visible_diagnostic_text(raw: &str) -> Option<String> {
     Some(normalized)
 }
 
+fn diagnostic_detail_from_raw(raw: &str) -> CapabilityFailureDetail {
+    let text = model_visible_diagnostic_text(raw)
+        .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+    CapabilityFailureDetail::Diagnostic { text }
+}
+
 fn runtime_model_visible_failure_to_loop(
     failure: RuntimeCapabilityFailure,
 ) -> Result<LoopFailureClass, AgentLoopHostError> {
@@ -3806,10 +3821,8 @@ fn runtime_model_visible_failure_to_loop(
 
     let error_kind = failure.kind;
     let safe_summary = runtime_failure_safe_summary(&failure, "capability invocation failed");
-    let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
-        Some(structured) => Some(structured),
-        None => runtime_failure_diagnostic_detail(&failure),
-    };
+    let detail = runtime_failure_detail_to_loop(failure.detail.clone())
+        .unwrap_or_else(|| runtime_failure_diagnostic_detail(&failure));
     Ok(LoopFailureClass::Failed {
         error_kind,
         safe_summary,
@@ -4268,9 +4281,9 @@ mod tests {
         );
         assert_eq!(
             detail,
-            Some(CapabilityFailureDetail::Diagnostic {
+            CapabilityFailureDetail::Diagnostic {
                 text: raw_invalid_input.to_string(),
-            })
+            }
         );
 
         let issue =
@@ -4293,7 +4306,7 @@ mod tests {
         assert!(matches!(
             detailed_invalid_input,
             LoopFailureClass::Failed {
-                detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+                detail: CapabilityFailureDetail::InvalidInput { issues },
                 ..
             } if issues.len() == 2
                 && issues[0].path == "schedule.kind"
@@ -4392,7 +4405,7 @@ mod tests {
         // The summary stays generic (the path tripped the strict validator) ...
         assert_eq!(safe_summary, "capability invocation failed");
         // ... but the raw path-bearing cause now rides the diagnostic detail.
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail carrying the raw cause");
         };
         assert_eq!(text, path, "the path string must reach the model intact");
@@ -4412,7 +4425,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4446,7 +4459,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4486,7 +4499,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail carrying the raw cause");
         };
         assert!(
@@ -4520,7 +4533,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4544,10 +4557,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_diagnostic_detail_that_normalizes_to_nothing_is_dropped() {
+    fn runtime_diagnostic_detail_that_normalizes_to_nothing_uses_fallback() {
         // A diagnostic that is nothing but disallowed control characters
-        // normalizes to whitespace; an empty diagnostic would fail the
-        // model-observation validator downstream, so it is dropped instead.
+        // normalizes to whitespace. The failure still carries an explicit
+        // fallback rather than degrading to a bare category.
         let capability_id = CapabilityId::new("builtin.shell").expect("valid capability id");
         let failure =
             RuntimeCapabilityFailure::new(capability_id, FailureKind::OperationFailed, None)
@@ -4560,7 +4573,10 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        assert_eq!(detail, None, "empty diagnostics must be dropped");
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
+            panic!("empty diagnostics must use the fixed fallback");
+        };
+        assert_eq!(text, ModelDiagnostic::unavailable().as_str());
     }
 
     #[test]
@@ -4582,7 +4598,7 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_renders_invalid_input_issues() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![
                 CapabilityInputIssue {
                     path: "schedule.kind".to_string(),
@@ -4599,7 +4615,7 @@ mod tests {
                     schema_path: None,
                 },
             ],
-        });
+        };
         let summary = failure_display_summary("tool input failed validation", &detail)
             .expect("invalid input renders a summary");
         assert!(summary.starts_with("Invalid input:"));
@@ -4614,15 +4630,20 @@ mod tests {
         // The `json` builtin reports invalid_input with a descriptive message
         // but no structured issues; that message must reach the preview.
         assert_eq!(
-            failure_display_summary("invalid JSON: expected value at line 1 column 1", &None)
-                .as_deref(),
+            failure_display_summary(
+                "invalid JSON: expected value at line 1 column 1",
+                &CapabilityFailureDetail::Diagnostic {
+                    text: ModelDiagnostic::unavailable().into_inner(),
+                },
+            )
+            .as_deref(),
             Some("invalid JSON: expected value at line 1 column 1")
         );
     }
 
     #[test]
     fn capability_failure_display_summary_skips_unsafe_input_issue_fields() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "payload</script>".to_string(),
                 code: DispatchInputIssueCode::InvalidValue,
@@ -4630,7 +4651,7 @@ mod tests {
                 received: None,
                 schema_path: None,
             }],
-        });
+        };
 
         assert_eq!(
             failure_display_summary("input schema validation failed", &detail).as_deref(),
@@ -4640,7 +4661,7 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_skips_sensitive_input_issue_fields() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "secret_api_key".to_string(),
                 code: DispatchInputIssueCode::TypeMismatch,
@@ -4648,7 +4669,7 @@ mod tests {
                 received: None,
                 schema_path: None,
             }],
-        });
+        };
 
         assert_eq!(
             failure_display_summary("input schema validation failed", &detail).as_deref(),
@@ -4671,7 +4692,15 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_is_none_for_generic_placeholder() {
-        assert!(failure_display_summary("capability invocation failed", &None).is_none());
+        assert!(
+            failure_display_summary(
+                "capability invocation failed",
+                &CapabilityFailureDetail::Diagnostic {
+                    text: ModelDiagnostic::unavailable().into_inner(),
+                },
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -5942,6 +5971,7 @@ mod tests {
                 )),
                 FailureKind::InputEncode,
                 Some("invalid JSON: expected value at line 1 column 1"),
+                false,
             ),
             (
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
@@ -5951,6 +5981,7 @@ mod tests {
                 )),
                 FailureKind::InputEncode,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+                false,
             ),
             (
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
@@ -5960,6 +5991,7 @@ mod tests {
                 )),
                 FailureKind::InputEncode,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+                true,
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -5972,10 +6004,21 @@ mod tests {
                 // `Unclassified` sink.
                 FailureKind::Unclassified,
                 None,
+                false,
+            ),
+            (
+                RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: "custom_failure".to_string(),
+                    message: None,
+                }),
+                FailureKind::from_tag("custom_failure"),
+                None,
+                true,
             ),
         ];
 
-        for (outcome, expected_kind, expected_summary) in cases {
+        for (outcome, expected_kind, expected_summary, expects_fallback) in cases {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
@@ -6000,7 +6043,24 @@ mod tests {
                 .await
                 .expect("runtime failure outcome maps to loop outcome");
 
-            assert!(matches!(&outcome, Resolution::Done(o) if o.verdict.error_kind().is_some()));
+            let Resolution::Done(done) = &outcome else {
+                panic!("runtime failure must be a recoverable outcome");
+            };
+            assert!(done.verdict.error_kind().is_some());
+            assert!(
+                done.verdict.diagnostic().is_some(),
+                "runtime failure must not degrade to a bare category"
+            );
+            if expects_fallback {
+                let Some(ModelFailureDiagnostic::Diagnostic { text }) = done.verdict.diagnostic()
+                else {
+                    panic!("missing cause must use a free-text fallback diagnostic");
+                };
+                assert!(
+                    text.as_str()
+                        .contains("did not provide additional diagnostic detail")
+                );
+            }
             let milestones = milestone_sink.milestones();
             assert_eq!(milestones.len(), 2);
             assert!(matches!(
@@ -6022,6 +6082,87 @@ mod tests {
             };
             assert_eq!(actual_summary, expected_summary);
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_failure_preserves_scrubbed_cause_through_resolution() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let cause = "failed to read /workspace/project/config.json at line 17";
+        let failure = RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            FailureKind::OperationFailed,
+            Some("the capability operation failed".to_string()),
+        )
+        .with_model_visible_cause(cause);
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::Failed(failure))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-runtime-capability-diagnostic-cause",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime failure maps to a recoverable loop outcome");
+        let Resolution::Done(outcome) = outcome else {
+            panic!("expected a recoverable failure");
+        };
+        let Some(ModelFailureDiagnostic::Diagnostic { text }) = outcome.verdict.diagnostic() else {
+            panic!("expected an inline diagnostic");
+        };
+        assert_eq!(text.as_str(), cause);
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_failure_without_backend_message_inlines_fallback_diagnostic() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let failure = RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            FailureKind::OperationFailed,
+            None,
+        );
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::Failed(failure))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-runtime-capability-missing-diagnostic",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime failure maps to a recoverable loop outcome");
+        let Resolution::Done(outcome) = outcome else {
+            panic!("expected a recoverable failure");
+        };
+        let Some(ModelFailureDiagnostic::Diagnostic { text }) = outcome.verdict.diagnostic() else {
+            panic!("a missing backend message must not produce a bare failure category");
+        };
+        assert!(
+            text.as_str()
+                .contains("did not provide additional diagnostic detail"),
+            "unexpected fallback diagnostic: {}",
+            text.as_str()
+        );
     }
 
     #[tokio::test]
@@ -8009,7 +8150,7 @@ mod tests {
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
         assert!(o.summary.as_str().contains("schema validation"));
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert_eq!(issues.len(), 1);
@@ -8104,7 +8245,7 @@ mod tests {
             panic!("expected schema-invalid provider call to fail");
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert!(
@@ -8201,7 +8342,7 @@ mod tests {
             panic!("expected schema-invalid provider call to fail");
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert!(
@@ -8523,7 +8664,7 @@ mod tests {
             text.as_str()
         );
         assert!(
-            text.as_str().contains("redacted"),
+            text.as_str().to_ascii_lowercase().contains("redacted"),
             "the diagnostic should retain an explicit redaction marker: {}",
             text.as_str()
         );

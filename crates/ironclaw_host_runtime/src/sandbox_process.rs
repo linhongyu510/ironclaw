@@ -29,6 +29,7 @@ mod container_identity;
 mod credential_firewall;
 mod egress_proxy;
 mod exec_transport;
+mod key_codec;
 mod mounts;
 mod network_allowlist;
 mod reaper;
@@ -47,8 +48,9 @@ pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_doc
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use egress_proxy::{BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError};
 pub use network_allowlist::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, sandbox_allowed_domains,
-    sandbox_extra_allowed_domains, sandbox_network_policy,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
 pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
 use registry::BackgroundJobRegistry;

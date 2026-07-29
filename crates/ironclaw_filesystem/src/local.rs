@@ -127,11 +127,11 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
-        let canonical = tokio::fs::canonicalize(&joined)
+        let resolved = self.resolve_joined(path)?;
+        let canonical = tokio::fs::canonicalize(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), operation, error))?;
-        ensure_contained(path, &containment_root, &canonical, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
@@ -140,23 +140,53 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
+        let resolved = self.resolve_joined(path)?;
 
-        if tokio::fs::try_exists(&joined)
-            .await
-            .map_err(|error| io_error(path.clone(), operation, error))?
-        {
-            let canonical = tokio::fs::canonicalize(&joined)
-                .await
-                .map_err(|error| io_error(path.clone(), operation, error))?;
-            ensure_contained(path, &containment_root, &canonical, true)?;
-            return Ok(canonical);
+        // `symlink_metadata` (lstat) reports whether a directory entry
+        // exists at this path at all, without following a final symlink —
+        // unlike `try_exists`, which follows symlinks and reports `false`
+        // for a *dangling* one (target missing). Using `try_exists` here
+        // would let a pre-existing dangling symlink fall through to the
+        // "brand new file in this leaf" bootstrap path below, which hands
+        // back an unchecked path through the symlink; `write_file`/
+        // `append_file` open with `O_CREAT` and the OS creates the file at
+        // wherever the symlink points, bypassing containment entirely.
+        match tokio::fs::symlink_metadata(&resolved.joined).await {
+            Ok(metadata) => {
+                match tokio::fs::canonicalize(&resolved.joined).await {
+                    Ok(canonical) => {
+                        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
+                        return Ok(canonical);
+                    }
+                    Err(error) if metadata.file_type().is_symlink() => {
+                        // The entry is a symlink whose target can't be
+                        // resolved (dangling, or a broken intermediate
+                        // component). Fail closed: we cannot verify
+                        // containment of a target we can't resolve, and
+                        // silently falling through would let a write
+                        // escape via the symlink.
+                        let _ = error;
+                        return Err(FilesystemError::SymlinkEscape { path: path.clone() });
+                    }
+                    Err(error) => return Err(io_error(path.clone(), operation, error)),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(path.clone(), operation, error)),
         }
 
-        let parent = joined
+        let parent = resolved
+            .joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        ensure_existing_ancestor_contained(path, &containment_root, parent, operation).await?;
+        ensure_existing_ancestor_contained(
+            path,
+            &resolved.containment_root,
+            resolved.bootstrap_root,
+            parent,
+            operation,
+        )
+        .await?;
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
@@ -166,7 +196,7 @@ impl DiskFilesystem {
         // `joined` is constructed from validated virtual path segments under the
         // backend root. If its canonical parent leaves the backend root, an
         // existing symlink in the parent chain caused the escape.
-        ensure_contained(path, &containment_root, &canonical_parent, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical_parent, true)?;
         // Re-root the final path on the canonicalized, containment-checked
         // parent rather than returning `joined` (which still contains the
         // un-canonicalized ancestor components). This narrows the TOCTOU
@@ -174,7 +204,8 @@ impl DiskFilesystem {
         // later swap of an ancestor symlink does not change the path we hand
         // back. Robust defense (openat / O_NOFOLLOW / cap-std) is tracked as a
         // follow-up; see PR #2996 review.
-        let file_name = joined
+        let file_name = resolved
+            .joined
             .file_name()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
         Ok(canonical_parent.join(file_name))
@@ -184,40 +215,48 @@ impl DiskFilesystem {
         &self,
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
-        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
+        let resolved = self.resolve_joined(path)?;
         ensure_existing_ancestor_contained(
             path,
-            &containment_root,
-            &joined,
+            &resolved.containment_root,
+            resolved.bootstrap_root,
+            &resolved.joined,
             FilesystemOperation::CreateDirAll,
         )
         .await?;
-        tokio::fs::create_dir_all(&joined)
+        // Same residual TOCTOU window as `resolve_for_write` (see the
+        // comment at that function's re-rooting step): the ancestor check
+        // above and this `create_dir_all` are two syscalls, not one atomic
+        // operation, so a symlink swapped into the parent chain between
+        // them is not caught until the post-creation `ensure_contained`
+        // below — by which point `create_dir_all` may already have created
+        // directories at the swapped-in location. Closing this fully needs
+        // the same descriptor/capability-rooted traversal (openat /
+        // O_NOFOLLOW / cap-std) tracked as a follow-up in PR #2996 review;
+        // this function's defense-in-depth is the post-creation containment
+        // check, which still fails closed rather than silently succeeding.
+        tokio::fs::create_dir_all(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        let canonical = tokio::fs::canonicalize(&joined)
+        let canonical = tokio::fs::canonicalize(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        ensure_contained(path, &containment_root, &canonical, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
-    /// Resolves `path` to `(mount, joined host path, containment root)`.
+    /// Resolves `path` to its host-side join point plus the containment
+    /// invariant callers must enforce against it.
     ///
-    /// `containment_root` is the boundary [`ensure_contained`] checks
-    /// against. For an ordinary mount it is `mount.host_root`. For a
-    /// [`LocalMount::leaf_scoped`] mount it is `mount.host_root` plus the
-    /// first tail segment after `virtual_root` — the caller's own leaf,
-    /// which the composition-layer `MountView` grant target (not the
-    /// caller-controlled tail) determines. This is what closes the
-    /// same-mount cross-leaf symlink escape: a symlink planted inside one
-    /// caller's leaf that resolves into a sibling leaf still starts with the
-    /// shared `host_root`, but no longer starts with the caller's own
-    /// `containment_root`.
-    fn resolve_joined(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<(&LocalMount, PathBuf, PathBuf), FilesystemError> {
+    /// Bundled into one typed [`ResolvedMountPath`] — rather than a
+    /// positional tuple with `bootstrap_root` re-derived per caller — because
+    /// the three fields are one invariant, not three independent values: a
+    /// caller that threads `joined`/`containment_root` from one mount but
+    /// `bootstrap_root` from another (or forgets it for a leaf-scoped mount)
+    /// would silently reopen the bootstrap containment gap this type exists
+    /// to close. Computing all three together, once, in the one place that
+    /// knows which mount `path` resolved to removes that chance entirely.
+    fn resolve_joined(&self, path: &VirtualPath) -> Result<ResolvedMountPath<'_>, FilesystemError> {
         let mount = self
             .mounts
             .iter()
@@ -250,8 +289,30 @@ impl DiskFilesystem {
                 }
             }
         }
-        Ok((mount, joined, containment_root))
+        Ok(ResolvedMountPath {
+            joined,
+            containment_root,
+            bootstrap_root: leaf_bootstrap_root(mount),
+        })
     }
+}
+
+/// The host-side join point for a resolved `VirtualPath` plus the
+/// containment invariant every write/read caller must enforce against it —
+/// see [`DiskFilesystem::resolve_joined`] for why these three fields travel
+/// together instead of as a positional tuple.
+struct ResolvedMountPath<'a> {
+    /// The host path `path` joins to under the mount's `host_root`,
+    /// pre-canonicalization.
+    joined: PathBuf,
+    /// The boundary [`ensure_contained`] checks the canonicalized path
+    /// against: `host_root` for an ordinary mount, or `host_root` plus the
+    /// caller's own leaf segment for a [`LocalMount::leaf_scoped`] mount —
+    /// see [`DiskFilesystem::resolve_joined`].
+    containment_root: PathBuf,
+    /// `Some(host_root)` for a leaf-scoped mount, `None` otherwise — see
+    /// [`leaf_bootstrap_root`] for the bootstrap gap this covers.
+    bootstrap_root: Option<&'a Path>,
 }
 
 #[async_trait]
@@ -431,6 +492,15 @@ impl RootFilesystem for DiskFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        // `resolved` is the canonicalized, containment-checked path from
+        // `resolve_existing`, but the check and the removal below are still
+        // two syscalls: an ancestor symlink swapped in between them is the
+        // same residual TOCTOU window documented on `resolve_for_write`
+        // (local.rs) and not closed until descriptor/capability-rooted
+        // traversal lands (PR #2996 review follow-up). `remove_dir_all` and
+        // `remove_file` operate on the already-canonical `resolved` path
+        // rather than re-walking `path`'s original components, which keeps
+        // this in line with the other mutating operations in this file.
         let resolved = self
             .resolve_existing(path, FilesystemOperation::Delete)
             .await?;
@@ -570,9 +640,35 @@ async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<()
         .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
 }
 
+/// For a [`LocalMount::leaf_scoped`] mount, the shared `host_root` one level
+/// above the caller's own leaf — the one ancestor
+/// [`ensure_existing_ancestor_contained`] must accept even though it sits
+/// outside the leaf's `containment_root`, because it is exactly what a
+/// brand-new leaf's nearest *existing* ancestor looks like before that leaf
+/// has ever been created (see the "reject brand-new leaf" fix this
+/// accompanies). `None` for an ordinary mount, where `containment_root` is
+/// already `host_root` and no such gap exists.
+fn leaf_bootstrap_root(mount: &LocalMount) -> Option<&Path> {
+    mount.leaf_scoped.then_some(mount.host_root.as_path())
+}
+
+/// Walks up from `candidate` to the nearest ancestor that actually exists on
+/// disk, canonicalizes it, and checks containment. Two shapes are accepted:
+/// the ordinary case (the existing ancestor is already under
+/// `containment_root`), and — for a leaf-scoped mount only — the bootstrap
+/// case where the existing ancestor is exactly `bootstrap_root`, the shared
+/// mount root one level above a leaf that does not exist yet. The bootstrap
+/// case is safe because the leaf segment itself is never caller-controlled
+/// (it comes from the server-computed `MountView` grant, not the caller's
+/// tail — see [`DiskFilesystem::resolve_joined`]); once the caller's own
+/// leaf directory is created, the caller of this function re-canonicalizes
+/// and re-checks containment against `containment_root` on the
+/// now-existing path, so the bootstrap exception never itself becomes the
+/// final containment decision.
 async fn ensure_existing_ancestor_contained(
     virtual_path: &VirtualPath,
     containment_root: &Path,
+    bootstrap_root: Option<&Path>,
     candidate: &Path,
     operation: FilesystemOperation,
 ) -> Result<(), FilesystemError> {
@@ -591,6 +687,9 @@ async fn ensure_existing_ancestor_contained(
     let canonical = tokio::fs::canonicalize(&ancestor)
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
+    if bootstrap_root.is_some_and(|bootstrap_root| canonical == bootstrap_root) {
+        return Ok(());
+    }
     ensure_contained(virtual_path, containment_root, &canonical, true)
 }
 
@@ -717,13 +816,13 @@ mod tests {
         let storage = tempdir().unwrap();
         let mut root = DiskFilesystem::new();
         root.mount_local_per_leaf(
-            VirtualPath::new("/workspace").unwrap(),
+            VirtualPath::new("/tmp").unwrap(),
             HostPath::from_path_buf(storage.path().to_path_buf()),
         )
         .unwrap();
 
         let error = root
-            .read_file(&VirtualPath::new("/workspace").unwrap())
+            .read_file(&VirtualPath::new("/tmp").unwrap())
             .await
             .unwrap_err();
 
@@ -740,6 +839,7 @@ mod tests {
     /// `host_root` — a plain `mount_local` containment check (host_root
     /// only) would let it resolve — but leaves `leaf-a`'s own containment
     /// root, so it must be rejected here.
+    #[cfg(unix)]
     #[tokio::test]
     async fn leaf_scoped_mount_rejects_cross_leaf_symlink_escape() {
         let storage = tempdir().unwrap();
@@ -754,13 +854,13 @@ mod tests {
 
         let mut root = DiskFilesystem::new();
         root.mount_local_per_leaf(
-            VirtualPath::new("/workspace").unwrap(),
+            VirtualPath::new("/tmp").unwrap(),
             HostPath::from_path_buf(host_root.to_path_buf()),
         )
         .unwrap();
 
         let error = root
-            .read_file(&VirtualPath::new("/workspace/leaf-a/escape.txt").unwrap())
+            .read_file(&VirtualPath::new("/tmp/leaf-a/escape.txt").unwrap())
             .await
             .unwrap_err();
 
@@ -768,5 +868,138 @@ mod tests {
             matches!(error, FilesystemError::SymlinkEscape { .. }),
             "expected SymlinkEscape, got: {error:?}"
         );
+    }
+
+    /// First-use path for a brand-new leaf: nothing under `host_root` exists
+    /// yet for this caller, so the nearest *existing* ancestor of the target
+    /// is the shared `host_root` itself, not the (not-yet-created)
+    /// containment root `host_root/<leaf>`. Regression for the bug where
+    /// `ensure_existing_ancestor_contained` rejected that shared root as an
+    /// escape, permanently blocking every new leaf's first write.
+    #[tokio::test]
+    async fn leaf_scoped_mount_creates_a_brand_new_leaf_on_first_write() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        root.write_file(
+            &VirtualPath::new("/tmp/new-leaf/file.txt").unwrap(),
+            b"hello",
+        )
+        .await
+        .unwrap();
+
+        let bytes = root
+            .read_file(&VirtualPath::new("/tmp/new-leaf/file.txt").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    /// Same first-use bootstrap, but through `create_dir_all` rather than
+    /// `write_file` — the two callers of `ensure_existing_ancestor_contained`
+    /// must both accept the shared `host_root` as a bootstrap ancestor.
+    #[tokio::test]
+    async fn leaf_scoped_mount_create_dir_all_bootstraps_a_brand_new_leaf() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        root.create_dir_all(&VirtualPath::new("/tmp/new-leaf/nested").unwrap())
+            .await
+            .unwrap();
+
+        assert!(host_root.join("new-leaf").join("nested").is_dir());
+    }
+
+    /// Bootstrapping a new leaf must not reopen the cross-leaf symlink
+    /// escape the write path closes: a *pre-existing* sibling leaf's
+    /// symlink must still be rejected by `resolve_for_write`
+    /// (`append_file`/`write_file`), not just by `read_file`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_cross_leaf_symlink_escape_on_write() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let leaf_a = host_root.join("leaf-a");
+        let leaf_b = host_root.join("leaf-b");
+        std::fs::create_dir_all(&leaf_a).unwrap();
+        std::fs::create_dir_all(&leaf_b).unwrap();
+        std::os::unix::fs::symlink("../leaf-b", leaf_a.join("escape")).unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .write_file(
+                &VirtualPath::new("/tmp/leaf-a/escape/planted.txt").unwrap(),
+                b"planted",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::SymlinkEscape { .. }),
+            "expected SymlinkEscape, got: {error:?}"
+        );
+        assert!(!leaf_b.join("planted.txt").exists());
+    }
+
+    /// A *dangling* final symlink — the entry exists but its target does
+    /// not — must still be rejected. `tokio::fs::try_exists` follows
+    /// symlinks and reports `false` for a target that doesn't exist yet, so
+    /// naively treating "not exists" as "brand new file in this leaf" would
+    /// let `write_file`/`append_file` open through the symlink (the OS
+    /// creates the target on `O_CREAT`), writing into whatever sibling leaf
+    /// (or worse) the symlink points at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_dangling_final_symlink_escape_on_write() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let leaf_a = host_root.join("leaf-a");
+        let leaf_b = host_root.join("leaf-b");
+        std::fs::create_dir_all(&leaf_a).unwrap();
+        std::fs::create_dir_all(&leaf_b).unwrap();
+        std::os::unix::fs::symlink("../leaf-b/planted.txt", leaf_a.join("escape.txt")).unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .write_file(
+                &VirtualPath::new("/tmp/leaf-a/escape.txt").unwrap(),
+                b"planted",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::SymlinkEscape { .. }),
+            "expected SymlinkEscape, got: {error:?}"
+        );
+        assert!(!leaf_b.join("planted.txt").exists());
     }
 }

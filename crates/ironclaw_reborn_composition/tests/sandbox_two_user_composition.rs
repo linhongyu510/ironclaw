@@ -129,7 +129,8 @@ fn shell_execution_context(user: &str) -> ExecutionContext {
                 // an empty allowlist fails
                 // `validate_network_policy_metadata` and blocks every
                 // `builtin.shell` invocation in this profile.
-                network: sandbox_network_policy(),
+                network: sandbox_network_policy()
+                    .expect("default sandbox network policy must be valid"),
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
