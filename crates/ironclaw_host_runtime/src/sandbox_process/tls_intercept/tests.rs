@@ -499,12 +499,11 @@ async fn client_handshake_failure_never_dials_the_origin() {
 
     // A listener standing in for the origin: if `terminate_and_forward`
     // ever fell back to a plaintext relay after the client handshake
-    // failed, this would be the first thing it dialed.
+    // failed, this would be the first thing it dialed. The timed `accept()`
+    // probe below is deliberately NOT started here — see the doc on that
+    // check for why racing it against `server_task` is unsound.
     let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin_listener.local_addr().unwrap();
-    let origin_saw_a_connection = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
-    });
 
     let config = TlsInterceptConfig::new(
         ca,
@@ -537,9 +536,18 @@ async fn client_handshake_failure_never_dials_the_origin() {
         "expected a client handshake failure, got: {result:?}"
     );
 
-    let origin_result = origin_saw_a_connection
-        .await
-        .expect("origin probe task did not panic");
+    // Only now start the timed probe: `server_task` has already resolved,
+    // so anything `terminate_and_forward` was ever going to do — including
+    // an errant origin dial — has already happened (or is already queued
+    // on the listener) by this point. Starting the 300ms window earlier,
+    // concurrently with `server_task`, would race CI scheduling jitter:
+    // the window could close before the code under test even reached the
+    // point where a regression would dial, reporting "no connection" for
+    // a reason that has nothing to do with the fail-closed behavior being
+    // tested. See `AGENTS.md`/the coding guidelines' "tests must fail for
+    // the intended reason" rule.
+    let origin_result =
+        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await;
     assert!(
         origin_result.is_err(),
         "origin must never be dialed after a failed client handshake (fail-closed, no \
@@ -826,11 +834,11 @@ fn build_server_config_fails_closed_on_empty_key_pem() {
 async fn invalid_host_fails_before_the_origin_is_dialed() {
     let host = "";
 
+    // The timed `accept()` probe is started AFTER `server_task` resolves
+    // below, not here — see `client_handshake_failure_never_dials_the_origin`
+    // for why racing it against the task under test is unsound.
     let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin_listener.local_addr().unwrap();
-    let origin_saw_a_connection = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
-    });
 
     let ca = SandboxCertificateAuthority::generate().unwrap();
     let config = TlsInterceptConfig::new(
@@ -869,9 +877,8 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
         "an invalid host must never mint a leaf certificate"
     );
 
-    let origin_result = origin_saw_a_connection
-        .await
-        .expect("origin probe task did not panic");
+    let origin_result =
+        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await;
     assert!(
         origin_result.is_err(),
         "origin must never be dialed when the host is invalid (fail-closed before dial)"
@@ -913,11 +920,11 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
 async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     let host = "sni-host.example.com";
 
+    // The timed `accept()` probe is started AFTER `server_task` resolves
+    // below, not here — see `client_handshake_failure_never_dials_the_origin`
+    // for why racing it against the task under test is unsound.
     let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin_listener.local_addr().unwrap();
-    let origin_saw_a_connection = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
-    });
 
     let ca = SandboxCertificateAuthority::generate().unwrap();
     let config = TlsInterceptConfig::new(
@@ -966,9 +973,8 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
         "expected Err(InvalidSniHost) for a forced SNI-conversion failure, got: {result:?}"
     );
 
-    let origin_result = origin_saw_a_connection
-        .await
-        .expect("origin probe task did not panic");
+    let origin_result =
+        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await;
     assert!(
         origin_result.is_err(),
         "origin must never be dialed when the SNI host fails validation \
