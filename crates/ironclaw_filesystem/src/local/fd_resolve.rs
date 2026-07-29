@@ -134,6 +134,25 @@ impl SymlinkBudget {
     }
 }
 
+/// Per-resolution state every fd-opening step in this module needs, bundled
+/// into one reference so the growing family of `open_one`/`open_one_inner`/
+/// `follow_symlink_component`/`walk_symlink_target` signatures doesn't keep
+/// gaining one more standalone parameter each time a new per-resolution
+/// invariant is added (clippy's `too_many_arguments` at 8; this keeps the
+/// count at 7). Both fields share the same lifecycle: constructed once at
+/// the top of [`resolve_walk`]/[`descend_creating`]/[`resolve_write_leaf`]/
+/// `anchor_for_target` (never per-component, never per-symlink-hop), then
+/// threaded by reference through the whole walk.
+///
+/// - `budget`: see [`SymlinkBudget`].
+/// - `anchor_dev`: the resolution anchor's own device, captured once via one
+///   `fstat` (not re-`fstat`'d per component) — see [`check_same_device`]
+///   (PR #6817 follow-up: macOS `RESOLVE_NO_XDEV` parity).
+pub(super) struct ResolveContext<'a> {
+    pub(super) budget: &'a SymlinkBudget,
+    pub(super) anchor_dev: Dev,
+}
+
 /// The outcome of a failed fd-relative resolution step: either a genuine I/O
 /// error (propagated as-is), or a symlink/`..`-past-root escape attempt (or
 /// a symlink chain deep enough to be indistinguishable from a cycle).
@@ -281,10 +300,9 @@ pub(super) fn open_one(
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
-    budget: &SymlinkBudget,
-    anchor_dev: Dev,
+    ctx: &ResolveContext<'_>,
 ) -> Result<OwnedFd, ResolveError> {
-    open_one_inner(root, ancestors, dir, name, oflags, mode, budget, anchor_dev)
+    open_one_inner(root, ancestors, dir, name, oflags, mode, ctx)
 }
 
 /// Outcome of the Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`
@@ -375,8 +393,7 @@ fn open_one_inner(
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
-    budget: &SymlinkBudget,
-    anchor_dev: Dev,
+    ctx: &ResolveContext<'_>,
 ) -> Result<OwnedFd, ResolveError> {
     #[cfg(target_os = "linux")]
     {
@@ -387,9 +404,7 @@ fn open_one_inner(
         match open_one_beneath_no_symlinks(dir, name, oflags, mode) {
             FastOpenOutcome::Opened(fd) => return Ok(fd),
             FastOpenOutcome::IsSymlink => {
-                return follow_symlink_component(
-                    root, ancestors, dir, name, oflags, mode, budget, anchor_dev,
-                );
+                return follow_symlink_component(root, ancestors, dir, name, oflags, mode, ctx);
             }
             FastOpenOutcome::Failed(error) => return Err(error),
             // Fall through to the portable per-component path below instead
@@ -410,16 +425,14 @@ fn open_one_inner(
         // closed exactly like every other containment rejection in this
         // module — never falls back to a wider root or a path-string check.
         Ok(fd) => {
-            check_same_device(anchor_dev, fd.as_fd())?;
+            check_same_device(ctx.anchor_dev, fd.as_fd())?;
             Ok(fd)
         }
         // With `O_NOFOLLOW` set, `ELOOP` from a single-component open
         // unambiguously means "this entry is a symlink" (the kernel never
         // attempts to expand it, so a genuine cycle cannot be observed
         // here) — follow it ourselves, fd-anchored and budget-bounded.
-        Err(Errno::LOOP) => {
-            follow_symlink_component(root, ancestors, dir, name, oflags, mode, budget, anchor_dev)
-        }
+        Err(Errno::LOOP) => follow_symlink_component(root, ancestors, dir, name, oflags, mode, ctx),
         // Some platforms (observed on macOS) report `ENOTDIR` rather than
         // `ELOOP` when `O_DIRECTORY | O_NOFOLLOW` hits a symlink — the
         // kernel checks "is this a directory" before "did NOFOLLOW block
@@ -433,9 +446,7 @@ fn open_one_inner(
                     if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                         == rustix::fs::FileType::Symlink =>
                 {
-                    follow_symlink_component(
-                        root, ancestors, dir, name, oflags, mode, budget, anchor_dev,
-                    )
+                    follow_symlink_component(root, ancestors, dir, name, oflags, mode, ctx)
                 }
                 _ => Err(io_err(Errno::NOTDIR)),
             }
@@ -458,20 +469,12 @@ fn follow_symlink_component(
     name: &OsStr,
     oflags: OFlags,
     mode: Mode,
-    budget: &SymlinkBudget,
-    anchor_dev: Dev,
+    ctx: &ResolveContext<'_>,
 ) -> Result<OwnedFd, ResolveError> {
-    budget.consume()?;
+    ctx.budget.consume()?;
     let target = rustix::fs::readlinkat(dir, name, Vec::new()).map_err(io_err)?;
-    let (new_ancestors, anchor, last) = walk_symlink_target(
-        root,
-        ancestors,
-        dir,
-        name,
-        target.as_bytes(),
-        budget,
-        anchor_dev,
-    )?;
+    let (new_ancestors, anchor, last) =
+        walk_symlink_target(root, ancestors, dir, name, target.as_bytes(), ctx)?;
     match last {
         Some(final_name) => open_one_inner(
             root,
@@ -480,8 +483,7 @@ fn follow_symlink_component(
             &final_name,
             oflags,
             mode,
-            budget,
-            anchor_dev,
+            ctx,
         ),
         // Target had no final component (e.g. "/" or ""): it resolves to
         // the anchor directory itself.
@@ -550,8 +552,7 @@ fn walk_symlink_target(
     dir: BorrowedFd<'_>,
     symlink_name: &OsStr,
     target: &[u8],
-    budget: &SymlinkBudget,
-    anchor_dev: Dev,
+    ctx: &ResolveContext<'_>,
 ) -> Result<(Vec<OwnedFd>, OwnedFd, Option<OsString>), ResolveError> {
     if target.starts_with(b"/") {
         // PR #6817 review follow-up: report exactly which symlink and
@@ -600,8 +601,7 @@ fn walk_symlink_target(
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
-            budget,
-            anchor_dev,
+            ctx,
         )?;
         stack.push(cur);
         cur = next;
@@ -650,6 +650,10 @@ pub(super) fn resolve_walk(
     // non-leaf-scoped case's value came from. One `fstat` per request is the
     // real floor either way.
     let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
+    let ctx = ResolveContext {
+        budget: &budget,
+        anchor_dev,
+    };
     let mut cur = dup_fd(root)?;
     let mut ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestor_components.len());
     for component in ancestor_components {
@@ -660,8 +664,7 @@ pub(super) fn resolve_walk(
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
-            &budget,
-            anchor_dev,
+            &ctx,
         )?;
         ancestors.push(cur);
         cur = next;
@@ -673,8 +676,7 @@ pub(super) fn resolve_walk(
         leaf,
         final_oflags,
         Mode::empty(),
-        &budget,
-        anchor_dev,
+        &ctx,
     )?;
     Ok((fd, Some((cur, leaf.clone()))))
 }
@@ -723,6 +725,10 @@ pub(super) fn descend_creating(
     // See `resolve_walk`'s matching comment: captured once per resolution,
     // not per component.
     let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
+    let ctx = ResolveContext {
+        budget: &budget,
+        anchor_dev,
+    };
     let mut cur = dup_fd(root)?;
     let mut ancestors: Vec<OwnedFd> = Vec::new();
     for component in components {
@@ -733,8 +739,7 @@ pub(super) fn descend_creating(
             component,
             OFlags::DIRECTORY,
             Mode::empty(),
-            &budget,
-            anchor_dev,
+            &ctx,
         ) {
             Ok(fd) => {
                 ancestors.push(cur);
@@ -758,8 +763,7 @@ pub(super) fn descend_creating(
                     component,
                     OFlags::DIRECTORY,
                     Mode::empty(),
-                    &budget,
-                    anchor_dev,
+                    &ctx,
                 )?;
                 ancestors.push(cur);
                 fd
@@ -810,6 +814,10 @@ pub(super) fn resolve_write_leaf(
     // See `resolve_walk`'s matching comment: captured once per resolution,
     // not per component.
     let anchor_dev = rustix::fs::fstat(root).map_err(io_err)?.st_dev;
+    let ctx = ResolveContext {
+        budget: &budget,
+        anchor_dev,
+    };
     let mut cur_ancestors: Vec<OwnedFd> = Vec::with_capacity(ancestors.len());
     for ancestor in ancestors {
         cur_ancestors.push(dup_fd(ancestor.as_fd())?);
@@ -835,7 +843,7 @@ pub(super) fn resolve_write_leaf(
         // draws on for any non-final components of this hop's target text —
         // one ceiling for the whole chase, matching `resolve_walk`/
         // `descend_creating`'s per-resolution (not per-hop) budget.
-        budget.consume()?;
+        ctx.budget.consume()?;
         let target =
             rustix::fs::readlinkat(cur_parent.as_fd(), &cur_leaf, Vec::new()).map_err(io_err)?;
         let (new_ancestors, new_parent, new_leaf) = walk_symlink_target(
@@ -844,8 +852,7 @@ pub(super) fn resolve_write_leaf(
             cur_parent.as_fd(),
             &cur_leaf,
             target.as_bytes(),
-            &budget,
-            anchor_dev,
+            &ctx,
         )?;
         let Some(new_leaf) = new_leaf else {
             // Symlink target has no final path component (e.g. "/" or ""):

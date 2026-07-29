@@ -11,9 +11,9 @@ use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{AtFlags, Mode, OFlags};
 
 use self::fd_resolve::{
-    ResolveError, SymlinkBudget, atomic_write_file, descend_creating, map_file_type, new_file_mode,
-    open_one, read_all, remove_dir_all_fd, resolve_error_to_filesystem_error, resolve_walk,
-    resolve_write_leaf, write_all,
+    ResolveContext, ResolveError, SymlinkBudget, atomic_write_file, descend_creating,
+    map_file_type, new_file_mode, open_one, read_all, remove_dir_all_fd,
+    resolve_error_to_filesystem_error, resolve_walk, resolve_write_leaf, write_all,
 };
 use self::mount_registry::{LocalMount, MountTarget};
 use crate::{
@@ -109,6 +109,11 @@ fn anchor_for_target(
         let anchor_dev = rustix::fs::fstat(target.root_fd.as_fd())
             .map_err(|errno| ResolveError::Io(errno.into()))?
             .st_dev;
+        let budget = SymlinkBudget::new();
+        let ctx = ResolveContext {
+            budget: &budget,
+            anchor_dev,
+        };
         open_one(
             target.root_fd.as_fd(),
             &[],
@@ -116,8 +121,7 @@ fn anchor_for_target(
             leaf,
             OFlags::DIRECTORY,
             Mode::empty(),
-            &SymlinkBudget::new(),
-            anchor_dev,
+            &ctx,
         )?
     };
     Ok((anchor, rest.to_vec()))
@@ -278,6 +282,11 @@ impl RootFilesystem for DiskFilesystem {
                     resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
                 })?
                 .st_dev;
+            let budget = SymlinkBudget::new();
+            let ctx = ResolveContext {
+                budget: &budget,
+                anchor_dev,
+            };
             let fd = open_one(
                 anchor.as_fd(),
                 &parent_ancestors,
@@ -285,8 +294,7 @@ impl RootFilesystem for DiskFilesystem {
                 &leaf,
                 OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
                 new_file_mode(),
-                &SymlinkBudget::new(),
-                anchor_dev,
+                &ctx,
             )
             .map_err(|error| {
                 resolve_error_to_filesystem_error(&path, FilesystemOperation::AppendFile, error)
