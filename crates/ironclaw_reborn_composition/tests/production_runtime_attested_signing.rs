@@ -85,10 +85,6 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
 /// handler.
 #[tokio::test]
 async fn production_runtime_composes_the_attested_signing_graph() {
-    // The custodial keystore is minted through `ironclaw_secrets`; without this
-    // the build reaches for the OS keychain under test.
-    unsafe { std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1") };
-
     let dir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
         libsql::Builder::new_local(dir.path().join("reborn.db"))
