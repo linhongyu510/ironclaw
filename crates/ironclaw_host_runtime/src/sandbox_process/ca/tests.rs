@@ -343,14 +343,23 @@ fn dns_parse_failure_is_logged_before_being_sanitized() {
     // A leading-hyphen label: `rcgen` itself accepts it, so this must fail
     // via `validate_dns_host`'s `DnsName::try_from_str` delegation — the
     // exact path whose error `map_err(|_| ...)` currently discards.
+    let expected_parse_error = DnsName::try_from_str("-leading-hyphen.example.com")
+        .expect_err("fixture must be an invalid DNS name")
+        .to_string();
     let error = ca.issue_leaf_for_host("-leading-hyphen.example.com");
 
     assert!(error.is_err(), "a leading-hyphen label must be rejected");
+    // Asserting the interpolated `DnsName::try_from_str` cause itself, not
+    // just the static `"... DnsName parse: ..."` log prefix: the static
+    // prefix already contains the literal substring "DnsName", so a looser
+    // `logs_contain("DnsName")` would keep passing even if `{error}` were
+    // dropped from the log's format string entirely, silently letting the
+    // interpolated cause go unasserted again.
     assert!(
-        logs_contain("leading-hyphen") || logs_contain("DnsName") || logs_contain("dns"),
-        "the original DnsName parse error must be logged (debug!) before \
-         validate_dns_host returns its sanitized ExecutionFailed message, so \
-         the cause is not silently discarded"
+        logs_contain(&expected_parse_error),
+        "the original DnsName parse error ({expected_parse_error:?}) must be \
+         logged (debug!) before validate_dns_host returns its sanitized \
+         ExecutionFailed message, so the cause is not silently discarded"
     );
 }
 

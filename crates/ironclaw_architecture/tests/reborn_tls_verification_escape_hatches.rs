@@ -89,6 +89,27 @@ fn sandbox_process_dir(root: &Path) -> PathBuf {
     root.join("crates/ironclaw_host_runtime/src/sandbox_process")
 }
 
+/// Whether `line` contains `pattern` once ASCII whitespace is ignored on
+/// both sides. None of `BANNED_PATTERNS` contains whitespace itself, so this
+/// only widens matching — it never turns a real hit into a miss.
+///
+/// A plain `str::contains` only matches the pattern's exact spelling, so
+/// valid, semantically identical Rust written with incidental whitespace —
+/// `.dangerous ()` instead of `.dangerous()`, `RootCertStore :: empty ( )`
+/// instead of `RootCertStore::empty()` — compiled to the same escape hatch
+/// but slipped past the literal substring check. This does not attempt full
+/// tokenization (a banned call split across multiple lines is still
+/// unhandled — out of scope for this fix, see the reviewer thread this
+/// closes), but line-level whitespace variance was the concretely
+/// demonstrated bypass and this closes it.
+fn contains_pattern_ignoring_whitespace(line: &str, pattern: &str) -> bool {
+    let normalized: String = line
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    normalized.contains(pattern)
+}
+
 /// A standalone test file (`ca/tests.rs`, `credential_firewall/tests.rs`) is
 /// pure test code end to end — excluded wholesale rather than line-scanned,
 /// PROVIDED its parent module actually wires it in behind `#[cfg(test)]`
@@ -190,34 +211,66 @@ fn parent_gates_tests_module_behind_cfg_test(root: &Path, relative: &str) -> io:
     Ok(false)
 }
 
-/// Files in this crate keep their `#[cfg(test)] mod tests { ... }` at the
-/// end of the file (verified for every file under `sandbox_process/` that
-/// declares one). Truncating the scan at that marker — rather than trying
-/// to track brace depth — keeps the scan simple while still only policing
-/// production code: everything from the marker onward is test-only, so
-/// dropping it can only ever *hide* a hit inside `mod tests`, never invent
-/// one in production code.
-fn truncate_at_inline_test_module(contents: &str) -> &str {
+/// Strips only the `#[cfg(test)] mod tests { ... }` (or `#[cfg(test)] mod
+/// tests;`) span itself out of `contents`, leaving everything before *and
+/// after* it intact.
+///
+/// This crate's convention is to keep that marker at the end of the file,
+/// but that is a convention, not something the scanner may assume: earlier
+/// versions of this function truncated everything from the marker line
+/// onward, so a production item placed (accidentally or otherwise) after an
+/// inline `mod tests { ... }` block's own closing brace — still legal Rust,
+/// still compiled into every build — was silently dropped from the scan
+/// along with the real test module. Tracking the inline body's brace depth
+/// to find its true end, and continuing to scan whatever follows, closes
+/// that hole without having to assume anything about file layout.
+fn truncate_at_inline_test_module(contents: &str) -> String {
     let mut previous_was_cfg_test = false;
-    let mut offset = 0usize;
-    for line in contents.lines() {
+    let mut result = String::with_capacity(contents.len());
+    let mut lines = contents.lines().peekable();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim();
         // Exact match only: `mod tests;` (external-file form) or
         // `mod tests {` (inline-body form). A prefix check
         // (`starts_with("mod tests")`) would also match an unrelated
         // `mod tests_helper;` sharing the line right after a `#[cfg(test)]`
-        // marker, truncating the scan there and hiding any real production
-        // code that follows — the same look-alike-name hole
-        // `declares_from_system_roots` was already hardened against.
-        if previous_was_cfg_test && (trimmed == "mod tests;" || trimmed.starts_with("mod tests {"))
-        {
-            return &contents[..offset];
+        // marker, hiding any real production code that follows — the same
+        // look-alike-name hole `declares_from_system_roots` was already
+        // hardened against.
+        if previous_was_cfg_test && trimmed == "mod tests;" {
+            previous_was_cfg_test = false;
+            continue;
+        }
+        if previous_was_cfg_test && trimmed.starts_with("mod tests {") {
+            // Track brace depth from this line's own braces to find where
+            // the inline module body actually ends, then drop every line in
+            // between (but keep scanning whatever follows).
+            let mut depth: i64 = 0;
+            for byte in line.bytes() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            while depth > 0 {
+                let Some(inner) = lines.next() else { break };
+                for byte in inner.bytes() {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+            previous_was_cfg_test = false;
+            continue;
         }
         previous_was_cfg_test = trimmed == "#[cfg(test)]";
-        // +1 for the '\n' the `lines()` iterator strips.
-        offset += line.len() + 1;
+        result.push_str(line);
+        result.push('\n');
     }
-    contents
+    result
 }
 
 /// The line numbers (1-indexed, into `code_only`) covered by
@@ -334,14 +387,14 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> io::Result<()> {
         }
         let contents = std::fs::read_to_string(&path)?;
         let production_only = truncate_at_inline_test_module(&contents);
-        let code_only = strip_comments_and_strings(production_only);
+        let code_only = strip_comments_and_strings(&production_only);
         let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
         for (number, line) in code_only.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             for pattern in BANNED_PATTERNS {
-                if !line.contains(pattern) {
+                if !contains_pattern_ignoring_whitespace(line, pattern) {
                     continue;
                 }
                 if *pattern == "RootCertStore::empty()" && sanctioned_lines.contains(&(number + 1))
@@ -478,7 +531,7 @@ fn sanctioned_call_site_is_scoped_to_the_one_function_not_the_whole_file() {
     let contents = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let production_only = truncate_at_inline_test_module(&contents);
-    let code_only = strip_comments_and_strings(production_only);
+    let code_only = strip_comments_and_strings(&production_only);
     let sanctioned_lines = sanctioned_from_system_roots_lines(relative, &code_only);
     let real_occurrences = code_only
         .lines()
@@ -823,5 +876,105 @@ fn parent_gates_tests_module_behind_cfg_test_handles_documented_edge_cases() {
         !parent_gates_tests_module_behind_cfg_test(root, relative).expect("read must succeed"),
         "an inline `mod tests {{ ... }}` body must not verify an external \
          tests.rs file's wiring"
+    );
+}
+
+/// Regression for the sixth near-miss on this gate: the banned-pattern match
+/// is a plain `str::contains`, so it is exact-spelling-only. Valid,
+/// semantically identical Rust written with extra whitespace — `.dangerous
+/// ()` instead of `.dangerous()`, `RootCertStore :: empty ( )` instead of
+/// `RootCertStore::empty()` — compiles to the exact same escape hatch but
+/// does not match the literal substring, so this gate reported clean while
+/// scanning code that genuinely hand-rolls a permissive connector.
+#[test]
+fn gate_catches_a_banned_call_written_with_extra_whitespace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn build_permissive_store() -> rustls::RootCertStore {\n    \
+             rustls::RootCertStore :: empty ( )\n}\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a whitespace-varied spelling of the banned call \
+         (`RootCertStore :: empty ( )`) must still be caught, not silently \
+         passed because the exact-substring match didn't line up"
+    );
+}
+
+/// Same near-miss as above, for the `.dangerous(` spelling specifically —
+/// kept in a separate fixture from `RootCertStore :: empty ( )` so the
+/// function name chosen for the fixture can't itself accidentally contain
+/// the banned substring (as `build_dangerous()` would for `dangerous(`).
+#[test]
+fn gate_catches_dangerous_written_with_extra_whitespace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn build_permissive_config() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous ()\n}\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a whitespace-varied spelling of the banned call (`.dangerous ()`) \
+         must still be caught, not silently passed because the \
+         exact-substring match didn't line up"
+    );
+}
+
+/// Regression for the seventh near-miss: `truncate_at_inline_test_module`
+/// truncates the scan at the `mod tests { ... }` marker line itself, not at
+/// the end of that module's body. The module doc documents "files in this
+/// crate keep `mod tests` at the end of the file" as an *assumption*, not
+/// something the scanner verifies — so production code placed textually
+/// after a closing `}` that ends an inline `mod tests { ... }` block, but
+/// still on a line at or after the truncation offset, was silently dropped
+/// from the scan along with the real test module. Plants a banned call in
+/// exactly that position: after the inline test module's own closing brace.
+#[test]
+fn gate_catches_production_code_that_follows_an_inline_test_module_body() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             fn harmless() {\n        \
+                 let _ = 1 + 1;\n    \
+             }\n\
+         }\n\n\
+         pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n\
+         }\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a banned call in production code placed after an inline \
+         `mod tests {{ ... }}` block's own closing brace must still be \
+         caught, not silently dropped along with the test module it follows"
     );
 }

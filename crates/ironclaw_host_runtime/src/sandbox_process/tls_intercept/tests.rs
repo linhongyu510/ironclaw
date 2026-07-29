@@ -12,6 +12,20 @@ use tokio::{
 };
 use x509_parser::prelude::*;
 
+/// Shared prefix for every test-only `rustls::ClientConfig` built in this
+/// file: the explicit-provider builder this PR's own crypto-provider fix
+/// requires (see `tls_intercept.rs`'s `ring_crypto_provider` doc), through
+/// `with_safe_default_protocol_versions()`. Was duplicated identically
+/// across 5 call sites; a single helper removes the duplication and guards
+/// against a future test silently reverting to the process-global-provider
+/// pattern this PR replaced.
+fn test_client_config_builder() -> rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>
+{
+    rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
+}
+
 /// Test-only certificate verifier that accepts anything — used by
 /// [`invalid_sni_host_fails_before_the_origin_is_dialed`] because that
 /// test's client deliberately connects with SNI `"localhost"`, which does
@@ -82,9 +96,7 @@ fn connector_trusting_only(root_pem: &str) -> VerifiedOriginConnector {
             .add(cert.expect("valid root cert pem"))
             .expect("root cert adds");
     }
-    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring provider pairs with the default TLS protocol versions")
+    let client_config = test_client_config_builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
     VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
@@ -95,9 +107,7 @@ fn connector_trusting_only(root_pem: &str) -> VerifiedOriginConnector {
 /// force the fail-closed path deterministically without relying on
 /// network conditions.
 fn connector_trusting_nothing() -> VerifiedOriginConnector {
-    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring provider pairs with the default TLS protocol versions")
+    let client_config = test_client_config_builder()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
     VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
@@ -426,9 +436,7 @@ async fn bound_host_is_intercepted_with_our_ca_and_relays_bytes() {
     for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
         our_roots.add(cert.unwrap()).unwrap();
     }
-    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring provider pairs with the default TLS protocol versions")
+    let client_config = test_client_config_builder()
         .with_root_certificates(our_roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
@@ -603,9 +611,7 @@ async fn origin_handshake_failure_never_leaks_plaintext_to_the_origin() {
     for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
         our_roots.add(cert.unwrap()).unwrap();
     }
-    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring provider pairs with the default TLS protocol versions")
+    let client_config = test_client_config_builder()
         .with_root_certificates(our_roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
@@ -960,9 +966,7 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     // syntactically and canonically valid host, so the mint and this
     // handshake succeed exactly like the production path would; only the
     // forced SNI-builder closure diverges from production.
-    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring provider pairs with the default TLS protocol versions")
+    let client_config = test_client_config_builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
