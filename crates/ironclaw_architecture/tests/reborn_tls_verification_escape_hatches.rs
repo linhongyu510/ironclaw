@@ -202,7 +202,15 @@ fn truncate_at_inline_test_module(contents: &str) -> &str {
     let mut offset = 0usize;
     for line in contents.lines() {
         let trimmed = line.trim();
-        if previous_was_cfg_test && trimmed.starts_with("mod tests") {
+        // Exact match only: `mod tests;` (external-file form) or
+        // `mod tests {` (inline-body form). A prefix check
+        // (`starts_with("mod tests")`) would also match an unrelated
+        // `mod tests_helper;` sharing the line right after a `#[cfg(test)]`
+        // marker, truncating the scan there and hiding any real production
+        // code that follows — the same look-alike-name hole
+        // `declares_from_system_roots` was already hardened against.
+        if previous_was_cfg_test && (trimmed == "mod tests;" || trimmed.starts_with("mod tests {"))
+        {
             return &contents[..offset];
         }
         previous_was_cfg_test = trimmed == "#[cfg(test)]";
@@ -231,6 +239,17 @@ fn truncate_at_inline_test_module(contents: &str) -> &str {
 /// make this test a guard with a hole in exactly the shape it exists to
 /// close, so `declares_from_system_roots` requires the next character after
 /// the identifier to be a non-identifier character.
+///
+/// "Non-identifier character" means Rust's real identifier-continuation
+/// rule (`XID_Continue`, via the `unicode-ident` crate — the same crate
+/// `proc-macro2`/`syn` already use in this workspace to tokenize
+/// identifiers), not ASCII alphanumeric/underscore alone. A combining mark
+/// (e.g. U+0301) is `XID_Continue` to rustc — `fn
+/// from_system_roots\u{0301}(...)` is a genuinely different, visually
+/// near-identical identifier — but is not `char::is_alphanumeric()`, so an
+/// ASCII-only check would wrongly treat that look-alike as the real function
+/// and hand its whole body the same carve-out this exact-identifier fix
+/// exists to deny ASCII look-alikes.
 fn declares_from_system_roots(line: &str) -> bool {
     const NEEDLE: &str = "fn from_system_roots";
     let mut search_from = 0usize;
@@ -238,10 +257,12 @@ fn declares_from_system_roots(line: &str) -> bool {
         let start = search_from + found;
         let after = start + NEEDLE.len();
         // Exact identifier: whatever follows must not extend the name.
+        // `_` is itself `XID_Continue` (and `XID_Start`), so
+        // `is_xid_continue` alone already covers it.
         let extends_identifier = line[after..]
             .chars()
             .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            .is_some_and(unicode_ident::is_xid_continue);
         if !extends_identifier {
             return true;
         }
@@ -526,6 +547,105 @@ fn the_carve_out_matches_the_exact_function_name_not_a_prefix() {
         sanctioned.is_empty(),
         "an impostor function must receive no sanctioned lines, so its \
          `RootCertStore::empty()` is still reported; got {sanctioned:?}"
+    );
+}
+
+/// `declares_from_system_roots`'s identifier-boundary check must follow
+/// Rust's real identifier-continuation rule (`XID_Continue`), not just ASCII
+/// alphanumeric/underscore. A combining mark (e.g. U+0301 COMBINING ACUTE
+/// ACCENT) is a valid `XID_Continue` character to rustc — `fn
+/// from_system_roots\u{0301}(...)` compiles as a distinct identifier from
+/// `from_system_roots`, visually near-identical — but `char::is_alphanumeric()`
+/// does not classify combining marks as alphanumeric, so the old
+/// alphanumeric-only check would treat this look-alike as an exact match and
+/// hand its whole body the `RootCertStore::empty()` carve-out, exactly the
+/// hole the exact-identifier fix (the prefix-match fix above) exists to
+/// close for ASCII look-alikes.
+#[test]
+fn the_carve_out_rejects_a_unicode_combining_mark_look_alike() {
+    let impostor = "    fn from_system_roots\u{0301}() -> Self {";
+    assert!(
+        !declares_from_system_roots(impostor),
+        "a combining-mark look-alike must NOT inherit the carve-out \
+         (XID_Continue-aware boundary check required): {impostor}"
+    );
+
+    // End to end: a file containing only the combining-mark impostor gets
+    // no sanctioned lines, so a banned call inside it stays visible.
+    let impostor_body = "fn from_system_roots\u{0301}() -> Self {\n    RootCertStore::empty()\n}\n";
+    let sanctioned = sanctioned_from_system_roots_lines(
+        "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs",
+        impostor_body,
+    );
+    assert!(
+        sanctioned.is_empty(),
+        "a combining-mark impostor must receive no sanctioned lines, so its \
+         `RootCertStore::empty()` is still reported; got {sanctioned:?}"
+    );
+}
+
+/// Regression for the fifth near-miss on this exact class of gate (see the
+/// module's commit history — this file's boundary checks have silently
+/// failed to bind four times already): `mod tests_helper;` sharing a line
+/// right after a `#[cfg(test)]` marker must NOT be mistaken for the real
+/// `mod tests;`/`mod tests {` inline-test-module marker. A prefix check
+/// (`starts_with("mod tests")`) would truncate the scan there, hiding any
+/// real production code — including a banned escape-hatch spelling — that
+/// follows `mod tests_helper;` in the same file. Reproduced directly against
+/// `truncate_at_inline_test_module` (confirmed to fail before the exact-match
+/// fix landed) and end to end through `scan_dir` against a fabricated fixture
+/// tree, mirroring `gate_fails_when_a_tests_rs_files_cfg_test_wiring_is_missing`'s
+/// tempdir approach.
+#[test]
+fn truncate_does_not_mistake_a_look_alike_module_name_for_the_real_test_module() {
+    let contents = "\
+#[cfg(test)]
+mod tests_helper;
+
+pub(crate) fn build_dangerous() -> rustls::ClientConfig {
+    rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(()))
+}
+";
+    let truncated = truncate_at_inline_test_module(contents);
+    assert!(
+        truncated.contains("dangerous()"),
+        "a look-alike `mod tests_helper;` must not truncate the scan and hide \
+         the real production code (including a banned `dangerous()` call) \
+         that follows it; truncated={truncated:?}"
+    );
+}
+
+/// End-to-end proof of the same fix through the real `scan_dir` gate: a
+/// `mod tests_helper;` module declared right after `#[cfg(test)]`, followed
+/// by a banned escape-hatch spelling in genuine production code, must be
+/// caught — not silently exempted because the scan truncated early.
+#[test]
+fn gate_catches_a_banned_pattern_hidden_behind_a_look_alike_tests_helper_module() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[cfg(test)]\n\
+         mod tests_helper;\n\n\
+         pub(crate) fn build() -> u8 {\n    \
+             let _ = rustls::ClientConfig::builder().dangerous();\n    \
+             0\n\
+         }\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a `mod tests_helper;` look-alike must not truncate the scan before \
+         the banned `.dangerous()` call that follows it in production code"
     );
 }
 
