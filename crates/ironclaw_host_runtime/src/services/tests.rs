@@ -98,16 +98,34 @@ async fn production_wiring_reports_local_only_persistent_approval_policies() {
     ));
 }
 
-// `registered_runtime_backends()` has no Sandbox backend field: there is no
-// production Sandbox runtime to wire up yet. A `RuntimeKind::Sandbox` entry in
-// `required_runtime_backends` must therefore surface as `UnsupportedRequirement`
-// — exactly like `RuntimeKind::System` — rather than being silently accepted by
-// the safe-runtimes catch-all arm.
+// The sandbox process runtime is production-wired (`ironclaw_process_sandbox`
+// backs `TenantSandboxProcessPort`): a `RuntimeKind::Sandbox` entry in
+// `required_runtime_backends` is a supported requirement and must NOT surface
+// `UnsupportedRequirement`, unlike `RuntimeKind::System`, which still has no
+// production runtime backend.
 #[tokio::test]
-async fn production_wiring_reports_unsupported_sandbox_runtime_requirement() {
+async fn production_wiring_accepts_sandbox_runtime_requirement() {
     let report = test_services()
-        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::Sandbox]))
-        .expect_err("Sandbox runtime requirement is not production-wired");
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::Sandbox]));
+
+    if let Err(report) = report {
+        assert!(
+            !report.contains(
+                ProductionWiringComponent::RuntimeBackend,
+                ProductionWiringIssueKind::UnsupportedRequirement
+            ),
+            "Sandbox runtime requirement must not be reported as unsupported: {report:?}"
+        );
+    }
+}
+
+// `RuntimeKind::System` still has no production runtime backend and must
+// continue to surface as `UnsupportedRequirement`.
+#[tokio::test]
+async fn production_wiring_reports_unsupported_system_runtime_requirement() {
+    let report = test_services()
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::System]))
+        .expect_err("System runtime requirement is not production-wired");
 
     assert!(report.contains(
         ProductionWiringComponent::RuntimeBackend,

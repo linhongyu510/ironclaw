@@ -161,8 +161,9 @@ where
                 RuntimeKind::Script
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
-                | RuntimeKind::FirstParty => {}
-                RuntimeKind::System | RuntimeKind::Sandbox => self.push_issue(
+                | RuntimeKind::FirstParty
+                | RuntimeKind::Sandbox => {}
+                RuntimeKind::System => self.push_issue(
                     &mut issues,
                     ProductionWiringComponent::RuntimeBackend,
                     ProductionWiringIssueKind::UnsupportedRequirement,
