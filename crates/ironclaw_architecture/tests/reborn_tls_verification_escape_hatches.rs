@@ -89,25 +89,59 @@ fn sandbox_process_dir(root: &Path) -> PathBuf {
     root.join("crates/ironclaw_host_runtime/src/sandbox_process")
 }
 
-/// Whether `line` contains `pattern` once ASCII whitespace is ignored on
-/// both sides. None of `BANNED_PATTERNS` contains whitespace itself, so this
-/// only widens matching — it never turns a real hit into a miss.
-///
-/// A plain `str::contains` only matches the pattern's exact spelling, so
-/// valid, semantically identical Rust written with incidental whitespace —
-/// `.dangerous ()` instead of `.dangerous()`, `RootCertStore :: empty ( )`
-/// instead of `RootCertStore::empty()` — compiled to the same escape hatch
-/// but slipped past the literal substring check. This does not attempt full
-/// tokenization (a banned call split across multiple lines is still
-/// unhandled — out of scope for this fix, see the reviewer thread this
-/// closes), but line-level whitespace variance was the concretely
-/// demonstrated bypass and this closes it.
-fn contains_pattern_ignoring_whitespace(line: &str, pattern: &str) -> bool {
-    let normalized: String = line
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    normalized.contains(pattern)
+/// A whitespace-free copy of an entire (already comment/string-stripped)
+/// file, paired with a per-character index back to the 1-based source line
+/// each retained character came from. Lets [`scan_dir`] match a banned
+/// pattern across the **whole file** in one search instead of one line at a
+/// time, so semantically identical Rust written with incidental whitespace
+/// or split across a line break — `.dangerous ()`, `.dangerous\n()`,
+/// `RootCertStore :: empty ( )`, `RootCertStore::\nempty()` — cannot slip
+/// past the ban by varying how (or whether) it is spread across lines. None
+/// of `BANNED_PATTERNS` contains whitespace itself, so stripping whitespace
+/// here only widens matching — it never turns a real hit into a miss.
+struct Haystack {
+    normalized: String,
+    line_of_char: Vec<usize>,
+}
+
+impl Haystack {
+    fn build(code_only: &str) -> Self {
+        let mut normalized = String::with_capacity(code_only.len());
+        let mut line_of_char = Vec::with_capacity(code_only.len());
+        let mut line_number = 1usize;
+        for character in code_only.chars() {
+            if character == '\n' {
+                line_number += 1;
+                continue;
+            }
+            if character.is_whitespace() {
+                continue;
+            }
+            normalized.push(character);
+            line_of_char.push(line_number);
+        }
+        Self {
+            normalized,
+            line_of_char,
+        }
+    }
+
+    /// Every occurrence of `pattern`, as (1-based source line the match
+    /// starts on, byte offset into `normalized`) — the offset lets a caller
+    /// (the sanctioned-call carve-out) test whether a specific match sits
+    /// inside a specific line span without this type needing to know
+    /// anything about that carve-out itself.
+    fn find_all(&self, pattern: &str) -> Vec<(usize, usize)> {
+        let mut hits = Vec::new();
+        let mut search_from = 0usize;
+        while let Some(found) = self.normalized[search_from..].find(pattern) {
+            let start = search_from + found;
+            let line = self.line_of_char.get(start).copied().unwrap_or(1);
+            hits.push((line, start));
+            search_from = start + pattern.len().max(1);
+        }
+        hits
+    }
 }
 
 /// A standalone test file (`ca/tests.rs`, `credential_firewall/tests.rs`) is
@@ -405,19 +439,13 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> io::Result<()> {
         let production_only = truncate_at_inline_test_module(&contents);
         let code_only = strip_comments_and_strings(&production_only);
         let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
-        for (number, line) in code_only.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            for pattern in BANNED_PATTERNS {
-                if !contains_pattern_ignoring_whitespace(line, pattern) {
+        let haystack = Haystack::build(&code_only);
+        for pattern in BANNED_PATTERNS {
+            for (line, _offset) in haystack.find_all(pattern) {
+                if *pattern == "RootCertStore::empty()" && sanctioned_lines.contains(&line) {
                     continue;
                 }
-                if *pattern == "RootCertStore::empty()" && sanctioned_lines.contains(&(number + 1))
-                {
-                    continue;
-                }
-                hits.push(format!("{relative}:{}: `{pattern}`", number + 1));
+                hits.push(format!("{relative}:{line}: `{pattern}`"));
             }
         }
     }
@@ -992,6 +1020,60 @@ fn gate_catches_production_code_that_follows_an_inline_test_module_body() {
         "a banned call in production code placed after an inline \
          `mod tests {{ ... }}` block's own closing brace must still be \
          caught, not silently dropped along with the test module it follows"
+    );
+}
+
+/// Regression for the ninth near-miss: the banned-pattern match used to run
+/// **per line** (`code_only.lines().enumerate()`), so valid Rust with the
+/// call itself split across a line break — `.dangerous\n()` or
+/// `RootCertStore::\nempty()` — never appeared whole on any single line and
+/// slipped past every per-line check, including the whitespace-widened one
+/// (widening a match only ever happened *within* a line). `scan_dir` now
+/// matches across the whole stripped file at once via [`Haystack`], a
+/// single whitespace-free buffer with a per-character line-number index, so
+/// a call split across any number of line breaks is still caught, and still
+/// reported at the source line the match begins on.
+#[test]
+fn gate_catches_a_banned_call_split_across_a_line_break() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("tls_intercept.rs"),
+        "pub(crate) fn build_permissive_config() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous\n        ()\n}\n",
+    )
+    .expect("write tls_intercept.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a banned call split across a line break (`.dangerous\\n()`) must \
+         still be caught, not silently passed because the match never \
+         crossed a line boundary"
+    );
+}
+
+/// The sanctioned `RootCertStore::empty()` carve-out must still apply when
+/// that exact call is itself split across a line break inside
+/// `from_system_roots`'s own body — the multiline matcher must not turn the
+/// legitimate call site into a false positive.
+#[test]
+fn gate_still_exempts_the_sanctioned_call_when_split_across_a_line_break() {
+    let relative = "crates/ironclaw_host_runtime/src/sandbox_process/tls_intercept.rs";
+    let contents = "pub(crate) fn from_system_roots() -> Result<Self, ()> {\n    \
+        let mut store = rustls::RootCertStore::\n        empty();\n    Ok(Self(store))\n}\n";
+    let production_only = truncate_at_inline_test_module(contents);
+    let code_only = strip_comments_and_strings(&production_only);
+    let sanctioned_lines = sanctioned_from_system_roots_lines(relative, &code_only);
+    assert!(
+        !sanctioned_lines.is_empty(),
+        "a `RootCertStore::empty()` call split across a line break inside \
+         from_system_roots's own body must still be recognized as the \
+         sanctioned call site"
     );
 }
 
