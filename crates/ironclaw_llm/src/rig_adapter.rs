@@ -686,27 +686,48 @@ fn convert_tools_with_compatibility(
 /// retains `items` after choosing the first member of a type union, both of
 /// which Gemini rejects before inference.
 fn normalize_gemini_schema(schema: &mut serde_json::Value) {
-    let union_type = schema
-        .as_object()
-        .and_then(|object| {
-            ["oneOf", "anyOf"]
-                .iter()
-                .find_map(|key| object.get(*key))
-                .and_then(serde_json::Value::as_array)
-                .and_then(|variants| variants.first())
-        })
-        .and_then(serde_json::Value::as_object)
-        .and_then(|variant| variant.get("type"))
-        .cloned();
+    fn concrete_type(schema: &serde_json::Value) -> Option<String> {
+        let object = schema.as_object()?;
+        match object.get("type") {
+            Some(serde_json::Value::String(kind)) if kind != "null" => {
+                return Some(kind.clone());
+            }
+            Some(serde_json::Value::Array(kinds)) => {
+                if let Some(kind) = kinds
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .find(|kind| *kind != "null")
+                {
+                    return Some(kind.to_string());
+                }
+            }
+            _ => {}
+        }
+        if object.contains_key("properties") {
+            return Some("object".to_string());
+        }
+        if object.contains_key("items") {
+            return Some("array".to_string());
+        }
+        ["oneOf", "anyOf", "allOf"]
+            .iter()
+            .filter_map(|keyword| object.get(*keyword))
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .find_map(concrete_type)
+    }
+
+    let inferred_type = concrete_type(schema);
 
     let Some(object) = schema.as_object_mut() else {
         return;
     };
 
-    if !object.contains_key("type")
-        && let Some(union_type) = union_type
-    {
-        object.insert("type".to_string(), union_type);
+    if !object.contains_key("type") && let Some(inferred_type) = inferred_type {
+        object.insert(
+            "type".to_string(),
+            serde_json::Value::String(inferred_type),
+        );
     }
 
     if let Some(types) = object.get("type").and_then(serde_json::Value::as_array) {
@@ -3035,11 +3056,15 @@ mod tests {
         assert_eq!(properties["data"]["type"], "string");
         assert_eq!(properties["timestamp"]["type"], "string");
         assert_eq!(properties["schedule"]["type"], "object");
-        assert_eq!(properties["schedule"]["properties"]["kind"]["type"], "string");
         assert_eq!(
-            properties["schedule"]["oneOf"][1]["properties"]["kind"]["type"],
+            properties["schedule"]["anyOf"][0]["oneOf"][0]["properties"]["kind"]["type"],
             "string",
-            "all union variants must have concrete nested types"
+            "the first nested union variant must have concrete nested types"
+        );
+        assert_eq!(
+            properties["schedule"]["anyOf"][0]["oneOf"][1]["properties"]["kind"]["type"],
+            "string",
+            "the second nested union variant must have concrete nested types"
         );
     }
 
