@@ -34,11 +34,9 @@
 //! `MountTarget`) was later extracted again into `local/mount_registry.rs`
 //! once the cross-tenant symlink-escape wiring fix and its fd-growth bound
 //! added enough logic to that one area to earn its own file. All three files
-//! are gated here, each against the same allowlist; `fd_resolve.rs` has no
-//! `#[cfg(test)]` module of its own today, so its entire contents are
-//! scanned as production code, while `mount_registry.rs` (like `local.rs`)
-//! does have one, so only its production half is scanned (see
-//! [`GATED_FILES`]/[`GatedFile`]).
+//! are gated here, each against the same allowlist; all three now carry a
+//! `#[cfg(test)]` module of their own, so only each file's production half
+//! is scanned (see [`GATED_FILES`]/[`GatedFile`]).
 //!
 //! Scoped to these two files, not the whole crate: `postgres.rs`/
 //! `libsql.rs`/`db/` have no local-filesystem containment surface, and
@@ -80,7 +78,7 @@ const GATED_FILES: &[GatedFile] = &[
     },
     GatedFile {
         relative_path: "crates/ironclaw_filesystem/src/local/fd_resolve.rs",
-        has_test_module: false,
+        has_test_module: true,
     },
     GatedFile {
         relative_path: "crates/ironclaw_filesystem/src/local/mount_registry.rs",
@@ -99,11 +97,27 @@ const GATED_FILES: &[GatedFile] = &[
 /// if `has_test_module` is true but the marker isn't found, since a refactor
 /// that removes or renames the test module would otherwise make this split
 /// silently meaningless.
+///
+/// Takes already comment-stripped `source` (see [`strip_line_comments`]),
+/// not raw source: locating the marker before stripping comments would let
+/// a doc comment above the real test module that happens to mention the
+/// literal attribute — plausible in files this comment-dense, including
+/// this one's own module doc — truncate the scan early and pass vacuously
+/// over everything after it (PR #6817 review follow-up). Also asserts the
+/// marker appears exactly once, so a second occurrence fails loudly instead
+/// of silently shrinking the scan.
 fn production_source(source: &str, has_test_module: bool) -> &str {
     const MARKER: &str = "#[cfg(test)]";
     if !has_test_module {
         return source;
     }
+    let marker_count = source.matches(MARKER).count();
+    assert_eq!(
+        marker_count, 1,
+        "expected exactly one `{MARKER}` marking the test module boundary in \
+         comment-stripped source, found {marker_count} — a second occurrence \
+         would silently shrink this gate's scan"
+    );
     let index = source
         .find(MARKER)
         .unwrap_or_else(|| panic!("expected to find `{MARKER}` marking the test module boundary"));
@@ -118,26 +132,29 @@ fn production_source(source: &str, has_test_module: bool) -> &str {
 ///   which runs only at trusted mount-setup time (synchronous, not on the
 ///   async per-request path) to resolve the host root a mount is pinned to.
 ///   There is no request-time path string here for a symlink swap to race.
-/// - `File`: `std::fs::File::from(fd)` (in `fd_resolve.rs`) converts an
-///   already fd-rooted, already-verified `OwnedFd` into a
+/// - `File::from`: `std::fs::File::from(fd)` (in `fd_resolve.rs`) converts
+///   an already fd-rooted, already-verified `OwnedFd` into a
 ///   `std::io::Read`/`Write` handle for the bytes underneath it — it never
 ///   opens anything by path, so it cannot re-resolve or re-check
-///   containment.
+///   containment. Allowlisted as the specific associated function, not the
+///   bare `File` type name: `std::fs::File::open`/`std::fs::File::create`
+///   are fully path-based, TOCTOU-shaped constructors that must stay
+///   banned, and both would otherwise pass under a type-name-only entry
+///   (PR #6817 review follow-up).
 ///
 /// Checked against comment-stripped source (see [`strip_line_comments`]),
 /// so doc-comment prose that merely *mentions* a `std::fs::*` name (e.g.
 /// contrasting `remove_dir_all_fd` with `std::fs::remove_dir_all`'s
 /// equally-recursive, uncapped shape) never has to be allowlisted just to
 /// keep the gate green — only a live call counts.
-const ALLOWED_STD_FS_FUNCTIONS: &[&str] = &["canonicalize", "File"];
+const ALLOWED_STD_FS_FUNCTIONS: &[&str] = &["canonicalize", "File::from"];
 
 /// The actual gate. Fails loud with a specific reason instead of a single
 /// generic message, so a future failure immediately tells the reader which
 /// file and which primitive was reintroduced.
 fn assert_fd_rooted_allowlist(relative_path: &str, source: &str, has_test_module: bool) {
-    let production = production_source(source, has_test_module);
-    let production = strip_line_comments(production);
-    let production = production.as_str();
+    let stripped = strip_line_comments(source);
+    let production = production_source(&stripped, has_test_module);
 
     // `tokio::fs` is definitionally the vulnerable pattern: every
     // `tokio::fs::*` entry point takes a path, not a descriptor, and
@@ -225,9 +242,14 @@ fn strip_line_comments(source: &str) -> String {
 }
 
 /// Finds every `std::fs::<identifier>` occurrence in `source` and returns
-/// the identifier that follows. A tiny hand-rolled scanner rather than a
-/// regex dependency — this crate has no `regex` dev-dependency today and
-/// the pattern is simple enough not to need one.
+/// the identifier that follows — including a `::`-qualified associated
+/// function (`File::open`, not just `File`), so the allowlist can be scoped
+/// to the exact call actually audited rather than the type name alone (PR
+/// #6817 review follow-up: `std::fs::File::open`/`std::fs::File::create`
+/// must not pass under the same entry as `std::fs::File::from`). A tiny
+/// hand-rolled scanner rather than a regex dependency — this crate has no
+/// `regex` dev-dependency today and the pattern is simple enough not to
+/// need one.
 fn find_std_fs_function_names(source: &str) -> Vec<String> {
     const PREFIX: &str = "std::fs::";
     let mut names = Vec::new();
@@ -235,9 +257,9 @@ fn find_std_fs_function_names(source: &str) -> Vec<String> {
     while let Some(offset) = rest.find(PREFIX) {
         let after = &rest[offset + PREFIX.len()..];
         let end = after
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
             .unwrap_or(after.len());
-        names.push(after[..end].to_string());
+        names.push(after[..end].trim_end_matches(':').to_string());
         rest = &after[end..];
     }
     names
@@ -263,9 +285,9 @@ fn local_backend_never_reintroduces_banned_path_resolution() {
 /// `#[cfg(test)]` module boundary — i.e. into the production half
 /// `production_source` scans — rather than appending to the end of the
 /// file, which would land past that boundary (inside the discarded test
-/// half) and prove nothing. Shared by every gated file that carries its own
-/// test module (`local.rs`, `mount_registry.rs`); `fd_resolve.rs` has none,
-/// so its own proof-of-binding test appends directly instead.
+/// half) and prove nothing. Shared by every gated file — all three
+/// (`local.rs`, `mount_registry.rs`, `fd_resolve.rs`) carry their own
+/// `#[cfg(test)]` module.
 fn plant_in_production(relative_path: &str, addition: &str) -> String {
     let source = read_gated_file(relative_path);
     let index = source.find("#[cfg(test)]").unwrap_or_else(|| {
@@ -342,7 +364,31 @@ fn gate_fails_on_planted_disallowed_std_fs_function() {
     assert_fd_rooted_allowlist("crates/ironclaw_filesystem/src/local.rs", &source, true);
 }
 
-/// The allowlisted `std::fs::canonicalize`/`std::fs::File` calls that
+/// `find_std_fs_function_names` used to capture only the identifier
+/// directly after `std::fs::`, so `std::fs::File::open(path)` and
+/// `std::fs::File::create(path)` — both fully path-based, TOCTOU-shaped
+/// constructors — yielded the bare name `"File"` and passed under the same
+/// allowlist entry that exists for the benign `std::fs::File::from(fd)`
+/// conversion. Pins that the allowlist is scoped to the actual audited
+/// associated function, not the type name.
+#[test]
+#[should_panic(expected = "std::fs::File::open")]
+fn gate_fails_on_planted_std_fs_file_open_evasion() {
+    // The return type deliberately avoids a second bare `std::fs::File`
+    // mention (e.g. `-> std::io::Result<std::fs::File>`) — that would be
+    // scanned as its own, earlier `std::fs::` occurrence and fail the gate
+    // for the wrong reason (a bare `File` no longer on the allowlist) before
+    // ever reaching the actual `std::fs::File::open` evasion this test
+    // means to pin.
+    let source = plant_in_local_rs_production(
+        "\nfn planted_regression(path: &std::path::Path) -> std::io::Result<()> {\n\
+         \x20\x20\x20\x20std::fs::File::open(path)?;\n\
+         \x20\x20\x20\x20Ok(())\n}\n",
+    );
+    assert_fd_rooted_allowlist("crates/ironclaw_filesystem/src/local.rs", &source, true);
+}
+
+/// The allowlisted `std::fs::canonicalize`/`std::fs::File::from` calls that
 /// already exist in production code must not themselves trip the gate —
 /// otherwise the allowlist would be indistinguishable from a ban that
 /// happens to fail closed for the wrong reason.
@@ -357,22 +403,27 @@ fn gate_does_not_flag_allowlisted_std_fs_calls() {
 }
 
 /// Proves the file-scoping actually extends to `fd_resolve.rs` — not just
-/// cosmetically listed in `GATED_FILES` — by planting a `tokio::fs` import
-/// directly into it (appended to the end of the file; `fd_resolve.rs` has
-/// no `#[cfg(test)]` boundary to land past) and confirming the gate still
-/// catches it there.
+/// cosmetically listed in `GATED_FILES` — by planting a direct `tokio::fs`
+/// call into its production half (before the `#[cfg(test)]` boundary, via
+/// [`plant_in_production`]) and confirming the gate still catches it there.
+/// `fd_resolve.rs` gained its own `#[cfg(test)]` module (a deterministic
+/// regression for the recursive-delete symlink race, PR #6817 follow-up),
+/// so this can no longer append past the end of the file the way it used
+/// to — appending now would land inside the discarded test half and prove
+/// nothing, exactly the silent-under-scan failure this gate exists to
+/// avoid elsewhere.
 #[test]
 #[should_panic(expected = "must never reference `tokio::fs`")]
 fn gate_fails_on_planted_tokio_fs_in_fd_resolve_module() {
-    let mut source = read_gated_file("crates/ironclaw_filesystem/src/local/fd_resolve.rs");
-    source.push_str(
+    let source = plant_in_production(
+        "crates/ironclaw_filesystem/src/local/fd_resolve.rs",
         "\nasync fn planted_regression(path: std::path::PathBuf) -> std::io::Result<Vec<u8>> {\n\
          \x20\x20\x20\x20tokio::fs::read(path).await\n}\n",
     );
     assert_fd_rooted_allowlist(
         "crates/ironclaw_filesystem/src/local/fd_resolve.rs",
         &source,
-        false,
+        true,
     );
 }
 
