@@ -395,6 +395,20 @@ fn with_clean_attested_env(body: impl FnOnce()) {
     }
 }
 
+/// Set one attested env var from inside a [`with_clean_attested_env`] body.
+///
+/// The single `unsafe` + guard annotation lives here rather than at each call
+/// site. That is not only tidier: a trailing annotation on a *multi-line*
+/// `set_var(` call is not stable, because rustfmt relocates the comment inside
+/// the parens (or onto the closing line), where the line-scoped hermetic-env
+/// checker cannot see it — which is exactly how five call sites in this file
+/// ended up annotated but still failing the check.
+fn set_attested_env(key: &str, value: &str) {
+    // SAFETY: the caller holds ENV_LOCK for the whole `with_clean_attested_env`
+    // body, so no other thread reads or writes these vars concurrently.
+    unsafe { std::env::set_var(key, value) }; // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
+}
+
 /// A 36-char, high-distinct-byte, marker-free `state_secret`.
 fn strong_state_secret() -> &'static str {
     "f3K9pLm2QzR7vWx1Yb4Nc8Hd6Ts0Ug5Ej2Aq"
@@ -409,31 +423,24 @@ fn strong_state_secret() -> &'static str {
 fn partial_near_config_fails_closed() {
     with_clean_attested_env(|| {
         // Only base URL set.
-        unsafe {
-            std::env::set_var(
-                // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-                "ATTESTED_NEAR_WALLET_BASE_URL",
-                "https://wallet.near.org/sign",
-            );
-        }
+        set_attested_env(
+            "ATTESTED_NEAR_WALLET_BASE_URL",
+            "https://wallet.near.org/sign",
+        );
         assert!(
             AttestedProvidersConfig::from_env().is_err(),
             "base-url-only partial NEAR config must fail closed"
         );
 
         // Base URL + callback, no state_secret.
-        unsafe {
-            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb"); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
         assert!(
             AttestedProvidersConfig::from_env().is_err(),
             "missing state_secret partial NEAR config must fail closed"
         );
 
         // All three present + valid -> Ok with the provider configured.
-        unsafe {
-            std::env::set_var("ATTESTED_NEAR_STATE_SECRET", strong_state_secret()); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env("ATTESTED_NEAR_STATE_SECRET", strong_state_secret());
         let cfg = AttestedProvidersConfig::from_env()
             .expect("complete + valid NEAR config resolves cleanly");
         assert!(cfg.near_redirect.is_some());
@@ -453,9 +460,7 @@ fn partial_near_config_single_var_fails_closed_with_missing_required() {
 
     // Only state_secret set: the first absent field reported is the base URL.
     with_clean_attested_env(|| {
-        unsafe {
-            std::env::set_var("ATTESTED_NEAR_STATE_SECRET", strong_state_secret()); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env("ATTESTED_NEAR_STATE_SECRET", strong_state_secret());
         let err = AttestedProvidersConfig::from_env()
             .expect_err("state_secret-only partial NEAR config must fail closed");
         assert_eq!(
@@ -469,9 +474,7 @@ fn partial_near_config_single_var_fails_closed_with_missing_required() {
 
     // Only callback URL set: base URL still the first absent field.
     with_clean_attested_env(|| {
-        unsafe {
-            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb"); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
         let err = AttestedProvidersConfig::from_env()
             .expect_err("callback-only partial NEAR config must fail closed");
         assert_eq!(
@@ -484,14 +487,11 @@ fn partial_near_config_single_var_fails_closed_with_missing_required() {
 
     // Base URL + state_secret, no callback: the absent field is the callback.
     with_clean_attested_env(|| {
-        unsafe {
-            std::env::set_var(
-                // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-                "ATTESTED_NEAR_WALLET_BASE_URL",
-                "https://wallet.near.org/sign",
-            );
-            std::env::set_var("ATTESTED_NEAR_STATE_SECRET", strong_state_secret()); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env(
+            "ATTESTED_NEAR_WALLET_BASE_URL",
+            "https://wallet.near.org/sign",
+        );
+        set_attested_env("ATTESTED_NEAR_STATE_SECRET", strong_state_secret());
         let err = AttestedProvidersConfig::from_env()
             .expect_err("missing-callback partial NEAR config must fail closed");
         assert_eq!(
@@ -505,14 +505,11 @@ fn partial_near_config_single_var_fails_closed_with_missing_required() {
     // Base URL + callback, no state_secret: the absent field is the secret —
     // and crucially is NOT reported as an empty URL.
     with_clean_attested_env(|| {
-        unsafe {
-            std::env::set_var(
-                // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-                "ATTESTED_NEAR_WALLET_BASE_URL",
-                "https://wallet.near.org/sign",
-            );
-            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb"); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env(
+            "ATTESTED_NEAR_WALLET_BASE_URL",
+            "https://wallet.near.org/sign",
+        );
+        set_attested_env("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
         let err = AttestedProvidersConfig::from_env()
             .expect_err("missing-state_secret partial NEAR config must fail closed");
         assert_eq!(
@@ -533,9 +530,7 @@ fn partial_near_config_single_var_fails_closed_with_missing_required() {
 fn build_fails_on_invalid_attested_provider_config() {
     with_clean_attested_env(|| {
         // Malformed WalletConnect project id (not 32 hex chars).
-        unsafe {
-            std::env::set_var("ATTESTED_WALLETCONNECT_PROJECT_ID", "not-a-valid-id"); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-        }
+        set_attested_env("ATTESTED_WALLETCONNECT_PROJECT_ID", "not-a-valid-id");
         assert!(
             AttestedProvidersConfig::from_env().is_err(),
             "malformed WalletConnect project id must fail the build"
@@ -544,19 +539,15 @@ fn build_fails_on_invalid_attested_provider_config() {
 
     with_clean_attested_env(|| {
         // Complete NEAR config but a low-entropy placeholder state_secret.
-        unsafe {
-            std::env::set_var(
-                // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-                "ATTESTED_NEAR_WALLET_BASE_URL",
-                "https://wallet.near.org/sign",
-            );
-            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb"); // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-            std::env::set_var(
-                // env-hermetic: serialized through ENV_LOCK in with_clean_attested_env
-                "ATTESTED_NEAR_STATE_SECRET",
-                "changeme-changeme-changeme-changeme",
-            );
-        }
+        set_attested_env(
+            "ATTESTED_NEAR_WALLET_BASE_URL",
+            "https://wallet.near.org/sign",
+        );
+        set_attested_env("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
+        set_attested_env(
+            "ATTESTED_NEAR_STATE_SECRET",
+            "changeme-changeme-changeme-changeme",
+        );
         assert!(
             AttestedProvidersConfig::from_env().is_err(),
             "placeholder state_secret must fail the build"
