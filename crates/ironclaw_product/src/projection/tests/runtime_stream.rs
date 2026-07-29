@@ -2226,7 +2226,9 @@ async fn consume_runtime_items_reports_page_capacity_boundary() {
             runtime: None,
             process_id: None,
             error_kind: None,
-            last_cursor: ironclaw_events::EventCursor::new(PRODUCT_PROJECTION_PAGE_LIMIT as u64 + 1),
+            last_cursor: ironclaw_events::EventCursor::new(
+                PRODUCT_PROJECTION_PAGE_LIMIT as u64 + 1,
+            ),
             updated_at: chrono::Utc::now(),
         }],
         capability_activities: Vec::new(),
