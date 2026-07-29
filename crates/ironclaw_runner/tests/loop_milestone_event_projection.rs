@@ -20,7 +20,7 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_loop_host::{
-    FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
+    CheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_event_store::{
@@ -40,18 +40,19 @@ use ironclaw_threads::{
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    FilesystemTurnStateRowStore, GetRunStateRequest, InMemoryRunProfileResolver,
-    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
-    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    GetRunStateRequest, InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId,
+    LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
-        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
-        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
+        InstructionSafetyContext, LoopCheckpointKind, LoopDriverId, LoopGateKind,
+        LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -680,9 +681,9 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    checkpoint_state_store: Arc<CheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    loop_checkpoint_store: Arc<TurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -973,6 +974,74 @@ fn milestone_for(
 }
 
 #[tokio::test]
+async fn failure_recovery_milestone_is_durable_and_projected_exactly_once() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_id = ThreadId::new("thread-failure-recovery-event").unwrap();
+    let run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &milestone_thread_scope(),
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(milestone_for(
+        scope,
+        run_id,
+        LoopHostMilestoneKind::FailureRecovered {
+            sequence: 1,
+            stage: LoopRecoveryStage::Capability,
+            class: LoopRecoveryClass::Capability(ironclaw_host_api::FailureKind::Backend),
+            disposition: LoopRecoveryDisposition::Retried,
+        },
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()))
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let recovered = snapshot
+        .timeline
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == TimelineEntryKind::FailureRecovered)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "one applied recovery milestone must append exactly one durable numerator event"
+    );
+    assert_eq!(recovered[0].recovery_stage.as_deref(), Some("capability"));
+    assert_eq!(recovered[0].recovery_class.as_deref(), Some("backend"));
+    assert_eq!(
+        recovered[0].recovery_disposition.as_deref(),
+        Some("retried")
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(
+        snapshot.runs[0].status,
+        RunProjectionStatus::Running,
+        "recovery telemetry must not invent a terminal run transition"
+    );
+}
+
+#[tokio::test]
 async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events() {
     let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let thread_id = ThreadId::new("thread-capability-publish-lifecycle").unwrap();
@@ -1029,7 +1098,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             capability_id: second_capability_id.clone(),
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind: CapabilityFailureKind::OperationFailed,
+            reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
             safe_summary: None,
         },
     ] {

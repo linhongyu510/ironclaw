@@ -15,12 +15,12 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation,
-        CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRunContext,
-        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        resolution,
     },
 };
 use serde_json::{Value, json};
@@ -509,7 +509,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !is_bridge_capability_id(&request.capability_id) {
             let target_capability_id = self
@@ -547,7 +547,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         let mut stopped_on_suspension = false;
@@ -890,10 +890,7 @@ impl ToolDisclosureCapabilityPort {
             .ok_or_else(|| invalid_invocation("capability surface is unavailable"))
     }
 
-    async fn invoke_bridge(
-        &self,
-        request: CapabilityInvocation,
-    ) -> Result<Resolution, AgentLoopHostError> {
+    async fn invoke_bridge(&self, request: LoopRequest) -> Result<Resolution, AgentLoopHostError> {
         let bridge = self
             .bridge_inputs
             .lock()
@@ -913,7 +910,7 @@ impl ToolDisclosureCapabilityPort {
 
     async fn invoke_tool_search(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(query) = bridge.arguments.get("query").and_then(Value::as_str) else {
@@ -959,7 +956,7 @@ impl ToolDisclosureCapabilityPort {
 
     async fn invoke_tool_describe(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
@@ -999,7 +996,7 @@ impl ToolDisclosureCapabilityPort {
     /// pre-disclosure guarantee for the one call that got it wrong.
     async fn invoke_describe_first(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
@@ -1030,7 +1027,7 @@ impl ToolDisclosureCapabilityPort {
 
     async fn completed_bridge_result(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
         output: Value,
         safe_summary: &'static str,
     ) -> Result<Resolution, AgentLoopHostError> {
@@ -1291,9 +1288,11 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
 
 fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
-        CapabilityFailureKind::InvalidInput,
+        ironclaw_host_api::FailureKind::InputEncode,
         summary.to_string(),
-        None,
+        CapabilityFailureDetail::Diagnostic {
+            text: summary.to_string(),
+        },
     )
 }
 
@@ -1356,7 +1355,7 @@ mod tests {
         definitions: Vec<ProviderToolDefinition>,
         surface_version: CapabilitySurfaceVersion,
         registered_calls: Mutex<Vec<ProviderToolCall>>,
-        invocations: Mutex<Vec<CapabilityInvocation>>,
+        invocations: Mutex<Vec<LoopRequest>>,
     }
 
     #[async_trait]
@@ -1463,7 +1462,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             // Sentinel: lets a test drive a gate (approval) suspension outcome.
             let suspends = request.capability_id.as_str() == "fixture.suspends";
@@ -1493,7 +1492,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             let mut resolutions = Vec::new();
             for invocation in request.invocations {
@@ -1606,7 +1605,7 @@ mod tests {
             .await
             .expect("search registers");
         let search_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: search.activity_id,
                 surface_version: search.surface_version,
                 capability_id: search.capability_id,
@@ -1648,8 +1647,8 @@ mod tests {
             TOOL_CALL_NAME
         );
         let batch = port
-            .invoke_capability_batch(CapabilityBatchInvocation {
-                invocations: vec![CapabilityInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![LoopRequest {
                     activity_id: target.activity_id,
                     surface_version: target.surface_version,
                     capability_id: target.capability_id,
@@ -1771,7 +1770,7 @@ mod tests {
             "hidden_tool"
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
@@ -1956,7 +1955,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -2078,7 +2077,7 @@ mod tests {
             is_bridge_capability_id(&first.capability_id),
             "first undisclosed invalid call is describe-first"
         );
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: first.activity_id,
             surface_version: first.surface_version,
             capability_id: first.capability_id,
@@ -2100,7 +2099,7 @@ mod tests {
             .await
             .expect("second registers via recoverable fallback");
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: second.activity_id,
                 surface_version: second.surface_version,
                 capability_id: second.capability_id,
@@ -2240,7 +2239,7 @@ mod tests {
             .await
             .expect("direct deferred call registers as target");
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
@@ -2411,7 +2410,7 @@ mod tests {
             "builtin__echo"
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
@@ -2547,7 +2546,7 @@ mod tests {
             "gmail__send_message"
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: target.activity_id,
                 surface_version: target.surface_version,
                 capability_id: target.capability_id,
@@ -2660,7 +2659,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -2746,7 +2745,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -2760,7 +2759,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "fallback must be a recoverable InvalidInput failure, not run death"
         );
@@ -2804,7 +2809,7 @@ mod tests {
             "recursive tool_call must stay on the bridge path, never resolve to a target"
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -2818,7 +2823,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "recursive tool_call must be a recoverable InvalidInput failure, not run death"
         );
@@ -2878,7 +2889,7 @@ mod tests {
             "unknown-target tool_call must stay on the bridge path"
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -2892,7 +2903,13 @@ mod tests {
             matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ),
             "unknown-target tool_call must be a recoverable InvalidInput failure"
         );
@@ -2960,7 +2977,7 @@ mod tests {
             .expect("search registers");
         assert!(matches!(
             tenant_a_first_turn
-                .invoke_capability(CapabilityInvocation {
+                .invoke_capability(LoopRequest {
                     activity_id: search.activity_id,
                     surface_version: search.surface_version,
                     capability_id: search.capability_id,
@@ -2981,7 +2998,7 @@ mod tests {
             .expect("target registers");
         assert!(matches!(
             tenant_a_first_turn
-                .invoke_capability(CapabilityInvocation {
+                .invoke_capability(LoopRequest {
                     activity_id: target.activity_id,
                     surface_version: target.surface_version,
                     capability_id: target.capability_id,
@@ -3056,7 +3073,7 @@ mod tests {
                 .await
                 .expect("tool_search registers");
             let outcome = port
-                .invoke_capability(CapabilityInvocation {
+                .invoke_capability(LoopRequest {
                     activity_id: candidate.activity_id,
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
@@ -3069,7 +3086,13 @@ mod tests {
             assert!(matches!(
                 outcome,
                 Resolution::Done(ref o)
-                    if o.verdict.error_kind() == Some(&FailureKind::InvalidInput)
+                    if matches!(
+                        o.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: FailureKind::InputEncode,
+                            ..
+                        }
+                    )
             ));
         }
     }
@@ -3163,3 +3186,4 @@ mod tests {
         CapabilityInputRef::new(value.into()).expect("valid input ref")
     }
 }
+// arch-exempt: large_file, tool disclosure migration remains centralized, plan #6175

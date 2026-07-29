@@ -8,7 +8,7 @@ by normal CI.
 
 import httpx
 
-from reborn_webui_harness import reborn_bearer_headers
+from reborn_webui_harness import client_action_id, reborn_bearer_headers
 
 pytest_plugins = ["reborn_webui_harness"]
 
@@ -28,6 +28,7 @@ async def _remove_web_access_if_present(
 ) -> None:
     response = await client.post(
         f"{base_url}/api/webchat/v2/extensions/web-access/remove",
+        json={"client_action_id": client_action_id()},
         timeout=15,
     )
     assert response.status_code == 200 or 400 <= response.status_code < 500
@@ -60,7 +61,10 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
 
         install = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/extensions/install",
-            json={"package_ref": WEB_ACCESS_PACKAGE_REF},
+            json={
+                "package_ref": WEB_ACCESS_PACKAGE_REF,
+                "client_action_id": client_action_id(),
+            },
             timeout=15,
         )
         install.raise_for_status()
@@ -80,10 +84,17 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
                 if extension["package_ref"]["id"] == "web-access"
             )
             assert installed["display_name"] == "Web Access"
-            assert installed["kind"] == "first_party"
+            # Runtime is an implementation badge (`runtime`), never taxonomy;
+            # the retired `kind` wire string is gone (NEA-25).
+            assert installed["runtime"] == "first_party"
+            # Installation state and the compatibility readiness fields must
+            # describe the same setup-free active extension.
+            assert installed["installation_state"] == "active"
+            assert installed["authenticated"] is True
+            assert installed["active"] is True
+            assert installed["needs_setup"] is False
             assert installed["has_auth"] is False
-            assert installed["needs_setup"] in {False, True}
-            assert installed["activation_status"] in {"installed", "configured", "active"}
+            assert installed.get("onboarding_state") is None
 
             setup = await client.get(
                 f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",
@@ -92,31 +103,9 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
             setup.raise_for_status()
             setup_body = setup.json()
             assert setup_body["package_ref"] == WEB_ACCESS_PACKAGE_REF
-            assert setup_body["phase"] in {"installed", "configured", "active"}
+            assert setup_body["phase"] == "active"
             assert isinstance(setup_body.get("blockers", []), list)
-
-            activate = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/activate",
-                timeout=15,
-            )
-            activate.raise_for_status()
-            activate_body = activate.json()
-            assert activate_body["success"] is True
-            assert activate_body.get("activated") in {True, False, None}
-
-            active_list = await client.get(
-                f"{reborn_v2_server}/api/webchat/v2/extensions",
-                timeout=15,
-            )
-            active_list.raise_for_status()
-            active = next(
-                extension
-                for extension in active_list.json()["extensions"]
-                if extension["package_ref"]["id"] == "web-access"
-            )
-            assert active["active"] is True
-            assert active["activation_status"] == "active"
-            assert "web-access.search" in active.get("tools", [])
+            assert "web-access.search" in installed.get("tools", [])
         finally:
             await _remove_web_access_if_present(client, reborn_v2_server)
 
@@ -128,6 +117,16 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
         assert "web-access" not in _extension_ids(final_list.json()["extensions"])
 
 
+async def test_reborn_v2_public_activation_route_is_absent_served(reborn_v2_server):
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        response = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/activate",
+            timeout=15,
+        )
+
+    assert response.status_code == 404
+
+
 async def test_reborn_v2_extension_routes_require_auth_served(reborn_v2_server):
     async with httpx.AsyncClient() as anonymous:
         for method, path, body in [
@@ -136,12 +135,23 @@ async def test_reborn_v2_extension_routes_require_auth_served(reborn_v2_server):
             (
                 "POST",
                 "/api/webchat/v2/extensions/install",
-                {"package_ref": WEB_ACCESS_PACKAGE_REF},
+                {
+                    "package_ref": WEB_ACCESS_PACKAGE_REF,
+                    "client_action_id": client_action_id(),
+                },
             ),
-            ("POST", "/api/webchat/v2/extensions/web-access/activate", None),
+            (
+                "POST",
+                "/api/webchat/v2/extensions/web-access/remove",
+                {"client_action_id": client_action_id()},
+            ),
             ("POST", "/api/webchat/v2/extensions/web-access/remove", None),
             ("GET", "/api/webchat/v2/extensions/web-access/setup", None),
-            ("POST", "/api/webchat/v2/extensions/web-access/setup", {}),
+            (
+                "POST",
+                "/api/webchat/v2/extensions/web-access/setup",
+                {"client_action_id": client_action_id()},
+            ),
         ]:
             response = await anonymous.request(
                 method,
@@ -166,13 +176,17 @@ async def test_reborn_v2_extension_routes_reject_invalid_input_served(
 
         wrong_package_kind = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/extensions/install",
-            json={"package_ref": {"kind": "skill", "id": "web-access"}},
+            json={
+                "package_ref": {"kind": "skill", "id": "web-access"},
+                "client_action_id": client_action_id(),
+            },
             timeout=15,
         )
         assert wrong_package_kind.status_code == 400
 
         malformed_package_id = await client.post(
-            f"{reborn_v2_server}/api/webchat/v2/extensions/bad%20id/activate",
+            f"{reborn_v2_server}/api/webchat/v2/extensions/bad%20id/remove",
+            json={"client_action_id": client_action_id()},
             timeout=15,
         )
         assert malformed_package_id.status_code == 400

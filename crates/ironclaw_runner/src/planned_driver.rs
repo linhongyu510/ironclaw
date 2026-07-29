@@ -315,14 +315,12 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             kind,
             safe_summary,
             reason_kind,
-            diagnostic_ref,
             detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
                 kind = ?kind,
                 reason_kind = ?reason_kind,
-                diagnostic_ref = ?diagnostic_ref,
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
@@ -359,6 +357,13 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
             AgentLoopDriverError::Failed {
                 reason_kind: "checkpoint_rejected".to_string(),
+                detail: None,
+            }
+        }
+        AgentLoopExecutorError::RecoverySequenceExhausted => {
+            tracing::warn!("planned driver exhausted durable recovery event identity space");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
                 detail: None,
             }
         }
@@ -427,23 +432,24 @@ mod tests {
         MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     };
     use ironclaw_agent_loop::test_support::{
-        MockAgentLoopDriverHost, MockHostCall, test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
+        test_run_context,
     };
     use ironclaw_turns::{
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityInvocation,
-            CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
-            LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal,
-            LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-            LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
-            LoopContextBundle, LoopContextPort, LoopContextRequest, LoopDriverId,
-            LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
-            LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-            LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-            LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, StageCheckpointPayloadRequest,
-            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            BeginAssistantDraft, CheckpointSchemaId, FinalizeAssistantMessage,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
+            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+            LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+            LoopTranscriptPort, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+            VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -577,7 +583,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -599,7 +604,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -620,7 +624,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -640,7 +643,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some("HTTP 404 model not found".to_string()),
         });
 
@@ -666,7 +668,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(format!("provider rejected token {secret} at /host/route")),
         });
 
@@ -698,7 +699,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -718,7 +718,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -1122,14 +1121,14 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
@@ -1295,8 +1294,16 @@ mod tests {
         };
         let checkpoint_id = TurnCheckpointId::new();
 
+        // The denied resume crosses the capability port as a typed terminal
+        // auth resume (the host terminalizes it as gate-declined); the loop
+        // then continues to the model, which closes the turn.
         let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
             .run_context(context.clone())
+            .script(
+                ScenarioScript::reply_only("denial surfaced").with_capability_outcomes(vec![vec![
+                    ScriptedCapabilityOutcome::failed("gate_declined"),
+                ]]),
+            )
             .build();
         let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
 

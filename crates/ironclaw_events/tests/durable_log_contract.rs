@@ -925,6 +925,9 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         hook_decision: None,
         hook_failure_category: None,
         hook_failure_disposition: None,
+        recovery_stage: None,
+        recovery_class: None,
+        recovery_disposition: None,
     };
 
     let json = serde_json::to_string(&event).expect("serialize");
@@ -1013,6 +1016,13 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
 /// `succeed_count` calls and fails for every subsequent call.  `append_batch`
 /// is deliberately NOT overridden so the test exercises the default
 /// implementation in [`DurableEventLog`].
+//
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. It exists to exercise the trait's
+// *default* `append_batch` loop, which the filesystem-backed store overrides
+// (so the real store never runs this path); and the filesystem store lives in
+// the downstream `ironclaw_reborn_event_store` crate, unreachable from
+// `ironclaw_events` without a circular dependency.
 struct PartialFailLog {
     call_count: std::sync::atomic::AtomicUsize,
     succeed_count: usize,

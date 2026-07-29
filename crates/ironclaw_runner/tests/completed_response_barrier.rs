@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ProviderToolName};
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
-    LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+    LlmProvider, RetryConfig, RetryProvider, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -39,6 +40,55 @@ struct BarrierProvider {
     deltas: Vec<String>,
     fail_stream: bool,
     finish_reason: FinishReason,
+}
+
+struct ReplacementThenInvalidProvider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LlmProvider for ReplacementThenInvalidProvider {
+    fn model_name(&self) -> &str {
+        "replacement-then-invalid-provider"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(unexpected_non_streaming_error())
+    }
+
+    async fn complete_streaming(
+        &self,
+        _request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            sink.text_delta("visible first attempt".to_string()).await;
+            return Err(LlmError::RateLimited {
+                provider: self.model_name().to_string(),
+                retry_after: Some(Duration::ZERO),
+            });
+        }
+        Ok(CompletionResponse {
+            content: String::new(),
+            input_tokens: 1,
+            output_tokens: 0,
+            finish_reason: FinishReason::Unknown,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(unexpected_non_streaming_error())
+    }
 }
 
 impl BarrierProvider {
@@ -194,14 +244,14 @@ impl LoopCapabilityPort for ToolSurface {
 
     async fn invoke_capability(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         Err(unexpected_capability_error())
     }
 
     async fn invoke_capability_batch(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         Err(unexpected_capability_error())
     }
@@ -266,6 +316,30 @@ async fn tool_post_stream_validation_failure_cannot_register_a_call() {
     assert_eq!(capabilities.registrations.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn textless_replacement_cannot_clear_outer_retry_barrier() {
+    let sink = Arc::new(RecordingStreamSink::default());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let provider = RetryProvider::new(
+        Arc::new(ReplacementThenInvalidProvider {
+            attempts: Arc::clone(&attempts),
+        }),
+        RetryConfig { max_retries: 1 },
+    );
+
+    let error = gateway(provider)
+        .stream_model_with_progress(model_request(), sink.clone())
+        .await
+        .unwrap_err();
+
+    assert_partial_output_error(&error);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        sink.updates.lock().unwrap().as_slice(),
+        ["visible first attempt", ""]
+    );
+}
+
 fn assert_partial_output_error(error: &ironclaw_loop_host::HostManagedModelError) {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
     assert_eq!(
@@ -274,7 +348,10 @@ fn assert_partial_output_error(error: &ironclaw_loop_host::HostManagedModelError
     );
 }
 
-fn gateway(provider: BarrierProvider) -> LlmProviderModelGateway<BarrierProvider> {
+fn gateway<P>(provider: P) -> LlmProviderModelGateway<P>
+where
+    P: LlmProvider,
+{
     LlmProviderModelGateway::with_provider_identity(
         "barrier-test-provider",
         Arc::new(provider),

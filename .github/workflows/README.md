@@ -25,9 +25,8 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
-`--all-features` while push linted a broader matrix, so
-feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum
-variant) passed the queue and turned main red post-merge.
+`--all-features` while push linted a broader matrix, so feature-gated dead code
+could pass the queue and turn main red post-merge.
 
 ## Required checks and where they're enforced
 
@@ -98,19 +97,26 @@ pull-request workflows.
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
 The cargo-dist release and manual preflight both build the `ironclaw` package
-and binary with the explicit release feature contract
-`libsql,postgres`. In the manual preflight, each matrix
-entry performs a final `cargo build --locked --profile dist` link and executes
-that exact native binary with `--version`, `--help`, and
-`profile list --json`. Its musl entries also use `readelf` to reject a program
-interpreter or dynamic-library dependency, which prevents an installed musl
-loader on the build runner from hiding a non-portable artifact. This is shallow
-CLI startup coverage; it does not validate `serve` or external services.
+and binary without backend feature flags; database backends compile
+unconditionally. In the manual preflight, each matrix entry performs a final
+`cargo build --locked --profile dist` link and executes that exact native binary
+with `--version`, `--help`, and `profile list --json`. Its musl entries also use
+`readelf` to reject a program interpreter or dynamic-library dependency, which
+prevents an installed musl loader on the build runner from hiding a non-portable
+artifact. This is shallow CLI startup coverage; it does not validate `serve` or
+external services.
 
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+`reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
+requests, the merge queue candidate check, and main. The standalone
+`reborn-playwright.yml` schedule owns the broader six-shard browser matrix; it
+is post-merge nightly coverage, not a required merge check. Failed nightly
+shards upload server logs, Playwright traces, screenshots, and videos, and the
+nightly watchdog owns alerting for that workflow.
+
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:
@@ -198,12 +204,12 @@ of the Reborn package by default.
   is deleted, a v1 bug fix that must land should temporarily restore the
   `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
   `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
-- **Full-path extension↔provider coverage has no scheduler on any stack**:
-  the Emulate-backed full-path tests (`test_reborn_emulate_full_path.py`)
-  boot the legacy binary (see `tests/e2e/CLAUDE.md`, Reborn E2E coverage
-  gate) and were frozen with it. A Reborn-native port — same
-  install → OAuth → tool call → provider-mutation contract through
-  `ironclaw serve` — is the follow-up that restores this tier.
+- **Broad full-path extension↔provider mutation coverage remains legacy-only**:
+  `test_reborn_emulate_full_path.py` still boots the legacy binary. The Reborn
+  E2E job now replays every harvested live-QA model trace against Emulate's
+  supported provider operations and runs a Reborn-native Drive read path through
+  `ironclaw serve`; equivalent standalone mutation paths for every provider are
+  still follow-up work.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep

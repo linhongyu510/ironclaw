@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{LoopDiagnosticRef, LoopGateRef};
+use crate::LoopGateRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +22,9 @@ pub enum AgentLoopHostErrorKind {
     Invalid,
     /// The model/provider output was structurally invalid for the active loop contract.
     InvalidOutput,
+    /// The provider refused to produce the completion because its content
+    /// filter rejected the request or response.
+    ContentFiltered,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -50,6 +53,7 @@ impl AgentLoopHostErrorKind {
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
             Self::InvalidOutput => "invalid_output",
+            Self::ContentFiltered => "content_filtered",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",
@@ -59,6 +63,44 @@ impl AgentLoopHostErrorKind {
             Self::CheckpointRejected => "checkpoint_rejected",
             Self::TranscriptWriteFailed => "transcript_write_failed",
             Self::Internal => "internal",
+        }
+    }
+
+    /// Project this loop-host error kind onto the unified closed
+    /// [`ironclaw_host_api::FailureKind`] vocabulary. Exhaustive on purpose: a
+    /// new `AgentLoopHostErrorKind` variant must pick its honest failure kind
+    /// here instead of falling into a wildcard bucket. Decision sites ask
+    /// [`ironclaw_host_api::FailureKind::fate`] for the disposition.
+    pub fn failure_kind(self) -> ironclaw_host_api::FailureKind {
+        use ironclaw_host_api::FailureKind;
+        match self {
+            Self::Unauthorized => FailureKind::Authorization,
+            Self::CredentialUnavailable => FailureKind::AuthRequired,
+            Self::ScopeMismatch => FailureKind::Authorization,
+            Self::StaleSurface => FailureKind::StaleSurface,
+            Self::InvalidInvocation | Self::Invalid => FailureKind::InputEncode,
+            Self::InvalidOutput => FailureKind::OutputDecode,
+            Self::ContentFiltered => FailureKind::OperationFailed,
+            Self::PolicyDenied => FailureKind::PolicyDenied,
+            // A budget limit the model could work around (smaller call, fewer
+            // tools) — the honest resource-quota kind.
+            Self::BudgetExceeded => FailureKind::Resource,
+            // "Callers surface an approval gate and retry after the user
+            // resolves it" (variant doc) — a PARK semantic, so the projection
+            // must carry the Park-fated kind, not a model-visible tool error.
+            Self::BudgetApprovalRequired => FailureKind::AuthRequired,
+            // The budget governor itself failed — "callers must fail closed"
+            // (variant doc). Not a budget outcome and not classifiable as one:
+            // the non-retryable unclassified sink keeps it from being retried
+            // or mistaken for a quota the model can route around.
+            Self::BudgetAccountingFailed => FailureKind::Unclassified,
+            Self::Unavailable => FailureKind::Unavailable,
+            Self::Cancelled => FailureKind::Cancelled,
+            // A rejected checkpoint (schema id/version mismatch) is
+            // deterministic — it cannot succeed on re-attempt, so it must not
+            // ride the retryable `Internal` bucket and burn retry budget.
+            Self::CheckpointRejected => FailureKind::OperationFailed,
+            Self::TranscriptWriteFailed | Self::Internal => FailureKind::Internal,
         }
     }
 }
@@ -90,8 +132,6 @@ pub struct AgentLoopHostError {
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ref: Option<LoopGateRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
     /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
     /// carries the original error text (paths, codes, schema refs) so the model
     /// can retry or explain. Secret VALUES are redacted by the producer via
@@ -108,7 +148,6 @@ impl AgentLoopHostError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
-            diagnostic_ref: None,
             detail: None,
         }
     }
@@ -125,11 +164,6 @@ impl AgentLoopHostError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
-        self
-    }
-
-    pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {
-        self.diagnostic_ref = Some(diagnostic_ref);
         self
     }
 }
@@ -157,5 +191,51 @@ mod tests {
 
         let plain = AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "boom");
         assert_eq!(plain.detail, None);
+    }
+
+    /// Regression (#6684 review): the budget/checkpoint port kinds must not
+    /// collapse into one model-visible `Resource`/retryable `Internal` bucket —
+    /// each projects the fate its variant doc prescribes.
+    #[test]
+    fn budget_and_checkpoint_port_errors_project_honest_fates() {
+        use ironclaw_host_api::{FailureFate, FailureKind};
+        // Park semantic: "callers surface an approval gate ... and retry
+        // after the user resolves it" — not a tool error to route around.
+        assert_eq!(
+            AgentLoopHostErrorKind::BudgetApprovalRequired.failure_kind(),
+            FailureKind::AuthRequired
+        );
+        assert_eq!(
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+                .failure_kind()
+                .fate(),
+            FailureFate::Park
+        );
+        // Fail closed: a governor fault is neither a quota outcome nor
+        // retryable.
+        assert_eq!(
+            AgentLoopHostErrorKind::BudgetAccountingFailed.failure_kind(),
+            FailureKind::Unclassified
+        );
+        assert!(
+            !AgentLoopHostErrorKind::BudgetAccountingFailed
+                .failure_kind()
+                .is_retryable()
+        );
+        // A schema id/version rejection is deterministic — never retryable.
+        assert_eq!(
+            AgentLoopHostErrorKind::CheckpointRejected.failure_kind(),
+            FailureKind::OperationFailed
+        );
+        assert!(
+            !AgentLoopHostErrorKind::CheckpointRejected
+                .failure_kind()
+                .is_retryable()
+        );
+        // The genuine budget outcome keeps the resource-quota kind.
+        assert_eq!(
+            AgentLoopHostErrorKind::BudgetExceeded.failure_kind(),
+            FailureKind::Resource
+        );
     }
 }

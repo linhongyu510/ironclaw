@@ -37,25 +37,51 @@ export function useAdminUsers() {
     errorCode === "forbidden" ||
     errorCode === "participant_denied";
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+  const invalidateUsers = () =>
+    queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+  const refreshUser = (userId, user) => {
+    if (userId && user?.id === userId) {
+      queryClient.setQueryData(["admin", "user", userId], (currentUser) =>
+        currentUser ? { ...currentUser, ...user } : user,
+      );
+    }
+    const invalidations = [invalidateUsers()];
+    if (userId) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["admin", "user", userId],
+          exact: true,
+          refetchType: "active",
+        }),
+      );
+    }
+    return Promise.all(invalidations);
+  };
 
-  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidate });
+  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
   const updateMut = useMutation({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
-    onSuccess: invalidate,
+    onSuccess: (user, { id }) => refreshUser(id, user),
   });
   const deleteMut = useMutation({
     mutationFn: (id) => deleteAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: invalidateUsers,
   });
   const suspendMut = useMutation({
     mutationFn: (id) => suspendAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: (user, id) => refreshUser(id, user),
   });
   const activateMut = useMutation({
     mutationFn: (id) => activateAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: (user, id) => refreshUser(id, user),
   });
+
+  const resetActionErrors = () => {
+    updateMut.reset();
+    deleteMut.reset();
+    suspendMut.reset();
+    activateMut.reset();
+  };
 
   return {
     users,
@@ -64,10 +90,27 @@ export function useAdminUsers() {
     createUser: createMut.mutateAsync,
     isCreating: createMut.isPending,
     createError: createMut.error,
+    resetCreate: createMut.reset,
     updateUser: (id, payload) => updateMut.mutateAsync({ id, payload }),
+    isUpdating: updateMut.isPending,
+    updateError: updateMut.error,
+    updatingUserId: updateMut.variables?.id || null,
+    resetUpdate: updateMut.reset,
     deleteUser: deleteMut.mutateAsync,
+    isDeleting: deleteMut.isPending,
+    deleteError: deleteMut.error,
+    deletingUserId: deleteMut.variables || null,
+    resetDelete: deleteMut.reset,
     suspendUser: suspendMut.mutateAsync,
+    isSuspending: suspendMut.isPending,
+    suspendError: suspendMut.error,
+    suspendingUserId: suspendMut.variables || null,
+    resetSuspend: suspendMut.reset,
     activateUser: activateMut.mutateAsync,
+    isActivating: activateMut.isPending,
+    activateError: activateMut.error,
+    activatingUserId: activateMut.variables || null,
+    resetActionErrors,
     // The one-time API bearer is issued ONLY at user creation, so the create
     // result (which carries `.token`) feeds the one-time token banner. There is
     // no re-issue endpoint for existing users, so no `createToken` action is

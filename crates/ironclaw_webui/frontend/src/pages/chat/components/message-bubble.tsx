@@ -7,8 +7,11 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
+import { fetchRunArtifact } from "../../../lib/api";
+import { saveBlob } from "../../../lib/download";
 import {
   CHAT_MESSAGE_ROLES,
+  messageBelongsToActiveRun,
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
@@ -31,6 +34,7 @@ type MessageBubbleProps = {
   message: ChatMessage;
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
+  activeRunId?: string | null;
 };
 
 function formatTimestamp(value?: string) {
@@ -43,12 +47,21 @@ function formatTimestamp(value?: string) {
 /* Collapsible provider-reasoning summary. Collapsed by default so the
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
-function ThinkingDisclosure({ content }: { content?: string }) {
+function ThinkingDisclosure({
+  content,
+  streaming = false,
+}: {
+  content?: string;
+  streaming?: boolean;
+}) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
   return (
-    <div className="flex flex-col items-start">
+    <div
+      className="flex flex-col items-start"
+      data-streaming={String(streaming)}
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -65,14 +78,23 @@ function ThinkingDisclosure({ content }: { content?: string }) {
       {open &&
       (
         <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
-          <MarkdownRenderer content={content} className="text-[13px]" />
+          <MarkdownRenderer
+            content={content}
+            className="text-[13px]"
+            streaming={streaming}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
+function MessageBubbleImpl({
+  message,
+  onRetry,
+  threadId,
+  activeRunId,
+}: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
@@ -81,6 +103,13 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     typeof message.isFinalReply === "boolean"
       ? String(message.isFinalReply)
       : undefined;
+  const isStreamingAssistantReply =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false &&
+    messageBelongsToActiveRun(message, activeRunId);
+  const isStreamingThinking =
+    role === CHAT_MESSAGE_ROLES.THINKING &&
+    messageBelongsToActiveRun(message, activeRunId);
   const failureCategory =
     role === CHAT_MESSAGE_ROLES.ERROR &&
     typeof message.failureCategory === "string"
@@ -92,6 +121,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       ? message.failureStatus
       : undefined;
   const [copied, setCopied] = React.useState(false);
+  const [artifactDownloading, setArtifactDownloading] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
@@ -111,6 +141,31 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       // clipboard unavailable — no-op
     }
   }, [content, t]);
+  const turnRunId =
+    typeof message.turnRunId === "string" ? message.turnRunId : "";
+  const downloadArtifact = React.useCallback(async () => {
+    if (!threadId || !turnRunId || artifactDownloading) return;
+    setArtifactDownloading(true);
+    try {
+      const artifact = await fetchRunArtifact({ threadId, runId: turnRunId });
+      const filenameRunId = turnRunId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      saveBlob(
+        new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `ironclaw-run-${filenameRunId}.json`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : t("chat.fileDownloadFailed"),
+        { tone: "error" },
+      );
+    } finally {
+      setArtifactDownloading(false);
+    }
+  }, [artifactDownloading, t, threadId, turnRunId]);
 
   if (
     role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
@@ -126,7 +181,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   }
 
   if (role === CHAT_MESSAGE_ROLES.THINKING) {
-    return (<ThinkingDisclosure content={content} />);
+    return (
+      <ThinkingDisclosure
+        content={content}
+        streaming={isStreamingThinking}
+      />
+    );
   }
 
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {
@@ -153,6 +213,13 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   const showActions =
     role === CHAT_MESSAGE_ROLES.USER ||
     (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+  const showArtifactAction = Boolean(
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === true &&
+    !isOptimistic &&
+    threadId &&
+    turnRunId,
+  );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;
   const bubbleWidthClass = isUser
@@ -190,7 +257,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} streaming={isStreamingAssistantReply} /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
@@ -252,6 +319,19 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showArtifactAction && (
+              <button
+                type="button"
+                onClick={downloadArtifact}
+                disabled={artifactDownloading}
+                title={artifactDownloading ? t("common.loading") : t("common.download")}
+                aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
+                data-testid="download-run-artifact"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+              >
+                <Icon name="download" className="h-3.5 w-3.5" />
               </button>
             )}
             {showRetryAction && (

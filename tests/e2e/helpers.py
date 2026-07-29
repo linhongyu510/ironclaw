@@ -232,6 +232,9 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "session_check_error": "[data-testid='session-check-error']",
+    "session_check_retry": "[data-testid='session-check-retry']",
+    "session_check_sign_out": "[data-testid='session-check-sign-out']",
     "admin_new_user_button_name": "New user",
     "admin_create_form": "form",
     "admin_display_name_input": 'input[type="text"]',
@@ -241,6 +244,18 @@ SEL_V2 = {
     "admin_token_value": "code",
     "admin_token_description_text": "Copy this now — it will not be shown again.",
     "admin_create_token_button_name": "Create token",
+    "admin_current_role_button_name": "Current role",
+    "admin_save_role_button_name": "Save role",
+    "admin_member_role_name": "Member",
+    "admin_admin_role_name": "Admin",
+    "admin_active_status_name": "Active",
+    "admin_suspended_status_name": "Suspended",
+    "admin_suspend_button_name": "Suspend",
+    "admin_activate_button_name": "Activate",
+    "admin_configuration_group_test_id": "admin-configuration-group",
+    "admin_extension_configuration_heading_name": "Extension configuration",
+    "admin_slack_configuration_heading_name": "Slack deployment configuration",
+    "admin_bot_token_label_pattern": r"^Bot token",
     "admin_user_secrets_panel": "[data-testid='admin-user-secrets-panel']",
     "admin_secret_handle_input": "[data-testid='admin-secret-handle']",
     "admin_secret_value_input": "[data-testid='admin-secret-value']",
@@ -265,16 +280,24 @@ SEL_V2 = {
     "workspace_directory_entry_for": (
         "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
     ),
+    "workspace_tree_entry": "[data-testid='workspace-tree-entry']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
     "confirm_dialog_cancel": '[data-testid="confirm-dialog-cancel"]',
     "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "thread_search": "input[placeholder='Search chats...']",
+    "thread_load_more": "[data-testid='thread-load-more']",
     "sign_out_button": "button[title='Sign out']",
+    "nav_chat": "a[href='/chat']",
+    "nav_settings_inference": "a[href='/settings/inference']",
+    "nav_settings_appearance": "a[href='/settings/appearance']",
+    "settings_search_input": "input[type='search'][placeholder='Search settings...']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "chat_cancel_run": "[data-testid='chat-cancel-run']",
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
     "connection_status": "[data-testid='connection-status']",
@@ -313,6 +336,13 @@ SEL_V2 = {
     "extension_card_for": (
         "[data-testid='extension-card'][data-extension-id='{id}']"
     ),
+    "extension_primary_action": "[data-extension-primary-action]",
+    "extension_return_focus": "[data-extension-return-focus]",
+    "extension_more_actions_name": "More actions",
+    "extension_reconfigure_name": "Reconfigure",
+    "extension_configure_dialog_name_for": "Configure {name}",
+    "extension_dialog_close_name": "Close",
+    "extension_dialog_save_name": "Save",
     "pairing_section": "[data-testid='pairing-section']",
     "pairing_code_input": "[data-testid='pairing-code-input']",
     "pairing_submit": "[data-testid='pairing-submit']",
@@ -363,6 +393,9 @@ SEL_V2 = {
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
     ),
+    "settings_tool_permission_select": (
+        "[data-testid='settings-tool-permission-select']"
+    ),
     "settings_tool_permission": (
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
@@ -377,6 +410,9 @@ SEL_V2 = {
     ),
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
+    ),
+    "automation_filter_for": (
+        "[data-testid='automation-filter'][data-filter='{filter}']"
     ),
     "automation_detail": "[data-testid='automation-detail-panel']",
     "automation_detail_title": "[data-testid='automation-detail-title']",

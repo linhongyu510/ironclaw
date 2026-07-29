@@ -3,23 +3,24 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use super::port_adapters::HostManagedLoopCheckpointPort;
+use super::port_adapters::{HostManagedLoopCheckpointPort, HostManagedLoopProgressPort};
 
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_loop_host::FilesystemCheckpointStateStore;
+use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CheckpointStateRecord, CheckpointStateStore, FilesystemTurnStateRowStore,
-    GetCheckpointStateRequest, InMemoryRunProfileResolver, LoopCheckpointStateRef,
-    LoopCheckpointStore, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver,
-    TurnActor, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope,
+    CheckpointStateRecord, CheckpointStateStorePort, GetCheckpointStateRequest,
+    InMemoryRunProfileResolver, LoopCheckpointStateRef, LoopCheckpointStore,
+    PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateRowStore,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest,
-        StageCheckpointPayloadRequest,
+        LoopCheckpointRequest, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProgressEvent,
+        LoopProgressPort, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+        LoopRunContext, RunProfileResolutionRequest, StageCheckpointPayloadRequest,
     },
 };
 
@@ -36,14 +37,47 @@ async fn test_run_context() -> LoopRunContext {
     LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
 }
 
+#[tokio::test]
+async fn recovery_progress_adapter_preserves_sequence_and_typed_labels() {
+    let context = test_run_context().await;
+    let sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = sink.clone();
+    let port = HostManagedLoopProgressPort::new(context.clone(), milestone_sink);
+
+    port.emit_loop_progress(LoopProgressEvent::FailureRecovered {
+        sequence: 7,
+        stage: LoopRecoveryStage::Capability,
+        class: LoopRecoveryClass::Capability(FailureKind::Backend),
+        disposition: LoopRecoveryDisposition::Retried,
+    })
+    .await
+    .expect("recovery progress must reach the durable milestone seam");
+
+    let milestones = sink.milestones();
+    assert_eq!(milestones.len(), 1);
+    let milestone = &milestones[0];
+    assert_eq!(milestone.scope, context.scope);
+    assert_eq!(milestone.turn_id, context.turn_id);
+    assert_eq!(milestone.run_id, context.run_id);
+    assert!(matches!(
+        milestone.kind,
+        LoopHostMilestoneKind::FailureRecovered {
+            sequence: 7,
+            stage: LoopRecoveryStage::Capability,
+            class: LoopRecoveryClass::Capability(FailureKind::Backend),
+            disposition: LoopRecoveryDisposition::Retried,
+        }
+    ));
+}
+
 use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 fn test_checkpoint_port(
     context: LoopRunContext,
 ) -> (
     HostManagedLoopCheckpointPort,
-    Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-    Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    Arc<CheckpointStateStore<InMemoryBackend>>,
+    Arc<TurnStateRowStore<InMemoryBackend>>,
 ) {
     let state_store = in_memory_checkpoint_state_store();
     let checkpoint_store = Arc::new(in_memory_turn_state_store());
@@ -58,7 +92,7 @@ fn test_checkpoint_port(
 }
 
 struct CountingCheckpointStateStore {
-    inner: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    inner: Arc<CheckpointStateStore<InMemoryBackend>>,
     get_calls: AtomicUsize,
 }
 
@@ -78,7 +112,7 @@ impl CountingCheckpointStateStore {
 }
 
 #[async_trait::async_trait]
-impl CheckpointStateStore for CountingCheckpointStateStore {
+impl CheckpointStateStorePort for CountingCheckpointStateStore {
     async fn put_checkpoint_state(
         &self,
         request: PutCheckpointStateRequest,
