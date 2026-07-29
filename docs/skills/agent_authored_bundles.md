@@ -147,3 +147,20 @@ unobservable.
   lower bound is +0.3pp. The mechanism is trace-backed; the effect size is not tight.
   **Measure the extension as its own arm on the resource-bearing tasks before committing
   the trust work.**
+
+## Explicitly unchanged: creation, discovery, indexing
+
+To be unambiguous, since this is the crux of the objection — **none of the three is
+migrated to the filesystem. All stay exactly as they are today.**
+
+| concern | how it works today | after this design |
+|---|---|---|
+| **skill creation** | `skill_install` tool, one `content` string, 64 KiB cap (`commands.rs::parse_skill_install_command`) | **unchanged.** Still the path for prose skills. The extension adds `skill_write_file` alongside it for bundle files; `skill_install`'s parser is not touched. |
+| **skill discovery** | `SkillBundleSource` trait — `list_skill_bundles` + `read_bundle_file`. Storage-agnostic; several non-filesystem impls in tree (`StaticSkillBundleSource`). Descriptors carry `skill_md_path`, `trust`, `visibility`, `provenance`, `description`. | **unchanged.** No new impl, no new trait method, no descriptor change. `skill_list_files` lives in the extension precisely so discovery does not have to change. |
+| **indexing** | There is no session-start index. Selection runs **per request** (`select_activation_plan` / `activate_skills_for_run` take the current message). The only cache is a 5-minute in-memory TTL on catalog *search* results (`catalog.rs`). | **unchanged.** Nothing is pre-indexed today, so there is nothing to migrate. |
+| **selection predicate** | `score_skill` over `activation.keywords`/`tags`/`patterns`, kept `if score > 0` | the one change, and it is opt-in: `always_available` (this PR). Needed because 0/30 agent-authored skills carry an `activation` block. |
+
+The only filesystem interaction added anywhere is **runtime read** of a bundle file
+through `read_bundle_file` (which already exists), plus copying a single script into
+`/workspace` when the agent needs to execute it. Creation stays tool-based, discovery
+stays trait-based, indexing stays absent.
