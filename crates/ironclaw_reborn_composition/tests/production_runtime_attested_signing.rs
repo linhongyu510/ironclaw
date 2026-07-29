@@ -17,11 +17,17 @@
 //!    `first_party_tools/request_signature.rs` — whose own doc comment says it
 //!    is "only reachable when no [`AttestedRaiseHook`] is" set.
 //!
-//! Net effect: no gate could be raised, and no gate could be resolved. The
+//! Net effect: no gate could be resolved, and no gate could be raised. The
 //! behaviour of each piece was covered (see `attested_request_signature_raise`
 //! and the driver's own suites); what was missing was that anything ever built
 //! them. This test asserts the composition, which is the only thing those
 //! suites cannot see.
+//!
+//! Cases (1) and (2) pin that composition. Case (3) pins something different
+//! and is the more important of the two: `request_signature` must not reach the
+//! raise hook without passing the kernel authorization fold. Raising is
+//! currently unavailable-by-design pending the authorized-dispatch rework — see
+//! the case comment and `DefaultHostRuntime::invoke_capability`.
 //!
 //! Lives in its own integration-test binary (mirroring
 //! `production_runtime_identity.rs`) so the CPU-heavy production build does not
@@ -147,17 +153,26 @@ async fn production_runtime_composes_the_attested_signing_graph() {
          are present"
     );
 
-    // (3) THE RAISE HOOK, asserted through the capability path the agent loop
-    // actually takes rather than through an accessor.
+    // (3) AN UNGRANTED CALLER IS REFUSED BY THE AUTHORIZATION FOLD.
     //
-    // `DefaultHostRuntime` intercepts `request_signature` and routes it to the
-    // hook BEFORE the kernel authorization fold; with no hook the invocation
-    // falls through into that fold instead. Deliberately malformed input
-    // separates the two without needing a provisioned chain key: only the hook
-    // can produce `InputEncode`. Verified by mutation — dropping
-    // `with_attested_raise_hook` in the factory fails this assertion with
-    // `Authorization` (the fold rejecting the empty grant set, having never
-    // reached the fail-closed first-party handler behind it).
+    // This is the regression guard for a HIGH-severity bypass. `invoke_capability`
+    // used to intercept `request_signature` and route it straight to the raise
+    // hook BEFORE `invoke_json` ran the kernel's `authorize()` fold — so trust
+    // classification, capability grants, runtime policy, credential pre-flight,
+    // persistent approval, and the sealed `Authorized` witness were all skipped.
+    // This exact call, with an EMPTY grant set, reached the hook and could mint
+    // a human-facing approval prompt for an attacker-chosen transaction.
+    //
+    // The context below carries `CapabilitySet { grants: vec![] }`, so the fold
+    // must refuse. `Authorization` here means the fold ran; `InputEncode` would
+    // mean the raise hook was reached and parsed the body, i.e. the bypass is
+    // back. Nothing downstream is asserted because nothing downstream should
+    // happen: no gate raised, no grant sealed, no intent minted.
+    //
+    // Raising is therefore currently *unavailable* rather than *unauthorized*.
+    // Restoring it means dispatching the hook from behind the fold (as an
+    // authorized dispatch result), at which point this assertion should become
+    // "an ungranted caller is refused AND a granted one reaches the hook".
     let host_runtime = runtime
         .host_runtime_for_test()
         .expect("production runtime exposes its host runtime");
@@ -175,13 +190,15 @@ async fn production_runtime_composes_the_attested_signing_graph() {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(
             failure.kind,
-            FailureKind::InputEncode,
-            "malformed input must be rejected BY THE RAISE HOOK; \
-             `UnsupportedRunner` here means no hook is wired and every \
-             `request_signature` refuses, making the attested path unreachable \
-             from the agent loop"
+            FailureKind::Authorization,
+            "a caller with no capability grants must be refused by the kernel \
+             authorization fold; `InputEncode` here means the raise hook was \
+             reached without authorization — the bypass has returned"
         ),
-        other => panic!("expected the raise hook to reject malformed input, got {other:?}"),
+        other => panic!(
+            "an ungranted `request_signature` must be refused, got {other:?} — \
+             anything else means the authorization fold did not run"
+        ),
     }
 
     runtime.shutdown().await.expect("runtime shutdown");
