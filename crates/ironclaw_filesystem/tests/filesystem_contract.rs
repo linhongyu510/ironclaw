@@ -916,6 +916,33 @@ async fn local_backend_resolves_parent_relative_symlink_pnpm_layout() {
              must resolve, not be rejected as an escape",
         );
     assert_eq!(bytes, b"module.exports = {}");
+
+    // PR #6817 review follow-up (discussion_r3669792305 / r3670294887): the
+    // write side goes through a different resolver (`descend_creating` ->
+    // `resolve_write_leaf`, not `resolve_walk`) than the read assertion
+    // above, so it needs its own coverage rather than inheriting the read
+    // path's pass — `descend_creating` used to discard the ancestor stack it
+    // built, which made this identical parent-relative symlink fail closed
+    // as `SymlinkEscape` on write even though the read resolved it fine
+    // (fixed in 234c1c82e: `descend_creating` now returns its ancestor stack
+    // and `write_file_with_cas` threads it into `resolve_write_leaf`).
+    scoped
+        .write_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/node_modules/@types/react/index.js").unwrap(),
+            b"module.exports = { updated: true }",
+        )
+        .await
+        .expect(
+            "writing through the same in-bounds parent-relative symlink must succeed, not be \
+             rejected as an escape",
+        );
+    assert_eq!(
+        std::fs::read(pnpm_real_dir.join("index.js")).unwrap(),
+        b"module.exports = { updated: true }",
+        "the write must land at the symlink's real target, not create a shadow file at the \
+         symlink's own path"
+    );
 }
 
 /// An absolute symlink target is rejected outright (`Escape`), unconditionally
