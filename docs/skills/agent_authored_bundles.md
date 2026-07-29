@@ -164,3 +164,32 @@ The only filesystem interaction added anywhere is **runtime read** of a bundle f
 through `read_bundle_file` (which already exists), plus copying a single script into
 `/workspace` when the agent needs to execute it. Creation stays tool-based, discovery
 stays trait-based, indexing stays absent.
+
+## Capability is not behaviour: eliciting multi-file skills
+
+`skill_write_file` makes multi-file authoring possible. It does not make it happen. Two
+measured reasons to design for this explicitly:
+
+- **Reborn does not reliably invoke skill tooling even under direct instruction.** On the
+  31-task subset, **6 tasks finished with zero `skill_install` calls** despite the
+  authoring turn stating "Saving the skill is required" (`dependency_audit` twice). Adding
+  a second skill tool does not fix compliance; if anything it adds a way to half-finish.
+- **Nothing currently asks for code.** The authoring request asks for method, conventions,
+  output contract and verification — all prose. An agent following it writes prose even
+  with a write tool available.
+
+So the authoring instruction has to change alongside the tool. It should ask the agent to
+extract into files whatever prose cannot carry:
+
+- a **script** for any computation the skill describes step-by-step and that a future run
+  would otherwise re-derive (the measured failure mode: `lake_warming`'s self-authored
+  skill described a regression procedure in prose and the next run recomputed it slightly
+  differently, missing the grader's threshold);
+- a **reference file** for lookup data — conversion factors, category spellings, schema
+  fragments — rather than restating values inline where they can drift;
+- `SKILL.md` then names those files, since `SkillBundleDescriptor` cannot advertise them.
+
+Success criterion for the arm: agent-authored bundles should stop being 100% prose.
+Today **0 of 27** self-created skills ship any resource file, against **18 of 31** curated
+ones. If that ratio does not move after the tool ships, the bottleneck was elicitation,
+not capability, and the tool alone will not improve scores.
