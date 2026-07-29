@@ -175,8 +175,23 @@ working the day someone loosens the CSP for an unrelated reason.
 
 Repointed all four. `cal` goes to a same-origin backend proxy — our SPA has a
 zero-remote-origins CSP, so the browser cannot reach Ledger's CAL directly and
-the backend fetches descriptors on its behalf (against a compile-time host
-allowlist, over HTTPS only). The other three point at an inert same-origin path.
+the backend fetches descriptors on its behalf, over HTTPS only. The other three
+point at an inert same-origin path.
+
+The allowlist has exactly one entry, and it is your own default:
+
+```
+global.api.prd.ledger.com
+```
+
+It is a compile-time constant, not configuration. An operator selects *which*
+allowed upstream to use; they cannot add one via the environment. The reasoning
+is that a descriptor decides what the device shows a human who is about to sign,
+so an attacker who could repoint this would not need to touch the transaction at
+all — only to change what the device says it is. **If descriptors should be
+fetched from a different host (per-region, staging, or a CDN edge), tell us and
+we will add it to the allowlist** — we would rather extend a constant than make
+the host a free-text setting.
 
 ---
 
