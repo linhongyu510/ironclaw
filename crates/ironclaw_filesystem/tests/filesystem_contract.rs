@@ -956,6 +956,26 @@ async fn local_backend_denies_absolute_symlink_even_when_bytes_would_land_in_mou
         matches!(err, FilesystemError::SymlinkEscape { .. }),
         "expected SymlinkEscape, got: {err:?}"
     );
+    // PR #6817 review follow-up: this rejection must be *actionable*, not
+    // just correct — a `local-dev-yolo` user hitting this on a real pyenv/
+    // chezmoi/cloud-sync symlink under their mounted home directory needs
+    // to know which symlink and what target caused it, and that absolute
+    // targets specifically (not symlinks in general) are unsupported, so
+    // they can fix it (replace with a relative link) instead of guessing.
+    let message = err.to_string();
+    assert!(
+        message.contains("absolute-alias.txt"),
+        "error message must name the offending symlink, got: {message:?}"
+    );
+    assert!(
+        message.contains("real.txt"),
+        "error message must show the symlink's absolute target, got: {message:?}"
+    );
+    assert!(
+        message.contains("absolute") && message.contains("not supported"),
+        "error message must state that absolute symlink targets are unsupported, \
+         got: {message:?}"
+    );
 }
 
 /// A symlink chain within the depth cap (`MAX_SYMLINK_DEPTH = 32`) still
@@ -1211,6 +1231,47 @@ async fn local_backend_delete_of_tree_exceeding_max_depth_fails_cleanly() {
     assert!(
         matches!(err, FilesystemError::Backend { .. }),
         "expected a clean Backend error for a too-deep tree, got: {err:?}"
+    );
+}
+
+/// PR #6817 review follow-up ("unbounded ancestor-fd retention"):
+/// `resolve_walk`/`descend_creating` hold one open ancestor directory fd per
+/// path component *simultaneously* for the duration of a single resolution,
+/// and (before this fix) `VirtualPath`/`MountTarget.components` had no cap
+/// on component count at all — every component is caller-supplied, so a
+/// pathologically deep single virtual path could force this backend to hold
+/// an attacker-chosen number of open fds for one request, a process-wide
+/// (`RLIMIT_NOFILE`) exhaustion vector, not one scoped to the offending
+/// request. This pins that a virtual path past
+/// `mount_registry::MAX_PATH_COMPONENTS` fails closed with a dedicated,
+/// diagnosable error *before* any fd work happens — never by silently
+/// widening to a shorter prefix or truncating the walk (see the
+/// constant's doc comment for why a fallback shape is exactly the wrong
+/// move here, per the PR's own earlier LRU-fallback cross-tenant escape).
+#[tokio::test]
+async fn local_backend_rejects_path_components_past_the_ancestor_fd_cap() {
+    let storage = tempdir().unwrap();
+    let root = local_root_with_projects_mount(storage.path());
+
+    // Comfortably past MAX_PATH_COMPONENTS (2048) — and, crucially, past
+    // every legitimately-deep tree this suite itself builds elsewhere (the
+    // deepest, `local_backend_delete_of_tree_exceeding_max_depth_fails_cleanly`,
+    // goes to 600 components) — so this is unambiguously the pathological
+    // case the cap exists for, not a false positive on a real deep layout.
+    let too_deep = deep_virtual_dir(3000);
+
+    let err = root.create_dir_all(&too_deep).await.unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::PathTooDeep { .. }),
+        "expected PathTooDeep for a path far past the component cap, got: {err:?}"
+    );
+
+    // Fails closed, not merely "differently": nothing must have been
+    // created on disk by the rejected walk.
+    assert!(
+        !storage.path().join("project1/d0").exists(),
+        "a PathTooDeep rejection must not partially create the tree"
     );
 }
 

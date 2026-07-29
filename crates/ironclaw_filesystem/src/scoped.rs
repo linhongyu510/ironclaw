@@ -155,6 +155,7 @@ fn filesystem_error_kind(error: &FilesystemError) -> &'static str {
         FilesystemError::MountNotFound { .. } => "mount_not_found",
         FilesystemError::NotFound { .. } => "not_found",
         FilesystemError::PathOutsideMount { .. } => "path_outside_mount",
+        FilesystemError::PathTooDeep { .. } => "path_too_deep",
         FilesystemError::SymlinkEscape { .. } => "symlink_escape",
         FilesystemError::MountConflict { .. } => "mount_conflict",
         FilesystemError::Backend { .. } => "backend",

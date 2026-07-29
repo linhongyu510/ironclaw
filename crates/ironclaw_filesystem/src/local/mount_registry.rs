@@ -67,6 +67,49 @@ use crate::{FilesystemError, FilesystemOperation, path_prefix_matches};
 /// [`DiskFilesystem::ensure_scoped_mount_dynamic`].
 const MAX_DYNAMIC_MOUNTS: usize = 512;
 
+/// Upper bound on how many path components a single [`VirtualPath`] tail may
+/// resolve into beneath a mount (PR #6817 review follow-up — "unbounded
+/// ancestor-fd retention").
+///
+/// `resolve_walk`/`descend_creating` (`local/fd_resolve.rs`) hold one open
+/// ancestor directory fd per path component *simultaneously* for the
+/// duration of a single resolution — they need every one of them live at
+/// once so a `..` inside a followed symlink can answer by popping an
+/// already-open fd rather than a live, racy `openat(fd, "..")` lookup (see
+/// `fd_resolve.rs`'s module doc). Unlike [`MAX_DYNAMIC_MOUNTS`] (which bounds
+/// a *cache* with an LRU-eviction release valve), there was no cap at all on
+/// a single request's own component count: every component of `path` is
+/// caller-supplied (a `VirtualPath` has no length or depth limit of its
+/// own — see `ironclaw_host_api::path`), so an attacker could send one
+/// pathologically deep path and force this backend to hold thousands of
+/// open fds for the lifetime of that one resolution — exhaustion that is
+/// process-wide (`RLIMIT_NOFILE`), not scoped to the offending request.
+///
+/// **Fails closed, never wide.** This check runs in
+/// [`resolve_mount_route`](DiskFilesystem::resolve_mount_route) *before* any
+/// fd is opened — the earliest possible point, before `MountTarget` is even
+/// constructed — and rejects with [`FilesystemError::PathTooDeep`] outright.
+/// There is deliberately no fallback path (no "widen to a shorter prefix",
+/// no "truncate and continue"): the PR history already has one proven
+/// cross-tenant escape from a bound that silently fell back to a wider
+/// scope on eviction (the now-removed LRU-fallback shape a different
+/// structure in this crate used before PR #6817) — this cap does the
+/// opposite by construction: exceeding it is always a hard `Err`, never a
+/// change in which (narrower or wider) boundary a request resolves against.
+///
+/// 2048 is chosen well above both any real virtual-path shape this crate's
+/// own callers ever construct (`/projects/tenants/<t>/users/<u>/skills/...`
+/// tops out at a double-digit component count even for a deeply nested
+/// project) *and* the deepest deliberately-deep tree this crate's own test
+/// suite builds via `create_dir_all`/`delete`
+/// (`local_backend_delete_of_tree_exceeding_max_depth_fails_cleanly` goes to
+/// 600+2 components, one past `MAX_REMOVE_DIR_DEPTH`, to pin the *separate*
+/// recursive-delete stack-depth cap) — so this cap only ever fires on a
+/// component count no legitimate caller or existing regression test
+/// approaches, while still bounding a single resolution's simultaneous fd
+/// cost to a small, fixed number rather than an attacker-chosen one.
+pub(super) const MAX_PATH_COMPONENTS: usize = 2048;
+
 /// Process-wide logical clock for dynamic-mount LRU recency. A simple
 /// monotonically increasing counter (not wall-clock time) is enough: only
 /// the *relative order* of touches across entries in one `DiskFilesystem`'s
@@ -355,6 +398,17 @@ impl DiskFilesystem {
             }
             if segment == "." {
                 continue;
+            }
+            // Bound the per-resolution ancestor-fd budget before any fd is
+            // opened (`MAX_PATH_COMPONENTS` — PR #6817 review follow-up).
+            // Fails closed with a dedicated error, never widens or
+            // truncates: see the constant's doc comment for why a fallback
+            // shape is exactly what this must not do.
+            if components.len() >= MAX_PATH_COMPONENTS {
+                return Err(FilesystemError::PathTooDeep {
+                    path: path.clone(),
+                    max_components: MAX_PATH_COMPONENTS,
+                });
             }
             components.push(OsString::from(segment));
         }

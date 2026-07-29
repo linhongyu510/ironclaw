@@ -137,8 +137,25 @@ impl SymlinkBudget {
 /// The outcome of a failed fd-relative resolution step: either a genuine I/O
 /// error (propagated as-is), or a symlink/`..`-past-root escape attempt (or
 /// a symlink chain deep enough to be indistinguishable from a cycle).
+///
+/// `AbsoluteSymlinkTarget` (PR #6817 review follow-up) is a distinct variant
+/// from the bare `Escape` every other rejection in this module reports —
+/// not a different *outcome* (both still fail the resolution closed,
+/// unconditionally; see [`walk_symlink_target`]'s doc comment for why an
+/// absolute target is always rejected, never reinterpreted against the
+/// root), only a richer one: at the one call site that produces it, this
+/// module already knows exactly which symlink and exactly what target text
+/// caused the rejection, and that is enough to turn an opaque "symlink
+/// escapes backend mount" into something a user can actually act on
+/// (replace the symlink with a relative one) — see
+/// `resolve_error_to_filesystem_error` and
+/// `FilesystemError::SymlinkEscape`'s `detail` field.
 pub(super) enum ResolveError {
     Escape,
+    AbsoluteSymlinkTarget {
+        symlink_name: OsString,
+        target: OsString,
+    },
     Io(std::io::Error),
 }
 
@@ -148,7 +165,22 @@ pub(super) fn resolve_error_to_filesystem_error(
     error: ResolveError,
 ) -> FilesystemError {
     match error {
-        ResolveError::Escape => FilesystemError::SymlinkEscape { path: path.clone() },
+        ResolveError::Escape => FilesystemError::SymlinkEscape {
+            path: path.clone(),
+            detail: None,
+        },
+        ResolveError::AbsoluteSymlinkTarget {
+            symlink_name,
+            target,
+        } => FilesystemError::SymlinkEscape {
+            path: path.clone(),
+            detail: Some(format!(
+                "symlink {symlink_name:?} has an absolute target {target:?}; absolute \
+                 symlink targets are not supported by this filesystem backend, even when \
+                 the target would resolve inside the mount — replace it with a relative \
+                 symlink target"
+            )),
+        },
         ResolveError::Io(io_err) => super::io_error(path.clone(), operation, io_err),
     }
 }
@@ -388,7 +420,7 @@ fn follow_symlink_component(
     budget.consume()?;
     let target = rustix::fs::readlinkat(dir, name, Vec::new()).map_err(io_err)?;
     let (new_ancestors, anchor, last) =
-        walk_symlink_target(root, ancestors, dir, target.as_bytes(), budget)?;
+        walk_symlink_target(root, ancestors, dir, name, target.as_bytes(), budget)?;
     match last {
         Some(final_name) => open_one_inner(
             root,
@@ -464,11 +496,20 @@ fn walk_symlink_target(
     root: BorrowedFd<'_>,
     ancestors: &[OwnedFd],
     dir: BorrowedFd<'_>,
+    symlink_name: &OsStr,
     target: &[u8],
     budget: &SymlinkBudget,
 ) -> Result<(Vec<OwnedFd>, OwnedFd, Option<OsString>), ResolveError> {
     if target.starts_with(b"/") {
-        return Err(ResolveError::Escape);
+        // PR #6817 review follow-up: report exactly which symlink and
+        // exactly what (attacker/user-supplied, already-on-disk-in-their-
+        // own-mount) target text caused the rejection, instead of the bare
+        // `Escape` every other rejection in this module reports — see
+        // `ResolveError::AbsoluteSymlinkTarget`'s doc comment.
+        return Err(ResolveError::AbsoluteSymlinkTarget {
+            symlink_name: symlink_name.to_os_string(),
+            target: OsStr::from_bytes(target).to_os_string(),
+        });
     }
     let mut stack: Vec<OwnedFd> = Vec::with_capacity(ancestors.len());
     for ancestor in ancestors {
@@ -727,6 +768,7 @@ pub(super) fn resolve_write_leaf(
             root,
             &cur_ancestors,
             cur_parent.as_fd(),
+            &cur_leaf,
             target.as_bytes(),
             &budget,
         )?;
@@ -846,6 +888,13 @@ fn remove_dir_contents(
 fn resolve_error_to_io(error: ResolveError) -> std::io::Error {
     match error {
         ResolveError::Escape => std::io::Error::other("symlink escape"),
+        ResolveError::AbsoluteSymlinkTarget {
+            symlink_name,
+            target,
+        } => std::io::Error::other(format!(
+            "symlink {symlink_name:?} has an absolute target {target:?}, which is not \
+             supported"
+        )),
         ResolveError::Io(io_err) => io_err,
     }
 }
