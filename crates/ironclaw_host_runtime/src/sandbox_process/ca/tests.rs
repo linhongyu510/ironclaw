@@ -328,6 +328,32 @@ fn leading_hyphen_label_is_rejected() {
     assert_eq!(ca.cached_entry_count(), 0);
 }
 
+/// `validate_dns_host`'s `DnsName::try_from_str(host).map_err(|_| ...)`
+/// must not discard the parsed bound error: per this repo's error-handling
+/// rule (`.claude/rules/error-handling.md`, "A `map_err(|_| …)` … is not
+/// `silent-ok`-exemptible"), a sanitized `RuntimeProcessError` may hide
+/// details from the client, but the server-side chain must retain/log the
+/// source. This gates certificate minting, so a discarded parse failure is
+/// exactly the kind of path that needs to stay debuggable.
+#[test]
+#[tracing_test::traced_test]
+fn dns_parse_failure_is_logged_before_being_sanitized() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    // A leading-hyphen label: `rcgen` itself accepts it, so this must fail
+    // via `validate_dns_host`'s `DnsName::try_from_str` delegation — the
+    // exact path whose error `map_err(|_| ...)` currently discards.
+    let error = ca.issue_leaf_for_host("-leading-hyphen.example.com");
+
+    assert!(error.is_err(), "a leading-hyphen label must be rejected");
+    assert!(
+        logs_contain("leading-hyphen") || logs_contain("DnsName") || logs_contain("dns"),
+        "the original DnsName parse error must be logged (debug!) before \
+         validate_dns_host returns its sanitized ExecutionFailed message, so \
+         the cause is not silently discarded"
+    );
+}
+
 #[test]
 fn oversized_dns_label_is_rejected() {
     let ca = SandboxCertificateAuthority::generate().unwrap();

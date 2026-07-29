@@ -488,7 +488,14 @@ fn validate_dns_host(host: &str) -> Result<(), RuntimeProcessError> {
             "sandbox CA: wildcard hosts are not permitted".to_string(),
         ));
     }
-    DnsName::try_from_str(host).map_err(|_| {
+    DnsName::try_from_str(host).map_err(|error| {
+        // The public error is intentionally sanitized (no attacker-influenced
+        // host content echoed back), but the parse cause must not simply
+        // vanish — `RuntimeProcessError::ExecutionFailed` here gates
+        // certificate minting, so a discarded cause would make a real
+        // validator regression undebuggable. See
+        // `.claude/rules/error-handling.md`'s `map_err(|_| ...)` rule.
+        tracing::debug!("sandbox CA: host failed DnsName parse: {error}");
         RuntimeProcessError::ExecutionFailed(
             "sandbox CA: host is not a syntactically valid DNS name".to_string(),
         )
