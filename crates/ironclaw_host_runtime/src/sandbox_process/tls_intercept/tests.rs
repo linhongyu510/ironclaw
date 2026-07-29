@@ -228,6 +228,73 @@ async fn unbound_host_is_not_bound_and_mints_no_leaf() {
     );
 }
 
+/// D1's proof-of-binding must be scoped to the config that actually minted
+/// it, not just to "some config allowed this host." Before this test,
+/// `BoundHost` carried only a `String` while `terminate_and_forward` took an
+/// independent `&TlsInterceptConfig` — so a host bound via config A's
+/// allowlist could be passed alongside config B, and `terminate_and_forward`
+/// would mint/dial using B's CA and `origin_connector` even though B never
+/// authorized this host. Two configs, each independently binding the exact
+/// same host string, prove the type itself (not merely "the host isn't in
+/// B's allowlist") is what must reject the mismatch — B's allowlist DOES
+/// contain the host, so an allowlist-only check would wrongly let this
+/// through.
+#[tokio::test]
+async fn bound_host_from_one_config_is_rejected_by_a_different_config() {
+    let host = "bound.example.com";
+
+    let config_a = TlsInterceptConfig::new(
+        SandboxCertificateAuthority::generate().unwrap(),
+        HashSet::from([host.to_string()]),
+        connector_trusting_nothing(),
+    );
+    let config_b = TlsInterceptConfig::new(
+        SandboxCertificateAuthority::generate().unwrap(),
+        HashSet::from([host.to_string()]),
+        connector_trusting_nothing(),
+    );
+
+    let bound_via_a = config_a.bind(host).expect("host is bound in config_a too");
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let unreachable_origin_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        // The bug this test pins: passing a BoundHost minted by config_a
+        // alongside config_b, a DIFFERENT config instance.
+        let result = terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_via_a,
+            unreachable_origin_addr,
+            &config_b,
+        )
+        .await;
+        (result, config_b.cached_leaf_count())
+    });
+
+    let _raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+
+    let (result, config_b_cached_leaf_count) =
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task did not panic");
+    assert!(
+        matches!(result, Err(TlsInterceptError::ConfigMismatch { .. })),
+        "a BoundHost minted from config_a must be rejected (not silently \
+         accepted) when passed to termination alongside a different config_b, \
+         got: {result:?}"
+    );
+    assert_eq!(
+        config_b_cached_leaf_count, 0,
+        "config_b's CA must never mint a leaf for a BoundHost it did not itself \
+         authorize, even though config_b's own allowlist happens to also \
+         contain this host"
+    );
+}
+
 /// [`TlsInterceptConfig::bind`] must apply the same [`normalize_host`]
 /// canonicalization [`TlsInterceptConfig::is_bound`] does — otherwise the
 /// allowlist check and the value actually threaded through cert minting and

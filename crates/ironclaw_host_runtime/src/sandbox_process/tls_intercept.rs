@@ -49,7 +49,10 @@ use std::{
     io,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Once},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -105,6 +108,12 @@ pub(crate) enum TlsInterceptError {
     RelayFailed(String),
     #[error("sandbox tls intercept: failed to load system trust roots: {0}")]
     TrustRootsUnavailable(String),
+    #[error(
+        "sandbox tls intercept: BoundHost for {host:?} was minted by a different \
+         TlsInterceptConfig instance than the one passed to termination; refusing \
+         to mint a leaf or dial the origin"
+    )]
+    ConfigMismatch { host: String },
 }
 
 /// A [`TlsConnector`] whose trust store is guaranteed to be the real
@@ -232,11 +241,39 @@ impl VerifiedOriginConnector {
 /// `RootCertStore::empty()`) from non-test code under
 /// `sandbox_process/`, so a caller can no longer route around this type and
 /// hand-roll a permissive connector either.
+/// Process-wide counter minting a fresh [`ConfigIdentity`] for every
+/// [`TlsInterceptConfig`] constructed. `Relaxed` ordering is sufficient — the
+/// only property this counter needs is "every call returns a different
+/// value than every other call within this process," not any ordering
+/// relative to other memory, and identity comparison
+/// ([`terminate_and_forward_core`]'s D1 check) only ever compares two
+/// already-materialized `ConfigIdentity` values for equality.
+static NEXT_CONFIG_IDENTITY: AtomicU64 = AtomicU64::new(0);
+
+/// A [`TlsInterceptConfig`] instance's identity, minted once at
+/// construction ([`TlsInterceptConfig::new`]) and never mutated. Exists
+/// solely so a [`BoundHost`] can prove not just "some config allowed this
+/// host" but "*this specific config instance* allowed this host" — see
+/// `BoundHost`'s doc and [`terminate_and_forward_core`]'s D1 check for why
+/// binding the proof to a bare host `String` alone was insufficient: two
+/// configs can independently allowlist the identical host string, and a
+/// `BoundHost` minted from one must still be rejected if passed to
+/// termination alongside the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfigIdentity(u64);
+
+impl ConfigIdentity {
+    fn mint() -> Self {
+        Self(NEXT_CONFIG_IDENTITY.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
     origin_connector: VerifiedOriginConnector,
+    identity: ConfigIdentity,
 }
 
 impl TlsInterceptConfig {
@@ -253,6 +290,7 @@ impl TlsInterceptConfig {
                 .map(|host| normalize_host(&host))
                 .collect(),
             origin_connector,
+            identity: ConfigIdentity::mint(),
         }
     }
 
@@ -297,10 +335,20 @@ impl TlsInterceptConfig {
     /// use, so the allowlist check baked into the returned [`BoundHost`] and
     /// the value actually threaded through cert minting and SNI can never
     /// disagree about which host is meant.
+    ///
+    /// The returned [`BoundHost`] also carries `self`'s [`ConfigIdentity`] —
+    /// D1's proof is scoped to *this specific config instance*, not merely
+    /// "some config allowed this host": [`terminate_and_forward_core`]
+    /// rejects a `BoundHost` whose identity does not match the config it is
+    /// passed alongside, even if that other config's own allowlist happens
+    /// to also contain the same host string.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn bind(&self, host: &str) -> Option<BoundHost> {
         let host = normalize_host(host);
-        self.bound_hosts.contains(&host).then_some(BoundHost(host))
+        self.bound_hosts.contains(&host).then_some(BoundHost {
+            host,
+            config_identity: self.identity,
+        })
     }
 
     /// Test/introspection seam: how many hosts this config's CA currently
@@ -311,6 +359,13 @@ impl TlsInterceptConfig {
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn cached_leaf_count(&self) -> usize {
         self.ca.cached_entry_count()
+    }
+
+    /// This instance's [`ConfigIdentity`], minted once at construction.
+    /// [`terminate_and_forward_core`]'s D1 check compares this against the
+    /// identity carried by the [`BoundHost`] it was passed.
+    fn identity(&self) -> ConfigIdentity {
+        self.identity
     }
 }
 
@@ -333,15 +388,35 @@ impl TlsInterceptConfig {
 /// never produce, `BoundHost` has no test scenario that needs to skip the
 /// allowlist check, so it gets no escape hatch — the mirrored shape is "one
 /// checked constructor, no bypass," not "always add a `#[cfg(test)]` door.")
+///
+/// Also carries the [`ConfigIdentity`] of the [`TlsInterceptConfig`] that
+/// minted it. A bare `String` alone only proves "some config allowed this
+/// host" — two independently-constructed configs can allowlist the exact
+/// same host string, so a `BoundHost` minted from config A could otherwise
+/// be passed to [`terminate_and_forward`] alongside a *different* config B,
+/// which would mint/dial using B's CA and `origin_connector` even though B
+/// never authorized this specific `BoundHost`. `config_identity` closes
+/// that: [`terminate_and_forward_core`] rejects the call
+/// (`TlsInterceptError::ConfigMismatch`, fail-closed, not a panic) unless it
+/// matches the config actually passed in.
 #[allow(dead_code)] // consumed by W6; not wired yet
-pub(crate) struct BoundHost(String);
+pub(crate) struct BoundHost {
+    host: String,
+    config_identity: ConfigIdentity,
+}
 
 impl BoundHost {
     /// Named accessor for the wrapped host, matching this module's other
     /// newtype ([`VerifiedOriginConnector::connector`]) instead of letting
     /// callers reach past the type via `.0`.
     fn as_str(&self) -> &str {
-        &self.0
+        &self.host
+    }
+
+    /// The [`ConfigIdentity`] of the [`TlsInterceptConfig`] that minted this
+    /// `BoundHost` via [`TlsInterceptConfig::bind`].
+    fn config_identity(&self) -> ConfigIdentity {
+        self.config_identity
     }
 }
 
@@ -481,6 +556,19 @@ async fn terminate_and_forward_core<F>(
 where
     F: FnOnce(&str) -> Result<ServerName<'static>, TlsInterceptError>,
 {
+    // D1, scoped to the specific config instance: `host` proves "some
+    // config allowed this host," not "THIS config allowed this host" —
+    // two independently-constructed configs can allowlist the identical
+    // host string. Reject before any side effect (leaf mint, dial) if the
+    // `BoundHost` was minted by a different `TlsInterceptConfig` than the
+    // one passed here. Fail closed with an error, never a panic — see
+    // `BoundHost`'s and `TlsInterceptError::ConfigMismatch`'s docs.
+    if host.config_identity() != config.identity() {
+        return Err(TlsInterceptError::ConfigMismatch {
+            host: host.as_str().to_string(),
+        });
+    }
+
     // `host` arrives already canonicalized — `BoundHost` only exists via
     // `TlsInterceptConfig::bind`, which normalizes through the same
     // `normalize_host` this used to call directly here. Use that SAME
