@@ -13,16 +13,22 @@ use tokio::{
 use x509_parser::prelude::*;
 
 /// Test-only certificate verifier that accepts anything — used by
-/// [`invalid_sni_host_fails_before_the_origin_is_dialed`] purely to let a
-/// real rustls client complete its handshake against a leaf certificate
-/// whose SAN (a padded, untrimmed host) cannot itself be turned into a
-/// `ServerName` to check against; the property under test is the *server*
-/// side's dial-vs-validate ordering, not client-side certificate
-/// verification, so skipping verification here does not weaken the
-/// assertion. `dangerous()`/`with_custom_certificate_verifier` are banned
-/// in production `sandbox_process/` code by
-/// `reborn_tls_verification_escape_hatches.rs`, which exempts standalone
-/// `tests.rs` files precisely for cases like this one.
+/// [`invalid_sni_host_fails_before_the_origin_is_dialed`] because that
+/// test's client deliberately connects with SNI `"localhost"`, which does
+/// NOT match the leaf certificate's SAN (`host`, e.g.
+/// `"sni-host.example.com"`): the server never consults client SNI to
+/// select or validate a certificate at all (see [`build_server_config`]'s
+/// doc — no SNI-keyed resolver; a CONNECT tunnel already pins the intended
+/// host before termination starts), so this mismatch is expected and
+/// orthogonal to what that test actually exercises — the *server* side's
+/// dial-vs-validate ordering (does the forced SNI-conversion failure run,
+/// and fail closed, strictly before `TcpStream::connect(dial_addr)`), not
+/// client-side certificate verification — so skipping verification here
+/// does not weaken that assertion. `dangerous()`/
+/// `with_custom_certificate_verifier` are banned in production
+/// `sandbox_process/` code by `reborn_tls_verification_escape_hatches.rs`,
+/// which exempts standalone `tests.rs` files precisely for cases like this
+/// one.
 #[derive(Debug)]
 struct NoVerify;
 
