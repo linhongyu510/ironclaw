@@ -41,7 +41,7 @@
 //! still safely inside the mount root but the `..` in the target text steps
 //! above `dir` itself. `RESOLVE_BENEATH` rejects that with `EXDEV`
 //! regardless of where `sibling` actually is, because the kernel has no way
-//! to know this process's notion of "the true root" — only `RESOLVE_BENEATH`'s
+//! to know this process's concept of "the true root" — only `RESOLVE_BENEATH`'s
 //! own `dir` argument. This is exactly the shape a real pnpm `node_modules`
 //! layout uses (`node_modules/@types/react ->
 //! ../.pnpm/react@.../node_modules/react`), so silently deferring every
@@ -731,13 +731,22 @@ const MAX_REMOVE_DIR_DEPTH: usize = 512;
 /// Recursively removes `name` (found directly under `parent`) and everything
 /// beneath it, never following a symlink into whatever it points at — a
 /// symlinked child is unlinked as itself, exactly like `std::fs::remove_dir_all`,
-/// never traversed into. `root` anchors the (never actually taken, since
-/// `remove_dir_contents` only ever calls back in here for an
-/// `AT_SYMLINK_NOFOLLOW`-confirmed real directory) symlink-following path
-/// inside `open_one`, kept for signature uniformity with the rest of this
-/// module rather than smuggling in a path-based fallback. Passes an empty
-/// ancestor stack to `open_one` for the same reason: that path is never
-/// actually taken, so there is no `..`-in-a-symlink-target case to answer.
+/// never traversed into.
+///
+/// This does **not** use [`open_one`] (PR #6817 review follow-up): a caller
+/// (`DiskFilesystem::delete`, and this function's own recursion via
+/// `remove_dir_contents`) classifies `name` as a real directory via an
+/// `AT_SYMLINK_NOFOLLOW` `statat` *before* calling in here — but `open_one`
+/// deliberately follows an in-bounds symlink, so a concurrent writer that
+/// swaps `name` for a symlink to another in-bounds directory in the gap
+/// between that classification and this function's own lookup would have
+/// this function recurse into and delete the symlink's *target*, only
+/// failing (safely, but too late) on the trailing `unlinkat(REMOVEDIR)`
+/// below once the target's contents are already gone. Opening with
+/// `O_DIRECTORY | O_NOFOLLOW` directly instead makes the open itself the
+/// (re-)classification: a symlink now fails the open with `ELOOP`/`ENOTDIR`
+/// and is never traversed, closing the gap structurally rather than relying
+/// on the classify-and-open pair being too fast to race in practice.
 pub(super) fn remove_dir_all_fd(
     root: BorrowedFd<'_>,
     parent: BorrowedFd<'_>,
@@ -757,16 +766,13 @@ fn remove_dir_all_fd_bounded(
             "directory tree exceeds maximum removal depth of {MAX_REMOVE_DIR_DEPTH} levels; refusing to delete"
         )));
     }
-    let dir_fd = open_one(
-        root,
-        &[],
+    let dir_fd = rustix::fs::openat(
         parent,
         name,
-        OFlags::DIRECTORY,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-        &SymlinkBudget::new(),
     )
-    .map_err(resolve_error_to_io)?;
+    .map_err(std::io::Error::from)?;
     remove_dir_contents(root, dir_fd.as_fd(), depth + 1)?;
     rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)
 }
@@ -964,4 +970,76 @@ pub(super) fn atomic_write_file(
     parent_file.sync_all().map_err(|error| {
         super::io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use rustix::fd::AsFd;
+    use rustix::fs::{Mode, OFlags, openat};
+    use tempfile::tempdir;
+
+    use super::remove_dir_all_fd;
+
+    /// Deterministic (non-timing-dependent) regression for the recursive
+    /// `delete` symlink race flagged in PR #6817 review: `remove_dir_all_fd`
+    /// is only ever called by a caller that has already classified `name` as
+    /// a real directory via a `SYMLINK_NOFOLLOW` `statat` — but this
+    /// function then re-looks-up `name` itself via `open_one`, which
+    /// deliberately follows in-bounds symlinks. Rather than racing that gap
+    /// against a background thread (tried, and could not reliably win it —
+    /// the classify-then-open window in `DiskFilesystem::delete` is a
+    /// handful of back-to-back syscalls with no intervening work), this
+    /// pins the function's *own* contract directly: called with `name`
+    /// already pointing at a symlink to a sibling directory (modeling "the
+    /// race already landed"), it must never recurse into and delete that
+    /// sibling's contents.
+    #[test]
+    fn remove_dir_all_fd_never_deletes_through_a_symlink_at_the_target_name() {
+        let storage = tempdir().unwrap();
+        let root_path = storage.path();
+
+        let target_dir = root_path.join("target-dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let precious = target_dir.join("precious.txt");
+        std::fs::write(&precious, b"PRECIOUS-CONTENT").unwrap();
+
+        // `victim` is a symlink to `target-dir`, not a real directory —
+        // modeling the post-swap state a caller's earlier
+        // `statat(SYMLINK_NOFOLLOW)` classification can no longer see by
+        // the time this function's own `open_one` call runs.
+        symlink("target-dir", root_path.join("victim")).unwrap();
+
+        let root_fd = openat(
+            rustix::fs::CWD,
+            root_path,
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .unwrap();
+        let parent_fd = openat(
+            &root_fd,
+            ".",
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .unwrap();
+
+        // Whether this returns `Ok` or `Err` is not the contract being
+        // pinned here — either is an acceptable way to refuse recursing
+        // through the symlink. Losing `precious.txt` is not.
+        let _ = remove_dir_all_fd(
+            root_fd.as_fd(),
+            parent_fd.as_fd(),
+            std::ffi::OsStr::new("victim"),
+        );
+
+        assert_eq!(
+            std::fs::read(&precious).unwrap(),
+            b"PRECIOUS-CONTENT",
+            "remove_dir_all_fd must never delete a sibling directory's contents by \
+             following a symlink planted at the name it was asked to remove"
+        );
+    }
 }

@@ -1487,6 +1487,68 @@ mod toctou_escape {
         );
     }
 
+    /// (d2) Recursive `delete` re-looks-up a classified child by name instead
+    /// of treating the classification as the open: `DiskFilesystem::delete`
+    /// (and, identically, `remove_dir_contents`'s own recursion) calls
+    /// `statat(..., SYMLINK_NOFOLLOW)` to decide "is this a directory to
+    /// recurse into", then separately calls `remove_dir_all_fd` ->
+    /// `open_one`, which — now that this module follows in-bounds symlinks
+    /// — happily opens straight through a symlink planted at that name in
+    /// the gap between the two calls. Recursion then empties the symlink's
+    /// *target* directory before the trailing `unlinkat(..., REMOVEDIR)`
+    /// fails closed on what is now a symlink, not a directory: the data is
+    /// already gone by the time that final unlink fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn delete_recursive_never_follows_a_classified_directory_swapped_to_a_symlink() {
+        let storage = tempdir().unwrap();
+        let project = storage.path().join("project1");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // An in-bounds sibling directory holding data that must survive —
+        // the actual thing `remove_dir_contents`'s no-follow-open fix
+        // protects, distinct from `outside_target` in the other cases here
+        // (which model an out-of-mount escape): this is an *in-mount*
+        // symlink target, exactly the shape this module's "follow in-bounds
+        // symlinks" policy makes reachable.
+        let target_dir = project.join("target-dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let precious = target_dir.join("precious.txt");
+        std::fs::write(&precious, b"PRECIOUS-CONTENT").unwrap();
+
+        let victim = project.join("victim");
+        let root = disk_fs(storage.path());
+        let path = VirtualPath::new("/projects/project1/victim").unwrap();
+
+        let escaped = race(
+            &victim,
+            &target_dir,
+            || {
+                let _ = std::fs::remove_dir_all(&victim);
+                let _ = std::fs::remove_file(&victim);
+                std::fs::create_dir_all(&victim).unwrap();
+            },
+            || {
+                let root = &root;
+                let path = &path;
+                let _ = futures_block_on(async { root.delete(path).await });
+                !precious.exists()
+            },
+        );
+
+        assert!(
+            !escaped,
+            "recursive delete must never empty a sibling in-mount directory reached \
+             by following a symlink planted at the classified entry's name after \
+             the SYMLINK_NOFOLLOW statat that classified it as a real directory"
+        );
+        assert_eq!(
+            std::fs::read(&precious).unwrap(),
+            b"PRECIOUS-CONTENT",
+            "target directory's contents must be untouched once the race loop \
+             completes"
+        );
+    }
+
     /// (e) PR #6817 follow-up (Task 2): `walk_symlink_target`'s old defense
     /// against stepping above the mount root captured `fd_identity(cur)` and
     /// compared it to the root's identity *before* calling

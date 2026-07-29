@@ -588,6 +588,37 @@ mod tests {
         );
     }
 
+    /// Same containment gap as `leaf_scoped_mount_rejects_bare_mount_root_request`,
+    /// reached via a `.`-only tail instead of an empty one: `tail.is_empty()`
+    /// is checked *before* `.` segments are stripped out of the tail below,
+    /// so `/tmp/.` produces a non-empty raw tail (`"."`) that sails past the
+    /// bare-root guard and only then normalizes to zero components. Without
+    /// this fix, `anchor_for_target` in `local.rs` treats that as "no leaf"
+    /// and hands back the wide, shared mount root instead of failing closed
+    /// — `list_dir("/tmp/.")` would enumerate every caller's leaf directory
+    /// names under the shared root, exactly the boundary this mount kind
+    /// exists to eliminate.
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_dot_only_bare_mount_root_request() {
+        let storage = tempdir().unwrap();
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .list_dir(&VirtualPath::new("/tmp/.").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::PathOutsideMount { .. }),
+            "expected PathOutsideMount, got: {error:?}"
+        );
+    }
+
     /// The actual escape `leaf_scoped` containment exists to close: two
     /// callers share one `mount_local_per_leaf` `host_root`, each confined to
     /// their own leaf (`leaf-a`, `leaf-b`). A symlink planted inside

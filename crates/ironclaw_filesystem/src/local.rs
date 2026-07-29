@@ -87,10 +87,16 @@ fn anchor_for_target(
     let Some((leaf, rest)) = target.components.split_first() else {
         // `resolve_mount_target` already fails a leaf-scoped mount closed on
         // an empty tail (`PathOutsideMount`) before a `MountTarget` is ever
-        // built, so this arm is unreachable in practice; handled without
-        // `.unwrap()`/`.expect()` regardless, matching the rest of this
-        // module's no-panic discipline.
-        return Ok((dup_owned_fd(target.root_fd.as_fd())?, Vec::new()));
+        // built, and `VirtualPath::new` (the type's sole constructor, used
+        // even by `Deserialize`) strips every `.` segment before any path
+        // reaches this crate, so a `.`-only tail like `/tmp/.` can never
+        // arrive here either — confirmed by
+        // `leaf_scoped_mount_rejects_dot_only_bare_mount_root_request`.
+        // Fail closed anyway rather than widening to the shared root: a
+        // leaf-scoped mount has no safe anchor without a leaf, and this arm
+        // should never depend on an invariant enforced by a different
+        // crate to stay safe.
+        return Err(ResolveError::Escape);
     };
     let leaf_components = std::slice::from_ref(leaf);
     let anchor = if create_if_missing {
