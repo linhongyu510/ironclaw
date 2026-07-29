@@ -69,8 +69,8 @@ pub(crate) fn ironhub_tool_package(
     // The catalog entry names the tool the user asked for; the manifest declares
     // the id it installs as. They are covered by the same signature, so a
     // mismatch is a publishing mistake rather than an attack — but installing
-    // `github` when the user asked for `attio` would shadow an unrelated
-    // extension, so it fails here rather than resolving in the manifest's favour.
+    // under an id the user did not ask for would shadow an unrelated extension,
+    // so it fails here rather than resolving in the manifest's favour.
     let installed_id = package.package.id.as_str();
     if installed_id != entry.name {
         return Err(IronHubCommandError::Catalog {
@@ -276,7 +276,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
     fn a_manifest_id_that_contradicts_the_catalog_is_refused() {
         let error = ironhub_tool_package(
             &entry_named("attio"),
-            published_manifest("github", &api_key_auth("github", "")),
+            published_manifest("other-tool", &api_key_auth("other-tool", "")),
             component(),
             b"{}".to_vec(),
             &[],
@@ -285,7 +285,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
 
         let message = error.to_string();
         assert!(
-            message.contains("attio") && message.contains("github"),
+            message.contains("attio") && message.contains("other-tool"),
             "error should name both ids, got {message}"
         );
     }
