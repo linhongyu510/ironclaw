@@ -67,20 +67,33 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use super::ca::{LeafCertificate, SandboxCertificateAuthority, normalize_host};
 
-/// Installs rustls's default (`ring`) process-level crypto provider exactly
-/// once. rustls 0.23 requires one to be installed before any `ServerConfig`/
-/// `ClientConfig` builder call; a second install attempt from a concurrent
-/// caller (e.g. parallel tests) would return `Err` for the loser, which is
-/// harmless — the provider is already installed by then — so this only
-/// needs to run the *first* call exactly once, not guard every call.
-#[allow(dead_code)] // consumed by W6; not wired yet
-static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
-
-#[allow(dead_code)] // consumed by W6; not wired yet
-fn ensure_crypto_provider_installed() {
-    INSTALL_CRYPTO_PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+/// This module builds every `rustls::ClientConfig`/`ServerConfig` through
+/// `builder_with_provider(ring_crypto_provider())` — never the bare
+/// `ClientConfig::builder()`/`ServerConfig::builder()`, which resolve
+/// against whatever `CryptoProvider` happens to be installed as the
+/// *process-global* default via `CryptoProvider::install_default`.
+///
+/// This module used to install a process-global default (`Once` +
+/// `rustls::crypto::ring::default_provider().install_default()`, ignoring
+/// the `Err` on a losing racer) on the premise that "every call path in
+/// this process installs the same `ring` provider, so a second, ignored
+/// install attempt is harmless." That premise does not hold: this binary
+/// also links `reqwest`/`hyper-rustls` (via `ironclaw_network`), which pulls
+/// in `aws-lc-rs` and can install *that* provider as the process-global
+/// default before this module ever runs — at which point this module's own
+/// install would silently lose the race, and its `ServerConfig`/
+/// `ClientConfig::builder()` calls would resolve against `aws-lc-rs`
+/// instead of `ring`, contrary to what this module's own (now-removed)
+/// comment claimed. Not a security weakening (both providers are valid,
+/// spec-compliant `rustls` backends), but exactly the "hidden
+/// initialization order" hazard flagged in review: which provider ends up
+/// active becomes a function of unrelated call ordering elsewhere in the
+/// process. `builder_with_provider` sidesteps the whole class: no
+/// process-global state is read or written, so this module's TLS configs
+/// are deterministically `ring`-backed regardless of what else runs in the
+/// same binary.
+fn ring_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
 /// Errors from the TLS-termination seam. Every variant is a **fail-closed**
@@ -149,7 +162,6 @@ impl VerifiedOriginConnector {
     /// hand back a connector that verifies against nothing.
     #[allow(dead_code)] // consumed by W6; not wired to a production caller yet
     pub(crate) fn from_system_roots() -> Result<Self, TlsInterceptError> {
-        ensure_crypto_provider_installed();
         let mut root_store = rustls::RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for error in &native.errors {
@@ -184,7 +196,20 @@ impl VerifiedOriginConnector {
                 "system trust store yielded zero usable root certificates".to_string(),
             ));
         }
-        let client_config = rustls::ClientConfig::builder()
+        // `builder_with_provider` (not the bare, process-default-resolving
+        // `builder()`) — see `ring_crypto_provider`'s doc for why this
+        // module never reads or writes process-global crypto-provider
+        // state. `with_safe_default_protocol_versions` mirrors exactly what
+        // `builder()` does internally, just with an explicit provider and a
+        // propagated `Result` instead of an internal `.unwrap()`.
+        let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+            .with_safe_default_protocol_versions()
+            .map_err(|error| {
+                TlsInterceptError::TrustRootsUnavailable(format!(
+                    "failed to pair the ring crypto provider with safe default TLS protocol \
+                     versions: {error}"
+                ))
+            })?
             .with_root_certificates(root_store)
             .with_no_client_auth();
         Ok(Self(TlsConnector::from(Arc::new(client_config))))
@@ -681,7 +706,6 @@ fn build_sni_server_name(host: &str) -> Result<ServerName<'static>, TlsIntercept
 pub(crate) fn build_server_config(
     leaf: &LeafCertificate,
 ) -> Result<rustls::ServerConfig, TlsInterceptError> {
-    ensure_crypto_provider_installed();
     let chain = CertificateDer::pem_slice_iter(leaf.cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
@@ -696,7 +720,16 @@ pub(crate) fn build_server_config(
         TlsInterceptError::ServerConfigFailed(format!("parsing leaf key pem: {error}"))
     })?;
 
-    rustls::ServerConfig::builder()
+    // `builder_with_provider` (not the bare, process-default-resolving
+    // `builder()`) — see `ring_crypto_provider`'s doc.
+    rustls::ServerConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            TlsInterceptError::ServerConfigFailed(format!(
+                "failed to pair the ring crypto provider with safe default TLS protocol \
+                 versions: {error}"
+            ))
+        })?
         .with_no_client_auth()
         .with_single_cert(chain, key)
         .map_err(|error| TlsInterceptError::ServerConfigFailed(error.to_string()))

@@ -70,14 +70,15 @@ impl ServerCertVerifier for NoVerify {
 /// local origin TLS server trusted by the connector under test without
 /// depending on any real certificate authority.
 fn connector_trusting_only(root_pem: &str) -> VerifiedOriginConnector {
-    ensure_crypto_provider_installed();
     let mut roots = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(root_pem.as_bytes()) {
         roots
             .add(cert.expect("valid root cert pem"))
             .expect("root cert adds");
     }
-    let client_config = rustls::ClientConfig::builder()
+    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
@@ -88,8 +89,9 @@ fn connector_trusting_only(root_pem: &str) -> VerifiedOriginConnector {
 /// force the fail-closed path deterministically without relying on
 /// network conditions.
 fn connector_trusting_nothing() -> VerifiedOriginConnector {
-    ensure_crypto_provider_installed();
-    let client_config = rustls::ClientConfig::builder()
+    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
     VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(client_config)))
@@ -418,8 +420,9 @@ async fn bound_host_is_intercepted_with_our_ca_and_relays_bytes() {
     for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
         our_roots.add(cert.unwrap()).unwrap();
     }
-    ensure_crypto_provider_installed();
-    let client_config = rustls::ClientConfig::builder()
+    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
         .with_root_certificates(our_roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
@@ -586,8 +589,9 @@ async fn origin_handshake_failure_never_leaks_plaintext_to_the_origin() {
     for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
         our_roots.add(cert.unwrap()).unwrap();
     }
-    ensure_crypto_provider_installed();
-    let client_config = rustls::ClientConfig::builder()
+    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
         .with_root_certificates(our_roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
@@ -943,8 +947,9 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
     // syntactically and canonically valid host, so the mint and this
     // handshake succeed exactly like the production path would; only the
     // forced SNI-builder closure diverges from production.
-    ensure_crypto_provider_installed();
-    let client_config = rustls::ClientConfig::builder()
+    let client_config = rustls::ClientConfig::builder_with_provider(ring_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider pairs with the default TLS protocol versions")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
