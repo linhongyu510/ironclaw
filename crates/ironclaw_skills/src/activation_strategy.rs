@@ -56,6 +56,22 @@ pub enum ActivationStrategy {
     /// skills are unaffected — their explicit keywords still score first and
     /// still outrank a name/description match.
     NameAndDescription,
+    /// Every installed skill is a **candidate**, regardless of what it matches.
+    ///
+    /// This is the actual Claude Code / Hermes contract, and the reason the two
+    /// score higher with curated skills: in both, a skill is a file in a directory
+    /// the agent can read, so there is no gate to fail. Reborn's `score > 0` filter
+    /// has no counterpart there.
+    ///
+    /// [`Self::NameAndDescription`] only narrows the gap — it still requires a
+    /// lexical hit, so a correctly-seeded skill whose wording misses the prompt is
+    /// still dropped. This removes the gate instead of widening it.
+    ///
+    /// Ordering is unaffected: matched skills keep their real score and still rank
+    /// first, unmatched ones enter at a floor of 1. The existing context budget,
+    /// not the score filter, decides what actually gets injected — which is also
+    /// how Claude Code behaves (it lists every skill and loads bodies on demand).
+    AlwaysAvailable,
     /// No criteria-based activation; explicit mention or `skill_activate` only.
     Disabled,
     /// A third-party strategy extension. Permitted in production only with an
@@ -83,7 +99,19 @@ impl ActivationStrategy {
 
     /// Whether this strategy may fall back to name/description scoring.
     pub fn allows_name_fallback(&self) -> bool {
-        matches!(self, Self::NameAndDescription)
+        matches!(self, Self::NameAndDescription | Self::AlwaysAvailable)
+    }
+
+    /// Minimum score every candidate skill enters with.
+    ///
+    /// 1 for [`Self::AlwaysAvailable`] so an unmatched skill clears the selector's
+    /// `score > 0` filter while still sorting below every genuine match; 0 elsewhere,
+    /// which leaves the filter exactly as it was.
+    pub fn floor_score(&self) -> u32 {
+        match self {
+            Self::AlwaysAvailable => 1,
+            _ => 0,
+        }
     }
 
     /// Whether criteria-based activation runs at all.
@@ -96,6 +124,7 @@ impl ActivationStrategy {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "criteria" | "criteria_only" => Ok(Self::CriteriaOnly),
             "name_and_description" | "name+description" => Ok(Self::NameAndDescription),
+            "always" | "always_available" => Ok(Self::AlwaysAvailable),
             s if s == ACTIVATION_DISABLED_SENTINEL || s == "disabled" => Ok(Self::Disabled),
             other => {
                 if let Some(id) = other.strip_prefix("ext:") {
@@ -119,6 +148,7 @@ impl ActivationStrategy {
         match self {
             Self::CriteriaOnly => "criteria".to_string(),
             Self::NameAndDescription => "name_and_description".to_string(),
+            Self::AlwaysAvailable => "always_available".to_string(),
             Self::Disabled => ACTIVATION_DISABLED_SENTINEL.to_string(),
             Self::ThirdParty { extension_id } => format!("ext:{extension_id}"),
         }

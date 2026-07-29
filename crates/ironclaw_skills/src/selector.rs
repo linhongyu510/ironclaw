@@ -212,7 +212,13 @@ pub fn prefilter_skills_with_options<'a>(
             {
                 return None;
             }
-            let score = score_skill(skill, &message_lower, message, options);
+            // `floor_score()` is 0 for every strategy except `always_available`, where
+            // it is 1 — enough to clear the filter below while still sorting under any
+            // real match. That reproduces Claude Code / Hermes, where a seeded skill is
+            // a readable file with no gate to fail; the context budget further down,
+            // not this filter, decides what is actually injected.
+            let score = score_skill(skill, &message_lower, message, options)
+                .max(options.activation_strategy.floor_score());
             if score > 0 {
                 Some(ScoredSkill { skill, score })
             } else {
@@ -885,6 +891,80 @@ mod tests {
             },
         );
         assert!(out.selected.is_empty(), "must not over-select on an unrelated request");
+    }
+
+    /// `always_available` reproduces the Claude Code / Hermes contract: a seeded skill
+    /// is a readable file, so there is no gate to fail.
+    ///
+    /// This is the case `NameAndDescription` still gets wrong. A correctly-seeded,
+    /// genuinely-applicable skill whose wording happens to miss the prompt's wording
+    /// scores 0 under BOTH criteria-only and the name fallback, and is dropped —
+    /// while Claude Code would have had it available the whole time.
+    #[test]
+    fn always_available_selects_a_seeded_skill_whose_wording_misses_the_prompt() {
+        // Applicable to the task, but shares no vocabulary with how it was phrased.
+        let skill = make_skill("hp-filter-detrending", &[], &[], &[]);
+        let skills = vec![skill];
+        let msg = "separate the cyclical component from the underlying growth path";
+
+        for strategy in [
+            crate::activation_strategy::ActivationStrategy::CriteriaOnly,
+            crate::activation_strategy::ActivationStrategy::NameAndDescription,
+        ] {
+            let out = super::prefilter_skills_with_options(
+                msg,
+                &skills,
+                3,
+                MAX_SKILL_CONTEXT_TOKENS,
+                &HashSet::new(),
+                super::SkillSelectionOptions { activation_strategy: strategy, ..Default::default() },
+            );
+            assert!(
+                out.selected.is_empty(),
+                "{strategy:?} is expected to MISS this skill -- that is the gap being closed"
+            );
+        }
+
+        let always = super::prefilter_skills_with_options(
+            msg,
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                activation_strategy:
+                    crate::activation_strategy::ActivationStrategy::AlwaysAvailable,
+                ..Default::default()
+            },
+        );
+        assert_eq!(always.selected.len(), 1, "no gate: a seeded skill is always a candidate");
+    }
+
+    /// Removing the gate must not reorder anything: a real keyword match still
+    /// outranks a skill riding the floor, so the context budget spends on the
+    /// relevant skill first.
+    #[test]
+    fn always_available_keeps_matched_skills_ranked_above_floor_skills() {
+        let matched = make_skill("pdf-form-filler", &["court form"], &[], &[]);
+        let floor = make_skill("hp-filter-detrending", &[], &[], &[]);
+        let skills = vec![floor, matched];
+        let out = super::prefilter_skills_with_options(
+            "fill in the court form",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                activation_strategy:
+                    crate::activation_strategy::ActivationStrategy::AlwaysAvailable,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.selected.len(), 2, "both are candidates under always_available");
+        assert_eq!(
+            out.selected[0].manifest.name, "pdf-form-filler",
+            "the genuine keyword match must still rank first"
+        );
     }
 
     fn make_skill_with_excludes(
