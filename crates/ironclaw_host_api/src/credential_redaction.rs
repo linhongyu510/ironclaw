@@ -51,23 +51,33 @@ pub(crate) fn contains_credential_marker(lower: &str) -> bool {
 /// boundary and keep matching exactly as before. Canonical copy of
 /// `ironclaw_threads::tool_result_reference::contains_marker_at_word_boundary`
 /// (verified there by `sensitive_markers_match_on_word_boundary_not_substring`).
+/// Boundary rule for ONE candidate match, extracted from
+/// [`contains_marker_at_word_boundary`] so the detector and the redactor cannot
+/// drift. A marker that already carries a non-alphanumeric delimiter on a side
+/// (`bearer `, `authorization:`) does not additionally require an alphanumeric
+/// boundary there — applying the check uniformly made `bearer ` fail to match in
+/// "presented as a Bearer header", so the detector refused text the redactor had
+/// left untouched.
+fn marker_match_at(haystack: &str, marker: &str, start: usize, end: usize) -> bool {
+    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
+    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
+    let before_ok = !starts_alnum
+        || haystack
+            .get(..start)
+            .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
+    let after_ok = !ends_alnum
+        || haystack
+            .get(end..)
+            .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
+    before_ok && after_ok
+}
+
 fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     if marker.is_empty() {
         return false;
     }
-    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
-    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
     for (start, _) in haystack.match_indices(marker) {
-        let end = start + marker.len();
-        let before_ok = !starts_alnum
-            || haystack
-                .get(..start)
-                .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
-        let after_ok = !ends_alnum
-            || haystack
-                .get(end..)
-                .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
-        if before_ok && after_ok {
+        if marker_match_at(haystack, marker, start, start + marker.len()) {
             return true;
         }
     }
@@ -106,7 +116,7 @@ pub(crate) fn redact_credential_text(value: &str) -> String {
             while let Some(found) = lower[from..].find(marker) {
                 let start = from + found;
                 let end = start + marker.len();
-                if marker_at_word_boundary(&lower, start, end) {
+                if marker_match_at(&lower, marker, start, end) {
                     if best.is_none_or(|(best_start, _)| start < best_start) {
                         best = Some((start, end));
                     }
@@ -154,16 +164,6 @@ fn redact_secret_like_tokens(value: &str) -> String {
     }
     flush(&mut out, &mut token);
     out
-}
-
-fn marker_at_word_boundary(lower: &str, start: usize, end: usize) -> bool {
-    let before_ok = lower
-        .get(..start)
-        .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
-    let after_ok = lower
-        .get(end..)
-        .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
-    before_ok && after_ok
 }
 
 /// True when any whitespace/punctuation-delimited token in `lower` (already

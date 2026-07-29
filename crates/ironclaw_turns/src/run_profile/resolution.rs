@@ -1618,6 +1618,19 @@ mod tests {
         // and left the model an unreadable, unpageable reference. Masking keeps
         // the surrounding output visible while the secret still never reaches
         // the model.
+        // The PRODUCTION trigger is credential VOCABULARY, not a secret value:
+        // extension_search / ironhub results carry "Authenticated with an Attio
+        // workspace API key presented as a Bearer header", which refused the whole
+        // payload and left the model an unreadable reference (1088 bytes, no preview).
+        let vocab = refs_preview(
+            "{\"name\": \"attio\", \"description\": \"Authenticated with a workspace API key presented as a Bearer header.\"}",
+        )
+        .expect("credential VOCABULARY must not drop the preview");
+        assert!(
+            vocab.contains("attio"),
+            "the payload must survive vocabulary redaction: {vocab}"
+        );
+
         let masked =
             refs_preview("token sk-ant-abc123def456").expect("preview is masked, not dropped");
         assert!(
