@@ -95,15 +95,23 @@ fn mapped_credentials(
                 (name.to_ascii_lowercase(), None)
             }
             other => {
-                // Fail closed. v3 injection models header, query param, path
-                // placeholder and JSON pointer — not HTTP Basic. Installing
-                // anyway would recreate the exact failure this function fixes:
-                // a successful install that can never authenticate.
+                // Fail closed rather than install a tool that can never
+                // authenticate — that silent-success path is the bug this
+                // function exists to fix.
+                //
+                // Mapped today: "bearer" and "header", the only shapes any
+                // catalog tool publishes. `RuntimeCredentialTarget` also models
+                // QueryParam, PathPlaceholder and BodyJsonPointer; those are
+                // deliberately NOT mapped speculatively because no published
+                // artifact uses them, so the tool-side spelling is unverified —
+                // add each when a real tool declares it. "basic" is genuinely
+                // inexpressible: v3 injection has no HTTP Basic variant (it
+                // would need username + base64(user:secret) composition).
                 return Err(IronHubCommandError::Catalog {
                     reason: format!(
-                        "'{}' declares credential '{handle}' with unsupported location type \
-                         '{other}'; the host cannot inject it, so the tool would install \
-                         without working authentication",
+                        "'{}' declares credential '{handle}' with location type '{other}', \
+                         which the host cannot inject. Supported: 'bearer', 'header'. \
+                         Installing anyway would leave the tool authenticated-less.",
                         entry.name
                     ),
                 });
