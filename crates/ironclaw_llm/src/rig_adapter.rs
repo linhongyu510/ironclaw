@@ -723,11 +723,10 @@ fn normalize_gemini_schema(schema: &mut serde_json::Value) {
         return;
     };
 
-    if !object.contains_key("type") && let Some(inferred_type) = inferred_type {
-        object.insert(
-            "type".to_string(),
-            serde_json::Value::String(inferred_type),
-        );
+    if !object.contains_key("type")
+        && let Some(inferred_type) = inferred_type
+    {
+        object.insert("type".to_string(), serde_json::Value::String(inferred_type));
     }
 
     if let Some(types) = object.get("type").and_then(serde_json::Value::as_array) {
@@ -3044,8 +3043,7 @@ mod tests {
             }),
         }];
 
-        let converted =
-            convert_tools_with_compatibility(&tools, ToolSchemaCompatibility::Gemini);
+        let converted = convert_tools_with_compatibility(&tools, ToolSchemaCompatibility::Gemini);
         let properties = &converted[0].parameters["properties"];
 
         assert_eq!(properties["body"]["type"], "string");
@@ -3057,13 +3055,11 @@ mod tests {
         assert_eq!(properties["timestamp"]["type"], "string");
         assert_eq!(properties["schedule"]["type"], "object");
         assert_eq!(
-            properties["schedule"]["anyOf"][0]["oneOf"][0]["properties"]["kind"]["type"],
-            "string",
+            properties["schedule"]["anyOf"][0]["oneOf"][0]["properties"]["kind"]["type"], "string",
             "the first nested union variant must have concrete nested types"
         );
         assert_eq!(
-            properties["schedule"]["anyOf"][0]["oneOf"][1]["properties"]["kind"]["type"],
-            "string",
+            properties["schedule"]["anyOf"][0]["oneOf"][1]["properties"]["kind"]["type"], "string",
             "the second nested union variant must have concrete nested types"
         );
     }
