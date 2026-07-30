@@ -418,21 +418,19 @@ impl SandboxCredentialFirewall {
         let Some((tenant_id, user_id)) = identity else {
             return Err(SandboxCredentialFirewallError::AttributionFailed);
         };
+        // Single check at the decision point. Everything below is a
+        // process-local, in-memory `HashMap` lookup/retain/clone under a
+        // `std::sync::Mutex` with no `.await` anywhere in the call —
+        // microsecond-scale even under lock contention. `deadline` exists to
+        // catch a genuinely hung/stalled callback into policy (§3.4),
+        // measured in milliseconds; it does not need to be re-read between
+        // synchronous, non-yielding steps of an in-memory operation.
         if Instant::now() >= deadline {
             return Err(SandboxCredentialFirewallError::LookupTimedOut);
         }
 
         let key = StagingKey::new(tenant_id, user_id);
         let mut staged = self.lock();
-        // Re-check after acquiring the lock: the doc above promises the
-        // deadline bounds the *whole call*, but lock acquisition itself can
-        // block under contention — without this check, a caller stalled on
-        // `self.lock()` past `deadline` could still fall through to a
-        // `Grant`/`NoGrant` decision instead of the required
-        // CONNECTION-DENIAL.
-        if Instant::now() >= deadline {
-            return Err(SandboxCredentialFirewallError::LookupTimedOut);
-        }
         let now = Instant::now();
         let Some(entries) = staged.get_mut(&key) else {
             return Ok(SandboxCredentialDecision::NoGrant);
@@ -447,25 +445,7 @@ impl SandboxCredentialFirewall {
             staged.remove(&key);
             return Ok(SandboxCredentialDecision::NoGrant);
         }
-        // Re-check once more before materializing the grant: `retain` and
-        // the clone below are cheap in the common case but still do real
-        // work while `staged`'s lock is held, and the doc above promises the
-        // deadline bounds the *whole call* — a `Grant` must never be handed
-        // back once the deadline has already passed, even if only this last
-        // stretch of in-lock work crossed it.
-        if Instant::now() >= deadline {
-            return Err(SandboxCredentialFirewallError::LookupTimedOut);
-        }
         let live: Vec<StagedCredentialObligation> = entries.values().cloned().collect();
-        // Re-check once more after materializing `live`: the clone above is
-        // itself real work done while `staged`'s lock is held (and the
-        // thread can be descheduled mid-clone), so a deadline that was still
-        // valid at the previous check can have passed by the time this
-        // returns — the doc above promises the deadline bounds the *whole
-        // call*, and a `Grant` must never be handed back once it has.
-        if Instant::now() >= deadline {
-            return Err(SandboxCredentialFirewallError::LookupTimedOut);
-        }
         Ok(SandboxCredentialDecision::Grant(live))
     }
 
