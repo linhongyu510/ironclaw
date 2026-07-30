@@ -1,7 +1,10 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern, sha256_digest_token};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::sha256_digest_token,
+};
 use sha2::{Digest, Sha256};
 
 use super::{

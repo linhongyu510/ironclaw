@@ -7,9 +7,16 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkPolicy, ProductSurfaceCaller, ResourceScope,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, UserId, VirtualPath,
+    action::NetworkPolicy,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, UserId},
+    path::VirtualPath,
+    product_surface::ProductSurfaceCaller,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_product::{IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService};
 use ironclaw_skills::ManagedSkillSource;
@@ -755,7 +762,7 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
         project_id: caller.project_id.clone(),
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     };
     let private_url = "https://hub.ironclaw.com/api/private/manifest?access=caller-test";
     let artifact_url = "https://hub.ironclaw.com/api/private/caller-skill/SKILL.md";

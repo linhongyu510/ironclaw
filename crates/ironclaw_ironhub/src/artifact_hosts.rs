@@ -1,4 +1,4 @@
-use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 
 const IRONHUB_ARTIFACT_HOSTS: &[&str] = &[
     "hub.ironclaw.com",

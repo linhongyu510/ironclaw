@@ -4,9 +4,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RootFilesystem};
 #[cfg(test)]
-use ironclaw_host_api::RuntimeHttpEgress;
+use ironclaw_host_api::http::RuntimeHttpEgress;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ProductSurfaceCaller, ResourceScope, VirtualPath,
+    ids::{CapabilityId, InvocationId},
+    path::VirtualPath,
+    product_surface::ProductSurfaceCaller,
+    resource::ResourceScope,
 };
 use ironclaw_product::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
@@ -55,7 +58,7 @@ pub struct IronhubLinkStateStore {
 pub struct RebornIronhubLinkService {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
-    egress: Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+    egress: Arc<dyn ironclaw_host_api::http::RuntimeHttpEgress>,
     state: Arc<IronhubLinkStateStore>,
     shared_key: IronhubSharedKey,
     install_capability: CapabilityId,
@@ -66,7 +69,7 @@ impl RebornIronhubLinkService {
     pub fn new(
         skill_management: Arc<ScopedSkillManagementPort>,
         extension_management: Arc<ExtensionLifecycleManager>,
-        runtime_http_egress: Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+        runtime_http_egress: Arc<dyn ironclaw_host_api::http::RuntimeHttpEgress>,
         state: Arc<IronhubLinkStateStore>,
         shared_key: IronhubSharedKey,
     ) -> Result<Self, IronhubLinkBuildError> {
@@ -537,9 +540,9 @@ mod tests {
 
     fn caller(user_id: &str) -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(
-            ironclaw_host_api::TenantId::new("tenant").expect("tenant"),
-            ironclaw_host_api::UserId::new(user_id).expect("user"),
-            Some(ironclaw_host_api::AgentId::new("agent").expect("agent")),
+            ironclaw_host_api::ids::TenantId::new("tenant").expect("tenant"),
+            ironclaw_host_api::ids::UserId::new(user_id).expect("user"),
+            Some(ironclaw_host_api::ids::AgentId::new("agent").expect("agent")),
             None,
         )
     }

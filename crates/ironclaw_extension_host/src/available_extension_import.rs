@@ -6,7 +6,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, LifecycleExtensionOnboarding, RuntimeKind, VendorAuthRecipe, VirtualPath,
+    ids::ExtensionId, package_lifecycle::LifecycleExtensionOnboarding, path::VirtualPath,
+    recipe::VendorAuthRecipe, runtime::RuntimeKind,
 };
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 
@@ -375,7 +376,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::ManifestSource;
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::RuntimeKind;
+    use ironclaw_host_api::runtime::RuntimeKind;
 
     use crate::{AvailableExtensionAssetContent, AvailableExtensionCatalog};
 

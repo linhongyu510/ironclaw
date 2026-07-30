@@ -13,7 +13,7 @@ use ironclaw_host_api::ingress::{
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{HostPortId, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, host_port::HostPortId};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::{IronhubLinkError, IronhubLinkService, IronhubRegisterRequest};
 

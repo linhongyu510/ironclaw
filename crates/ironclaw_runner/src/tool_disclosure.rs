@@ -6,7 +6,10 @@ use std::{
     sync::LazyLock,
 };
 
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_turns::run_profile::{
     CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,
@@ -1217,7 +1220,8 @@ mod tests {
             name: ProviderToolName::new("builtin__ironhub_search")
                 .expect("valid provider tool name"),
             description: "Search the verified IronHub catalog.".to_string(),
-            description_trust: ironclaw_host_api::CapabilityDescriptionTrust::VerifiedCatalog,
+            description_trust:
+                ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog,
             parameters: small_no_arg_schema(),
         };
         let catalog = CapabilityCatalog::new(&[definition], &[]);
@@ -1235,7 +1239,7 @@ mod tests {
         assert_eq!(descriptors.len(), 1);
         assert_eq!(
             descriptors[0].description_trust,
-            ironclaw_host_api::CapabilityDescriptionTrust::VerifiedCatalog
+            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog
         );
     }
 
