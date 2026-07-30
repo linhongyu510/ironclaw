@@ -821,13 +821,10 @@ fn build_sandboxed_local_runtime_services_input(
 ) -> anyhow::Result<RebornHostBindings> {
     let sandbox_workspaces_root =
         local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-    // No pre-spawned proxy port to offer: `tenant_sandbox_process_binding`
-    // spawns its own egress-allowlist proxy when neither
-    // `IRONCLAW_SANDBOX_HTTP_PROXY` nor `IRONCLAW_SANDBOX_HTTP_PROXY_PORT` is
-    // set, and hands the resulting handle back on `TenantSandboxBinding`.
+    // `tenant_sandbox_process_binding` always spawns its own egress-allowlist
+    // proxy and hands the resulting handle back on `TenantSandboxBinding`.
     let connect = ironclaw_reborn_composition::tenant_sandbox_process_binding(
         sandbox_workspaces_root.clone(),
-        None,
     );
     let tenant_sandbox =
         block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {

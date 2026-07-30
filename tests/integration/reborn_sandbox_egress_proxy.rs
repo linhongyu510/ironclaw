@@ -5,13 +5,14 @@
 //!
 //! Drives `ironclaw_reborn_composition::tenant_sandbox_process_binding` —
 //! the exact function `build_local_runtime` calls to assemble the
-//! `TenantSandbox` process-port binding for the sandboxed profile — with no
-//! `IRONCLAW_SANDBOX_HTTP_PROXY[_PORT]` env set, so it spawns its own
-//! default `EgressAllowlistProxy` (Phase C Tasks 1-2, already landed) the
-//! same way an unconfigured production deployment would. A shell command
-//! run through the resulting `TenantSandboxProcessPort` then proves the
-//! proxy actually mediates egress: an allowlisted host succeeds, a
-//! non-allowlisted host is blocked with a `403` from the proxy.
+//! `TenantSandbox` process-port binding for the sandboxed profile. The
+//! function always spawns its own default `EgressAllowlistProxy` (Phase C
+//! Tasks 1-2; there is no operator-pointed external-proxy override — see
+//! `sandbox_boot.rs`'s doc for why) the same way every production
+//! deployment does. A shell command run through the resulting
+//! `TenantSandboxProcessPort` then proves the proxy actually mediates
+//! egress: an allowlisted host succeeds, a non-allowlisted host is blocked
+//! with a `403` from the proxy.
 //!
 //! Requires a reachable Docker daemon AND a locally-built sandbox worker
 //! image. Neither is available on a typical dev machine (this worktree has
@@ -44,6 +45,47 @@ fn test_scope() -> ResourceScope {
     }
 }
 
+/// Docker label every `TenantSandbox` user container carries for
+/// `test_scope()`'s fixed tenant id. Mirrors
+/// `reborn_sandbox_shell_turn.rs`'s `ITEST_TENANT_LABEL_FILTER` /
+/// `remove_itest_sandbox_containers`: this test's scope (and therefore its
+/// container's Docker labels) is fixed across runs, but the container's
+/// `/workspace` bind mount source is a fresh `tempfile::tempdir()` created
+/// only for THIS process and removed when it exits. The persistent-container
+/// design (`exec_transport::ensure_container`) reuses any existing container
+/// matching the label filter without checking whether its bind source still
+/// exists on disk, so a container left over from a prior run of this test
+/// binds `/workspace` to an already-deleted host directory — every exec
+/// inside it then fails with `mkdir: cannot create directory
+/// '/workspace/.ironclaw': No such file or directory`. Remove any such
+/// leftover container before building a fresh binding so this test's own
+/// tempdir always backs the container it actually talks to.
+const EGRESS_PROXY_TEST_TENANT_LABEL_FILTER: &str =
+    "label=ironclaw.tenant=sandbox-egress-proxy-tenant";
+
+fn remove_egress_proxy_test_sandbox_containers() {
+    let Ok(list) = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "-q",
+            "--filter",
+            EGRESS_PROXY_TEST_TENANT_LABEL_FILTER,
+        ])
+        .output()
+    else {
+        return;
+    };
+    for id in String::from_utf8_lossy(&list.stdout).lines() {
+        let id = id.trim();
+        if !id.is_empty() {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", id])
+                .output();
+        }
+    }
+}
+
 #[tokio::test]
 async fn sandbox_egress_proxy_enforces_allowlist_through_composition() {
     if !docker_gate::docker_available() {
@@ -60,21 +102,41 @@ async fn sandbox_egress_proxy_enforces_allowlist_through_composition() {
         return;
     }
 
+    // Remove any leftover persistent container from a PRIOR local run of this
+    // test before building a fresh workspace tempdir — see
+    // `remove_egress_proxy_test_sandbox_containers`'s doc for why: this
+    // scope's Docker labels are fixed across runs but the bind-mount source
+    // below is not.
+    remove_egress_proxy_test_sandbox_containers();
+
     let workspace_root = tempfile::tempdir().expect("tempdir for sandbox workspace root");
 
-    // Production composition path: `default_broker_port: None` and no
-    // IRONCLAW_SANDBOX_HTTP_PROXY[_PORT] env set means
-    // `tenant_sandbox_process_binding` spawns its own default
-    // `EgressAllowlistProxy` (the same call `build_local_runtime` makes for
-    // the sandboxed profile) and points the container's `http_proxy`/
-    // `https_proxy` env at it via the Docker host-gateway address.
-    let binding = tenant_sandbox_process_binding(workspace_root.path().to_path_buf(), None)
+    // Production composition path: `tenant_sandbox_process_binding` always
+    // spawns its own default `EgressAllowlistProxy` (the same call
+    // `build_local_runtime` makes for the sandboxed profile) and points the
+    // container's `http_proxy`/`https_proxy` env at it via the Docker
+    // host-gateway address.
+    let binding = tenant_sandbox_process_binding(workspace_root.path().to_path_buf())
         .await
         .expect("real docker connect + default egress proxy spawn should succeed");
+    let egress_proxy = binding.egress_proxy.expect(
+        "tenant_sandbox_process_binding should always spawn and return ownership of its own \
+         default egress proxy",
+    );
+
+    // W6 phase 2 gate: the production factory
+    // (`ironclaw_host_runtime::bind_sandbox_egress_proxy_with_tls_intercept`)
+    // must have wired TLS interception (and, on top of it, the credential
+    // swap) into this proxy — not merely returned `Ok`. `bound_hosts` is
+    // deliberately empty until the sandbox's CA-trust-distribution follow-up
+    // lands (see `egress_proxy.rs::interception_bound_hosts`'s doc), so this
+    // does NOT assert any given CONNECT is actually intercepted; it asserts
+    // the interception SEAM itself is live on every sandbox-profile boot.
     assert!(
-        binding.egress_proxy.is_some(),
-        "no proxy env was set, so tenant_sandbox_process_binding should have spawned and \
-         returned ownership of its own default egress proxy"
+        egress_proxy.tls_intercept_active(),
+        "REGRESSION: the production sandbox egress proxy was built without TLS interception \
+         wired in — bind_sandbox_egress_proxy_with_tls_intercept has no effective production \
+         caller"
     );
 
     let process_port = match binding.binding {

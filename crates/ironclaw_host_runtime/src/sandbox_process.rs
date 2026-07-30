@@ -47,7 +47,10 @@ pub use attribution::ConnectionAttributionResolver;
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
-pub use egress_proxy::{BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError};
+pub use egress_proxy::{
+    BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError,
+    bind_sandbox_egress_proxy_with_tls_intercept,
+};
 pub use network_allowlist::{
     DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES,
     SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,

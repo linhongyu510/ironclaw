@@ -23,7 +23,6 @@
 //! `None` — `SandboxRuntimeBindings::build` propagates that error and fails
 //! the whole sandboxed-profile build closed.
 
-use ironclaw_host_runtime::EgressAllowlistProxy;
 use tokio::sync::watch;
 
 use crate::RebornBuildError;
@@ -44,24 +43,43 @@ pub(crate) async fn spawn_sandbox_egress_proxy()
             reason: format!("sandbox egress allowlist policy is invalid: {error}"),
         }
     })?;
-    let bound = EgressAllowlistProxy::new(policy)
-        .bind(EGRESS_PROXY_BIND_ADDR)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("sandbox egress allowlist proxy failed to bind: {error}"),
-        })?;
+    // TLS interception + W6 phase 2's credential swap are wired
+    // unconditionally here — this factory is the ONLY production door to a
+    // real (non-test) `TlsInterceptConfig`, so this crate cannot build a
+    // sandbox egress proxy without them. See
+    // `bind_sandbox_egress_proxy_with_tls_intercept`'s doc for what "wired"
+    // does and does not mean yet (the credential-grant staging side is
+    // separate, not-yet-built work; today every intercepted connection's
+    // placeholder resolves to a fail-safe GRANT-DENIAL strip).
+    let bound = ironclaw_host_runtime::bind_sandbox_egress_proxy_with_tls_intercept(
+        EGRESS_PROXY_BIND_ADDR,
+        policy,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("sandbox egress allowlist proxy failed to bind: {error}"),
+    })?;
     let local_addr = bound.local_addr();
+    // Read before `bound` moves into the spawned task below — mirrors
+    // `local_addr` immediately above. Threaded onto the returned handle so
+    // an integration test can assert the production factory actually wired
+    // TLS interception, not merely that construction returned `Ok` (see
+    // `BoundEgressAllowlistProxy::tls_intercept_is_active`'s doc). Always
+    // `true` today: `bind_sandbox_egress_proxy_with_tls_intercept` has no
+    // path that skips interception setup.
+    #[cfg(any(test, feature = "test-support"))]
+    let tls_intercept_active = bound.tls_intercept_is_active();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = tokio::spawn(async move {
         bound.serve(shutdown_rx).await;
     });
 
-    Ok(SandboxEgressProxyRuntimeHandle::new(
-        shutdown_tx,
-        handle,
-        local_addr,
-    ))
+    let runtime_handle = SandboxEgressProxyRuntimeHandle::new(shutdown_tx, handle, local_addr);
+    #[cfg(any(test, feature = "test-support"))]
+    let runtime_handle = runtime_handle.with_tls_intercept_active(tls_intercept_active);
+
+    Ok(runtime_handle)
 }
 
 #[cfg(test)]

@@ -67,12 +67,20 @@
 //! HTTP framing (bodies, chunked encoding, pipelining) and is deliberately not
 //! in this slice.
 //!
-//! # Not wired to production
+//! # Wired to production, grant-staging is not
 //!
-//! Nothing constructs a [`SandboxCredentialSwap`] outside tests.
-//! `TlsInterceptConfig` carries an `Option<SandboxCredentialSwap>` that only
-//! tests populate, matching how `attribution`'s resolver and the firewall
-//! itself already ship. Production wiring is profile-gated and lands later.
+//! [`super::egress_proxy::bind_sandbox_egress_proxy_with_tls_intercept`]
+//! constructs a real [`SandboxCredentialSwap`] (fresh, per-proxy-instance
+//! registry + firewall + injection store — see its doc) for every
+//! production sandbox egress proxy. What remains unwired is the OTHER
+//! side: nothing in this workspace yet calls
+//! `CredentialPlaceholderRegistry::get_or_create` or
+//! `SandboxCredentialFirewall::stage` outside tests, so no container has
+//! ever been handed a real `icsbx_` placeholder and no connection has ever
+//! had a live grant. Every placeholder this module's swap sees today
+//! resolves to GRANT-DENIAL and is stripped (D5) — safe by construction,
+//! not yet useful. That staging (capability-dispatch obligation handoff
+//! ahead of a shell invocation) is separate, not-yet-built work.
 
 use std::{
     borrow::Cow,

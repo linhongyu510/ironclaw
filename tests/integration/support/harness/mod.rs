@@ -758,7 +758,6 @@ impl HostRuntimeCapabilityHarness {
             sandbox_workspaces_root_for_harness = Some(sandbox_workspaces_root.clone());
             let tenant_sandbox = ironclaw_reborn_composition::tenant_sandbox_process_binding(
                 sandbox_workspaces_root.clone(),
-                None,
             )
             .await
             .map_err(|error| {

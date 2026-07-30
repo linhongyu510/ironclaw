@@ -15,16 +15,12 @@
 //! does not itself enforce anything; it is the policy input consumed by two
 //! things that do: the CONNECT/forward proxy
 //! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
-//! bound via `crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs`
-//! and `sandbox_boot.rs`'s `with_sandbox_network_broker`, and the topological
-//! guardrail that the container's Docker network is pinned `internal: true`
-//! with no default route off the host, so the proxy is the container's only
-//! path to the outside world.
-//!
-//! Ships unwired: neither of those two enforcers is on `main` yet, so nothing
-//! reads this list in production today. It arrives first because both of them
-//! take it as an input, and because a list of hostnames is reviewable on its
-//! own in a way it will not be once it is buried in a proxy PR.
+//! bound unconditionally by
+//! `crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs` (no
+//! operator-pointed external-proxy override — see `sandbox_boot.rs`'s doc),
+//! and the topological guardrail that the container's Docker network is
+//! pinned `internal: true` with no default route off the host, so the proxy
+//! is the container's only path to the outside world.
 use ironclaw_common::env_helpers::env_or_override;
 use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
 use ironclaw_network::NetworkPolicyError;

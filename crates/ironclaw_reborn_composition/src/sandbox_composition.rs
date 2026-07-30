@@ -37,6 +37,12 @@ pub struct SandboxEgressProxyRuntimeHandle {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
     pub(crate) local_addr: std::net::SocketAddr,
+    /// Test-support only: whether the underlying `BoundEgressAllowlistProxy`
+    /// had TLS interception wired in when `spawn_sandbox_egress_proxy`
+    /// built it. See `BoundEgressAllowlistProxy::tls_intercept_is_active`'s
+    /// doc for the production call site this mirrors.
+    #[cfg(any(test, feature = "test-support"))]
+    tls_intercept_active: bool,
 }
 
 impl SandboxEgressProxyRuntimeHandle {
@@ -49,7 +55,21 @@ impl SandboxEgressProxyRuntimeHandle {
             shutdown_tx,
             handle,
             local_addr,
+            #[cfg(any(test, feature = "test-support"))]
+            tls_intercept_active: false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_tls_intercept_active(mut self, active: bool) -> Self {
+        self.tls_intercept_active = active;
+        self
+    }
+
+    /// Test-support only: see the field doc above.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tls_intercept_active(&self) -> bool {
+        self.tls_intercept_active
     }
 
     /// Signals the proxy's accept loop to stop and awaits the task,
@@ -107,8 +127,8 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     /// tenant.
     pub(crate) owner_user_id: UserId,
     /// An egress-allowlist proxy `tenant_sandbox_process_binding` already
-    /// spawned (and pointed the sandbox container's `default_broker_port`
-    /// at) before `build` ever runs — see `sandbox_boot::TenantSandboxBinding::egress_proxy`.
+    /// spawned (and pointed the sandbox container's network broker at)
+    /// before `build` ever runs — see `sandbox_boot::TenantSandboxBinding::egress_proxy`.
     /// When `Some`, `build` takes ownership of this SAME instance rather
     /// than spawning a second, orphaned proxy; when `None` (e.g. a direct
     /// test construction of `SandboxProfileBindingInputs`, or a future
@@ -413,7 +433,6 @@ mod tests {
         let workspace_dir = tempfile::tempdir().expect("tempdir creates");
         let tenant_sandbox = crate::sandbox_boot::tenant_sandbox_process_binding(
             workspace_dir.path().to_path_buf(),
-            None,
         )
         .await
         .expect(

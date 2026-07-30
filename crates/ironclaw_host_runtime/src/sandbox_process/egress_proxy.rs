@@ -19,6 +19,7 @@
 //! allowed/denied, at `debug` level) — secret material in query strings or
 //! headers must never reach the logs.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -29,7 +30,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
-use super::tls_intercept::{self, TlsInterceptConfig};
+use super::ca::SandboxCertificateAuthority;
+use super::credential_firewall::SandboxCredentialFirewall;
+use super::credential_swap::SandboxCredentialSwap;
+use super::tls_intercept::{self, TlsInterceptConfig, VerifiedOriginConnector};
+use crate::obligations::RuntimeSecretInjectionStore;
 
 /// Hard ceiling on concurrent client connections the proxy will service at
 /// once. The proxy binds `0.0.0.0` on the internal egress network and is
@@ -205,6 +210,8 @@ async fn resolve_dial_addr(
 pub enum EgressProxyError {
     #[error("failed to bind egress proxy listener: {reason}")]
     BindFailed { reason: String },
+    #[error("failed to set up TLS interception for the egress proxy: {reason}")]
+    TlsInterceptSetupFailed { reason: String },
 }
 
 /// The forward/CONNECT proxy, not yet bound to a socket.
@@ -221,12 +228,20 @@ pub struct EgressAllowlistProxy {
     /// override it to a small value so the connection-cap test doesn't need
     /// to actually open 128+ sockets.
     max_connections: usize,
-    /// W6 phase 1's TLS-termination seam (see `tls_intercept`'s module
-    /// doc). Always `None` in production (`new`) — nothing in this crate
-    /// constructs a [`TlsInterceptConfig`] yet, so every CONNECT stays an
-    /// opaque tunnel until a production caller wires one in. Only this
-    /// module's own tests set it, via the struct-literal construction
-    /// pattern the other test-only fields above already use.
+    /// W6 phase 1/2's TLS-termination + credential-swap seam (see
+    /// `tls_intercept`'s module doc). `None` reproduces the plain-tunnel
+    /// posture every CONNECT had before W6; the one production door to
+    /// `Some` is [`bind_sandbox_egress_proxy_with_tls_intercept`], which
+    /// this crate's sole production caller
+    /// (`ironclaw_reborn_composition::sandbox_egress_proxy_task`) uses
+    /// instead of [`EgressAllowlistProxy::new`] directly — so the
+    /// production proxy always terminates TLS and evaluates the credential
+    /// firewall for its `bound_hosts`. `new` itself still leaves this
+    /// `None`: ~10 tests in this module exercise the plain
+    /// allowlist/tunnel mechanics and have no reason to carry TLS-intercept
+    /// setup, and D1 (an unbound host always stays an opaque tunnel even
+    /// with intercept configured) is proven independently of whether this
+    /// field is populated at all.
     tls_intercept: Option<Arc<TlsInterceptConfig>>,
 }
 
@@ -239,6 +254,17 @@ impl EgressAllowlistProxy {
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
         }
+    }
+
+    /// Enables TLS interception (and, when the config carries one, W6
+    /// phase 2's credential swap) on this proxy instance. `pub(crate)`,
+    /// not `pub`: the only caller is
+    /// [`bind_sandbox_egress_proxy_with_tls_intercept`] below, in the same
+    /// crate — composition never constructs a [`TlsInterceptConfig`]
+    /// itself, it calls that factory.
+    pub(crate) fn with_tls_intercept(mut self, tls_intercept: Arc<TlsInterceptConfig>) -> Self {
+        self.tls_intercept = Some(tls_intercept);
+        self
     }
 
     /// Binds `bind_addr` (e.g. `"127.0.0.1:0"` for tests, `"0.0.0.0:0"` in
@@ -267,6 +293,104 @@ impl EgressAllowlistProxy {
     }
 }
 
+/// The TLS-interception bound-host set for the production sandbox egress
+/// proxy — **deliberately empty today**, not derived from `policy`'s
+/// `allowed_targets`, even though every allowed host is the obvious
+/// candidate set and this function's `&NetworkPolicy` parameter is kept for
+/// exactly that future derivation.
+///
+/// # Why empty, not "the full allowlist" (design fork — flagged for review)
+///
+/// Binding a host here means [`TlsInterceptConfig`] terminates TLS for it
+/// with a leaf minted from OUR OWN in-process CA
+/// ([`SandboxCertificateAuthority`]) instead of letting the real origin's
+/// certificate through. The sandboxed container has no way to trust that CA
+/// today: nothing bind-mounts its trust anchor into the container or sets
+/// `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`GIT_SSL_CAINFO`/
+/// `NODE_EXTRA_CA_CERTS` — `ca.rs`'s own doc on
+/// [`SandboxCertificateAuthority::root_certificate_pem`] names this
+/// explicitly as "W5's remaining trust-distribution work", and
+/// `docs/plans/2026-07-26-sandbox-credential-firewall-design.md`'s "W5 ·
+/// Internal CA" entry specs the exact mount + env plumbing as **not
+/// started**. Binding any real default-allowlist host (pypi.org,
+/// registry.npmjs.org, github.com, ...) before that lands would make every
+/// `pip install`/`npm install`/`git clone`/`curl` to that host fail
+/// certificate verification from inside the container — breaking the
+/// sandboxed shell's core purpose for every deployment, today, with no
+/// workaround. That is a functional regression, not a security one, but it
+/// is severe enough that this function ships the conservative answer
+/// instead of guessing: an empty bound-host set means D1 keeps every
+/// connection an opaque, unmodified `copy_bidirectional` tunnel — byte-for-
+/// byte the same behavior every sandboxed-shell workflow had before this
+/// wiring landed. The rest of [`bind_sandbox_egress_proxy_with_tls_intercept`]
+/// still unconditionally constructs and wires the CA, the verified origin
+/// connector, and the credential swap, so the interception SEAM is live and
+/// fails closed on setup failure; only "which hosts it actually
+/// intercepts" stays at zero pending the CA-distribution follow-up. Once
+/// that lands, flipping this to derive from `policy.allowed_targets`
+/// (filtering wildcard patterns — `bound_hosts` is an exact-match
+/// `HashSet<String>` with no wildcard matching) is the natural next step.
+fn interception_bound_hosts(_policy: &NetworkPolicy) -> HashSet<String> {
+    HashSet::new()
+}
+
+/// Production factory: binds an [`EgressAllowlistProxy`] to `bind_addr` with
+/// real TLS interception and W6 phase 2's credential swap wired in — the
+/// sole door into this crate's `ca`, `tls_intercept`, and `credential_swap`
+/// internals for a caller that must not (and, since those types stay
+/// `pub(crate)`, cannot) reach into them directly. This crate's
+/// module-owned-initialization convention (`CLAUDE.md`): composition calls
+/// this instead of assembling a `TlsInterceptConfig` itself, so it is
+/// structurally impossible for the one production caller
+/// (`ironclaw_reborn_composition::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy`)
+/// to bind a proxy without an intercept config.
+///
+/// The credential swap's registry/firewall/injection-store are freshly
+/// constructed here, scoped to this one proxy instance — all three
+/// constructors are dependency-free (`::new()`), matching how
+/// `services.rs` builds its own standalone `RuntimeSecretInjectionStore`.
+/// Nothing yet stages a live grant into the returned proxy's
+/// `SandboxCredentialFirewall` or mints a placeholder into its
+/// `CredentialPlaceholderRegistry` — that is a separate, not-yet-built
+/// feature (capability-dispatch obligation staging that hands a container
+/// an `icsbx_` placeholder ahead of a shell invocation; nothing in this
+/// workspace calls `CredentialPlaceholderRegistry::get_or_create` or
+/// `SandboxCredentialFirewall::stage` outside tests today). Until that
+/// lands, every `icsbx_`-shaped token this proxy's intercepted connections
+/// see resolves to GRANT-DENIAL and is stripped (D5) — this wiring is
+/// strictly additive to the prior plain-tunnel posture: it activates the
+/// interception + swap MACHINERY and fails safe (strip, never forward)
+/// rather than ever leaking a secret through an ungranted connection.
+pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
+    bind_addr: &str,
+    policy: NetworkPolicy,
+) -> Result<BoundEgressAllowlistProxy, EgressProxyError> {
+    let bound_hosts = interception_bound_hosts(&policy);
+    let ca = SandboxCertificateAuthority::generate().map_err(|error| {
+        EgressProxyError::TlsInterceptSetupFailed {
+            reason: error.to_string(),
+        }
+    })?;
+    let origin_connector = VerifiedOriginConnector::from_system_roots().map_err(|error| {
+        EgressProxyError::TlsInterceptSetupFailed {
+            reason: error.to_string(),
+        }
+    })?;
+    let credential_swap = SandboxCredentialSwap::new(
+        Arc::new(ironclaw_secrets::CredentialPlaceholderRegistry::new()),
+        Arc::new(SandboxCredentialFirewall::new()),
+        RuntimeSecretInjectionStore::new(),
+    );
+    let tls_intercept_config = Arc::new(
+        TlsInterceptConfig::new(ca, bound_hosts, origin_connector)
+            .with_credential_swap(credential_swap),
+    );
+    EgressAllowlistProxy::new(policy)
+        .with_tls_intercept(tls_intercept_config)
+        .bind(bind_addr)
+        .await
+}
+
 /// A proxy bound to a real local address, ready to `serve`.
 pub struct BoundEgressAllowlistProxy {
     listener: TcpListener,
@@ -285,6 +409,19 @@ impl BoundEgressAllowlistProxy {
         self.listener
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
+    }
+
+    /// Test-support only: whether this bound proxy has TLS interception (and
+    /// therefore W6 phase 2's credential swap) wired in. Mirrors the
+    /// production call site —
+    /// `ironclaw_reborn_composition::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy`
+    /// reads this right after `bind` and threads it onto
+    /// `SandboxEgressProxyRuntimeHandle` — so an integration test can assert
+    /// the production factory actually wired the interception seam, not
+    /// merely that construction returned `Ok`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tls_intercept_is_active(&self) -> bool {
+        self.tls_intercept.is_some()
     }
 
     /// Accept loop; spawns one task per connection, capped at

@@ -43,13 +43,15 @@
 //! plaintext `copy_bidirectional` fallback; `egress_proxy::handle_connect`
 //! must not add one.
 //!
-//! **Not wired to a production caller yet.** [`TlsInterceptConfig`] has no
-//! production constructor — nothing in this crate builds a
-//! [`super::ca::SandboxCertificateAuthority`] or a real "trust the sandbox
-//! egress network" `TlsConnector` today. `egress_proxy`'s proxy types carry
-//! an `Option<Arc<TlsInterceptConfig>>` that production always leaves `None`
-//! (see `EgressAllowlistProxy::new`), matching the same unwired-`Option<Arc<
-//! ..>>` shape `attribution`'s resolver field already uses in this crate.
+//! **Wired to production via one door.**
+//! [`super::egress_proxy::bind_sandbox_egress_proxy_with_tls_intercept`] is
+//! the only production constructor: it builds a real
+//! [`super::ca::SandboxCertificateAuthority`] and a real "trust the sandbox
+//! egress network" [`VerifiedOriginConnector`], and `EgressAllowlistProxy`'s
+//! `tls_intercept` field is `Some` on every proxy built that way (never on a
+//! plain `EgressAllowlistProxy::new`, which ~10 of this crate's own tests
+//! still use for plain tunnel/allowlist coverage that has no reason to carry
+//! TLS-intercept setup).
 
 use std::{
     collections::HashSet,
