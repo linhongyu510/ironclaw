@@ -25,9 +25,8 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
-`--all-features` while push linted `all-features`/`default`/`libsql-only`, so
-feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum
-variant) passed the queue and turned main red post-merge.
+`--all-features` while push linted a broader matrix, so feature-gated dead code
+could pass the queue and turn main red post-merge.
 
 ## Required checks and where they're enforced
 
@@ -49,6 +48,15 @@ roll-up **job names**, never individual matrix jobs):
 | `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
+The 2026-07-30 queue-cost audit found only one retained `merge_group` sample
+for each candidate: Reborn E2E took 594 seconds and failed; Platform & Compat
+took 364 seconds and passed. Pull-request history was healthier (Reborn E2E
+p50/p95 877/1124 seconds; Platform & Compat 415/492 seconds), but one real queue
+sample—especially a failing E2E sample—is not enough evidence to alter the
+repository ruleset. Both checks therefore remain candidates. Refresh the
+workflow-run sample before promotion; a workflow being present on
+`merge_group` is not itself proof that it is safe to require.
+
 Rules for a roll-up job that is (or may become) required:
 
 1. Trigger on `merge_group` and report on every run (`if: always()`), so the
@@ -59,10 +67,103 @@ Rules for a roll-up job that is (or may become) required:
    merge-queue/push run's clippy matrix is missing any of the three feature
    lanes, so a "green but slim" regression cannot come back silently.
 
+## Reborn release and manual compile preflight
+
+`ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
+`ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
+release targets, produce archives and checksums plus shell, PowerShell, and MSI
+installers, and create the tag's GitHub Release. cargo-dist derives the
+Release title and body from the release metadata and `CHANGELOG.md`.
+
+cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
+setting for built-in job permissions. The checked-in workflow is therefore
+intentionally hardened beyond the generated template: repository access
+defaults to `contents: read`, only `host` receives `contents: write`, and local
+and global build jobs do not receive `GH_TOKEN`. `allow-dirty = ["ci"]` in the
+workspace dist config prevents a later `dist generate` from silently restoring
+the broader permission. When updating cargo-dist or its CI configuration,
+remove that allow-dirty entry temporarily, regenerate the workflow, reapply the
+permission boundary, and verify it with:
+
+```bash
+cargo test -p ironclaw --test smoke release_ci_ -- --nocapture
+rg -n "permissions:|GH_TOKEN" .github/workflows/ironclaw-release.yml
+```
+
+`reborn-release-compile.yml` remains an independent compile-and-smoke preflight
+that runs only through `workflow_dispatch`. It uploads temporary evidence
+artifacts but does not publish a Release, and it is not called by the tag or
+pull-request workflows.
+
+| Rust target | GitHub runner |
+|---|---|
+| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| `x86_64-unknown-linux-musl` | `ubuntu-22.04` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
+| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` |
+| `x86_64-apple-darwin` | `macos-15-intel` |
+| `aarch64-apple-darwin` | `macos-15` |
+| `x86_64-pc-windows-msvc` | `windows-2022` |
+
+The cargo-dist release and manual preflight both build the `ironclaw` package
+and binary without backend feature flags; database backends compile
+unconditionally. The tag publisher extracts each target's completed cargo-dist
+archive and runs the shared release smoke before the artifact can enter the
+upload set. The manual preflight runs the same smoke against its exact
+dist-profile binary before uploading compile evidence. The smoke uses an
+isolated home to verify CLI identity/help, the supported profile contract,
+production-derived bundled-extension discovery through a real local runtime
+assembly (including first-party, MCP-server, and WASM-tool runtime kinds), the
+non-empty libSQL database created after its migrations complete, and the
+migration-dry-run profile selection. Its catalog denominator is the shipping
+binary itself, so adding or removing a bundled package does not require a second
+hand-maintained CI list. The musl entries also use `readelf` to reject a program
+interpreter or dynamic-library dependency, which prevents an installed musl
+loader on the build runner from hiding a non-portable artifact.
+
+The scheduled Postgres capacity lane complements that portable gate by building
+the same canonical binary with `--profile dist`, starting `serve`, applying the
+Postgres-backed runtime migrations, and driving its authenticated API against a
+mock provider. Weekly live provider jobs build the bundled WASM extensions and
+exercise the Anthropic and OpenAI-compatible provider paths. The portable
+archive smoke itself does not invoke every WASM/MCP/script runtime lane or
+execute the generated shell/PowerShell/MSI installers; those remain separately
+owned evidence and a green portable smoke must not be read as proof of them.
+
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+`reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
+requests, the merge queue candidate check, and main. The standalone
+`reborn-playwright.yml` schedule owns the broader generated four-shard browser
+matrix. `ws12-suite-shards.toml` records the source run, duration weights,
+provider-world affinities, and owned waivers; its generator refuses missing
+files, affinity splits, stale entries, and retry-enabled deterministic shards.
+It is post-merge nightly coverage, not a required merge check. Failed nightly
+shards upload server logs, Playwright traces, screenshots, and videos, and the
+nightly watchdog owns alerting for that workflow.
+
+The same deep reuse raises all existing property-test generators from 256 to
+2,048 random cases, runs the bounded mutation frontier, and replays the complete
+hermetic journey/provider-fault inventory. `ironclaw-stress.yml` adds a
+15-minute libSQL user-session soak alongside its libSQL ramps and
+shipping-profile Postgres API capacity lane. `live-canary.yml` keeps the
+three-hour Reborn WebUI cadence and runs the broader credentialed provider
+matrix weekly. Workflow-contract sabotage tests fail if any of these schedules,
+guards, merge/main triggers, or release gates disappear.
+
+The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
+Markdown files join the shipped capability denominator with typed contract,
+journey, and fault registries. The generator fails on unclassified or
+unevidenced tested capabilities and lists owned gaps, waivers, and live-only
+rows separately. Reporting imports the existing registries; it does not own a
+duplicate CI capability or journey list. Provider journeys carry typed
+scheduled-live bindings to the exact `live-canary.yml` job, case id, and
+`results.json` artifact. The matrix reports those cells as `scheduled`, not
+`covered`: a recorded trace or declared cron is never presented as a passing
+live result.
+
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:
@@ -114,6 +215,22 @@ alerts can target dedicated channels.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
+## Reborn-only release policy
+
+For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
+`ironclaw` package. The active tag DAG consists of cargo-dist planning, the
+seven target builds, universal installer generation, and GitHub Release
+hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
+images, and the old registry-checksum/announcement path are outside this DAG.
+The generated `announce` job remains as cargo-dist's final release step; it does
+not restore any of those retired products.
+
+`docker.yml` keeps its independent manual and hourly entry points; a Reborn
+version tag does not invoke them. The manual `reborn-release-compile.yml`
+preflight is also independent from publishing. Restoring any retired release
+product requires adding it back explicitly instead of making it a dependency
+of the Reborn package by default.
+
 ## Known accepted gaps (deliberate, revisit as needed)
 
 - **Windows clippy** (`code_style.yml` `clippy-windows`) runs on push only;
@@ -134,12 +251,12 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
   is deleted, a v1 bug fix that must land should temporarily restore the
   `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
   `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
-- **Full-path extension↔provider coverage has no scheduler on any stack**:
-  the Emulate-backed full-path tests (`test_reborn_emulate_full_path.py`)
-  boot the legacy binary (see `tests/e2e/CLAUDE.md`, Reborn E2E coverage
-  gate) and were frozen with it. A Reborn-native port — same
-  install → OAuth → tool call → provider-mutation contract through
-  `ironclaw-reborn serve` — is the follow-up that restores this tier.
+- **Broad full-path extension↔provider mutation coverage remains legacy-only**:
+  `test_reborn_emulate_full_path.py` still boots the legacy binary. The Reborn
+  E2E job now replays every harvested live-QA model trace against Emulate's
+  supported provider operations and runs a Reborn-native Drive read path through
+  `ironclaw serve`; equivalent standalone mutation paths for every provider are
+  still follow-up work.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep

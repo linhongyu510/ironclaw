@@ -10,20 +10,19 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionDecision, ListPendingApprovalsRequest, ListPendingAuthInteractionsRequest,
     ResolveApprovalInteractionRequest,
 };
 use ironclaw_reborn_composition::{
-    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
+    HooksActivationConfig, PollSettings, RebornHostBindings, RebornRuntimeError,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, RebornTurnDriveOutcome,
     TurnRunnerSettings, build_reborn_runtime,
 };
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, local_runtime_build_input_with_options,
 };
@@ -39,7 +38,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
-// These tests start full local-dev runtimes; with libsql enabled they contend
+// These tests start full standalone runtimes; with libsql enabled they contend
 // enough under libtest parallelism to trip timeout-oriented assertions.
 static RUNTIME_COMPOSITION_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -50,8 +49,9 @@ async fn runtime_composition_test_guard() -> tokio::sync::MutexGuard<'static, ()
 
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
-    let input =
-        RebornRuntimeInput::from_services(RebornBuildInput::disabled("runtime-disabled-owner"));
+    let input = RebornRuntimeInput::from_build_input(RebornHostBindings::disabled(
+        "runtime-disabled-owner",
+    ));
 
     let error = match build_reborn_runtime(input).await {
         Ok(_) => panic!("disabled profile is not a runnable REPL runtime"),
@@ -64,7 +64,6 @@ async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     assert!(reason.contains("profile=disabled must not start live Reborn runtime traffic"));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_rejects_migration_dry_run_before_live_traffic() {
     let dir = tempfile::tempdir().unwrap();
@@ -74,14 +73,17 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
             .await
             .unwrap(),
     );
-    let input = RebornRuntimeInput::from_services(RebornBuildInput::libsql(
-        ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
-        "runtime-migration-dry-run-owner",
-        db,
-        dir.path().join("events.db").to_string_lossy(),
-        None,
-        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
-    ));
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
+            ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
+            "runtime-migration-dry-run-owner",
+            db,
+            dir.path().join("reborn.db").to_string_lossy(),
+            None,
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .expect("libSQL bindings"),
+    );
 
     let error = match build_reborn_runtime(input).await {
         Ok(runtime) => {
@@ -102,25 +104,21 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
 }
 
 #[tokio::test]
-async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
+async fn local_filesystem_build_input_carries_resolved_runtime_policy() {
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-        "runtime-policy-owner",
-        root.path().join("local-dev"),
-    ));
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-policy-owner",
+            root.path().join("standalone"),
+        ),
+    );
 
-    let error = match build_reborn_runtime(input).await {
-        Ok(_) => panic!("local-dev runtime should require a resolved runtime policy"),
-        Err(error) => error,
-    };
-
-    let RebornRuntimeError::InvalidArgument { reason } = error else {
-        panic!("expected invalid argument, got {error:?}");
-    };
-    assert!(reason.contains("resolved runtime policy"));
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("standalone build input carries a resolved runtime policy");
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn hosted_single_tenant_volume_builds_live_runtime() {
     // Regression for #5346: the runtime profile match was hardcoded after
@@ -128,7 +126,7 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
     // "unsupported runtime profile checked above" unreachable arm.
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         local_runtime_build_input_with_options(
             RebornCompositionProfile::HostedSingleTenantVolume,
             "runtime-hosted-volume-owner",
@@ -159,9 +157,12 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
 async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-test-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-test-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-test-tenant".to_string(),
@@ -187,12 +188,17 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    // With no LLM gateway configured the stubbed driver path exhausts the
-    // model retry budget and verifies the final checkpoint evidence, which
-    // maps to a terminal model_unavailable failure instead of the pre-PR
+    // With no LLM gateway compiled in, the stub gateway reports a
+    // configuration fault (CredentialUnavailable) that fails the run on
+    // first sight — no availability retries — and verifies the final
+    // checkpoint evidence, mapping to a terminal
+    // model_credentials_unavailable failure instead of the pre-PR
     // RecoveryRequired path that cancelled via the standalone-runtime guard.
     assert_eq!(reply.status, TurnStatus::Failed);
-    assert_eq!(reply.failure_category.as_deref(), Some("model_unavailable"));
+    assert_eq!(
+        reply.failure_category.as_deref(),
+        Some("model_credentials_unavailable")
+    );
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -206,20 +212,180 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(
         second_reply.failure_category.as_deref(),
-        Some("model_unavailable")
+        Some("model_credentials_unavailable")
     );
     assert_eq!(second_reply.text, None);
 
     runtime.shutdown().await.unwrap();
 }
 
+/// Minimal completing model gateway: every model call returns a plain assistant
+/// reply, so a turn reaches `TurnStatus::Completed` without needing a real LLM.
+#[derive(Default)]
+struct AlwaysReplyGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for AlwaysReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "done".to_string(),
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "done".to_string(),
+        ))
+    }
+}
+
+#[derive(Default)]
+struct HookDeniedEchoGateway {
+    call_count: std::sync::Mutex<usize>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for HookDeniedEchoGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "HookDeniedEchoGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("hook gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+        if call_index > 0 {
+            assert!(
+                request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("hook_predicate_denied")),
+                "post-hook model request should include the hook-denied tool result: {:?}",
+                request.messages
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "hook denied echo".to_string(),
+            ));
+        }
+
+        let echo_id = CapabilityId::new("builtin.echo").expect("echo capability id");
+        let echo_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == echo_id)
+            .expect("builtin.echo must be visible in standalone capability surface");
+        let call = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "runtime-hook-provider".to_string(),
+                provider_model_id: "runtime-hook-model".to_string(),
+                turn_id: Some("runtime-hook-turn".to_string()),
+                id: "runtime-hook-echo".to_string(),
+                name: echo_tool.name,
+                arguments: json!({"message": "hook should deny this"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call(echo) failed: {err}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(vec![call], ""))
+    }
+}
+
+/// Production wiring at the composition seam: drive submit, process claim,
+/// terminal projection, and graceful shutdown over the composed journal.
+#[tokio::test]
+async fn process_journal_serves_turn_and_shuts_down() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "wb-durable-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "wb-durable-tenant".to_string(),
+        agent_id: "wb-durable-agent".to_string(),
+        source_binding_id: "wb-durable-source".to_string(),
+        reply_target_binding_id: "wb-durable-reply".to_string(),
+    })
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    )
+    .with_model_gateway_override(Arc::new(AlwaysReplyGateway));
+
+    // Drive a real turn to Completed through the production process runtime.
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let conversation = runtime.new_conversation().await.unwrap();
+    let reply = tokio::time::timeout(
+        SEND_USER_MESSAGE_TIMEOUT,
+        runtime.send_user_message(&conversation, "durable please"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        reply.status,
+        TurnStatus::Completed,
+        "turn must complete over the WriteBehind store, got {:?} ({:?})",
+        reply.status,
+        reply.failure_category
+    );
+
+    runtime
+        .shutdown()
+        .await
+        .expect("graceful process runtime shutdown");
+}
+
 #[tokio::test]
 async fn send_user_message_with_cancellation_cancels_submitted_run() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-cancel-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-cancel-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-cancel-tenant".to_string(),
@@ -259,7 +425,7 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
 async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let skill_root = storage_root
         .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper");
     std::fs::create_dir_all(skill_root.join("references")).unwrap();
@@ -269,9 +435,12 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     )
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-skill-execution-owner",
+            storage_root,
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-skill-execution-tenant".to_string(),
@@ -344,7 +513,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
 /// Drives `build_reborn_runtime` through the third-party hook activation wiring
 /// (runtime.rs: third-party discovery input + projection registry + tenant
 /// threading) with BOTH flags on and a real `/system/extensions` manifest tree
-/// on the local-dev host filesystem.
+/// on the standalone host filesystem.
 ///
 /// This is the only test that exercises the `build_reborn_runtime` third-party
 /// path end-to-end: `tests/third_party_hook_projection.rs` calls
@@ -353,29 +522,37 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
 /// call here uses the default disabled `HooksActivationConfig`. A regression in
 /// the wiring (dropped `hooks_config`, wrong `extension_filesystem`, mis-threaded
 /// tenant) would surface here as a build/start failure rather than going
-/// uncovered.
+/// uncovered. The turn invokes `builtin.echo` and must observe the projected
+/// hook denial in the model-visible tool-result replay; if runtime composition
+/// drops `hook_dispatcher_builder_factory`, the echo capability succeeds and
+/// this test fails.
 #[tokio::test]
 async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
 
     // Plant a discoverable third-party extension carrying a `[[hooks]]` block at
-    // the per-owner `/system/extensions` discovery root that local-dev mounts.
-    // The third-party projection path must read this manifest; with the wiring
-    // broken (e.g. `extension_filesystem` not threaded), the runtime would not
-    // build/start cleanly through `build_default_planned_runtime`.
-    let extension_dir = storage_root.join("system/extensions/example-hook-ext");
+    // the per-owner `/system/extensions` discovery root that standalone mounts.
+    // The hook is scoped to its own provider and targets `builtin.echo`; naming
+    // the discovered extension `builtin` lets this hook exercise the same
+    // provider-scoped path the built-in first-party capability uses without
+    // adding a test-only first-party hook catalog.
+    let extension_dir = storage_root.join("system/extensions/builtin");
     std::fs::create_dir_all(&extension_dir).unwrap();
     std::fs::write(
         extension_dir.join("manifest.toml"),
-        third_party_hook_manifest("example-hook-ext"),
+        third_party_hook_manifest("builtin", "builtin.echo"),
     )
     .unwrap();
+    let gateway = Arc::new(HookDeniedEchoGateway::default());
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-hooks-owner", storage_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "runtime-hooks-owner",
+            storage_root,
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-hooks-tenant".to_string(),
@@ -384,35 +561,29 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
         reply_target_binding_id: "runtime-hooks-reply".to_string(),
     })
     .with_hooks_config(HooksActivationConfig::enabled().with_third_party_enabled(true))
+    .with_model_gateway_override(gateway)
     .with_runner_settings(
         TurnRunnerSettings::default()
             .set_heartbeat_interval(Duration::from_millis(25))
-            .set_poll_interval(Duration::from_secs(60)),
+            .set_poll_interval(Duration::from_millis(10)),
     );
 
-    // Build succeeds: the third-party discovery + projection + dispatcher factory
-    // composed into the planned runtime without error.
     let runtime = build_reborn_runtime(input).await.unwrap();
     assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
 
-    // Runtime starts: a conversation turn runs through the composed dispatcher
-    // and reaches a terminal state without hanging.
     let conversation = runtime.new_conversation().await.unwrap();
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
     let reply = tokio::time::timeout(
         SEND_USER_MESSAGE_TIMEOUT,
-        runtime.send_user_message(&conversation, "hello"),
+        runtime.send_user_message(&conversation, "use echo"),
     )
     .await
     .unwrap()
     .unwrap();
-    // TODO(coverage gap, inherited from the removed test): the stub local-dev
-    // gateway terminates the turn before any capability call dispatches, so this
-    // asserts terminal progress rather than observing the projected `deny-run`
-    // hook actually firing on `example-hook-ext.run`. The wiring (discovery +
-    // projection + tenant threading) is exercised at build/start; end-to-end
-    // hook *enforcement* through `build_reborn_runtime` still needs a harness
-    // that drives a real capability call to completion.
-    assert!(reply.status.is_terminal(), "got {:?}", reply.status);
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("hook denied echo"));
 
     runtime.shutdown().await.unwrap();
 }
@@ -420,7 +591,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
 /// A discoverable v2 installed-extension manifest carrying a single
 /// `before_capability` hook over its own capability. Mirrors the canonical
 /// shape in `tests/third_party_hook_projection.rs`.
-fn third_party_hook_manifest(id: &str) -> String {
+fn third_party_hook_manifest(id: &str, deny_target: &str) -> String {
     format!(
         r#"schema_version = "reborn.extension_manifest.v2"
 id = "{id}"
@@ -454,7 +625,7 @@ required_host_ports = ["host.runtime.http_egress"]
 id = "deny-run"
 kind = "before_capability"
 scope = "own_capabilities"
-body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked", when = {{ type = "name_equals", name = "{id}.run" }} }} }}
+body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked", when = {{ type = "name_equals", name = "{deny_target}" }} }} }}
 "#
     )
 }
@@ -466,10 +637,10 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 }
 
 /// Caller-level config-wiring test: `build_reborn_runtime` correctly threads
-/// `TurnRunnerSettings::max_concurrent_runs_per_user` into the turn-state store.
+/// `TurnRunnerSettings::max_concurrent_runs_per_user` into process concurrency.
 ///
-/// Exercises the full `build_reborn_runtime` → `build_reborn_services` →
-/// `InMemoryTurnStateStore::with_limits` wiring path so that a mis-wired or
+/// Exercises the full `build_reborn_runtime` →
+/// `ProcessJournalStore::with_concurrency_limits` wiring path so that a mis-wired or
 /// accidentally-dropped limit is caught at the composition boundary, not just in
 /// unit tests that hand-construct the store.
 ///
@@ -494,9 +665,12 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     use std::num::NonZeroU32;
 
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("cap-wiring-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "cap-wiring-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "cap-wiring-tenant".to_string(),
@@ -515,7 +689,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     let runtime = build_reborn_runtime(input).await.unwrap();
 
     // Submit two sequential turns on two conversations. With the stub gateway
-    // each turn completes (as Failed / model_unavailable) before the
+    // each turn completes (as Failed / model_credentials_unavailable) before the
     // next is submitted, so the per-user slot is always free and neither
     // submission should be rejected. If the cap was accidentally set to 0 (a
     // misconfiguration the wiring layer could introduce) the store would block
@@ -568,9 +742,12 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     use std::num::NonZeroUsize;
 
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("multi-worker-guard-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "multi-worker-guard-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "multi-worker-guard-tenant".to_string(),
@@ -606,19 +783,19 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     runtime.shutdown().await.unwrap();
 }
 
-// W5-WEBUI-API-2 enabler smoke test: `local_dev_*_interaction_service_for_test`
+// W5-WEBUI-API-2 enabler smoke test: `standalone_*_interaction_service_for_test`
 // build real services (not `Rejecting*`/`Unavailable*` fallbacks) using the
 // runtime's own live `TurnCoordinator`. Full RESOLVE_GATE scenario coverage is a later PR.
 #[tokio::test]
-async fn local_dev_test_support_interaction_service_accessors_build_real_services() {
+async fn standalone_test_support_interaction_service_accessors_build_real_services() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
             "test-support-accessors-owner",
-            root.path().join("local-dev"),
+            root.path().join("standalone"),
         )
-        .with_runtime_policy(local_dev_runtime_policy()),
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "test-support-accessors-tenant".to_string(),
@@ -633,21 +810,15 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
     );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
-    let turn_coordinator = runtime
-        .services()
-        .turn_coordinator
-        .clone()
-        .expect("local-dev runtime should wire a turn coordinator");
+    let turn_coordinator = runtime.turn_coordinator_for_test();
 
     let approval_interaction_service = runtime
-        .services()
-        .local_dev_approval_interaction_service_for_test(turn_coordinator.clone())
-        .expect("local-dev capability policy and grantee resolver should construct cleanly")
-        .expect("local-dev runtime should support the approval interaction test accessor");
+        .standalone_approval_interaction_service_for_test(turn_coordinator.clone())
+        .expect("standalone capability policy and grantee resolver should construct cleanly")
+        .expect("standalone runtime should support the approval interaction test accessor");
     let auth_interaction_service = runtime
-        .services()
-        .local_dev_auth_interaction_service_for_test(turn_coordinator)
-        .expect("local-dev runtime should support the auth interaction test accessor");
+        .standalone_auth_interaction_service_for_test(turn_coordinator)
+        .expect("standalone runtime should support the auth interaction test accessor");
 
     let scope = TurnScope::new(
         TenantId::new("test-support-accessors-tenant").expect("tenant id"),
@@ -678,7 +849,7 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
 }
 
 /// Delegates every `TurnCoordinator` method to `inner`, counting `resume_turn`
-/// calls. Proves `local_dev_approval_interaction_service_for_test` actually
+/// calls. Proves `standalone_approval_interaction_service_for_test` actually
 /// wires the *caller-supplied* coordinator into resolve/resume, not the
 /// runtime's own (henrypark133 review, PR #5654).
 struct SpyTurnCoordinator {
@@ -791,7 +962,7 @@ impl HostManagedModelGateway for SingleWriteApprovalGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == write_id)
-            .expect("builtin.write_file must be visible in local-dev capability surface");
+            .expect("builtin.write_file must be visible in standalone capability surface");
         let call = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "coordinator-spy-provider".to_string(),
@@ -822,13 +993,16 @@ impl HostManagedModelGateway for SingleWriteApprovalGateway {
 // coordinator wrapping the runtime's own — only the spy's `resume_turn` may
 // fire.
 #[tokio::test]
-async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinator_on_resolve() {
+async fn standalone_test_support_interaction_services_use_supplied_turn_coordinator_on_resolve() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let tag = "coordinator-spy";
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(format!("{tag}-owner"), root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            format!("{tag}-owner"),
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),
@@ -849,9 +1023,8 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     // `write_filesystem` capabilities instead of gating them. Disable it here
     // so the scripted write actually parks on `BlockedApproval`.
     runtime
-        .services()
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test")
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test")
         .set(AutoApproveSettingInput {
             updated_by: Principal::User(UserId::new(format!("{tag}-owner")).expect("user")),
             scope: ResourceScope {
@@ -868,19 +1041,14 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
         .await
         .expect("disable auto-approve for the coordinator-spy scope");
 
-    let inner_coordinator = runtime
-        .services()
-        .turn_coordinator
-        .clone()
-        .expect("local-dev runtime should wire a turn coordinator");
+    let inner_coordinator = runtime.turn_coordinator_for_test();
     let spy = Arc::new(SpyTurnCoordinator::new(inner_coordinator));
     let spy_dyn: Arc<dyn TurnCoordinator> = spy.clone();
 
     let approval_interaction_service = runtime
-        .services()
-        .local_dev_approval_interaction_service_for_test(spy_dyn)
-        .expect("local-dev capability policy and grantee resolver should construct cleanly")
-        .expect("local-dev runtime should support the approval interaction test accessor");
+        .standalone_approval_interaction_service_for_test(spy_dyn)
+        .expect("standalone capability policy and grantee resolver should construct cleanly")
+        .expect("standalone runtime should support the approval interaction test accessor");
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let outcome = tokio::time::timeout(
@@ -945,11 +1113,11 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     runtime.shutdown().await.unwrap();
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

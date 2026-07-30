@@ -37,8 +37,8 @@ parallel after Phase 1 lands:
 
 | WS | Crate | Concern |
 |---|---|---|
-| **P2.A** | `ironclaw_loop_support` | spawn handling in the capability-port impl |
-| **P2.B** | `ironclaw_loop_support` | subagent prompt composition + attenuation |
+| **P2.A** | `ironclaw_loop_host` | spawn handling in the capability-port impl |
+| **P2.B** | `ironclaw_loop_host` | subagent prompt composition + attenuation |
 | **P2.C** | `ironclaw_runner` | `subagent` `PlannedDriver` + run-profile→driver binding |
 | **P2.D** | `ironclaw_runner` | `SubagentCompletionObserver` (`TurnEventSink`) |
 
@@ -56,7 +56,7 @@ diverges, **Phase 1 is authoritative** and this doc must be re-grounded.
 > **Note on a correction to the overarching doc.** README §5.3 says
 > `ironclaw_turns` gets
 > `+ CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}` and a 5-enum
-> blocked-kind surface, and that `ironclaw_loop_support` is "no stateful stores".
+> blocked-kind surface, and that `ironclaw_loop_host` is "no stateful stores".
 > Two refinements after grounding against the live crates:
 >
 > 1. `CapabilityOutcome` (in `ironclaw_turns/src/run_profile/host.rs`) is
@@ -264,7 +264,7 @@ sealed `ironclaw_agent_loop`) is consumed only by **P2.C**.
 
 ---
 
-## 1. P2.A — `ironclaw_loop_support`: spawn handling in the capability-port impl
+## 1. P2.A — `ironclaw_loop_host`: spawn handling in the capability-port impl
 
 ### 1.1 Goal
 
@@ -279,16 +279,16 @@ capability id passes straight through to the inner port unchanged.
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` |
-| **modify** | `crates/ironclaw_loop_support/src/lib.rs` (add `mod subagent_spawn_port;` + `pub use`) |
+| **create** | `crates/ironclaw_loop_host/src/subagent_spawn_port.rs` |
+| **modify** | `crates/ironclaw_loop_host/src/lib.rs` (add `mod subagent_spawn_port;` + `pub use`) |
 
 `SubagentSpawnCapabilityPort` is a decorator in the same family as
 `CapabilitySurfaceProfileFilter` (`capability_surface_filter.rs`) — it wraps an
 inner `Arc<dyn LoopCapabilityPort>` and adds one policy responsibility, matching
 the crate's "named types with a single policy responsibility" rule
-(`ironclaw_loop_support/CLAUDE.md`).
+(`ironclaw_loop_host/CLAUDE.md`).
 
-> **Crate-boundary caveat.** `ironclaw_loop_support/CLAUDE.md` says this crate is
+> **Crate-boundary caveat.** `ironclaw_loop_host/CLAUDE.md` says this crate is
 > "adapter glue, not … driver registration" and "should not own … stateful
 > stores". The decorator therefore **holds trait objects only** — a
 > `TurnCoordinator`, a `SessionThreadService`, a `SubagentGoalStore`, a
@@ -305,14 +305,14 @@ the crate's "named types with a single policy responsibility" rule
 pub trait LoopCapabilityPort: Send + Sync {
     async fn visible_capabilities(&self, request: VisibleCapabilityRequest)
         -> Result<VisibleCapabilitySurface, AgentLoopHostError>;
-    async fn invoke_capability(&self, request: CapabilityInvocation)
+    async fn invoke_capability(&self, request: LoopRequest)
         -> Result<CapabilityOutcome, AgentLoopHostError>;
-    async fn invoke_capability_batch(&self, request: CapabilityBatchInvocation)
+    async fn invoke_capability_batch(&self, request: LoopRequestBatch)
         -> Result<CapabilityBatchOutcome, AgentLoopHostError>;
 }
 
-// CapabilityInvocation { surface_version, capability_id, input_ref }
-// CapabilityBatchInvocation { invocations: Vec<CapabilityInvocation>, stop_on_first_suspension: bool }
+// LoopRequest { surface_version, capability_id, input_ref }
+// LoopRequestBatch { invocations: Vec<LoopRequest>, stop_on_first_suspension: bool }
 // CapabilityBatchOutcome { outcomes: Vec<CapabilityOutcome>, stopped_on_suspension: bool }
 
 // coordination — ironclaw_turns/src/coordinator.rs + request.rs + scope.rs
@@ -380,7 +380,7 @@ pub struct ThreadScope { pub tenant_id: TenantId, pub agent_id: AgentId,
 ### 1.4 The decorator type
 
 ```rust
-// crates/ironclaw_loop_support/src/subagent_spawn_port.rs
+// crates/ironclaw_loop_host/src/subagent_spawn_port.rs
 
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -389,9 +389,9 @@ use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
     SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopRequestBatch,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+        LoopRequest, CapabilityOutcome, LoopCapabilityPort,
         LoopCapabilityResultWriter, LoopGateRef, LoopRunContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -410,7 +410,7 @@ pub struct SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator:      Arc<dyn TurnCoordinator>,
     pub thread_service:   Arc<dyn SessionThreadService>,
-    pub goal_store:       Arc<dyn SubagentGoalStore>,            // from ironclaw_runner
+    pub goal_store:       Arc<dyn SubagentGoalStorePort>,            // from ironclaw_runner
     pub gate_store:       Arc<dyn SubagentGateResolutionStore>,  // from ironclaw_runner
     pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_runner
     pub child_profiles:   Arc<dyn SubagentRunProfileBinding>,    // flavor -> RunProfileRequest
@@ -460,7 +460,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         self.inner.visible_capabilities(req).await
     }
 
-    async fn invoke_capability(&self, req: CapabilityInvocation)
+    async fn invoke_capability(&self, req: LoopRequest)
         -> Result<CapabilityOutcome, AgentLoopHostError>
     {
         if self.is_spawn(&req.capability_id) {
@@ -470,7 +470,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         self.inner.invoke_capability(req).await
     }
 
-    async fn invoke_capability_batch(&self, req: CapabilityBatchInvocation)
+    async fn invoke_capability_batch(&self, req: LoopRequestBatch)
         -> Result<CapabilityBatchOutcome, AgentLoopHostError>
     {
         // ── per-turn fan-out cap (README §8.2). Counted across THIS batch.
@@ -509,7 +509,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 {
                     idx += 1;
                 }
-                let inner = self.inner.invoke_capability_batch(CapabilityBatchInvocation {
+                let inner = self.inner.invoke_capability_batch(LoopRequestBatch {
                     invocations: req.invocations[start..idx].to_vec(),
                     stop_on_first_suspension: req.stop_on_first_suspension,
                 }).await?;
@@ -555,7 +555,7 @@ and a per-tree over-admit cannot occur (README §6, §8.3, §9
 impl SubagentSpawnCapabilityPort {
     async fn handle_spawn(
         &self,
-        inv: &CapabilityInvocation,
+        inv: &LoopRequest,
         ordinal: u32,
         tree: &mut TreeBudget,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
@@ -880,7 +880,7 @@ Use a `SpyTurnCoordinator`, `SpySessionThreadService`, in-memory
 
 ---
 
-## 2. P2.B — `ironclaw_loop_support`: prompt composition + attenuation
+## 2. P2.B — `ironclaw_loop_host`: prompt composition + attenuation
 
 ### 2.1 Goal
 
@@ -894,8 +894,8 @@ task data; and (c) **attenuation** — the child capability port wrapped so its
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_loop_support/src/subagent_prompt_port.rs` |
-| **modify** | `crates/ironclaw_loop_support/src/lib.rs` (add `mod subagent_prompt_port;` + `pub use`) |
+| **create** | `crates/ironclaw_loop_host/src/subagent_prompt_port.rs` |
+| **modify** | `crates/ironclaw_loop_host/src/lib.rs` (add `mod subagent_prompt_port;` + `pub use`) |
 
 `SubagentPromptComposer` is **not** a new `LoopPromptPort`. The host already has
 `HostManagedLoopPromptPort` (`run_profile/prompt.rs`) which builds a bundle from
@@ -930,7 +930,7 @@ pub struct LoopPromptBundleRequest {
     #[serde(default)] pub inline_messages: Vec<LoopInlineMessage>,   // <-- composer fills this
 }
 
-// attenuation — already in ironclaw_loop_support
+// attenuation — already in ironclaw_loop_host
 pub enum CapabilityAllowSet { All, Allowlist(BTreeSet<CapabilityId>) }
 pub struct CapabilitySurfaceProfileFilter { /* wraps Arc<dyn LoopCapabilityPort> */ }
 impl CapabilitySurfaceProfileFilter {
@@ -975,7 +975,7 @@ impl CapabilitySurfaceProfileFilter {
 ### 2.4 The composer — pseudo code
 
 ```rust
-// crates/ironclaw_loop_support/src/subagent_prompt_port.rs
+// crates/ironclaw_loop_host/src/subagent_prompt_port.rs
 
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageRole,
@@ -988,7 +988,7 @@ const HANDOFF_DELIM: &str = "## Context from parent";
 /// Builds the subagent's inline system + (framing) user messages.
 /// Injected with the durable goal store + the static direction table.
 pub struct SubagentPromptComposer {
-    goal_store: Arc<dyn SubagentGoalStore>,
+    goal_store: Arc<dyn SubagentGoalStorePort>,
     flavor_resolver: Arc<dyn SubagentFlavorResolver>,
 }
 
@@ -1038,7 +1038,7 @@ impl SubagentPromptComposer {
 /// The FULL goal materialisation — used by P2.A when seeding the child thread
 /// (see §2.3 option B). Reads the durable goal store; a MISS fails loud.
 pub async fn materialize_goal_message(
-    goal_store: &dyn SubagentGoalStore,
+    goal_store: &dyn SubagentGoalStorePort,
     child_run_id: TurnRunId,
 ) -> Result<String, AgentLoopHostError> {
     let goal = goal_store.get_goal(child_run_id).await
@@ -1810,7 +1810,7 @@ assistant message yields a typed "completed, no output" entry.
 
 ## 5. File-overlap note (P2.A vs P2.B)
 
-P2.A and P2.B both land in `crates/ironclaw_loop_support/` but own **disjoint
+P2.A and P2.B both land in `crates/ironclaw_loop_host/` but own **disjoint
 files**:
 
 | WS | New file | Touches `lib.rs` |
@@ -1895,9 +1895,9 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 - `cargo fmt` clean.
 - `cargo clippy --all --benches --tests --examples --all-features` — zero
   warnings.
-- `cargo test` green for `ironclaw_loop_support` and `ironclaw_runner`.
+- `cargo test` green for `ironclaw_loop_host` and `ironclaw_runner`.
 - No new public API in `ironclaw_turns` or `ironclaw_agent_loop` beyond the
-  Phase 1 additions — Phase 2 is mechanisms in `ironclaw_loop_support` and
+  Phase 1 additions — Phase 2 is mechanisms in `ironclaw_loop_host` and
   `ironclaw_runner` only (README §10 crate-boundary table).
 - Integration tests (background E2E, blocking E2E, parallel-blocking,
   early-completion, child-authority, fork-bomb, cancellation subtree,

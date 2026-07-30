@@ -104,7 +104,7 @@ pub enum ResolveError {
 
     /// `OrgPolicyConstraints::max_profile` references a profile from a different family
     /// than the requested profile (e.g. tenant ceiling is `HostedSafe` but
-    /// the request is `LocalDev`). The settings/blueprint layer should have
+    /// the request is `LocalHost`). The settings/blueprint layer should have
     /// caught this at write time; surfacing it here is a fail-closed safety
     /// net.
     #[error(
@@ -172,7 +172,7 @@ const fn is_compatible(deployment: DeploymentMode, profile: RuntimeProfile) -> b
 
         // Local family — local single-user only.
         (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
-        | (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
+        | (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost)
         | (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo) => true,
 
         // Hosted family — hosted multi-tenant only.
@@ -196,7 +196,7 @@ const fn is_compatible(deployment: DeploymentMode, profile: RuntimeProfile) -> b
 const fn family_rank(profile: RuntimeProfile) -> Option<(ProfileFamily, u8)> {
     match profile {
         RuntimeProfile::LocalSafe => Some((ProfileFamily::Local, 1)),
-        RuntimeProfile::LocalDev => Some((ProfileFamily::Local, 2)),
+        RuntimeProfile::LocalHost => Some((ProfileFamily::Local, 2)),
         RuntimeProfile::LocalYolo => Some((ProfileFamily::Local, 3)),
         RuntimeProfile::HostedSafe => Some((ProfileFamily::Hosted, 1)),
         RuntimeProfile::HostedDev => Some((ProfileFamily::Hosted, 2)),
@@ -305,7 +305,7 @@ fn backends_for(
             ApprovalPolicy::AskWrites,
             AuditMode::LocalMinimal,
         ),
-        LocalDev => (
+        LocalHost => (
             FilesystemBackendKind::HostWorkspace,
             ProcessBackendKind::LocalHost,
             NetworkMode::DirectLogged,
@@ -447,6 +447,87 @@ fn audit_for(deployment: DeploymentMode) -> AuditMode {
     }
 }
 
+/// Whether the resolved runtime boundary enforces model-spend budgets.
+///
+/// A resolved policy *value*, not a deployment mode. Composition selects the
+/// budget accountant from this instead of branching on a profile name — §4.4
+/// the deployment contract: resolve mode to policy data at the composition
+/// edge; the kernel never names a mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetEnforcement {
+    /// Reserve model spend against budget accounts and pause the run on a
+    /// budget gate. The default for every deployment.
+    Enforced,
+    /// Skip the budget accountant entirely: no reservation, no gate, no
+    /// cascade. Reserved for the single-user trusted-laptop boundary, which
+    /// already inherits full host trust and must not pause on spend.
+    Unenforced,
+}
+
+/// Whether [`ApprovalPolicy::Minimal`] may bypass approval gates under the
+/// resolved runtime boundary.
+///
+/// Same shape and rationale as [`BudgetEnforcement`]: the approval gate policy
+/// consumes this value rather than storing a [`RuntimeProfile`] and asking it
+/// about itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MinimalApprovalBypass {
+    /// `Minimal` suppresses effect-driven approval gates.
+    Allowed,
+    /// `Minimal` still gates effects — the fail-closed default.
+    Denied,
+}
+
+/// Classify budget enforcement for a resolved policy.
+///
+/// Keyed on `resolved_profile`, so a tenant/org ceiling that narrows
+/// `LocalYolo` down to `LocalHost` restores budget enforcement: authority
+/// reductions reach this axis for free, which a caller branching on its own
+/// requested deployment mode does not get.
+///
+/// [`RuntimeProfile`] is `#[non_exhaustive]`, so every variant is listed
+/// explicitly and the required wildcard fails closed to
+/// [`BudgetEnforcement::Enforced`]: an unclassified future profile keeps
+/// budgets on rather than silently inheriting the laptop exception.
+pub fn budget_enforcement(policy: &EffectiveRuntimePolicy) -> BudgetEnforcement {
+    match policy.resolved_profile {
+        // The trusted-laptop boundary: single-user, host-trust-inheriting, and
+        // explicitly disclosed. Every other profile — including the hosted and
+        // enterprise yolo tiers, which are multi-tenant or org-owned — keeps
+        // budgets enforced.
+        RuntimeProfile::LocalYolo => BudgetEnforcement::Unenforced,
+        RuntimeProfile::SecureDefault
+        | RuntimeProfile::LocalSafe
+        | RuntimeProfile::LocalHost
+        | RuntimeProfile::HostedSafe
+        | RuntimeProfile::HostedDev
+        | RuntimeProfile::HostedYoloTenantScoped
+        | RuntimeProfile::EnterpriseSafe
+        | RuntimeProfile::EnterpriseDev
+        | RuntimeProfile::EnterpriseYoloDedicated
+        | RuntimeProfile::Sandboxed
+        | RuntimeProfile::Experiment => BudgetEnforcement::Enforced,
+        // Fail closed: a profile variant added upstream and not yet classified
+        // here keeps budgets enforced.
+        _ => BudgetEnforcement::Enforced,
+    }
+}
+
+/// Classify `Minimal`-approval bypass for a resolved policy.
+///
+/// Mirrors [`RuntimeProfile::allows_minimal_approval_bypass`], which this
+/// function is the sanctioned entry point for: consumers read the resolved
+/// value instead of holding a profile.
+pub fn minimal_approval_bypass(policy: &EffectiveRuntimePolicy) -> MinimalApprovalBypass {
+    if policy.resolved_profile.allows_minimal_approval_bypass() {
+        MinimalApprovalBypass::Allowed
+    } else {
+        MinimalApprovalBypass::Denied
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,7 +550,7 @@ mod tests {
         for profile in [
             RuntimeProfile::SecureDefault,
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::Sandboxed,
             RuntimeProfile::Experiment,
         ] {
@@ -485,7 +566,7 @@ mod tests {
     fn hosted_multi_tenant_rejects_every_local_profile() {
         for profile in [
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::LocalYolo,
         ] {
             let result = resolve(req(DeploymentMode::HostedMultiTenant, profile));
@@ -518,7 +599,7 @@ mod tests {
     fn enterprise_dedicated_rejects_local_and_hosted_families() {
         for profile in [
             RuntimeProfile::LocalSafe,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
             RuntimeProfile::LocalYolo,
             RuntimeProfile::HostedSafe,
             RuntimeProfile::HostedDev,
@@ -653,7 +734,7 @@ mod tests {
 
     #[test]
     fn local_family_maps_to_host_workspace_and_local_host_shell() {
-        for profile in [RuntimeProfile::LocalSafe, RuntimeProfile::LocalDev] {
+        for profile in [RuntimeProfile::LocalSafe, RuntimeProfile::LocalHost] {
             let policy = resolve(req(DeploymentMode::LocalSingleUser, profile)).unwrap();
             assert_eq!(
                 policy.filesystem_backend,
@@ -734,13 +815,13 @@ mod tests {
 
     #[test]
     fn org_policy_ceiling_within_family_narrows_resolved_profile() {
-        // Tenant ceiling LocalSafe + requested LocalDev → resolved LocalSafe.
+        // Tenant ceiling LocalSafe + requested LocalHost → resolved LocalSafe.
         let request = ResolveRequest {
             org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalSafe),
-            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
+            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost)
         };
         let policy = resolve(request).unwrap();
-        assert_eq!(policy.requested_profile, RuntimeProfile::LocalDev);
+        assert_eq!(policy.requested_profile, RuntimeProfile::LocalHost);
         assert_eq!(policy.resolved_profile, RuntimeProfile::LocalSafe);
         assert!(policy.was_reduced());
         // Resolved policy reflects the narrowed profile's backends.
@@ -749,9 +830,9 @@ mod tests {
 
     #[test]
     fn org_policy_ceiling_at_or_below_request_keeps_request() {
-        // Ceiling LocalDev + requested LocalSafe → keeps LocalSafe (already at/below ceiling).
+        // Ceiling LocalHost + requested LocalSafe → keeps LocalSafe (already at/below ceiling).
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalDev),
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalHost),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
         };
         let policy = resolve(request).unwrap();
@@ -780,13 +861,13 @@ mod tests {
         // Hosted ceiling on a local request → family mismatch.
         let request = ResolveRequest {
             org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::HostedSafe),
-            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
+            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost)
         };
         let r = resolve(request);
         assert!(matches!(
             r,
             Err(ResolveError::OrgPolicyCeilingFamilyMismatch {
-                requested: RuntimeProfile::LocalDev,
+                requested: RuntimeProfile::LocalHost,
                 ceiling: RuntimeProfile::HostedSafe,
             })
         ));
@@ -798,7 +879,7 @@ mod tests {
         let request = ResolveRequest {
             org_policy: OrgPolicyConstraints::default()
                 .set_max_profile(RuntimeProfile::SecureDefault),
-            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
+            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost)
         };
         assert!(matches!(
             resolve(request),
@@ -810,7 +891,7 @@ mod tests {
 
     #[test]
     fn resolution_is_deterministic_for_equal_inputs() {
-        let request = req(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev);
+        let request = req(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost);
         let a = resolve(request.clone()).unwrap();
         let b = resolve(request).unwrap();
         assert_eq!(a, b);
@@ -820,7 +901,7 @@ mod tests {
     fn resolved_policy_round_trips_through_serde() {
         let policy = resolve(req(
             DeploymentMode::LocalSingleUser,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
         ))
         .unwrap();
         let json = serde_json::to_string(&policy).unwrap();
@@ -834,7 +915,7 @@ mod tests {
         // org constraints; the wire shape must round-trip cleanly so a
         // reload reproduces the same input to the resolver.
         let original = OrgPolicyConstraints {
-            max_profile: Some(RuntimeProfile::LocalDev),
+            max_profile: Some(RuntimeProfile::LocalHost),
             admin_approves_dedicated_yolo: true,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -911,7 +992,7 @@ mod tests {
             ),
             // Family-specific profiles in their matching deployment.
             (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe),
-            (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev),
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost),
             (
                 DeploymentMode::HostedMultiTenant,
                 RuntimeProfile::HostedSafe,
@@ -933,5 +1014,119 @@ mod tests {
             assert_eq!(policy.requested_profile, profile);
             assert_eq!(policy.resolved_profile, profile);
         }
+    }
+
+    // --- resolved policy values (§4.4: mode becomes data) ------------------
+
+    #[test]
+    fn budget_enforcement_is_unenforced_only_for_the_trusted_laptop_boundary() {
+        let laptop = resolve(req_yolo(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ))
+        .expect("local yolo resolves");
+        assert_eq!(
+            budget_enforcement(&laptop),
+            BudgetEnforcement::Unenforced,
+            "local-yolo is the single trusted-laptop exception"
+        );
+
+        // Every other resolvable (deployment, profile) pair keeps budgets
+        // enforced — including the hosted and enterprise yolo tiers, which
+        // are multi-tenant or org-owned and must never inherit the laptop
+        // exception.
+        let enforced_pairs = [
+            (
+                DeploymentMode::LocalSingleUser,
+                RuntimeProfile::SecureDefault,
+            ),
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe),
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalHost),
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::Sandboxed),
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::Experiment),
+            (
+                DeploymentMode::HostedMultiTenant,
+                RuntimeProfile::HostedSafe,
+            ),
+            (DeploymentMode::HostedMultiTenant, RuntimeProfile::HostedDev),
+            (
+                DeploymentMode::HostedMultiTenant,
+                RuntimeProfile::HostedYoloTenantScoped,
+            ),
+            (
+                DeploymentMode::EnterpriseDedicated,
+                RuntimeProfile::EnterpriseSafe,
+            ),
+            (
+                DeploymentMode::EnterpriseDedicated,
+                RuntimeProfile::EnterpriseDev,
+            ),
+        ];
+        for (deployment, profile) in enforced_pairs {
+            let policy = resolve(req_yolo(deployment, profile))
+                .unwrap_or_else(|e| panic!("({deployment:?}, {profile:?}) failed: {e}"));
+            assert_eq!(
+                budget_enforcement(&policy),
+                BudgetEnforcement::Enforced,
+                "{profile:?} under {deployment:?} must keep budgets enforced"
+            );
+        }
+    }
+
+    #[test]
+    fn org_ceiling_narrowing_restores_budget_enforcement() {
+        // The regression this axis exists to prevent: today's composition
+        // branches on the *requested* deployment profile, so an org ceiling
+        // that narrows local-yolo down to standalone would still skip the
+        // budget accountant. Keying on `resolved_profile` fixes that.
+        let narrowed = resolve(ResolveRequest {
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalHost),
+            ..req_yolo(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo)
+        })
+        .expect("narrowed local yolo resolves");
+
+        assert!(narrowed.was_reduced(), "ceiling must narrow the profile");
+        assert_eq!(narrowed.requested_profile, RuntimeProfile::LocalYolo);
+        assert_eq!(narrowed.resolved_profile, RuntimeProfile::LocalHost);
+        assert_eq!(
+            budget_enforcement(&narrowed),
+            BudgetEnforcement::Enforced,
+            "an org ceiling that removes yolo must also restore budget enforcement"
+        );
+    }
+
+    #[test]
+    fn minimal_approval_bypass_tracks_the_resolved_profile() {
+        let bypass = resolve(req_yolo(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ))
+        .expect("local yolo resolves");
+        assert_eq!(
+            minimal_approval_bypass(&bypass),
+            MinimalApprovalBypass::Allowed
+        );
+
+        let gated = resolve(req(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalHost,
+        ))
+        .expect("standalone resolves");
+        assert_eq!(
+            minimal_approval_bypass(&gated),
+            MinimalApprovalBypass::Denied
+        );
+
+        // Same ceiling property as budgets: narrowing away yolo removes the
+        // bypass.
+        let narrowed = resolve(ResolveRequest {
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalHost),
+            ..req_yolo(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo)
+        })
+        .expect("narrowed local yolo resolves");
+        assert_eq!(
+            minimal_approval_bypass(&narrowed),
+            MinimalApprovalBypass::Denied
+        );
     }
 }

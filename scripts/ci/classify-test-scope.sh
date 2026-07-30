@@ -27,16 +27,16 @@ is_docs_only_path() {
 is_shared_test_path() {
   local path="$1"
   case "$path" in
-    Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
+    Cargo.toml|Cargo.lock|providers.json|Dockerfile)
       return 0
       ;;
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
-    .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+    .github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
-    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_support/*)
+    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*)
       return 0
       ;;
     crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
@@ -45,7 +45,7 @@ is_shared_test_path() {
     crates/ironclaw_capabilities/*|crates/ironclaw_secrets/*|crates/ironclaw_network/*|crates/ironclaw_runtime_policy/*)
       return 0
       ;;
-    crates/ironclaw_authorization/*|crates/ironclaw_run_state/*|crates/ironclaw_approvals/*|crates/ironclaw_resources/*)
+    crates/ironclaw_authorization/*|crates/ironclaw_approvals/*|crates/ironclaw_resources/*)
       return 0
       ;;
     crates/ironclaw_auth/*|crates/ironclaw_trust/*|crates/ironclaw_turns/*|crates/ironclaw_agent_loop/*|crates/ironclaw_threads/*)
@@ -75,16 +75,16 @@ is_reborn_test_path() {
     crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
       return 0
       ;;
-    crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)
+    crates/ironclaw_product_*/*|crates/ironclaw_slack_extension/*|crates/ironclaw_telegram_extension/*|crates/ironclaw_telegram_v2_adapter/*)
       return 0
       ;;
-    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui_v2/*)
+    crates/ironclaw_webui/*)
       return 0
       ;;
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
     *)
@@ -96,13 +96,13 @@ is_reborn_test_path() {
 is_code_path() {
   local path="$1"
   case "$path" in
-    src/*|crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
+    crates/*|tests/*|migrations/*)
       return 0
       ;;
-    Cargo.toml|Cargo.lock|Dockerfile|build.rs|providers.json)
+    Cargo.toml|Cargo.lock|Dockerfile|providers.json)
       return 0
       ;;
-    scripts/check_no_panics.py|scripts/check_gateway_boundaries.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
+    scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
       return 0
       ;;
     .github/workflows/*.yml|.github/actions/install-cargo-component/*|.github/dependabot.yml|.github/labeler.yml)

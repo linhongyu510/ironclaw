@@ -11,20 +11,28 @@ mod egress;
 mod error;
 mod policy;
 mod resolver;
+mod test_rewrite;
 mod transport;
 mod types;
 mod url_target;
 
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
 pub use error::NetworkHttpError;
-pub use policy::{StaticNetworkPolicyEnforcer, target_matches_pattern};
+pub use policy::{
+    NetworkPolicyError, StaticNetworkPolicyEnforcer, parse_egress_limit, parse_host_pattern,
+    target_matches_pattern,
+};
 pub use resolver::NetworkResolver;
+pub use test_rewrite::{
+    HostRewriteMap, HostRewriteMapError, RewriteNetworkTransport, TEST_HTTP_REWRITE_MAP_ENV,
+    default_policy_http_egress,
+};
 pub use transport::ReqwestNetworkTransport;
 pub use types::{
     DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkRequest,
     NetworkTransportRequest, NetworkUsage,
 };
 pub use url_target::{
-    NetworkTargetUrlError, is_rfc3986_unreserved_segment, network_target_for_url,
-    percent_decode_url_component_lossy,
+    NetworkTargetUrlError, is_path_segment_credential_material, is_rfc3986_unreserved_segment,
+    network_target_for_url, percent_decode_url_component_lossy,
 };

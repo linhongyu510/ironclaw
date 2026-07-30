@@ -39,7 +39,7 @@ generic `G` exists only so tests can pass concrete gateway structs. So S2 needs
 wider for identical behavior.
 
 **S2 edit surface (prod ≈ 12 lines, default-None → byte-identical):**
-- `crates/ironclaw_loop_support/src/lib.rs` (~6 lines): add to the
+- `crates/ironclaw_loop_host/src/lib.rs` (~6 lines): add to the
   `HostManagedModelGateway` trait a default method
   `fn resolve_for_scope(&self, _scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> { None }`.
   Every real gateway inherits the default → prod resolves to its own gateway.
@@ -101,7 +101,7 @@ capability/storage selections, then calls
 — no separate runtime construction may remain in builder.rs.
 
 ### 3a. Turn-state store — ONE shared store, isolation by run_id (not path)
-Build ONE `FilesystemTurnStateStore` at group construction (replacing the
+Build ONE `TurnStateRowStore` at group construction (replacing the
 per-thread stores). NOTE for the implementer: `turns_scope_path`
 (tests/support/reborn/filesystem.rs:26-48) yields
 `/tenants/{tenant}/agents/{agent}/users/{owner}/turns` with **no `thread_id`** —

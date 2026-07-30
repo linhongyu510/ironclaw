@@ -28,9 +28,7 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
@@ -68,11 +66,24 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
-        .with_skill_activation_tenant(tenant.clone()),
+        .with_skill_activation_tenant(tenant.clone())
+        .with_system_skill_fixture(
+            "greet",
+            "greets the user warmly",
+            "GREET_SKILL_PROMPT_SENTINEL",
+        )
+        .with_system_skill_fixture(
+            "bloat",
+            "an oversized skill",
+            "BLOAT_SKILL_FILLER ".repeat(2200),
+        )
+        .with_system_skill_fixture(
+            "duplicate",
+            "a system-scoped skill",
+            "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+        ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(

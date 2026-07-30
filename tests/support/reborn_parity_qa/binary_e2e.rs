@@ -3,7 +3,7 @@
 //! This harness drives the product caller path used by the #3702 validation
 //! ports:
 //!
-//! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
+//! inbound bytes -> ProductAdapter -> DefaultProductSurface ->
 //! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
@@ -17,32 +17,34 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
-use ironclaw_host_api::{
-    CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
-    ThreadId,
+use ironclaw_event_projections::{
+    EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
+    ProjectionSnapshot, ReplayEventProjectionService,
 };
-use ironclaw_loop_support::{
+use ironclaw_events::InMemoryDurableEventLog;
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_host_api::{
+    CapabilityId, InvocationId, NetworkPolicy, ProviderToolName, ResourceScope,
+    RuntimeHttpEgressRequest, ThreadId,
+};
+use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_product_adapters::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow,
-};
-use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+use ironclaw_product::{
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
+use ironclaw_product::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+};
 use ironclaw_runner::subagent::{
     await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_runner::{
@@ -50,9 +52,10 @@ use ironclaw_runner::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
         FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
     },
+    milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
-        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
-        RuntimeTurnStateStore, build_default_planned_runtime,
+        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
+        RebornRuntimeLoopComposition, build_default_planned_runtime,
     },
 };
 use ironclaw_threads::{
@@ -60,16 +63,15 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, GateRef,
+    GetLoopCheckpointRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind,
+    LoopCheckpointStore, ProcessLoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
     RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnStatus,
     run_profile::{
-        CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
-        ProviderToolCallReplay,
+        AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopRequest,
+        ParentLoopOutput, ProviderToolCallReplay,
     },
 };
 use serde_json::json;
@@ -83,29 +85,30 @@ use crate::reborn_support::doubles::{
 use crate::reborn_support::filesystem::{BlockingTurnStatePutFilesystem, local_filesystem};
 use crate::reborn_support::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use crate::reborn_support::harness::{
-    HarnessCapabilityMode, HarnessCapabilityRecorder, HarnessResult, HarnessTurnBackend,
-    HarnessTurnStorageBackend, RecordedCapabilityResult, product_scope, scoped_turns_fs,
+    HarnessCapabilityMode, HarnessCapabilityRecorder, HarnessResult, HarnessTurnStorageBackend,
+    RecordedCapabilityResult, product_scope, scoped_turns_fs,
 };
-use crate::reborn_support::product_workflow::RebornProductWorkflowHarness;
+use crate::reborn_support::product_surface::RebornProductSurfaceHarness;
 use crate::reborn_support::session_thread::RebornThreadHarness;
-use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use crate::reborn_support::test_adapter::RebornTestIngress;
 
 pub type HarnessWaitConfig = WaitConfig;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
-    workflow: DefaultProductWorkflow,
+    workflow: DefaultProductSurface,
     external_conversation_id: String,
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    turn_runtime: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
     coordinator: Arc<dyn TurnCoordinator>,
-    _product_harness: RebornProductWorkflowHarness,
+    _product_harness: RebornProductSurfaceHarness,
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    runtime_event_log: Arc<InMemoryDurableEventLog>,
     scheduler_handle: Option<TurnRunSchedulerHandle>,
     scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
@@ -122,7 +125,7 @@ pub struct SubmittedTurn {
 
 #[derive(Clone)]
 pub struct RebornHarnessSharedStorage {
-    product_backend: Arc<LocalFilesystem>,
+    product_backend: Arc<DiskFilesystem>,
     product_root: Arc<tempfile::TempDir>,
     thread_backend: Arc<InMemoryBackend>,
     turn_backend: Arc<HarnessTurnStorageBackend>,
@@ -163,7 +166,7 @@ impl RebornBinaryE2EHarness {
         Self::with_model_gateway(
             conversation_id,
             RebornTraceReplayModelGateway::with_responses([
-                ironclaw_loop_support::HostManagedModelResponse::assistant_reply(reply),
+                ironclaw_loop_host::HostManagedModelResponse::assistant_reply(reply),
             ]),
             RecordingTestCapabilityPort::echo(),
         )
@@ -314,8 +317,20 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // The production capability port resolves the dispatch scope
+        // owner-first from the turn's real binding subject (this harness
+        // submits as the fixed `"alice"` actor, not the profile's default
+        // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
+        // setting must be seeded under that SAME resolved subject or the
+        // gate never raises -- mirrors
+        // `with_host_runtime_extension_lifecycle_capabilities`.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -411,8 +426,26 @@ impl RebornBinaryE2EHarness {
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
         let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
+        // treatment in `harness/mod.rs`: this tier never represents a
+        // provider-unconfigured instance. The base profile already seeds a
+        // `Configured` google credential account with the full gsuite scope set
+        // (`extension_lifecycle_credential_seeds`), so leaving the composition
+        // signal `google_oauth_configured = false` describes an incoherent
+        // instance — a connected google account on a box where the operator
+        // never ran `config set google.client_id`. The provider-instance
+        // readiness chokepoint added in this PR reads that signal, so the
+        // incoherent combination fails every google-family activation with
+        // `ProviderInstanceNotConfigured` and their capabilities never reach
+        // the model surface.
+        //
+        // The `false` arm keeps its own dedicated coverage — it is NOT weakened
+        // here: `provider_instance_readiness.rs`'s unit tests pin the map, and
+        // `scenario_extension_activation_instance_not_configured.rs` drives the
+        // unconfigured activation failure end-to-end off the base
+        // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_for_user(
+            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
                 subject_user.as_str(),
             )?
             .build()
@@ -438,8 +471,7 @@ impl RebornBinaryE2EHarness {
     async fn resolve_default_binding_subject_user(
         conversation_id: &str,
     ) -> HarnessResult<ironclaw_host_api::UserId> {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-test", "install-1")?;
         let envelope = ingress.verified_text_envelope_with_trigger(
             "extension-lifecycle-actor-probe",
             "alice",
@@ -448,7 +480,7 @@ impl RebornBinaryE2EHarness {
             ProductTriggerReason::DirectChat,
         )?;
         let binding_request = binding_request_from_envelope(&envelope);
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(product_scope())?;
+        let product_harness = RebornProductSurfaceHarness::filesystem_temp(product_scope())?;
         let binding = product_harness
             .binding_service()?
             .resolve_binding(binding_request)
@@ -695,16 +727,15 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         initial_actor_id: &str,
     ) -> HarnessResult<Self> {
-        let adapter = RebornTestProductAdapter::new(adapter_id, installation_id)?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new(adapter_id, installation_id)?;
         let product_harness = if let Some(storage) = shared_storage.as_ref() {
-            RebornProductWorkflowHarness::filesystem_shared_backend(
+            RebornProductSurfaceHarness::filesystem_shared_backend(
                 product_scope.clone(),
                 Arc::clone(&storage.product_backend),
                 Arc::clone(&storage.product_root),
             )?
         } else {
-            RebornProductWorkflowHarness::filesystem_temp(product_scope)?
+            RebornProductSurfaceHarness::filesystem_temp(product_scope)?
         };
         let binding = product_harness
             .binding_service()?
@@ -747,11 +778,27 @@ impl RebornBinaryE2EHarness {
             )
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
-        let turn_store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs)));
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(Arc::clone(
+            &turns_scoped_fs,
+        )));
+        let process_system =
+            ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_store));
+        let turn_runtime = Arc::new(process_system.agent_turn_runtime());
+        let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = Arc::new(
+            ProcessLoopCheckpointStore::new(process_system.checkpoints()),
+        );
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
+        let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
+            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
+            DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
+        ));
+        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+            Arc::new(HarnessLoopHostMilestoneSink {
+                recorded: Arc::clone(&milestone_sink),
+                durable: durable_milestone_sink,
+            });
         let exposes_spawn_subagent = capability_mode.exposes_spawn_subagent();
         let (
             capability_factory,
@@ -762,18 +809,13 @@ impl RebornBinaryE2EHarness {
         ) = capability_mode.into_parts(
             milestone_sink.clone(),
             thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            process_system.clone(),
+            None,
         )?;
-        // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
-        // mount) — the await-edge tree lives at
-        // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
-        // "one shared handle, never a per-store fixed view" rule.
-        let await_edge_store =
-            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
-        let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(process_system.dependencies()));
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
-            turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            turn_runtime.clone() as Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
             capability_result_writer.clone(),
             thread_harness.service.clone(),
         ));
@@ -789,6 +831,12 @@ impl RebornBinaryE2EHarness {
             // process. Keep each harness deterministic; scheduler worker-pool
             // concurrency is covered by lower-level runtime tests.
             worker_count: Some(std::num::NonZeroUsize::MIN),
+            // Scripted replay gateways fail deliberately (exhausted steps,
+            // mismatched requests) and must reach Failed in seconds; the
+            // production availability budget would ride those errors through
+            // minutes of backoff. Mirrors the integration group harness's
+            // IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1 pin.
+            planned_model_availability_retry_attempts: std::num::NonZeroU32::new(1),
             ..DefaultPlannedRuntimeConfig::default()
         };
         if exposes_spawn_subagent {
@@ -796,7 +844,7 @@ impl RebornBinaryE2EHarness {
             // production currently disables model-facing spawn by default.
             runtime_config.disabled_capability_ids = Vec::new();
         }
-        let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
+        let turn_state_for_evidence: Arc<dyn AgentTurnRuntimePort> = turn_runtime.clone();
         let evidence = Arc::new(HarnessLoopExitEvidencePort {
             inner: ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 thread_harness.service.clone(),
@@ -809,31 +857,28 @@ impl RebornBinaryE2EHarness {
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
             accept_harness_blocked_evidence,
         });
-        let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
-            turn_state: turn_state_for_runtime,
+            process_system,
             thread_service: thread_harness.service.clone()
                 as Arc<dyn ironclaw_threads::SessionThreadService>,
             thread_scope: thread_scope.clone(),
             model_gateway: Arc::new(model_gateway.clone()),
-            checkpoint_state_store,
             loop_checkpoint_store,
-            milestone_sink: milestone_sink.clone(),
+            milestone_sink: runtime_milestone_sink,
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
-            subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
-            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+            subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: runtime_config,
             model_route_resolver: None,
@@ -842,6 +887,8 @@ impl RebornBinaryE2EHarness {
             input_queue: None,
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_service: None,
+            after_turn_memory_writer: None,
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
@@ -850,6 +897,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -860,7 +908,7 @@ impl RebornBinaryE2EHarness {
             composition.coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         Ok(Self::from_composition(
             ingress,
@@ -869,12 +917,13 @@ impl RebornBinaryE2EHarness {
             binding,
             thread_scope,
             turn_scope,
-            turn_store,
+            turn_runtime,
             product_harness,
             thread_harness,
             model_gateway,
             capability_recorder,
             milestone_sink,
+            runtime_event_log,
             composition,
             turn_root,
         ))
@@ -883,17 +932,18 @@ impl RebornBinaryE2EHarness {
     #[allow(clippy::too_many_arguments)]
     fn from_composition(
         ingress: RebornTestIngress,
-        workflow: DefaultProductWorkflow,
+        workflow: DefaultProductSurface,
         external_conversation_id: String,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
-        product_harness: RebornProductWorkflowHarness,
+        turn_runtime: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
+        product_harness: RebornProductSurfaceHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
         capability_recorder: HarnessCapabilityRecorder,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        runtime_event_log: Arc<InMemoryDurableEventLog>,
         composition: RebornRuntimeLoopComposition<
             dyn SessionThreadService,
             RebornTraceReplayModelGateway,
@@ -909,13 +959,14 @@ impl RebornBinaryE2EHarness {
             binding,
             thread_scope,
             turn_scope,
-            turn_store,
+            turn_runtime,
             coordinator,
             _product_harness: product_harness,
             thread_harness,
             model_gateway,
             capability_recorder,
             milestone_sink,
+            runtime_event_log,
             scheduler_handle: Some(composition.scheduler_handle),
             scheduler_notifier,
             _turn_root: turn_root,
@@ -991,7 +1042,7 @@ impl RebornBinaryE2EHarness {
             binding.subject_user_id.clone(),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        let ack = self.workflow.accept_inbound(envelope).await?;
+        let ack = self.workflow.submit_inbound(envelope).await?;
         let run_id = match &ack {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
@@ -1019,7 +1070,7 @@ impl RebornBinaryE2EHarness {
         self.resume_with_gate(run_id, blocked).await
     }
 
-    pub async fn approve_and_resume_local_dev_gate(
+    pub async fn approve_and_resume_standalone_gate(
         &self,
         run_id: TurnRunId,
     ) -> HarnessResult<GateRef> {
@@ -1029,7 +1080,7 @@ impl RebornBinaryE2EHarness {
             .gate_ref
             .ok_or("blocked run missing gate ref")?;
         self.capability_recorder
-            .approve_local_dev_gate(&blocked)
+            .approve_standalone_gate(&blocked)
             .await?;
         self.resume_with_gate(run_id, blocked.clone()).await?;
         Ok(blocked)
@@ -1232,10 +1283,7 @@ impl RebornBinaryE2EHarness {
         scope: TurnScope,
         run_id: TurnRunId,
     ) -> HarnessResult<TurnRunState> {
-        Ok(self
-            .turn_store
-            .get_run_state(GetRunStateRequest { scope, run_id })
-            .await?)
+        Ok(self.turn_runtime.get_run_state(&scope, run_id).await?)
     }
 
     pub async fn assert_final_reply(&self, text: &str) -> HarnessResult<()> {
@@ -1287,7 +1335,7 @@ impl RebornBinaryE2EHarness {
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> HarnessResult<Vec<TurnRunRecord>> {
-        Ok(self.turn_store.children_of(scope, run_id).await?)
+        Ok(self.turn_runtime.children_of(scope, run_id).await?)
     }
 
     pub fn model_requests(&self) -> Vec<HostManagedModelRequest> {
@@ -1302,7 +1350,7 @@ impl RebornBinaryE2EHarness {
         self.model_gateway.assert_exhausted();
     }
 
-    pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub fn capability_invocations(&self) -> Vec<LoopRequest> {
         self.capability_recorder.invocations()
     }
 
@@ -1318,6 +1366,11 @@ impl RebornBinaryE2EHarness {
         self.capability_recorder.network_http_requests()
     }
 
+    pub fn install_network_response_script(&self, status: u16, body: Vec<u8>) -> HarnessResult<()> {
+        self.capability_recorder
+            .install_network_response_script(status, body)
+    }
+
     pub fn host_workspace_file_path(&self, relative: &str) -> HarnessResult<PathBuf> {
         self.capability_recorder
             .workspace_file_path(relative)
@@ -1326,6 +1379,51 @@ impl RebornBinaryE2EHarness {
 
     pub fn milestones(&self) -> Vec<LoopHostMilestone> {
         self.milestone_sink.milestones()
+    }
+
+    pub async fn runtime_projection(&self, run_id: TurnRunId) -> HarnessResult<ProjectionSnapshot> {
+        let user_id = self
+            .thread_scope
+            .owner_user_id
+            .clone()
+            .ok_or("runtime projection requires a thread owner")?;
+        let resource_scope = ResourceScope {
+            tenant_id: self.thread_scope.tenant_id.clone(),
+            user_id,
+            agent_id: Some(self.thread_scope.agent_id.clone()),
+            project_id: self.thread_scope.project_id.clone(),
+            mission_id: self.thread_scope.mission_id.clone(),
+            thread_id: Some(self.binding.thread_id.clone()),
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        };
+        Ok(
+            ReplayEventProjectionService::new(Arc::clone(&self.runtime_event_log))
+                .snapshot(ProjectionRequest {
+                    scope: ProjectionScope::from_resource_scope(&resource_scope),
+                    after: None,
+                    limit: MAX_PROJECTION_PAGE_LIMIT,
+                })
+                .await?,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct HarnessLoopHostMilestoneSink {
+    recorded: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    durable: Arc<DurableLoopHostMilestoneSink>,
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for HarnessLoopHostMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        self.durable
+            .publish_loop_milestone(milestone.clone())
+            .await?;
+        self.recorded.publish_loop_milestone(milestone).await
     }
 }
 
@@ -1506,11 +1604,12 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {
-    ironclaw_loop_support::HostManagedModelResponse {
+pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelResponse {
+    ironclaw_loop_host::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
+        effective_fallback_index: Some(0),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
@@ -1557,3 +1656,4 @@ pub fn assert_milestone_order(
             .collect::<Vec<_>>()
     );
 }
+// arch-exempt: large_file, binary parity coverage remains centralized, plan #6175

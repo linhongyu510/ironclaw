@@ -5,7 +5,7 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_first_party_extensions/AGENTS.md`
-  - `crates/ironclaw_loop_support/AGENTS.md`
+  - `crates/ironclaw_loop_host/AGENTS.md`
   - `docs/reborn/contracts/skills-extension.md`
 
 ## What This Crate Owns
@@ -25,7 +25,7 @@
 
 - Fast local check: `cargo test -p ironclaw_first_party_extension_ports`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
-- Composition check when exposed ports change: `cargo test -p ironclaw_reborn_composition local_dev_runtime`
+- Composition check when exposed ports change: `cargo test -p ironclaw_reborn_composition standalone_runtime_webui_bundle`
 
 ## Agent Notes
 

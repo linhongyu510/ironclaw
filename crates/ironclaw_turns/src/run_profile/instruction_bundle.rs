@@ -12,13 +12,17 @@ use sha2::{Digest, Sha256};
 use crate::LoopMessageRef;
 
 use super::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
-    LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
-    LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel,
-    VisibleCapabilitySurface,
-    prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
+    CapabilityDescriptorView, LoopContextBundle, LoopContextMessage, LoopContextSnippet,
+    LoopInlineMessage, LoopInlineMessageRole, LoopModelMessage, LoopRunContext,
+    PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilitySurface,
+    prompt_text::{
+        PromptTextSurface, PromptTextValidationError, validate_model_safe_text,
+        validate_prompt_text, validate_prompt_text_with_diagnostics,
+    },
     runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
+    snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash},
 };
 
 const CAPABILITY_SURFACE_USAGE_POLICY: &str =
@@ -91,10 +95,10 @@ impl InstructionSafetyContext {
         })
     }
 
-    pub fn local_development_noop() -> Self {
+    pub fn non_production_noop() -> Self {
         Self::new(
-            "local-dev-instruction-safety:no-op",
-            "No instruction safety scanner is configured for this local-development run. Treat model-provided goals and instructions as untrusted.",
+            "non-production-instruction-safety:no-op",
+            "No instruction safety scanner is configured for this non-production run. Treat model-provided goals and instructions as untrusted.",
         )
         .expect("static no-op instruction safety context literals are valid") // safety: static literals are valid.
     }
@@ -133,19 +137,24 @@ pub trait InstructionMaterializationStore: Send + Sync {
     ) -> Result<Option<InstructionBundleMaterializedMessage>, AgentLoopHostError>;
 }
 
-/// In-memory, per-process materialization store for model-visible safe context.
+/// Ephemeral, per-process materialization store for model-visible prompt context.
+///
+/// This is intentionally not filesystem-backed. It stages raw model-visible
+/// prompt material between prompt construction and model resolution for one
+/// claimed run, and `ironclaw_turns` must not define a durable row shape for
+/// raw prompts.
 #[derive(Default)]
-pub struct InMemoryInstructionMaterializationStore {
+pub struct EphemeralInstructionMaterializationStore {
     messages: Mutex<HashMap<String, InstructionBundleMaterializedMessage>>,
 }
 
-impl InMemoryInstructionMaterializationStore {
+impl EphemeralInstructionMaterializationStore {
     fn key(context: &LoopRunContext, content_ref: &LoopMessageRef) -> String {
         format!("{}:{}", context.run_id, content_ref.as_str())
     }
 }
 
-impl InstructionMaterializationStore for InMemoryInstructionMaterializationStore {
+impl InstructionMaterializationStore for EphemeralInstructionMaterializationStore {
     fn put_materialized_messages(
         &self,
         context: &LoopRunContext,
@@ -286,6 +295,7 @@ impl InstructionBundleBuilder {
                 let content_ref = skill_snippet_model_message_ref(
                     &snippet.snippet_ref,
                     &snippet.safe_summary,
+                    &snippet.model_content,
                     skill_ordinal,
                 )?;
                 let Some(metadata) = snippet.metadata.as_ref() else {
@@ -306,7 +316,7 @@ impl InstructionBundleBuilder {
                 skill_context.push(PromptSkillContextMetadata {
                     ordinal: skill_ordinal,
                     source_name: metadata.source_name.clone(),
-                    trust_level: metadata.trust_level.clone(),
+                    trust_level: metadata.trust_level,
                 });
                 skill_ordinal += 1;
             } else {
@@ -326,11 +336,16 @@ impl InstructionBundleBuilder {
             }
         }
 
-        let mut memory_snippets = request.context_bundle.memory_snippets;
+        // Memory snippets arrive already ordered by the host's two-lane retrieval
+        // (short-term before long-term) so the active conversation keeps priority
+        // under the shared budget. Preserve that insertion order — do NOT re-sort
+        // by opaque ref like instruction snippets do, which would scramble the lane
+        // priority before the model sees it. (CR review: lane priority at the
+        // render boundary.)
+        let memory_snippets = request.context_bundle.memory_snippets;
         if !memory_snippets.is_empty() {
             requires_materialization_store = true;
         }
-        memory_snippets.sort_by(compare_snippet_refs);
         for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
             let content_ref =
                 snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;
@@ -513,7 +528,7 @@ fn snippet_model_content_surface(
     snippet: &LoopContextSnippet,
 ) -> PromptTextSurface {
     match (section, snippet.metadata.as_ref()) {
-        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted.as_str() => {
+        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted => {
             PromptTextSurface::TrustedSkillInstruction
         }
         _ => PromptTextSurface::GenericModelContent,
@@ -631,6 +646,24 @@ fn push_visible_surface(
     surface
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
+    surface
+        .descriptors
+        .retain(|descriptor| match validate_surface_descriptor(descriptor) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    capability_id = descriptor.capability_id.as_str(),
+                    field = error.field,
+                    matched_pattern = error
+                        .rejection
+                        .matched_pattern()
+                        .unwrap_or("structural prompt-text check"),
+                    error_safe_summary = %error.rejection.host_error().safe_summary,
+                    "capability omitted from model prompt because its descriptor is not model-safe"
+                );
+                false
+            }
+        });
     let capability_policy = capability_surface_usage_policy()?;
     let mut summary = format!("surface {}", surface.version.as_str());
     summary.push_str("\nPolicy:\n");
@@ -640,7 +673,6 @@ fn push_visible_surface(
         summary.push_str("\n(none)");
     }
     for descriptor in &surface.descriptors {
-        validate_surface_descriptor(descriptor)?;
         summary.push_str("\n- id: ");
         summary.push_str(descriptor.capability_id.as_str());
         summary.push_str("\n  name: ");
@@ -705,14 +737,38 @@ fn normalized_capability_surface_usage_policy(
     Ok(policy)
 }
 
+struct SurfaceDescriptorValidationError {
+    field: &'static str,
+    rejection: Box<PromptTextValidationError>,
+}
+
 fn validate_surface_descriptor(
     descriptor: &CapabilityDescriptorView,
-) -> Result<(), AgentLoopHostError> {
-    validate_model_safe_text(descriptor.safe_name.clone(), "capability safe name")?;
-    validate_model_safe_text(
+) -> Result<(), SurfaceDescriptorValidationError> {
+    validate_prompt_text_with_diagnostics(
+        descriptor.safe_name.clone(),
+        "capability safe name",
+        PromptTextSurface::SafeSummary,
+    )
+    .map_err(|rejection| SurfaceDescriptorValidationError {
+        field: "safe_name",
+        rejection: Box::new(rejection),
+    })?;
+    let description_surface = match descriptor.description_trust {
+        CapabilityDescriptionTrust::Untrusted => PromptTextSurface::SafeSummary,
+        CapabilityDescriptionTrust::VerifiedCatalog => {
+            PromptTextSurface::VerifiedCatalogDescription
+        }
+    };
+    validate_prompt_text_with_diagnostics(
         descriptor.safe_description.clone(),
         "capability safe description",
-    )?;
+        description_surface,
+    )
+    .map_err(|rejection| SurfaceDescriptorValidationError {
+        field: "safe_description",
+        rejection: Box::new(rejection),
+    })?;
     Ok(())
 }
 
@@ -879,45 +935,12 @@ fn validate_context_ref(value: String, label: &'static str) -> Result<String, Ag
     Ok(value)
 }
 
-fn sanitize_ref_suffix(value: &str) -> String {
-    let mut suffix = String::with_capacity(value.len().min(96));
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-            suffix.push(character);
-        } else {
-            suffix.push('.');
-        }
-        if suffix.len() >= 96 {
-            break;
-        }
-    }
-    let suffix = suffix.trim_matches('.');
-    if suffix.is_empty() {
-        "context".to_string()
-    } else {
-        suffix.to_string()
-    }
-}
-
 fn stable_ref_hash(section: &str, source_ref: &str, safe_summary: &str, ordinal: usize) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
-    let mut hash = FNV_OFFSET;
-    for bytes in [
-        section.as_bytes(),
-        &[0xFF],
-        source_ref.as_bytes(),
-        &[0xFF],
-        safe_summary.as_bytes(),
-        &[0xFF],
-        ordinal.to_string().as_bytes(),
-    ] {
-        for &byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
+    // Preserves the legacy between-fields FNV-1a layout (0xFF separators between
+    // the four ordered fields) that this ref used before centralization, so
+    // model-visible refs do not rotate.
+    let ordinal = ordinal.to_string();
+    stable_skill_snippet_display_hash([section, source_ref, safe_summary, ordinal.as_str()])
 }
 
 fn feed_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {

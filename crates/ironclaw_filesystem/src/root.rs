@@ -4,7 +4,8 @@ use ironclaw_host_api::VirtualPath;
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo, VersionedEntry,
+    FilesystemOperation, Filter, IndexSpec, OrderedPage, Page, RecordVersion, SeqNo,
+    VersionedEntry,
 };
 
 /// Unified filesystem interface over canonical virtual paths.
@@ -53,7 +54,7 @@ pub trait RootFilesystem: Send + Sync {
     /// the unified surface must implement `put` natively. Byte-only backends
     /// can do this with a thin delegation to their own native `write_file`,
     /// gated on `kind = None`, empty `indexed`, and `CasExpectation::Any`;
-    /// see `LocalFilesystem::put` for the canonical pattern. We deliberately
+    /// see `DiskFilesystem::put` for the canonical pattern. We deliberately
     /// do **not** route the default `put` through `self.write_file`, because
     /// the default `write_file` routes through `self.put` — a backend that
     /// overrode neither would recurse to a stack overflow.
@@ -73,7 +74,7 @@ pub trait RootFilesystem: Send + Sync {
     /// other direction in the trait default. Byte-only backends implement
     /// `get` by wrapping their native `read_file` result in
     /// `Some(VersionedEntry { entry: Entry::bytes(body), version: 0 })`
-    /// directly. See `LocalFilesystem::get` for the canonical pattern.
+    /// directly. See `DiskFilesystem::get` for the canonical pattern.
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         unsupported(path, FilesystemOperation::ReadFile)
     }
@@ -109,6 +110,16 @@ pub trait RootFilesystem: Send + Sync {
         path: &VirtualPath,
         _filter: &Filter,
         _page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        unsupported(path, FilesystemOperation::Query)
+    }
+
+    /// Ordered keyset query over one declared indexed projection.
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        _filter: &Filter,
+        _page: &OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         unsupported(path, FilesystemOperation::Query)
     }
@@ -198,8 +209,9 @@ pub trait RootFilesystem: Send + Sync {
     // ─── Atomicity ────────────────────────────────────────────────────────
 
     /// Begin a multi-key transaction scoped to `prefix`. Backends with only
-    /// CAS support return [`FilesystemError::Unsupported`]; consumers must
-    /// always have a CAS-only path.
+    /// CAS support return [`FilesystemError::Unsupported`]. Consumers normally
+    /// provide a CAS-only path; stores with cross-record invariants may require
+    /// `TxnCapability::MultiKey` and fail closed on weaker backends.
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         unsupported(path, FilesystemOperation::BeginTxn)
     }

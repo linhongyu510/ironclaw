@@ -435,7 +435,7 @@ tests that exercise only the default family still compile.
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::SpawnCapableLoopCapabilityPortFactory; // P2.A
+use ironclaw_loop_host::SpawnCapableLoopCapabilityPortFactory; // P2.A
 use ironclaw_turns::{TurnCoordinator, ...};
 
 use ironclaw_runner::{
@@ -535,7 +535,7 @@ where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     // 1. Goal store keyed by child TurnRunId.
-    let goal_store: Arc<dyn SubagentGoalStore> = match subagent.goal_store_backend {
+    let goal_store: Arc<dyn SubagentGoalStorePort> = match subagent.goal_store_backend {
         SubagentGoalStoreBackend::DbBacked => Arc::new(
             DbBackedSubagentGoalStore::from_turn_state_backend(&parts.turn_state)?,
         ),
@@ -748,7 +748,7 @@ struct SubagentTestHarness {
     coordinator: Arc<dyn TurnCoordinator>,
     turn_state: Arc<MemTurnStore>,
     thread_service: Arc<MemThreadService>,
-    goal_store: Arc<dyn SubagentGoalStore>,
+    goal_store: Arc<dyn SubagentGoalStorePort>,
     gateway: Arc<ScriptedGateway>,
     _worker: tokio::task::JoinHandle<()>,
 }
@@ -1359,7 +1359,8 @@ store, durable tombstone store, autonomous-continuation budget, completion
 observer, and restart reconciler. They must be subject to the same safety-class
 gate as `checkpoint_state_store` and `wake_notifier`. The pending-gate
 projection sink is a P0 product-surface prerequisite checked by composition, not
-a subagent-family readiness component.
+a subagent-family readiness component. The historical
+`checkpoint_state_store` gate is now the process checkpoint port.
 
 ```rust
 // crates/ironclaw_runner/src/production_readiness.rs  (additions)
@@ -1450,7 +1451,7 @@ cargo fmt --all -- --check
 cargo clippy --all --benches --tests --examples --all-features    # zero warnings
 cargo test -p ironclaw_runner                                     # crate unit + integration
 cargo test -p ironclaw_reborn_composition                         # product composition + E2E
-cargo test -p ironclaw_turns -p ironclaw_agent_loop -p ironclaw_loop_support
+cargo test -p ironclaw_turns -p ironclaw_agent_loop -p ironclaw_loop_host
 cargo test -p ironclaw_architecture --test reborn_dependency_boundaries
 scripts/reborn-e2e-rust.sh architecture
 cargo test                                                        # full workspace

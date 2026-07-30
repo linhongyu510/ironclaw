@@ -37,7 +37,7 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
     ));
     let mut registry = ExtensionRegistry::new();
     registry.insert(harness_web_access::web_access_extension_package()?)?;
-    let runtime = harness_web_access::local_dev_host_runtime_with_web_access(
+    let runtime = harness_web_access::standalone_host_runtime_with_web_access(
         storage_root,
         registry,
         Arc::clone(&http_egress),
@@ -45,8 +45,10 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
+        resource_governor: None,
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
@@ -83,5 +85,6 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

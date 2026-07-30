@@ -66,7 +66,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn product storage crate" \
-  "crates/ironclaw_product_workflow_storage/src/lib.rs" \
+  "crates/ironclaw_product_storage/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -74,7 +74,23 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn v2 adapter crate" \
-  "crates/ironclaw_telegram_v2_adapter/src/lib.rs" \
+  "crates/ironclaw_telegram_extension/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram extension crate" \
+  "crates/ironclaw_telegram_extension/src/channel.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram v2 protocol adapter crate" \
+  "crates/ironclaw_telegram_v2_adapter/src/render.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -148,14 +164,6 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
-
-assert_scope \
   "shared manifest" \
   "Cargo.toml" \
   "docs_only=false
@@ -166,6 +174,14 @@ has_reborn_tests=true"
 assert_scope \
   "shared substrate crate" \
   "crates/ironclaw_host_runtime/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "process lifecycle authority crate" \
+  "crates/ironclaw_processes/src/journal_store.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -185,6 +201,22 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket script" \
+  "scripts/ci/reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket regression suite" \
+  "scripts/ci/test-reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
@@ -258,8 +290,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed tests and reborn" \
+  "tests/e2e/scenarios/test_live_flow.py
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
@@ -309,6 +341,20 @@ has_reborn_tests=true"
 assert_scope \
   "reborn coverage regression suite, sourced sibling (R-section split)" \
   "scripts/ci/test-reborn-coverage-ratchet-cases.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "WS12 generated gates and sabotage tests are reborn-scoped" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/test_reborn_changed_coverage.py
+scripts/ci/ws12-suite-shards.toml
+scripts/ci/ws12_suite_shards.py
+scripts/ci/test_ws12_suite_shards.py
+scripts/ci/ws12_workflow_contracts.py
+scripts/ci/test_ws12_workflow_contracts.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

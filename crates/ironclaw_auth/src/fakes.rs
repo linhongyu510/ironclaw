@@ -6,18 +6,17 @@ use chrono::Utc;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowManager,
-    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProviderClient, CredentialAccount,
-    CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountListPage,
-    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
-    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
-    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSelectionInput, CredentialSetupService, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthExchangeCleanupRequest,
+    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
+    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
+    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
+    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
+    CredentialSetupService, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
@@ -35,7 +34,7 @@ use crate::{
         validate_refresh_target, validate_selection_flow,
     },
     flow::credential_status_for_completed_flow,
-    flow_matches_durable_owner, flow_matches_turn_gate_query,
+    flow_matches_turn_gate_query,
     interaction::PendingSecretInteraction,
     provider::validate_provider_callback_request,
     scope_matches,
@@ -113,6 +112,16 @@ impl InMemoryAuthProductServices {
         self.lock_state().quarantines.insert(account_id, reason);
     }
 
+    #[cfg(test)]
+    pub(crate) async fn create_account_at(
+        &self,
+        request: NewCredentialAccount,
+        now: Timestamp,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let mut state = self.lock_state();
+        create_account_in_state_at(&mut state, request, now)
+    }
+
     pub fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
         let mut flows = self
             .lock_state()
@@ -129,6 +138,40 @@ impl InMemoryAuthProductServices {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// The supersede walk over already-locked state used by `create_flow`,
+    /// which must run walk + insert inside one lock acquisition — two racing
+    /// setup creates could otherwise both observe "no live predecessor" and
+    /// both survive.
+    ///
+    /// Owner granularity (tenant/user/agent/project + surface + session):
+    /// setup flows are thread-less and each re-opened connect popup mints a
+    /// fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+    /// equality — is the correct predicate here, mirroring the durable
+    /// store's per-owner+surface+session flow-root listing. Records are
+    /// mutated in place rather than routed through `cancel_flow`, whose
+    /// full-scope check would reject the prior invocation's scope.
+    fn supersede_setup_flows_locked(
+        state: &mut AuthState,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Vec<AuthFlowId> {
+        let now = Utc::now();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if crate::flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && crate::is_setup_class_continuation(&record.continuation)
+                && !crate::is_terminal_status(record.status)
+            {
+                record.status = AuthFlowStatus::Canceled;
+                record.error = Some(crate::AuthErrorCode::Canceled);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded
+    }
 }
 
 #[async_trait]
@@ -142,19 +185,6 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
             .flows
             .values()
             .find(|flow| flow_matches_turn_gate_query(flow, &query))
-            .cloned())
-    }
-
-    async fn flow_for_owner_by_id(
-        &self,
-        owner_scope: &crate::AuthProductScope,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-        let state = self.lock_state();
-        Ok(state
-            .flows
-            .get(&flow_id)
-            .filter(|flow| flow_matches_durable_owner(flow, owner_scope))
             .cloned())
     }
 
@@ -178,6 +208,13 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
         let mut state = self.lock_state();
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract), under the SAME lock
+        // acquisition as the insert below: walk + insert must be one critical
+        // section or two racing creates both observe "no live predecessor".
+        if crate::is_setup_class_continuation(&request.continuation) {
+            Self::supersede_setup_flows_locked(&mut state, &request.scope, &request.provider);
+        }
         if let Some(binding) = &request.update_binding {
             let account = state
                 .accounts
@@ -520,7 +557,13 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !crate::is_terminal_status(record.status) {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed
+                | AuthFlowStatus::Canceled
+                | AuthFlowStatus::Failed
+                | AuthFlowStatus::Expired
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if already marked by a concurrent caller, return existing record.
@@ -531,6 +574,53 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.updated_at = emitted_at;
         Ok(record.clone())
     }
+
+    async fn fail_completed_continuation(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        error: crate::AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        // Only a completed flow that has not yet acknowledged its continuation
+        // can be terminalized by a continuation-dispatch failure. Anything else
+        // (already dispatched, or already terminal in some other state) must not
+        // regress — this races safely against a concurrent completion/dispatch.
+        if record.status != AuthFlowStatus::Completed || record.continuation_emitted_at.is_some() {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        record.status = AuthFlowStatus::Failed;
+        record.error = Some(error);
+        record.updated_at = now;
+        Ok(record.clone())
+    }
+}
+
+/// Credential-owner match for lifecycle/disconnect cleanup: two auth scopes
+/// share a credential owner iff they carry the same tenant/user/agent/project.
+/// Surface, session, thread, mission, and invocation are excluded — a removal or
+/// channel disconnect arrives on the `Callback` surface with a fresh invocation
+/// and no session/thread, yet must still reach the pending flow the connect
+/// popup created under its own surface/session. Mirrors the account-cleanup
+/// owner granularity.
+fn flow_matches_credential_owner(
+    flow_scope: &crate::AuthProductScope,
+    request_scope: &crate::AuthProductScope,
+) -> bool {
+    let flow = &flow_scope.resource;
+    let request = &request_scope.resource;
+    flow.tenant_id == request.tenant_id
+        && flow.user_id == request.user_id
+        && flow.agent_id == request.agent_id
+        && flow.project_id == request.project_id
 }
 
 #[async_trait]
@@ -826,6 +916,33 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                     refreshed: false,
                 })
             }
+            Err(AuthProductError::InvalidGrant) => {
+                // A14 · Fidelity with production
+                // `ProviderBackedCredentialAccountService::refresh_account`: a
+                // provider `invalid_grant` means the refresh token is permanently
+                // revoked, so the account becomes `Revoked` (reauthorize-required),
+                // not merely `RefreshFailed`. Without this arm the fake left the
+                // account status unchanged (propagating the raw error), hiding a
+                // divergence from the production path.
+                let mut state = self.lock_state();
+                let account = state
+                    .accounts
+                    .get_mut(&request.account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_refresh_target(account, &request)?;
+                if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
+                    account.status = CredentialAccountStatus::Revoked;
+                    account.updated_at = Utc::now();
+                }
+                Ok(CredentialRefreshReport {
+                    account: account.projection(),
+                    recovery: recovery_projection_for_single_account(
+                        account.provider.clone(),
+                        account,
+                    ),
+                    refreshed: false,
+                })
+            }
             Err(error) => Err(error),
         }
     }
@@ -1017,46 +1134,6 @@ impl AuthProviderClient for InMemoryAuthProductServices {
 
 #[async_trait]
 impl SecretCleanupService for InMemoryAuthProductServices {
-    async fn retain_oauth_exchange_for_cleanup(
-        &self,
-        request: OAuthExchangeCleanupRequest,
-    ) -> Result<CredentialAccountId, AuthProductError> {
-        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
-        let mut state = self.lock_state();
-        if let Some(existing) = state.accounts.get(&account_id) {
-            if existing.status == CredentialAccountStatus::Revoked
-                && existing.provider == request.exchange.provider
-                && CredentialAccountOwnerScope::from_scope(&request.scope).matches(existing)
-                && existing.access_secret.as_ref() == Some(&request.exchange.access_secret)
-                && existing.refresh_secret == request.exchange.refresh_secret
-            {
-                return Ok(account_id);
-            }
-            return Err(AuthProductError::BackendConflict);
-        }
-        let now = Utc::now();
-        state.accounts.insert(
-            account_id,
-            CredentialAccount {
-                id: account_id,
-                scope: request.scope,
-                provider: request.exchange.provider,
-                label: request.exchange.account_label,
-                status: CredentialAccountStatus::Revoked,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(request.exchange.access_secret),
-                refresh_secret: request.exchange.refresh_secret,
-                scopes: Vec::new(),
-                provider_identity: None,
-                created_at: now,
-                updated_at: now,
-            },
-        );
-        Ok(account_id)
-    }
-
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -1064,6 +1141,74 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         let mut state = self.lock_state();
         let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
+        // A3 · Cancel the provider's pending flows BEFORE enumerating
+        // accounts, mirroring the durable store's order (which closes the
+        // callback/removal race there — the fake serializes the whole
+        // cleanup under one lock, so here the order is fidelity only).
+        // Owner decision 2026-07-15: cancel on both Deactivate and
+        // Uninstall (any provider-selected cleanup). Idempotent.
+        //
+        // F2 · Any matched flow whose `TurnGateResume` continuation has not
+        // been acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `mark_continuation_dispatched`
+        // makes the handoff emit-once across cleanup retries.
+        if request.provider.is_some() || request.lifecycle_package.is_some() {
+            for record in state.flows.values_mut() {
+                if !flow_matches_credential_owner(&record.scope, &request.scope) {
+                    continue;
+                }
+                let provider_selected = request.provider.as_ref() == Some(&record.provider);
+                // Package-keyed selection mirrors the durable store (#6169):
+                // the removed extension's own LifecycleActivation flows die
+                // with it even when the provider is shared with another
+                // installed extension.
+                let package_selected = matches!(
+                    (&record.continuation, request.lifecycle_package.as_ref()),
+                    (
+                        crate::AuthContinuationRef::LifecycleActivation { package_ref },
+                        Some(package),
+                    ) if package_ref == package
+                );
+                let requires_cleanup = !crate::is_terminal_status(record.status)
+                    || (record.continuation_emitted_at.is_none()
+                        && matches!(
+                            record.continuation,
+                            crate::AuthContinuationRef::TurnGateResume { .. }
+                        ));
+                if !(provider_selected || package_selected) || !requires_cleanup {
+                    continue;
+                }
+                if !crate::is_terminal_status(record.status) {
+                    record.status = AuthFlowStatus::Canceled;
+                    record.error = Some(crate::AuthErrorCode::Canceled);
+                    record.updated_at = Utc::now();
+                }
+                if record.continuation_emitted_at.is_none()
+                    && matches!(
+                        record.continuation,
+                        crate::AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: record.id,
+                            scope: record.scope.clone(),
+                            continuation: record.continuation.clone(),
+                            provider: record.provider.clone(),
+                            credential_account_id: record.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
+                // #6169: report each walked flow so the composition layer can
+                // eagerly drop its durable setup PKCE verifier secret.
+                report.canceled_flows.push(crate::CanceledCleanupFlow {
+                    scope: record.scope.clone(),
+                    flow_id: record.id,
+                });
+            }
+        }
         // Credential-owner granularity, not full scope equality: cleanup
         // callers mint a fresh invocation (and often a different thread), so
         // exact matching could never find the account the flow stored.
@@ -1107,51 +1252,15 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                     SecretCleanupAction::Uninstall => {
                         if account.status != CredentialAccountStatus::Revoked {
                             account.status = CredentialAccountStatus::Revoked;
+                            account.access_secret = None;
+                            account.refresh_secret = None;
                             account.updated_at = Utc::now();
                             report.revoked_accounts.push(account.id);
                         }
-                        account.access_secret = None;
-                        account.refresh_secret = None;
                     }
                 }
             } else if had_grant {
                 report.retained_accounts.push(account.id);
-            }
-        }
-        if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
-        {
-            let owner = &request.scope.resource;
-            for flow in state.flows.values_mut().filter(|flow| {
-                let resource = &flow.scope.resource;
-                &flow.provider == provider
-                    && resource.tenant_id == owner.tenant_id
-                    && resource.user_id == owner.user_id
-                    && resource.agent_id == owner.agent_id
-                    && resource.project_id == owner.project_id
-            }) {
-                if !crate::is_terminal_status(flow.status) {
-                    flow.status = AuthFlowStatus::Canceled;
-                    flow.error = Some(crate::AuthErrorCode::Canceled);
-                    flow.updated_at = Utc::now();
-                }
-                if flow.continuation_emitted_at.is_none()
-                    && matches!(
-                        flow.continuation,
-                        AuthContinuationRef::TurnGateResume { .. }
-                    )
-                {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: flow.id,
-                            scope: flow.scope.clone(),
-                            continuation: flow.continuation.clone(),
-                            provider: flow.provider.clone(),
-                            credential_account_id: flow.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
-                }
             }
         }
         Ok(report)
@@ -1162,8 +1271,16 @@ fn create_account_in_state(
     state: &mut AuthState,
     request: NewCredentialAccount,
 ) -> Result<CredentialAccount, AuthProductError> {
-    validate_new_credential_account(&request)?;
     let now = Utc::now();
+    create_account_in_state_at(state, request, now)
+}
+
+fn create_account_in_state_at(
+    state: &mut AuthState,
+    request: NewCredentialAccount,
+    now: Timestamp,
+) -> Result<CredentialAccount, AuthProductError> {
+    validate_new_credential_account(&request)?;
     let account = CredentialAccount {
         id: CredentialAccountId::new(),
         scope: request.scope,

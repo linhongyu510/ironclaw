@@ -4,37 +4,49 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod approval_store;
 mod auto_approve;
 mod capability_permission;
 mod cas_record;
 mod policy;
 
-use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{
+    in_memory_backed_approval_filesystem, in_memory_backed_approval_request_store,
+    in_memory_backed_approvals_filesystem, in_memory_backed_auto_approve_setting_store,
+    in_memory_backed_capability_permission_override_store, in_memory_backed_gate_record_store,
+    in_memory_backed_persistent_approval_policy_store,
+};
+
+use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
     CapabilityId, GrantConstraints, InvocationFingerprint, Principal, ResourceScope,
 };
-use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+pub use approval_store::{
+    ApprovalRecord, ApprovalRequestStore, ApprovalRequestStorePort, ApprovalStatus,
+    ApprovalStoreError, GateRecordStore, GateRecordStorePort,
+};
 pub use auto_approve::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
-    AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,
-    InMemoryAutoApproveSettingStore,
+    AutoApproveSettingRecord, AutoApproveSettingStore, AutoApproveSettingStorePort,
 };
 pub use capability_permission::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
-    CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
-    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+    CapabilityPermissionOverrideStore, CapabilityPermissionOverrideStorePort,
+    CapabilityPermissionState, CapabilityPermissionStoreError,
 };
 pub use policy::{
-    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    PersistentApprovalScope, permission_mode_allows_persistent_approval,
-    persistent_approval_grant_issuer,
+    PersistentApprovalPolicyStorePort, PersistentApprovalScope,
+    permission_mode_allows_persistent_approval, persistent_approval_grant_issuer,
 };
 
 pub type ToolPermissionOverride = CapabilityPermissionOverride;
@@ -43,17 +55,17 @@ pub type ToolPermissionOverrideKey = CapabilityPermissionOverrideKey;
 pub type ToolPermissionOverrideRecord = CapabilityPermissionOverrideRecord;
 pub type ToolPermissionState = CapabilityPermissionState;
 pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
-pub type FilesystemToolPermissionOverrideStore<F> = FilesystemCapabilityPermissionOverrideStore<F>;
-pub type InMemoryToolPermissionOverrideStore = InMemoryCapabilityPermissionOverrideStore;
+pub type ToolPermissionOverrideStore<F> = CapabilityPermissionOverrideStore<F>;
 
-pub trait ToolPermissionOverrideStore: CapabilityPermissionOverrideStore {}
+pub trait ToolPermissionOverrideStorePort: CapabilityPermissionOverrideStorePort {}
 
-impl<T> ToolPermissionOverrideStore for T where T: CapabilityPermissionOverrideStore + ?Sized {}
+impl<T> ToolPermissionOverrideStorePort for T where T: CapabilityPermissionOverrideStorePort + ?Sized
+{}
 
 pub struct ApprovalResolver<'a, A, L>
 where
-    A: ApprovalRequestStore + ?Sized,
-    L: CapabilityLeaseStore + ?Sized,
+    A: ApprovalRequestStorePort + ?Sized,
+    L: CapabilityLeaseStorePort + ?Sized,
 {
     approvals: &'a A,
     leases: &'a L,
@@ -62,8 +74,8 @@ where
 
 impl<'a, A, L> ApprovalResolver<'a, A, L>
 where
-    A: ApprovalRequestStore + ?Sized,
-    L: CapabilityLeaseStore + ?Sized,
+    A: ApprovalRequestStorePort + ?Sized,
+    L: CapabilityLeaseStorePort + ?Sized,
 {
     pub fn new(approvals: &'a A, leases: &'a L) -> Self {
         Self {
@@ -158,7 +170,7 @@ where
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Approved {
             return Err(ApprovalResolutionError::NotApproved {
                 status: record.status,
@@ -187,7 +199,7 @@ where
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Pending {
             return Err(ApprovalResolutionError::NotPending {
                 status: record.status,
@@ -220,7 +232,7 @@ where
         // record.
         let approved_record = match self.approvals.approve(scope, request_id).await {
             Ok(record) => record,
-            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+            Err(ApprovalStoreError::ApprovalNotPending { status, .. }) => {
                 return Err(ApprovalResolutionError::NotPending { status });
             }
             Err(error) => return Err(error.into()),
@@ -277,7 +289,7 @@ where
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Pending {
             return Err(ApprovalResolutionError::NotPending {
                 status: record.status,
@@ -286,7 +298,7 @@ where
 
         let denied = match self.approvals.deny(scope, request_id).await {
             Ok(denied) => denied,
-            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+            Err(ApprovalStoreError::ApprovalNotPending { status, .. }) => {
                 return Err(ApprovalResolutionError::NotPending { status });
             }
             Err(error) => return Err(error.into()),
@@ -370,7 +382,7 @@ pub struct DenyApproval {
 #[derive(Debug, Error)]
 pub enum ApprovalResolutionError {
     #[error("approval store failed: {0}")]
-    RunState(#[from] RunStateError),
+    ApprovalStore(#[from] ApprovalStoreError),
     #[error("approval request is not pending: {status:?}")]
     NotPending { status: ApprovalStatus },
     /// Surfaced by [`retry_lease_issue_for_dispatch`] /

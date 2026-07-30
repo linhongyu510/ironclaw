@@ -194,6 +194,17 @@ fn apply_run_event(
     entry: &EventLogEntry<RuntimeEvent>,
 ) {
     let event = &entry.record;
+    let nested_dispatch = event.parent_invocation_id.is_some()
+        && matches!(
+            event.kind,
+            RuntimeEventKind::DispatchRequested
+                | RuntimeEventKind::RuntimeSelected
+                | RuntimeEventKind::DispatchSucceeded
+                | RuntimeEventKind::DispatchFailed
+        );
+    if nested_dispatch {
+        return;
+    }
     if matches!(
         event.kind,
         RuntimeEventKind::CapabilityActivityRequested
@@ -391,7 +402,8 @@ fn capability_activity_status_for_event(
         | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::HookDispatched
         | RuntimeEventKind::HookDecisionEmitted
-        | RuntimeEventKind::HookFailed => None,
+        | RuntimeEventKind::HookFailed
+        | RuntimeEventKind::FailureRecovered => None,
     }
 }
 
@@ -431,7 +443,8 @@ fn run_status_for_event(
         | RuntimeEventKind::HookFailed
         | RuntimeEventKind::CapabilityActivityRequested
         | RuntimeEventKind::CapabilityActivitySucceeded
-        | RuntimeEventKind::CapabilityActivityFailed => {
+        | RuntimeEventKind::CapabilityActivityFailed
+        | RuntimeEventKind::FailureRecovered => {
             current_status.unwrap_or(RunProjectionStatus::Running)
         }
     }

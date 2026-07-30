@@ -161,7 +161,7 @@ async def _open_stubbed_approval_thread(
         handle_resolve,
     )
 
-    await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
         "run a gated command", timeout=15000
@@ -170,7 +170,14 @@ async def _open_stubbed_approval_thread(
     return context, page, resolve_requests
 
 
-async def _emit_approval_gate(page, *, allow_always=True, gate_ref=GATE_REF):
+async def _emit_approval_gate(
+    page,
+    *,
+    allow_always=True,
+    gate_ref=GATE_REF,
+    invocation_id="invoke-legacy-approval",
+    tool_name="builtin.shell",
+):
     long_command = "python - <<'PY'\n" + "print('approval payload line')\n" * 28 + "PY"
     await page.evaluate(
         """
@@ -179,12 +186,12 @@ async def _emit_approval_gate(page, *, allow_always=True, gate_ref=GATE_REF):
         {
             "turn_run_id": RUN_ID,
             "gate_ref": gate_ref,
-            "invocation_id": "invoke-legacy-approval",
+            "invocation_id": invocation_id,
             "headline": "Approval required",
             "body": "Allow shell to inspect the workspace?",
             "allow_always": allow_always,
             "approval_context": {
-                "tool_name": "builtin.shell",
+                "tool_name": tool_name,
                 "reason": "Allow shell to inspect the workspace?",
                 "action": {"label": "Run command", "preview": long_command},
                 "destination": {"label": "Local workspace"},
@@ -231,6 +238,39 @@ async def test_reborn_legacy_approval_card_renders_details_and_expands_payload(
         await context.close()
 
 
+async def test_reborn_legacy_always_allow_resets_when_gate_changes(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, resolve_requests = await _open_stubbed_approval_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_approval_gate(page, gate_ref="gate-tool-a")
+        card = page.locator(SEL_V2["approval_card"]).first
+        always = card.locator(SEL_V2["approval_always"])
+        primary_action = card.locator(SEL_V2["approval_primary_action"])
+        await always.check()
+        await expect(always).to_be_checked()
+        await expect(primary_action).to_be_visible()
+
+        await _emit_approval_gate(
+            page,
+            gate_ref="gate-tool-b",
+            invocation_id="invoke-tool-b",
+            tool_name="builtin.http",
+        )
+        always = card.locator(SEL_V2["approval_always"])
+        await expect(always).not_to_be_checked()
+        await primary_action.click()
+        await expect(card).to_be_hidden(timeout=5000)
+
+        assert len(resolve_requests) == 1
+        assert "/gates/gate-tool-b/resolve" in resolve_requests[0]["url"]
+        assert resolve_requests[0]["body"]["always"] is False
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_approval_buttons_resolve_gate(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -273,7 +313,7 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-deny/resolve" in (
             resolve_requests[2]["url"]
         )
-        assert resolve_requests[2]["body"]["resolution"] == "denied"
+        assert resolve_requests[2]["body"]["resolution"] == "declined"
         assert resolve_requests[2]["body"]["always"] is False
     finally:
         await context.close()
@@ -310,7 +350,7 @@ async def test_reborn_legacy_approval_deny_shows_declined_activity(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-denied-visible/resolve" in (
             resolve_requests[0]["url"]
         )
-        assert resolve_requests[0]["body"]["resolution"] == "denied"
+        assert resolve_requests[0]["body"]["resolution"] == "declined"
         assert resolve_requests[0]["body"]["always"] is False
     finally:
         await context.close()

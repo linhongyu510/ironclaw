@@ -47,12 +47,16 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
-use loop_exit::{ExitInput, ExitStage};
+use loop_exit::{
+    COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
+    reply_trailed_off,
+};
 use mapping::{
-    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
-    capability_error_failure_category, capability_failure_kind, capability_host_error,
-    checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
-    model_error_failure_category, model_preference_to_host, sanitized_strategy_summary,
+    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_failure_category,
+    capability_host_error, capability_port_error_is_terminal, checkpoint_kind_to_host,
+    honor_capability_retry_alteration, loop_gate_kind, model_error_class,
+    model_error_failure_summary, model_preference_to_host, model_recovery_class,
+    sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
@@ -63,7 +67,7 @@ use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage,
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
+    LoopCancelledReasonKind, LoopExit,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
         AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
@@ -73,11 +77,10 @@ use ironclaw_turns::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::TurnSummary,
+    strategies::{StopKind, TurnSummary},
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;
-const MAX_MODEL_RETRIES: usize = 8;
 const MAX_INPUT_DRAIN: usize = 32;
 
 /// Drives the canonical loop tick by consulting a resolved [`LoopFamily`].
@@ -108,7 +111,6 @@ pub enum AgentLoopExecutorError {
         kind: AgentLoopHostErrorKind,
         safe_summary: LoopSafeSummary,
         reason_kind: Option<AgentLoopHostErrorReasonKind>,
-        diagnostic_ref: Option<LoopDiagnosticRef>,
         /// Secret-scrubbed model-visible raw cause carried from the host error
         /// so the runner/explainer can surface the real fault instead of a
         /// generic category. See [`AgentLoopHostError::detail`].
@@ -116,10 +118,17 @@ pub enum AgentLoopExecutorError {
     },
     #[error("planner returned a contract violation: {detail}")]
     PlannerContract { detail: &'static str },
+    #[error("host rejected checkpoint at {stage:?}: {safe_summary}")]
+    CheckpointRejected {
+        stage: CheckpointKind,
+        safe_summary: LoopSafeSummary,
+    },
     #[error("checkpoint write failed at {stage:?}")]
     CheckpointFailed { stage: CheckpointKind },
+    #[error("durable recovery event sequence exhausted")]
+    RecoverySequenceExhausted,
     /// Constructed when a model or capability call returns a cancelled outcome
-    /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `CapabilityFailureKind::Cancelled`
+    /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `FailureKind::Cancelled`
     /// surfaces from an in-flight external call). Between-call boundary cancellation
     /// — detected cooperatively by `CheckpointStage::cancel_if_requested` — returns
     /// `LoopExit::Cancelled` directly and never constructs this variant.
@@ -143,14 +152,12 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
         Ok(safe_summary) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            diagnostic_ref = ?error.diagnostic_ref,
             safe_summary = %safe_summary,
             "agent loop host call unavailable"
         ),
         Err(validation_error) => tracing::debug!(
             stage = ?stage,
             kind = ?error.kind,
-            diagnostic_ref = ?error.diagnostic_ref,
             validation_error = %validation_error,
             "agent loop host call unavailable with invalid safe summary"
         ),

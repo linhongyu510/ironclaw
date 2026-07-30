@@ -64,13 +64,13 @@ unchanged. The eviction-compensation finding is moot (no eviction).
   `local_dev_visible_capability_request` mints grants via
   `extension_surface.grants(&extension_id)` filtered by
   `owner.visible_to(caller)`
-  (`runtime/local_dev/extension_surface.rs`). Grant absence =
+  (`ironclaw_extension_host/src/capability_surface.rs`). Grant absence =
   invisible in the surface AND denied at dispatch — fail closed for
   free. Membership only changes what `visible_to` checks (set
   membership instead of single-owner equality).
-- **Persistence**: installations live in ONE snapshot file
-  (`.installations/state.json` under the tenant's extension root,
-  `extension_installation_store.rs`). Owner stays a field on the
+- **Persistence**: installations live as rows under the tenant's extension
+  installation root (`.installations/installations/`, owned by the filesystem
+  extension installation store). Owner stays a field on the
   record, not a new store.
 - **Reserved first-party ids** (`github`, `notion`, `web-access`,
   `slack`, nearai, gsuite) are the SYSTEM tier of the id namespace;

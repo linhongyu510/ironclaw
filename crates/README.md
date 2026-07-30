@@ -11,8 +11,8 @@ IronClaw Reborn keeps authority narrow and explicit:
 1. **Contracts describe authority**: `ironclaw_host_api` and adjacent contract crates define scoped identities, policies, requests, decisions, and DTOs.
 2. Policy gates decide: authorization, trust, runtime policy, resources, approvals, secrets, safety, filesystem, network, hooks, and prompt-envelope crates each own one kind of decision, label, or side effect.
 3. Capability hosts coordinate: capabilities, dispatcher, processes, scripts, MCP, WASM, shared WASM limiting, and host-runtime crates compose validated requests into sandboxed execution.
-4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product workflow storage, traces, and event projections keep the host observable without leaking secrets.
-5. Product surfaces adapt: agent loop, engine, loop support, gateway, WebChat v2, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
+4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product storage, traces, and event projections keep the host observable without leaking secrets.
+5. Product surfaces adapt: agent loop, engine, loop host, WebChat, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
 
 A good rule of thumb: if a change adds new authority or persistence, put it in the crate that owns that boundary instead of threading it through a UI or runtime crate.
 
@@ -33,7 +33,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | Crate directory | Package | Human context |
 | --- | --- | --- |
 | `ironclaw_authorization` | `ironclaw_authorization` | Evaluates host API authority contracts before capability execution. It should not execute work, reserve resources, or prompt users. |
-| `ironclaw_approvals` | `ironclaw_approvals` | Resolves durable approval requests and issues scoped authorization leases. It does not own prompting UI or runtime execution. |
+| `ironclaw_approvals` | `ironclaw_approvals` | Owns durable approval requests, gate records, policy, resolution, and scoped authorization leases. |
 | `ironclaw_trust` | `ironclaw_trust` | Host-controlled trust-class policy engine. Use it for decisions about how much trust a runtime, extension, or input receives. |
 | `ironclaw_resources` | `ironclaw_resources` | Resource reservation governor. Owns budget/reservation mechanics, not runtime dispatch. |
 | `ironclaw_auth` | `ironclaw_auth` | Product-facing Reborn auth setup contracts: auth-flow records, secure manual-token interactions, credential accounts, provider exchange, continuations, cleanup, and fakes. |
@@ -47,16 +47,16 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 
 | Crate directory | Package | Human context |
 | --- | --- | --- |
-| `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, run-state transitions, and neutral runtime dispatch. |
+| `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
 | `ironclaw_dispatcher` | `ironclaw_dispatcher` | Composition-only runtime dispatch contracts. Wires validated extension descriptors to runtime lanes; it does not parse manifests or grant authority. |
 | `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
 | `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface plus the folded domain-free `wasm_sandbox_core` primitives. |
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
-| `ironclaw_wasm_product_adapters` | `ironclaw_wasm_product_adapters` | WASM-side adapters that bridge guest components into product-facing shapes. Keeps host-only authority out of the guest. |
-| `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/activate/remove semantics; runtime crates consume validated descriptors from here. |
-| `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow facade upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
+| `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/readiness/remove semantics; runtime crates consume validated descriptors from here. |
+| `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
+| `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow service upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
 
@@ -66,7 +66,6 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_reborn_event_store` | `ironclaw_reborn_event_store` | Concrete Reborn event/audit store backends and backend-profile validation. Depends on `ironclaw_events`; keeps storage adapters out of event vocabulary. |
 | `ironclaw_event_projections` | `ironclaw_event_projections` | Product-facing read models over durable runtime and audit logs. Upper layers should consume these DTOs rather than parse event rows directly. |
 | `ironclaw_event_streams` | `ironclaw_event_streams` | Transport-neutral projection stream manager: admission, bounded subscription buffers, replay/live updates, lag signals, and redaction validation. |
-| `ironclaw_run_state` | `ironclaw_run_state` | Current lifecycle state for host-managed invocations. Events are history; run state answers “what is happening now?” |
 | `ironclaw_threads` | `ironclaw_threads` | Canonical session thread and transcript service contracts. Use it for durable thread/transcript ownership. |
 | `ironclaw_conversations` | `ironclaw_conversations` | Conversation binding and session-thread contracts that connect product conversation concepts to Reborn threads. |
 | `ironclaw_memory` | `ironclaw_memory` | Memory document service adapters. This is for workspace/memory document semantics, not arbitrary transcript deletion. |
@@ -80,25 +79,23 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_runner` | `ironclaw_runner` | Standalone Reborn composition and adapters. This is the high-level Reborn composition crate. |
 | `ironclaw_reborn_composition` | `ironclaw_reborn_composition` | Wiring layer that assembles Reborn services into the host runtime. Composition-only; no policy or persistence logic of its own. |
 | `ironclaw_reborn_config` | `ironclaw_reborn_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
-| `ironclaw_reborn_cli` | `ironclaw_reborn_cli` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
-| `ironclaw_reborn_webui_ingress` | `ironclaw_reborn_webui_ingress` | Host-owned listener binding, authenticator implementations, and serve loop for the Reborn WebChat v2 HTTP gateway. |
+| `ironclaw_reborn_cli` | `ironclaw` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
+| `ironclaw_webui` | `ironclaw_webui` | Host-owned listener binding, authenticator implementations, and serve loop for the Reborn WebChat v2 HTTP gateway. |
 | `ironclaw_reborn_openai_compat` | `ironclaw_reborn_openai_compat` | OpenAI-compatible Chat/Responses DTOs, route descriptors, sanitized errors, fail-closed route fragment, and feature-gated durable ref/idempotency storage. |
 | `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |
 | `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
-| `ironclaw_loop_support` | `ironclaw_loop_support` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
+| `ironclaw_loop_host` | `ironclaw_loop_host` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
-| `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-support and turn-run contracts. |
-| `ironclaw_product_adapters` | `ironclaw_product_adapters` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
-| `ironclaw_product_adapter_registry` | `ironclaw_product_adapter_registry` | ProductAdapter host-api projection and installation registry. |
-| `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade: inbound turn service, idempotency ledger, binding resolution. |
-| `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
+| `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
+| `ironclaw_product` | `ironclaw_product` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and feature-gated durable ledger adapters. |
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
-| `ironclaw_webui_v2` | `ironclaw_webui_v2` | Reborn WebChat v2 HTTP route surface and route descriptors. Off by default; enable with `webui-v2-beta`. |
+| `ironclaw_webui` | `ironclaw_webui` | Reborn WebChat v2 HTTP route surface and route descriptors. |
 | `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
-| `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
+| `ironclaw_slack_extension` | `ironclaw_slack_extension` | Slack v2 channel extension for the Reborn product surface: protocol parsing and rendering (payloads, mrkdwn, delivery DTOs). |
+| `ironclaw_telegram_extension` | `ironclaw_telegram_extension` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder` | Standalone WeChat `audio/silk` decoder helper. Excluded from the default workspace build; needs `libclang` and a C toolchain. |
 
 ## Where to make common changes
@@ -109,16 +106,16 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Network or filesystem access**: use `ironclaw_network` or `ironclaw_filesystem`; runtimes should ask host services instead of bypassing them.
 - **WASM, MCP, or script execution**: use the corresponding runtime-lane crate plus `ironclaw_capabilities`/`ironclaw_dispatcher` for coordination.
 - **Hook behavior or prompt snippet trust labeling**: use `ironclaw_hooks` for hook contracts/dispatch and `ironclaw_prompt_envelope` for model-facing snippet wrapping.
-- **Extension lifecycle (install/activate/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
+- **Extension lifecycle (install/readiness/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
 - **Reborn composition or boot config**: use `ironclaw_reborn_composition` and `ironclaw_reborn_config`; keep `main.rs`/CLI entry points thin.
 - **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into engine or gateway crates.
-- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_v2_adapter`); keep authority in lower host crates.
+- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_extension`); keep authority in lower host crates.
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
-- **Current invocation state**: use `ironclaw_run_state`, not event logs.
-- **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
-- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
-- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_support`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
-- **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_reborn_webui_ingress`, or `ironclaw_tui`; keep authority and persistence in lower crates.
+- **Current invocation state**: query the `ironclaw_processes` journal projection.
+- **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product` over parsing storage rows in UI code.
+- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product`; concrete adapters implement the `IdempotencyLedger` port without adding backend compile features.
+- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
+- **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui`, `ironclaw_webui`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
 ## Boundary rules
 
@@ -142,7 +139,7 @@ cargo test
 For targeted crate work, prefer the narrowest command first:
 
 ```bash
-cargo test -p ironclaw_secrets --features libsql
+cargo test -p ironclaw_secrets
 cargo clippy -p ironclaw_network --tests -- -D warnings
 ```
 

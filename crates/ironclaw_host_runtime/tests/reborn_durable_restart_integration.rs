@@ -5,43 +5,37 @@ use support::legacy_capability_fixture_to_v2;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort};
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
 };
 use ironclaw_processes::{
-    FilesystemProcessResultStore, FilesystemProcessStore, ProcessExecutionRequest,
-    ProcessExecutionResult, ProcessExecutor, ProcessManager, ProcessServices, ProcessStart,
-    ProcessStatus, ProcessStore,
+    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessInvocationStatePort,
+    ProcessInvocationStatus, ProcessInvocationStore, ProcessJournalStore, ProcessManager,
+    ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{
-    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore, RunStateStore,
-    RunStatus,
-};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use serde_json::{Value, json};
 
@@ -99,13 +93,12 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -134,7 +127,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         .await
         .unwrap()
         .expect("run state must survive restart");
-    assert_eq!(completed_run.status, RunStatus::Completed);
+    assert_eq!(completed_run.status, ProcessInvocationStatus::Completed);
     assert_eq!(
         third
             .capability_leases
@@ -174,17 +167,16 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 /// PR #5234 review (Medium): the test above shares one `Arc<InMemoryBackend>`
@@ -196,7 +188,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
 /// opened over the same on-disk libSQL file, mirroring
 /// `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once() {
     let temp = tempfile::tempdir().unwrap();
@@ -250,13 +241,12 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -285,7 +275,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
         .await
         .unwrap()
         .expect("run state must survive durable libsql reopen");
-    assert_eq!(completed_run.status, RunStatus::Completed);
+    assert_eq!(completed_run.status, ProcessInvocationStatus::Completed);
     assert_eq!(
         third
             .capability_leases
@@ -325,24 +315,23 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 #[tokio::test]
 async fn process_result_and_output_survive_filesystem_service_restart_with_scope_filtering() {
     let temp = tempfile::tempdir().unwrap();
-    let engine_root = temp.path().join("engine");
-    let first_services = filesystem_process_services(&engine_root);
+    let db_path = temp.path().join("processes.db");
+    let first_services = libsql_process_services(&db_path).await;
     let manager = first_services.background_manager(Arc::new(SuccessProcessExecutor));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
@@ -353,14 +342,14 @@ async fn process_result_and_output_survive_filesystem_service_restart_with_scope
         .await
         .unwrap();
     wait_for_status(
-        first_services.process_store().as_ref(),
+        first_services.process_runtime().as_ref(),
         &scope,
         process_id,
         ProcessStatus::Completed,
     )
     .await;
 
-    let restarted_services = filesystem_process_services(&engine_root);
+    let restarted_services = libsql_process_services(&db_path).await;
     let host = restarted_services.host();
     let status = host
         .status(&scope, process_id)
@@ -427,12 +416,11 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -479,26 +467,18 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
     }
 }
 
-type DurableProcessServices = ProcessServices<
-    FilesystemProcessStore<LocalFilesystem>,
-    FilesystemProcessResultStore<LocalFilesystem>,
->;
+type DurableProcessServices = ProcessServices;
 
-type DurableHostRuntimeServices = HostRuntimeServices<
-    LocalFilesystem,
-    InMemoryResourceGovernor,
-    FilesystemProcessStore<LocalFilesystem>,
-    FilesystemProcessResultStore<LocalFilesystem>,
->;
+type DurableHostRuntimeServices = HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>;
 
 struct DurableServices<F = InMemoryBackend>
 where
     F: RootFilesystem,
 {
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<F>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<F>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
+    run_state: Arc<ProcessInvocationStore>,
+    approval_requests: Arc<ApprovalRequestStore<F>>,
+    capability_leases: Arc<CapabilityLeaseStore<DiskFilesystem>>,
     events: RebornEventStores,
 }
 
@@ -506,7 +486,7 @@ where
 /// backend, generic over the backend type so the same mount shape can be
 /// reused for the shared in-memory backend (service-graph-restart coverage)
 /// and a real durable backend like [`LibSqlRootFilesystem`] (durable-reopen
-/// coverage). `LocalFilesystem` rejects the record-shaped entries
+/// coverage). `DiskFilesystem` rejects the record-shaped entries
 /// (`entry.kind = Some(RecordKind::new(…))`) these stores write, so callers
 /// must pick a backend whose `BackendCapabilities` accept them.
 fn scoped_run_state_filesystem<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
@@ -516,6 +496,11 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(
         backend,
         MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/processes").unwrap(),
+                VirtualPath::new("/processes").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
             MountGrant::new(
                 MountAlias::new("/run-state").unwrap(),
                 VirtualPath::new("/run-state").unwrap(),
@@ -539,17 +524,17 @@ async fn durable_services(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_run_state_filesystem(shared_run_state_backend);
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
-        &run_state_fs,
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::new(
+        ProcessJournalStore::new(Arc::clone(&run_state_fs)),
     )));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
         Arc::new(ApprovalThenGrantAuthorizer),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases));
 
@@ -569,7 +554,6 @@ async fn durable_services(
 /// reopen, not just a service-graph rebuild around a still-live store.
 /// Mirrors `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 async fn durable_services_with_libsql_run_state(
     engine_root: &Path,
     event_root: &Path,
@@ -578,17 +562,17 @@ async fn durable_services_with_libsql_run_state(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_libsql_run_state_filesystem(db_path).await;
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
-        &run_state_fs,
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::new(
+        ProcessJournalStore::new(Arc::clone(&run_state_fs)),
     )));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
         Arc::new(ApprovalThenGrantAuthorizer),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases));
 
@@ -606,12 +590,11 @@ async fn durable_services_with_libsql_run_state(
 /// `scoped_run_state_filesystem`. Called once per simulated process restart
 /// so each call is a real reopen of the on-disk libSQL file, not a
 /// reconnect to a still-live in-process handle.
-#[cfg(feature = "libsql")]
 async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     scoped_run_state_filesystem(Arc::new(filesystem))
 }
@@ -644,7 +627,7 @@ fn base_services(
 
 async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
     build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: event_root.to_path_buf(),
             accept_single_node_durable: false,
@@ -657,6 +640,17 @@ async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
 fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    ));
+    ProcessServices::filesystem(scoped)
+}
+
+async fn libsql_process_services(db_path: &Path) -> DurableProcessServices {
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = LibSqlRootFilesystem::new(db).expect("libSQL filesystem runtime");
+    filesystem.run_migrations().await.unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(filesystem),
         durable_mount_view(),
     ));
     ProcessServices::filesystem(scoped)
@@ -692,22 +686,22 @@ fn durable_mount_view() -> MountView {
     .unwrap()
 }
 
-/// Build a fresh [`ScopedFilesystem`] over a [`LocalFilesystem`] rooted at
+/// Build a fresh [`ScopedFilesystem`] over a [`DiskFilesystem`] rooted at
 /// `engine_root`. The restart contract spawns multiple service graphs against
 /// the same on-disk root, so each call here constructs a distinct
-/// `ScopedFilesystem` over a freshly-mounted `LocalFilesystem`; identity of
+/// `ScopedFilesystem` over a freshly-mounted `DiskFilesystem`; identity of
 /// the wrapping struct is irrelevant — durability lives on disk, and the
 /// per-path lock map is process-global by design.
-fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<DiskFilesystem>> {
     Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
         durable_mount_view(),
     ))
 }
 
-fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
+fn mounted_engine_filesystem(engine_root: &Path) -> DiskFilesystem {
     std::fs::create_dir_all(engine_root).unwrap();
-    let mut filesystem = LocalFilesystem::new();
+    let mut filesystem = DiskFilesystem::new();
     // Backend mount for `/engine` plus the consumer-store virtual roots
     // exposed via `durable_mount_view`. Each top-level root resolves to a
     // sibling subdirectory under `engine_root` so durable-restart fixtures
@@ -738,13 +732,7 @@ async fn block_for_approval(
     input: Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-            trust_decision_with_dispatch_authority(),
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -783,7 +771,7 @@ async fn approve_dispatch_for_services(
 }
 
 async fn assert_blocked_run(
-    run_state: &dyn RunStateStore,
+    run_state: &dyn ProcessInvocationStatePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     approval_request_id: ApprovalRequestId,
@@ -793,18 +781,20 @@ async fn assert_blocked_run(
         .await
         .unwrap()
         .expect("run state should exist");
-    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedApproval);
     assert_eq!(run.approval_request_id, Some(approval_request_id));
 }
 
 async fn wait_for_status(
-    store: &dyn ProcessStore,
+    processes: &dyn ProcessRuntimePort,
     scope: &ResourceScope,
     process_id: ProcessId,
     status: ProcessStatus,
 ) {
     for _ in 0..100 {
-        if let Some(record) = store.get(scope, process_id).await.unwrap()
+        if let Some(record) = capability_process_record(processes, scope, process_id)
+            .await
+            .unwrap()
             && record.status == status
         {
             return;
@@ -814,7 +804,7 @@ async fn wait_for_status(
     panic!("process {process_id} did not reach {status:?}");
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome, got {other:?}"),
@@ -911,12 +901,15 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
 
 fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -944,6 +937,8 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1004,6 +999,7 @@ fn process_start(
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: json!({"message": "running"}),
     }
 }
@@ -1023,18 +1019,6 @@ fn local_manifest_trust_policy(
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
@@ -1073,3 +1057,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

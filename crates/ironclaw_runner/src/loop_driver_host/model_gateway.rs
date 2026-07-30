@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
     HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway,
-    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
-    LoopModelResponse, LoopPromptBundleAuthority, LoopSafeSummary,
+    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
+    LoopPromptBundleAuthority,
 };
+
+use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 
 pub(super) struct ThreadResolvingLoopModelGateway<S, G>
 where
@@ -110,30 +112,4 @@ impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
     async fn safe_text_update(&self, safe_text: String) {
         self.inner.model_text_update(safe_text).await;
     }
-}
-
-fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
-    let reason_kind = error.reason_kind;
-    let gate_ref = error.gate_ref;
-    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
-        Ok(error) => error,
-        Err(_) => LoopModelGatewayError {
-            kind: error.kind,
-            safe_summary: LoopSafeSummary::model_gateway_failed(),
-            reason_kind: None,
-            gate_ref: None,
-            diagnostic_ref: None,
-        },
-    };
-    if let Some(reason_kind) = reason_kind {
-        converted = converted.with_reason_kind(reason_kind);
-    }
-    if let Some(gate_ref) = gate_ref {
-        converted = converted.with_gate_ref(gate_ref);
-    }
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
-    }
-    converted
 }

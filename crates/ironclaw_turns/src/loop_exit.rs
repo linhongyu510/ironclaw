@@ -2,16 +2,19 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+use ironclaw_processes::{
+    FailProcessRequest, JournaledProcessSnapshot, ProcessCheckpointRef, ProcessLeaseRequest,
+    ProcessLeaseToken, ProcessStateTransitionRequest, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTransitionPort, ProcessWorkerId, SuspendProcessRequest,
+};
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ResolvedRunProfile, SanitizedFailure,
-    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
+    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
-    runner::{
-        ApplyValidatedLoopExitRequest, ClaimedTurnRun, TurnRunTransitionPort, TurnRunnerOutcome,
-    },
+    runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
 
 /// Evidence request for completion refs returned by a driver.
@@ -100,13 +103,13 @@ pub trait LoopExitEvidencePort: Send + Sync {
 /// drivers can submit `LoopExit` claims, but only host-owned evidence ports can
 /// mint the validation policy that maps those claims to state transitions.
 pub struct LoopExitApplier {
-    transition_port: Arc<dyn TurnRunTransitionPort>,
+    transition_port: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     evidence_port: Arc<dyn LoopExitEvidencePort>,
 }
 
 impl LoopExitApplier {
     pub fn new(
-        transition_port: Arc<dyn TurnRunTransitionPort>,
+        transition_port: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
         evidence_port: Arc<dyn LoopExitEvidencePort>,
     ) -> Self {
         Self {
@@ -123,15 +126,46 @@ impl LoopExitApplier {
         exit: LoopExit,
     ) -> Result<TurnRunState, TurnError> {
         let policy = self.derive_policy(claimed, &exit).await?;
+        // Capture the loop's reported usage before `validate` consumes the exit
+        // and collapses it to a coarse outcome; carry it so the terminal
+        // transition can persist it on the run record.
+        let model_usage = exit.reported_model_usage();
         let decision = exit.validate(policy);
-        self.transition_port
-            .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
-                run_id: claimed.state.run_id,
-                runner_id: claimed.runner_id,
-                lease_token: claimed.lease_token,
-                mapping: decision.mapping,
+        let snapshot = apply_validated_process_loop_exit(
+            self.transition_port.as_ref(),
+            claimed,
+            decision.mapping,
+            model_usage,
+        )
+        .await?;
+        crate::turn_run_state_from_process_snapshot(snapshot)
+    }
+
+    pub async fn record_runner_failure(
+        &self,
+        claimed: &ClaimedTurnRun,
+        failure: SanitizedFailure,
+    ) -> Result<TurnRunState, TurnError> {
+        let snapshot = self
+            .transition_port
+            .fail_process(FailProcessRequest {
+                process_id: crate::process_projection::process_id_from_turn_run_id(
+                    claimed.state.run_id,
+                ),
+                worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
+                lease_token: process_lease_token_from_turn(claimed.lease_token),
+                failure,
+                recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
+                checkpoint_ref: claimed.state.checkpoint_id.map(|checkpoint_id| {
+                    ProcessCheckpointRef::from_trusted(checkpoint_id.as_uuid().to_string())
+                }),
+                metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
+                    claimed,
+                    claimed.state.model_usage,
+                )),
             })
-            .await
+            .await?;
+        crate::turn_run_state_from_process_snapshot(snapshot)
     }
 
     async fn derive_policy(
@@ -251,6 +285,135 @@ impl LoopExitApplier {
     }
 }
 
+async fn apply_validated_process_loop_exit(
+    transition_port: &dyn ProcessTransitionPort<Error = TurnError>,
+    claimed: &ClaimedTurnRun,
+    mapping: LoopExitMapping,
+    model_usage: Option<crate::run_profile::LoopModelUsage>,
+) -> Result<JournaledProcessSnapshot, TurnError> {
+    match mapping {
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
+            transition_port
+                .complete_process(process_state_transition_request_from_claimed(
+                    claimed,
+                    model_usage,
+                ))
+                .await
+        }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
+            transition_port
+                .cancel_process(process_state_transition_request_from_claimed(
+                    claimed,
+                    model_usage,
+                ))
+                .await
+        }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
+            checkpoint_id,
+            reason,
+            blocked_activity_id,
+            ..
+        }) => {
+            transition_port
+                .suspend_process(SuspendProcessRequest {
+                    process_id: crate::process_projection::process_id_from_turn_run_id(
+                        claimed.state.run_id,
+                    ),
+                    worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
+                    lease_token: process_lease_token_from_turn(claimed.lease_token),
+                    checkpoint_ref: ProcessCheckpointRef::from_trusted(
+                        checkpoint_id.as_uuid().to_string(),
+                    ),
+                    suspension: process_suspension_from_blocked_reason(reason, blocked_activity_id),
+                    metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
+                        claimed,
+                        model_usage,
+                    )),
+                })
+                .await
+        }
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure })
+        | LoopExitMapping::RecoveryRequired { failure } => {
+            transition_port
+                .fail_process(FailProcessRequest {
+                    process_id: crate::process_projection::process_id_from_turn_run_id(
+                        claimed.state.run_id,
+                    ),
+                    worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
+                    lease_token: process_lease_token_from_turn(claimed.lease_token),
+                    failure,
+                    recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
+                    // The failed exit's Final checkpoint is terminal evidence,
+                    // not a resumable continuation point. It was verified
+                    // before this transition; retain the checkpoint from the
+                    // claimed state so retry resumes from the last safe
+                    // BeforeModel/BeforeSideEffect/BeforeBlock checkpoint
+                    // instead.
+                    checkpoint_ref: claimed.state.checkpoint_id.map(|checkpoint_id| {
+                        ProcessCheckpointRef::from_trusted(checkpoint_id.as_uuid().to_string())
+                    }),
+                    metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
+                        claimed,
+                        model_usage,
+                    )),
+                })
+                .await
+        }
+    }
+}
+
+fn process_lease_request_from_claimed(claimed: &ClaimedTurnRun) -> ProcessLeaseRequest {
+    ProcessLeaseRequest {
+        process_id: crate::process_projection::process_id_from_turn_run_id(claimed.state.run_id),
+        worker_id: process_worker_id_from_turn_runner_id(claimed.runner_id),
+        lease_token: process_lease_token_from_turn(claimed.lease_token),
+    }
+}
+
+fn process_state_transition_request_from_claimed(
+    claimed: &ClaimedTurnRun,
+    model_usage: Option<crate::run_profile::LoopModelUsage>,
+) -> ProcessStateTransitionRequest {
+    ProcessStateTransitionRequest {
+        lease: process_lease_request_from_claimed(claimed),
+        metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
+            claimed,
+            model_usage,
+        )),
+    }
+}
+
+fn process_worker_id_from_turn_runner_id(runner_id: crate::TurnRunnerId) -> ProcessWorkerId {
+    ProcessWorkerId::from_trusted(runner_id.as_uuid().to_string())
+}
+
+fn process_lease_token_from_turn(lease_token: crate::TurnLeaseToken) -> ProcessLeaseToken {
+    ProcessLeaseToken::from_trusted(lease_token.as_uuid().to_string())
+}
+
+fn process_suspension_from_blocked_reason(
+    reason: BlockedReason,
+    blocked_activity_id: Option<CapabilityActivityId>,
+) -> ProcessSuspension {
+    ProcessSuspension {
+        kind: process_suspension_kind_from_gate_kind(reason.gate_kind()),
+        gate_ref: Some(reason.gate_ref().clone()),
+        activity_id: blocked_activity_id,
+        credential_requirements: reason.credential_requirements().to_vec(),
+        detail: None,
+    }
+}
+
+fn process_suspension_kind_from_gate_kind(kind: GateKind) -> ProcessSuspensionKind {
+    match kind {
+        GateKind::Approval => ProcessSuspensionKind::Approval,
+        GateKind::Auth => ProcessSuspensionKind::Authorization,
+        GateKind::Resource => ProcessSuspensionKind::Resource,
+        GateKind::AwaitDependentRun => ProcessSuspensionKind::AwaitingChildProcess,
+        GateKind::ExternalTool => ProcessSuspensionKind::ExternalTool,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopExit {
@@ -267,6 +430,16 @@ impl LoopExit {
             Self::Blocked(exit) => &exit.exit_id,
             Self::Cancelled(exit) => &exit.exit_id,
             Self::Failed(exit) => &exit.exit_id,
+        }
+    }
+
+    /// The cumulative model usage a terminal exit reported, if any. Blocked and
+    /// cancelled exits carry none (usage rides completion/failure only).
+    fn reported_model_usage(&self) -> Option<crate::run_profile::LoopModelUsage> {
+        match self {
+            Self::Completed(exit) => exit.model_usage,
+            Self::Failed(exit) => exit.model_usage,
+            Self::Blocked(_) | Self::Cancelled(_) => None,
         }
     }
 
@@ -315,8 +488,7 @@ impl LoopExit {
         Self::Failed(LoopFailed {
             reason_kind,
             checkpoint_id: None,
-            usage_summary_ref: None,
-            diagnostic_ref: None,
+            model_usage: None,
             exit_id,
             explanation_message_refs: Vec::new(),
             safe_summary: None,
@@ -333,7 +505,12 @@ pub struct LoopCompleted {
     #[serde(deserialize_with = "deserialize_bounded_unique_refs")]
     pub result_refs: Vec<LoopResultRef>,
     pub final_checkpoint_id: Option<TurnCheckpointId>,
-    pub usage_summary_ref: Option<LoopUsageSummaryRef>,
+    /// Cumulative provider-reported token usage the loop accumulated across its
+    /// model calls. Carried to the run record at the terminal transition so the
+    /// OpenAI-compatible surfaces can report `usage` and cost. `None` when the
+    /// loop saw no usage (replay stubs, providers without a usage object).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub exit_id: LoopExitId,
 }
 
@@ -386,6 +563,18 @@ pub enum LoopBlockedKind {
     ExternalTool,
 }
 
+impl From<LoopBlockedKind> for GateKind {
+    fn from(kind: LoopBlockedKind) -> Self {
+        match kind {
+            LoopBlockedKind::Approval => Self::Approval,
+            LoopBlockedKind::Auth => Self::Auth,
+            LoopBlockedKind::Resource => Self::Resource,
+            LoopBlockedKind::AwaitDependentRun => Self::AwaitDependentRun,
+            LoopBlockedKind::ExternalTool => Self::ExternalTool,
+        }
+    }
+}
+
 impl LoopBlockedKind {
     fn to_blocked_reason(
         self,
@@ -393,16 +582,7 @@ impl LoopBlockedKind {
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     ) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(match self {
-            Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth {
-                gate_ref,
-                credential_requirements,
-            },
-            Self::Resource => BlockedReason::Resource { gate_ref },
-            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
-            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
-        })
+        Ok(GateKind::from(self).into_blocked_reason(gate_ref, credential_requirements))
     }
 }
 
@@ -423,13 +603,14 @@ pub enum LoopCancelledReasonKind {
     HostInterrupt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LoopFailed {
     pub reason_kind: LoopFailureKind,
     pub checkpoint_id: Option<TurnCheckpointId>,
-    pub usage_summary_ref: Option<LoopUsageSummaryRef>,
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    /// Cumulative provider-reported token usage accumulated before the failure.
+    /// See [`LoopCompleted::model_usage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub exit_id: LoopExitId,
     #[serde(
         default,
@@ -439,6 +620,90 @@ pub struct LoopFailed {
     pub explanation_message_refs: Vec<LoopMessageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe_summary: Option<SanitizedFailure>,
+}
+
+impl<'de> Deserialize<'de> for LoopFailed {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LoopFailedWire {
+            reason_kind: LoopFailureKind,
+            checkpoint_id: Option<TurnCheckpointId>,
+            #[serde(default)]
+            model_usage: Option<crate::run_profile::LoopModelUsage>,
+            /// Read-only compatibility for exits written before the dead
+            /// diagnostic-reference field was retired. No production code
+            /// minted a usable value and no diagnostic store ever existed.
+            #[serde(
+                default,
+                rename = "diagnostic_ref",
+                deserialize_with = "deserialize_retired_diagnostic_ref"
+            )]
+            retired_diagnostic_ref: Option<()>,
+            exit_id: LoopExitId,
+            #[serde(default, deserialize_with = "deserialize_bounded_unique_refs")]
+            explanation_message_refs: Vec<LoopMessageRef>,
+            #[serde(default)]
+            safe_summary: Option<SanitizedFailure>,
+        }
+
+        let wire = LoopFailedWire::deserialize(deserializer)?;
+        let _ = wire.retired_diagnostic_ref;
+        Ok(Self {
+            reason_kind: wire.reason_kind,
+            checkpoint_id: wire.checkpoint_id,
+            model_usage: wire.model_usage,
+            exit_id: wire.exit_id,
+            explanation_message_refs: wire.explanation_message_refs,
+            safe_summary: wire.safe_summary,
+        })
+    }
+}
+
+fn deserialize_retired_diagnostic_ref<'de, D>(deserializer: D) -> Result<Option<()>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            validate_retired_diagnostic_ref(&value).map_err(de::Error::custom)?;
+            Ok(())
+        })
+        .transpose()
+}
+
+fn validate_retired_diagnostic_ref(value: &str) -> Result<(), String> {
+    const KIND: &str = "loop_diagnostic_ref";
+    const PREFIX: &str = "diag:";
+
+    if value.is_empty() {
+        return Err(format!("{KIND} must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(format!("{KIND} must be at most 256 bytes"));
+    }
+    if value.chars().any(|character| character.is_control()) {
+        return Err(format!("{KIND} must not contain control characters"));
+    }
+    let Some(suffix) = value.strip_prefix(PREFIX) else {
+        return Err(format!("{KIND} must start with {PREFIX}"));
+    };
+    if suffix.is_empty() {
+        return Err(format!("{KIND} must include an opaque id after {PREFIX}"));
+    }
+    if !suffix
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "{KIND} opaque id must contain only ASCII letters, digits, _, -, or ."
+        ));
+    }
+    Ok(())
 }
 
 #[non_exhaustive]
@@ -724,6 +989,17 @@ impl LoopExitViolationKind {
             | Self::NoReplyNotAllowed => "driver_protocol_violation",
         }
     }
+
+    /// Host-authored, secret-free failure detail naming the specific violation.
+    ///
+    /// The coarse [`Self::failure_category`] is the wire-stable user-facing
+    /// signal; this detail rides `SanitizedFailure::detail` so the specific
+    /// violation kind survives on the durable failure record (run state +
+    /// `TurnLifecycleEvent.detail`) and reaches the failure explainer instead
+    /// of being collapsed away.
+    fn failure_detail(self) -> String {
+        format!("loop exit violation: {}", self.category())
+    }
 }
 
 const MAX_LOOP_EXIT_REF_COUNT: usize = 64;
@@ -848,7 +1124,11 @@ fn invalid_exit_decision(
     exit_id: LoopExitId,
     kind: LoopExitViolationKind,
 ) -> LoopExitValidationDecision {
-    let failure = SanitizedFailure::from_trusted_static(kind.failure_category());
+    // Persist the specific violation kind on the sanitized failure detail so
+    // the durable record keeps WHICH protocol rule was broken, not only the
+    // coarse category (docs/plans/2026-07-03-loop-failure-matrix.md).
+    let failure = SanitizedFailure::from_trusted_static(kind.failure_category())
+        .with_detail(kind.failure_detail());
     let mapping = TurnRunnerOutcome::Failed { failure }.into();
 
     LoopExitValidationDecision {

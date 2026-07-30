@@ -3,10 +3,10 @@ use ironclaw_host_api::{
     CapabilityId, DenyReason, DispatchError, DispatchFailureDetail, DispatchFailureKind,
     HostApiError, Obligation, RuntimeCredentialAuthRequirement, SecretHandle,
 };
-use ironclaw_processes::ProcessError;
+use ironclaw_processes::{ProcessError, ProcessInvocationError, ProcessInvocationStatus};
 
 use crate::CapabilityObligationFailureKind;
-use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStatus};
+use ironclaw_approvals::{ApprovalStatus, ApprovalStoreError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +25,13 @@ pub enum CapabilityInvocationError {
     AuthorizationDenied {
         capability: CapabilityId,
         reason: DenyReason,
+        /// Optional model-visible sanitized cause behind the collapsed
+        /// [`DenyReason`] (e.g. the runtime-policy planner's "requires process
+        /// effects but policy resolves to `ProcessBackendKind::None`"). The
+        /// closed `DenyReason` set cannot carry it, so callers that resolve a
+        /// specific fail-closed reason thread it here; `None` when the bare
+        /// verdict is self-explanatory. Surfaced via [`sanitized_failure_message`].
+        detail: Option<String>,
     },
     #[error("capability {capability} returned unsupported authorization obligations")]
     UnsupportedObligations {
@@ -78,7 +85,7 @@ pub enum CapabilityInvocationError {
     #[error("capability {capability} cannot resume from run status {status:?}")]
     ResumeNotBlocked {
         capability: CapabilityId,
-        status: RunStatus,
+        status: ProcessInvocationStatus,
     },
     #[error("capability {capability} resume context mismatch: {kind:?}")]
     ResumeContextMismatch {
@@ -87,8 +94,10 @@ pub enum CapabilityInvocationError {
     },
     #[error("lease update failed: {0}")]
     Lease(Box<CapabilityLeaseError>),
-    #[error("run-state update failed: {0}")]
-    RunState(Box<RunStateError>),
+    #[error("approval store update failed: {0}")]
+    ApprovalStore(Box<ApprovalStoreError>),
+    #[error("process invocation update failed: {0}")]
+    InvocationState(Box<ProcessInvocationError>),
     #[error("process update failed: {0}")]
     Process(Box<ProcessError>),
     /// Runtime dispatch failure surfaced through the neutral host API port.
@@ -104,9 +113,15 @@ pub enum CapabilityInvocationError {
     },
 }
 
-impl From<RunStateError> for CapabilityInvocationError {
-    fn from(error: RunStateError) -> Self {
-        Self::RunState(Box::new(error))
+impl From<ApprovalStoreError> for CapabilityInvocationError {
+    fn from(error: ApprovalStoreError) -> Self {
+        Self::ApprovalStore(Box::new(error))
+    }
+}
+
+impl From<ProcessInvocationError> for CapabilityInvocationError {
+    fn from(error: ProcessInvocationError) -> Self {
+        Self::InvocationState(Box::new(error))
     }
 }
 
@@ -133,12 +148,15 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::RuntimeMismatch { .. }
             | DispatchError::MissingRuntimeBackend { .. }
             | DispatchError::UnsupportedRuntime { .. }
+            | DispatchError::MissingAuthorization { .. }
+            | DispatchError::AuthorizationExpired { .. }
+            | DispatchError::MissingProcessAuthorization { .. }
             | DispatchError::Mcp { .. }
             | DispatchError::Script { .. }
             | DispatchError::Wasm { .. }
             | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
-                safe_summary: dispatch_error_safe_summary(&other),
+                safe_summary: dispatch_error_model_visible_cause(&other),
                 detail: dispatch_error_detail(&other),
             },
         }
@@ -149,11 +167,37 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
     error.failure_kind()
 }
 
-fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
+fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     match error {
-        DispatchError::FirstParty { safe_summary, .. }
-        | DispatchError::Wasm { safe_summary, .. } => safe_summary.clone(),
-        _ => None,
+        DispatchError::Mcp {
+            model_visible_cause,
+            ..
+        }
+        | DispatchError::Script {
+            model_visible_cause,
+            ..
+        }
+        | DispatchError::Wasm {
+            model_visible_cause,
+            ..
+        } => model_visible_cause.clone(),
+        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        // These variants carry no free-form runtime string; their `Display`
+        // is a stable capability-id + category description that is itself the
+        // real cause. Carry it so the model-visible detail channel keeps it
+        // (scrubbing of any secret VALUE happens downstream at the
+        // Diagnostic-building layer, which lives in a crate that may depend on
+        // `ironclaw_turns` — this crate must not).
+        DispatchError::UnknownCapability { .. }
+        | DispatchError::UnknownProvider { .. }
+        | DispatchError::RuntimeMismatch { .. }
+        | DispatchError::MissingRuntimeBackend { .. }
+        | DispatchError::UnsupportedRuntime { .. }
+        | DispatchError::MissingAuthorization { .. }
+        | DispatchError::AuthorizationExpired { .. }
+        | DispatchError::MissingProcessAuthorization { .. } => Some(error.to_string()),
+        // Auth-required carries redacted secret handles; keep it summary-free.
+        DispatchError::AuthRequired { .. } => None,
     }
 }
 
@@ -169,8 +213,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, ExtensionId,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+        VendorId,
     };
 
     fn cap() -> CapabilityId {
@@ -225,16 +269,27 @@ mod tests {
 
     #[test]
     fn dispatch_error_kind_forwards_mcp_runtime_kind_as_str() {
-        let kind = dispatch_error_kind(&DispatchError::Mcp {
+        // Regression (Phase 1): an MCP dispatch error's raw cause must be
+        // carried on the model-visible-cause channel — including path/JSON delimiters
+        // that the strict summary validator rejects — so it reaches the
+        // model-visible Diagnostic/detail downstream instead of being dropped.
+        let error = DispatchError::Mcp {
             kind: RuntimeDispatchErrorKind::Backend,
-        });
+            model_visible_cause: Some("MCP request failed at /tmp/{socket}".to_string()),
+        };
+        let kind = dispatch_error_kind(&error);
         assert_eq!(kind.as_str(), "Backend");
+        assert_eq!(
+            dispatch_error_model_visible_cause(&error).as_deref(),
+            Some("MCP request failed at /tmp/{socket}")
+        );
     }
 
     #[test]
     fn dispatch_error_kind_forwards_script_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Script {
             kind: RuntimeDispatchErrorKind::OutputTooLarge,
+            model_visible_cause: None,
         });
         assert_eq!(kind.as_str(), "OutputTooLarge");
     }
@@ -243,7 +298,7 @@ mod tests {
     fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Memory,
-            safe_summary: None,
+            model_visible_cause: None,
         });
         assert_eq!(kind.as_str(), "Memory");
     }
@@ -274,7 +329,7 @@ mod tests {
     fn from_dispatch_error_preserves_redacted_runtime_kind() {
         let err = CapabilityInvocationError::from(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {
@@ -348,7 +403,7 @@ mod tests {
     #[test]
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: VendorId::new("google").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             },

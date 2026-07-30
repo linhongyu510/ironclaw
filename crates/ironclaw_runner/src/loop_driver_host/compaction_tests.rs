@@ -6,9 +6,9 @@
 use super::*;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    RunProfileResolver, TurnId, TurnRunId, TurnScope,
+    InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{InMemoryLoopHostMilestoneSink, RunProfileResolutionRequest},
 };
 
@@ -29,7 +29,7 @@ use ironclaw_turns::{
 /// passes if compaction reaches the scoped gateway.
 #[tokio::test]
 async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelRequest, HostManagedModelResponse,
     };
     use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};
@@ -152,15 +152,14 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         thread_service,
         thread_scope,
         model_gateway,
-        Arc::new(InMemoryCheckpointStateStore::default()) as Arc<dyn CheckpointStateStore>,
-        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
-        Arc::new(InMemoryLoopCheckpointStore::default()) as Arc<dyn LoopCheckpointStore>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
+        Arc::new(in_memory_loop_checkpoint_store()) as Arc<dyn LoopCheckpointStore>,
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,
             require_model_route_snapshot: false,
         },
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
     );
 
     let compaction = factory.build_compaction_ports(&run_context);

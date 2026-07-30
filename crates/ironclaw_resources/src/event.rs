@@ -45,7 +45,7 @@ pub enum BudgetEvent {
     },
     /// The governor's cascade said approval is needed but no gate has been
     /// opened yet. Internal signal from the governor — the accountant
-    /// (or any other handler that holds a [`BudgetGateStore`]) reacts to
+    /// (or any other handler that holds a [`BudgetGateStorePort`]) reacts to
     /// this by opening a gate and emitting [`BudgetEvent::GateOpened`]
     /// with the real `BudgetGateId`.
     ///
@@ -56,10 +56,10 @@ pub enum BudgetEvent {
         at: DateTime<Utc>,
     },
     /// A pending approval gate has been opened in the
-    /// [`BudgetGateStore`]. Carries the real `BudgetGateId` so the
+    /// [`BudgetGateStorePort`]. Carries the real `BudgetGateId` so the
     /// SSE projection / audit log can route the user to a resolvable
     /// gate. Produced by `GovernorBackedAccountant` after a successful
-    /// `BudgetGateStore::open`.
+    /// `BudgetGateStorePort::open`.
     GateOpened {
         gate_id: BudgetGateId,
         needed: ResourceApprovalNeeded,
@@ -93,7 +93,7 @@ impl BudgetEventSink for NoOpBudgetEventSink {
     fn emit(&self, _event: BudgetEvent) {}
 }
 
-/// In-memory sink used in tests and the local-dev gateway. Captures
+/// In-memory sink used in tests and the standalone gateway. Captures
 /// every event so assertions can inspect ordering and counts.
 #[derive(Debug, Default)]
 pub struct InMemoryBudgetEventSink {

@@ -16,15 +16,16 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_hooks::middleware::HookGateRefFactory;
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, UserId, sha256_digest_token};
+use ironclaw_host_api::{
+    ApprovalRequestId, CapabilityId, Resolution, ResolutionBatch, UserId, sha256_digest_token,
+};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
+        LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -117,7 +118,7 @@ pub struct HookGateInvocationMetadata {
 }
 
 impl HookGateInvocationMetadata {
-    pub fn for_invocation(invocation: &CapabilityInvocation) -> Result<Self, HookGateError> {
+    pub fn for_invocation(invocation: &LoopRequest) -> Result<Self, HookGateError> {
         let arguments_digest = hook_gate_arguments_digest(invocation);
         validate_digest(&arguments_digest)?;
         Ok(Self {
@@ -131,7 +132,7 @@ impl HookGateInvocationMetadata {
 /// hook gate path. The digest includes the cited capability id and opaque input
 /// ref so a later resolution can verify it is consuming the same gated call
 /// without exposing raw arguments to the approval surface.
-pub fn hook_gate_arguments_digest(invocation: &CapabilityInvocation) -> String {
+pub fn hook_gate_arguments_digest(invocation: &LoopRequest) -> String {
     let payload = format!(
         "hook-gate-arguments-v1\nsurface={}\ncapability={}\ninput={}",
         invocation.surface_version.as_str(),
@@ -194,7 +195,7 @@ impl HookGateResolutionRequest {
         gate_ref: LoopGateRef,
         actor: HookGateActorBinding,
         run_context: LoopRunContext,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
     ) -> Result<Self, HookGateError> {
         Self::for_kind(
             gate_ref,
@@ -210,7 +211,7 @@ impl HookGateResolutionRequest {
         expected_kind: HookGateKind,
         actor: HookGateActorBinding,
         run_context: LoopRunContext,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
     ) -> Result<Self, HookGateError> {
         let metadata = HookGateInvocationMetadata::for_invocation(invocation)?;
         Ok(Self {
@@ -400,8 +401,8 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        request: LoopRequest,
+    ) -> Result<Resolution, AgentLoopHostError> {
         let metadata = HookGateInvocationMetadata::for_invocation(&request)
             .map_err(AgentLoopHostError::from)?;
         HOOK_GATE_INVOCATION
@@ -411,26 +412,30 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let CapabilityBatchInvocation {
+        request: LoopRequestBatch,
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let LoopRequestBatch {
             invocations,
             stop_on_first_suspension,
         } = request;
-        let mut outcomes = Vec::with_capacity(invocations.len());
+        let mut resolutions = Vec::with_capacity(invocations.len());
         let mut stopped_on_suspension = false;
         for invocation in invocations {
             if stopped_on_suspension {
                 break;
             }
-            let outcome = self.invoke_capability(invocation).await?;
-            if outcome.is_suspension() && stop_on_first_suspension {
+            let resolution = self.invoke_capability(invocation).await?;
+            // H1: the batch stops on the first invocation that *parks* — a
+            // re-entrant gate as well as a suspension (the loop enum's old
+            // `is_suspension()` also lumped gates in). `Resolution::parks()` is
+            // that predicate.
+            if resolution.parks() && stop_on_first_suspension {
                 stopped_on_suspension = true;
             }
-            outcomes.push(outcome);
+            resolutions.push(resolution);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

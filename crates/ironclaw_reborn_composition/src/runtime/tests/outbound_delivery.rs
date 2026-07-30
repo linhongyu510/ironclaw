@@ -3,14 +3,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+use ironclaw_outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
+    OutboundDeliveryTargetSummary, OutboundError,
 };
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
@@ -18,10 +20,11 @@ use ironclaw_turns::{
 };
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
-use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
+use crate::outbound::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use ironclaw_outbound::RunFinalReplyDestination;
 
 use super::build_reborn_runtime;
 
@@ -35,16 +38,27 @@ struct OutboundDeliveryTriggerGateway {
 
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    entry: OutboundDeliveryTargetEntry,
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
+    reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 #[async_trait]
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(vec![self.entry.clone()])
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+        // Fixture available to whichever caller asks: claim the querying caller
+        // as owner so it survives the registry's caller-scoping filter.
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: self.capabilities.clone(),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
+        }])
     }
 }
 
@@ -168,22 +182,23 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
 }
 
 #[tokio::test]
-async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_create() {
+async fn standalone_runtime_selects_outbound_delivery_target_before_trigger_create() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
-            RebornCompositionProfile::LocalDevYolo,
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::StandaloneUnrestricted,
             "runtime-outbound-trigger-owner",
-            root.path().join("local-dev"),
+            root.path().join("standalone"),
         )
         .with_runtime_policy(
-            crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            crate::standalone_unrestricted_runtime_policy(true)
+                .expect("local-yolo policy resolves"),
         )
-        .with_local_dev_confirmed_host_home_root(host_home),
+        .with_local_runtime_confirmed_host_home_root(host_home),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-outbound-trigger-tenant".to_string(),
@@ -202,22 +217,22 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     let registered = runtime.register_outbound_delivery_target_provider(
         "slack:test",
         Arc::new(StaticOutboundDeliveryTargetProvider {
-            entry: OutboundDeliveryTargetEntry {
-                summary: RebornOutboundDeliveryTargetSummary::new(
-                    slack_target_id,
-                    "slack",
-                    "Slack DM",
-                    Some("Personal Slack direct message".to_string()),
-                )
-                .expect("target summary"),
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
-                    final_replies: true,
-                    gate_prompts: false,
-                    auth_prompts: false,
-                },
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:slack-dm")
-                    .expect("reply target"),
+            summary: OutboundDeliveryTargetSummary::new(
+                OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+                "slack",
+                "Slack DM",
+                Some("Personal Slack direct message".to_string()),
+            )
+            .expect("target summary"),
+            capabilities: DeliveryTargetCapabilities {
+                final_replies: true,
+                progress: false,
+                gate_prompts: false,
+                auth_prompts: false,
+                modalities: Vec::new(),
             },
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:slack-dm")
+                .expect("reply target"),
         }),
     );
     assert_eq!(

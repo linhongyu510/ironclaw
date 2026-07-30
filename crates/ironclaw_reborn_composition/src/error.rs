@@ -30,16 +30,34 @@ pub enum RebornBuildError {
     Secret(#[from] ironclaw_secrets::SecretError),
     #[error("reborn filesystem build failed")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime build failed")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor build failed")]
     Resource(#[from] ironclaw_resources::ResourceError),
-    #[error("reborn run state build failed")]
-    RunState(#[from] ironclaw_run_state::RunStateError),
+    #[error("reborn approval store build failed")]
+    ApprovalStore(#[from] ironclaw_approvals::ApprovalStoreError),
     #[error("reborn capability lease store build failed")]
     CapabilityLease(#[from] ironclaw_authorization::CapabilityLeaseError),
     #[error("reborn turn state build failed")]
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("reborn mount view construction failed")]
     Mount(#[from] ironclaw_host_api::HostApiError),
+}
+
+impl From<ironclaw_extension_host::RebornExtensionHostBuildError> for RebornBuildError {
+    fn from(error: ironclaw_extension_host::RebornExtensionHostBuildError) -> Self {
+        match error {
+            ironclaw_extension_host::RebornExtensionHostBuildError::InvalidConfig { reason } => {
+                Self::InvalidConfig { reason }
+            }
+            ironclaw_extension_host::RebornExtensionHostBuildError::Filesystem(error) => {
+                Self::Filesystem(error)
+            }
+            ironclaw_extension_host::RebornExtensionHostBuildError::Mount(error) => {
+                Self::Mount(error)
+            }
+        }
+    }
 }
 
 impl From<ironclaw_host_runtime::ProductionWiringReport> for crate::RebornCompositionError {
@@ -64,7 +82,7 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
             crate::RebornCompositionError::Resource(error) => Self::Resource(error),
-            crate::RebornCompositionError::RunState(error) => Self::RunState(error),
+            crate::RebornCompositionError::ApprovalStore(error) => Self::ApprovalStore(error),
             crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
             crate::RebornCompositionError::Secret(error) => Self::Secret(error),
             crate::RebornCompositionError::EventStore(error) => Self::EventStore(error),
@@ -90,7 +108,7 @@ mod tests {
     use super::RebornBuildError;
 
     #[test]
-    fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {
+    fn composition_missing_secret_master_key_stays_typed_for_service_errors() {
         let error = RebornBuildError::from(crate::RebornCompositionError::MissingSecretMasterKey);
 
         assert!(matches!(error, RebornBuildError::MissingSecretMasterKey));

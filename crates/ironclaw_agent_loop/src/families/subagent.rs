@@ -6,33 +6,33 @@ use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::DefaultBudgetStrategy;
 
-const SUBAGENT_ITERATION_LIMIT: u32 = 16;
+const SUBAGENT_ITERATION_LIMIT: u32 = 256;
 const SUBAGENT_WALL_CLOCK_LIMIT: Option<Duration> = None;
 
 #[cfg(test)]
 const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
-    "ironclaw_agent_loop.subagent_family.v1:",
+    "ironclaw_agent_loop.subagent_family.v2:",
     "family_id=subagent;",
     "identity=component_identity_v1;",
     "planner=DefaultPlanner;",
     "strategies=",
     "context:DefaultContextStrategy(max_messages=128),",
-    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000),",
+    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
     "gate:DefaultGateHandlingStrategy(block),",
-    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
+    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
-    "budget:DefaultBudgetStrategy(iteration_limit=16,wall_clock_limit=none)"
+    "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xd2, 0xea, 0x8a, 0xd9, 0x15, 0x09, 0x46, 0xe3, 0x8c, 0xe7, 0x63, 0xa5, 0xea, 0xd7, 0xc0, 0xc5,
-    0x28, 0x5c, 0x99, 0x66, 0x7d, 0x8e, 0x83, 0x1c, 0x18, 0xcd, 0xb6, 0x09, 0x47, 0x34, 0x10, 0x3a,
+    0xbb, 0xcc, 0xaf, 0x50, 0x60, 0xf4, 0x29, 0xea, 0x3a, 0x62, 0x1f, 0xe6, 0xd4, 0xfc, 0xac, 0xcf,
+    0xf0, 0xeb, 0x4a, 0xc8, 0xea, 0x53, 0x86, 0x82, 0x18, 0x68, 0xb6, 0xf4, 0x90, 0x04, 0xc8, 0x5c,
 ]);
 
 pub fn subagent() -> LoopFamily {
