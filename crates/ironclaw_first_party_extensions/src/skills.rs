@@ -467,14 +467,22 @@ mod install_files_encoding_tests {
         let parsed = parse_install_files(&input).expect("text files parse");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].path, "scripts/analyze.py");
-        assert_eq!(String::from_utf8(parsed[0].contents.clone()).unwrap(), "import sys\nprint(sys.argv)\n");
-        assert!(String::from_utf8(parsed[1].contents.clone()).unwrap().contains("0.0555"));
+        assert_eq!(
+            String::from_utf8(parsed[0].contents.clone()).unwrap(),
+            "import sys\nprint(sys.argv)\n"
+        );
+        assert!(
+            String::from_utf8(parsed[1].contents.clone())
+                .unwrap()
+                .contains("0.0555")
+        );
     }
 
     /// Binary payloads keep working; `text` is additive, not a replacement.
     #[test]
     fn base64_still_accepted_and_text_takes_precedence() {
-        let b64 = json!({ "content": "# s", "files": [{ "path": "a.bin", "bytes_base64": "aGVsbG8=" }] });
+        let b64 =
+            json!({ "content": "# s", "files": [{ "path": "a.bin", "bytes_base64": "aGVsbG8=" }] });
         let parsed = parse_install_files(&b64).expect("base64 parses");
         assert_eq!(parsed[0].contents, b"hello");
 
@@ -488,7 +496,11 @@ mod install_files_encoding_tests {
     /// Absent `files` stays a no-op, so prose-only installs are unchanged.
     #[test]
     fn no_files_key_is_empty_not_an_error() {
-        assert!(parse_install_files(&json!({ "content": "# s" })).expect("ok").is_empty());
+        assert!(
+            parse_install_files(&json!({ "content": "# s" }))
+                .expect("ok")
+                .is_empty()
+        );
     }
 
     /// A file entry with no usable encoding must fail rather than install an empty file.

@@ -230,7 +230,10 @@ mod tests {
 
     #[test]
     fn default_is_behavior_preserving() {
-        assert_eq!(ActivationStrategy::default(), ActivationStrategy::CriteriaOnly);
+        assert_eq!(
+            ActivationStrategy::default(),
+            ActivationStrategy::CriteriaOnly
+        );
         assert!(!ActivationStrategy::default().allows_name_fallback());
         assert!(ActivationStrategy::default().criteria_enabled());
     }
@@ -240,7 +243,10 @@ mod tests {
         for (s, want) in [
             ("", ActivationStrategy::CriteriaOnly),
             ("criteria", ActivationStrategy::CriteriaOnly),
-            ("name_and_description", ActivationStrategy::NameAndDescription),
+            (
+                "name_and_description",
+                ActivationStrategy::NameAndDescription,
+            ),
             (" Name+Description ", ActivationStrategy::NameAndDescription),
             ("disabled", ActivationStrategy::Disabled),
         ] {
@@ -248,7 +254,9 @@ mod tests {
         }
         assert_eq!(
             ActivationStrategy::parse("ext:acme.skills").expect("parses"),
-            ActivationStrategy::ThirdParty { extension_id: "acme.skills" }
+            ActivationStrategy::ThirdParty {
+                extension_id: "acme.skills"
+            }
         );
         assert!(matches!(
             ActivationStrategy::parse("nonsense"),
@@ -264,7 +272,9 @@ mod tests {
             ActivationStrategy::CriteriaOnly,
             ActivationStrategy::NameAndDescription,
             ActivationStrategy::Disabled,
-            ActivationStrategy::ThirdParty { extension_id: "acme" },
+            ActivationStrategy::ThirdParty {
+                extension_id: "acme",
+            },
         ] {
             assert_eq!(ActivationStrategy::parse(&s.id()).expect("round trip"), s);
         }
@@ -275,12 +285,20 @@ mod tests {
     /// `CriteriaOnly` they are permanently unreachable.
     #[test]
     fn name_fallback_selects_a_skill_with_no_activation_metadata() {
-        let m = manifest("hp-filter-detrending",
-                         "Detrend an economic time series with the HP filter and correlate");
+        let m = manifest(
+            "hp-filter-detrending",
+            "Detrend an economic time series with the HP filter and correlate",
+        );
         let msg = "detrend the gdp series using an hp filter then report the correlation";
-        assert!(fallback_score(&m, msg) > 0, "must be selectable from name/description");
+        assert!(
+            fallback_score(&m, msg) > 0,
+            "must be selectable from name/description"
+        );
         // and it stays zero when genuinely irrelevant
-        assert_eq!(fallback_score(&m, "fill in the pdf court form checkboxes"), 0);
+        assert_eq!(
+            fallback_score(&m, "fill in the pdf court form checkboxes"),
+            0
+        );
     }
 
     #[test]

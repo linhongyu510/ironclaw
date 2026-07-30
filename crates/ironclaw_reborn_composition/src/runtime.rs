@@ -5111,12 +5111,11 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let selector_config =
-        local_dev_selector_config(
-            regex_skill_activation_enabled,
-            skill_injection_mode_env()?,
-            skill_activation_env()?,
-        );
+    let selector_config = local_dev_selector_config(
+        regex_skill_activation_enabled,
+        skill_injection_mode_env()?,
+        skill_activation_env()?,
+    );
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(workspace_filesystem),

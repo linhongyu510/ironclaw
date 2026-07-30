@@ -869,7 +869,10 @@ mod tests {
             1,
             "an agent-authored skill must be selectable from its name alone"
         );
-        assert_eq!(with_fallback.selected[0].manifest.name, "hp-filter-detrending");
+        assert_eq!(
+            with_fallback.selected[0].manifest.name,
+            "hp-filter-detrending"
+        );
     }
 
     /// The fallback must not let an irrelevant skill in -- that is the failure mode
@@ -890,7 +893,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(out.selected.is_empty(), "must not over-select on an unrelated request");
+        assert!(
+            out.selected.is_empty(),
+            "must not over-select on an unrelated request"
+        );
     }
 
     /// `always_available` reproduces the Claude Code / Hermes contract: a seeded skill
@@ -917,7 +923,10 @@ mod tests {
                 3,
                 MAX_SKILL_CONTEXT_TOKENS,
                 &HashSet::new(),
-                super::SkillSelectionOptions { activation_strategy: strategy, ..Default::default() },
+                super::SkillSelectionOptions {
+                    activation_strategy: strategy,
+                    ..Default::default()
+                },
             );
             assert!(
                 out.selected.is_empty(),
@@ -937,7 +946,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(always.selected.len(), 1, "no gate: a seeded skill is always a candidate");
+        assert_eq!(
+            always.selected.len(),
+            1,
+            "no gate: a seeded skill is always a candidate"
+        );
     }
 
     /// Removing the gate must not reorder anything: a real keyword match still
@@ -960,7 +973,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(out.selected.len(), 2, "both are candidates under always_available");
+        assert_eq!(
+            out.selected.len(),
+            2,
+            "both are candidates under always_available"
+        );
         assert_eq!(
             out.selected[0].manifest.name, "pdf-form-filler",
             "the genuine keyword match must still rank first"

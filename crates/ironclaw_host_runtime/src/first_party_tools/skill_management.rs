@@ -177,9 +177,7 @@ async fn skill_install_input(
         //
         // `source`/`source_url` stay excluded: those are set by the URL path to record
         // provenance, and an agent must not be able to forge them on a direct install.
-        (true, None)
-            if !object.contains_key("source") && !object.contains_key("source_url") =>
-        {
+        (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
             Ok(request.input.clone())
         }
         (false, Some(url)) => {
