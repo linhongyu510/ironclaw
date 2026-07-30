@@ -27,11 +27,102 @@ use super::model::{
     IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
 };
 use super::service::{
-    IronHubService, clear_test_manifest_cache, configure_test_catalog, configure_test_link_state,
-    test_manifest_fetch_lock_exists,
+    IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
+    configure_test_link_state, execute_reborn_ironhub_command,
+    execute_reborn_ironhub_service_command, test_manifest_fetch_lock_exists,
+    validated_manifest_url,
 };
 
 const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
+
+struct MissingEgressRuntime;
+
+impl RebornIronHubRuntime for MissingEgressRuntime {
+    fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
+        unreachable!("missing egress must fail before skill management is requested")
+    }
+
+    fn ironhub_extension_management(
+        &self,
+    ) -> Arc<ironclaw_extension_host::ExtensionLifecycleManager> {
+        unreachable!("missing egress must fail before extension management is requested")
+    }
+
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        None
+    }
+
+    fn ironhub_surface_context(&self) -> ironclaw_product::LifecycleProductSurfaceContext {
+        unreachable!("missing egress must fail before surface context is requested")
+    }
+
+    fn ironhub_link_state(&self) -> Arc<IronhubLinkStateStore> {
+        unreachable!("missing egress must fail before link state is requested")
+    }
+
+    fn ironhub_manifest_url(&self) -> super::IronhubManifestUrl {
+        unreachable!("missing egress must fail before manifest URL is requested")
+    }
+}
+
+#[tokio::test]
+async fn reborn_runtime_wrapper_fails_before_requesting_other_services_without_egress() {
+    let error =
+        execute_reborn_ironhub_command(&MissingEgressRuntime, IronHubCommand::List { kind: None })
+            .await
+            .expect_err("runtime HTTP egress is required");
+
+    assert!(matches!(
+        error,
+        IronHubCommandError::RuntimeHttpEgressUnavailable
+    ));
+}
+
+#[tokio::test]
+async fn service_wrapper_routes_catalog_requests_through_the_mediated_egress() {
+    let owner = "service-wrapper-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url_value = "https://hub.ironclaw.com/tests/service-wrapper/manifest.json";
+    clear_test_manifest_cache(manifest_url_value);
+    let manifest_url = validated_manifest_url(manifest_url_value).expect("valid manifest URL");
+    let egress = Arc::new(RecordingEgress::new([]));
+    let state = Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new())));
+
+    let error = execute_reborn_ironhub_service_command(
+        services.skill_management,
+        services.extension_management,
+        egress.clone(),
+        state,
+        manifest_url,
+        scope.clone(),
+        IronHubCommand::List { kind: None },
+    )
+    .await
+    .expect_err("the empty recording egress rejects the catalog request");
+
+    assert!(matches!(error, IronHubCommandError::Catalog { .. }));
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, scope);
+    assert_eq!(
+        requests[0].capability_id.as_str(),
+        super::IRONHUB_SEARCH_CAPABILITY_ID
+    );
+}
+
+#[test]
+fn manifest_url_validation_rejects_non_https_and_preserves_valid_urls() {
+    assert!(validated_manifest_url("http://hub.ironclaw.com/manifest.json").is_err());
+
+    let value = "https://hub.ironclaw.com/manifest.json";
+    let validated = validated_manifest_url(value).expect("HTTPS manifest URL");
+    assert_eq!(validated.as_str(), value);
+}
 
 #[test]
 fn signed_catalog_verification_accepts_only_the_selected_key() {
