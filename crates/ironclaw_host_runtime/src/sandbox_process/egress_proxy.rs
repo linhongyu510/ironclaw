@@ -642,11 +642,17 @@ async fn handle_connect(
 
     // D1 split: BOUND hosts get TLS termination (`tls_intercept`), UNBOUND
     // hosts stay an opaque tunnel — see this function's doc and
-    // `tls_intercept`'s module doc. `filter` means a `tls_intercept: Some`
-    // config whose allowlist doesn't name this host takes the unbound path
-    // below exactly like `tls_intercept: None` would — D1 has no partial
-    // state between "bound" and "unbound."
-    if let Some(config) = tls_intercept.filter(|config| config.is_bound(host)) {
+    // `tls_intercept`'s module doc. `and_then` means a `tls_intercept: Some`
+    // config whose allowlist doesn't name this host (i.e. `bind` returns
+    // `None`) takes the unbound path below exactly like `tls_intercept:
+    // None` would — D1 has no partial state between "bound" and "unbound,"
+    // and the resulting `BoundHost` is D1's proof, scoped to this specific
+    // config, that `terminate_and_forward` can rely on instead of a bare
+    // `&str` + separate `is_bound` check (see `TlsInterceptConfig::bind`'s
+    // doc).
+    if let Some((config, bound_host)) =
+        tls_intercept.and_then(|config| config.bind(host).map(|bound_host| (config, bound_host)))
+    {
         tracing::debug!(
             host,
             action = "allow",
@@ -662,9 +668,10 @@ async fn handle_connect(
         // just be dropped.
         let leftover = client.buffer().to_vec();
         let raw_client = client.into_inner();
-        if let Err(error) =
-            tls_intercept::terminate_and_forward(raw_client, leftover, host, dial_addr, config)
-                .await
+        if let Err(error) = tls_intercept::terminate_and_forward(
+            raw_client, leftover, bound_host, dial_addr, config,
+        )
+        .await
         {
             // Fail CLOSED: log and close. Never fall back to a plaintext
             // relay — the client already believes it completed a CONNECT
@@ -1865,7 +1872,9 @@ mod tests {
     #[tokio::test]
     async fn connect_to_bound_host_through_the_real_proxy_terminates_tls_with_our_ca() {
         use super::super::ca::SandboxCertificateAuthority;
-        use super::super::tls_intercept::{TlsInterceptConfig, build_server_config};
+        use super::super::tls_intercept::{
+            TlsInterceptConfig, VerifiedOriginConnector, build_server_config,
+        };
         use tokio_rustls::{TlsAcceptor, TlsConnector};
 
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1897,11 +1906,11 @@ mod tests {
         for cert in rustls_pemfile::certs(&mut origin_ca.root_certificate_pem().as_bytes()) {
             origin_trust.add(cert.unwrap()).unwrap();
         }
-        let origin_connector = TlsConnector::from(Arc::new(
+        let origin_connector = VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(origin_trust)
                 .with_no_client_auth(),
-        ));
+        )));
         let tls_intercept = Arc::new(TlsInterceptConfig::new(
             ca,
             std::collections::HashSet::from([host.to_string()]),
@@ -1973,7 +1982,7 @@ mod tests {
     #[tokio::test]
     async fn connect_to_unbound_host_stays_opaque_even_with_tls_intercept_configured() {
         use super::super::ca::SandboxCertificateAuthority;
-        use super::super::tls_intercept::TlsInterceptConfig;
+        use super::super::tls_intercept::{TlsInterceptConfig, VerifiedOriginConnector};
         use tokio_rustls::TlsConnector;
 
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1992,11 +2001,11 @@ mod tests {
         // Deliberately never trusted by any client in this test — proves
         // the connector isn't even reachable for an unbound host, not just
         // unused by convention.
-        let origin_connector = TlsConnector::from(Arc::new(
+        let origin_connector = VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth(),
-        ));
+        )));
         let tls_intercept = Arc::new(TlsInterceptConfig::new(
             ca,
             std::collections::HashSet::from(["some-other-bound-host.example.com".to_string()]),
@@ -2064,7 +2073,7 @@ mod tests {
     #[tokio::test]
     async fn different_cased_connects_for_the_same_host_cache_one_leaf_not_two() {
         use super::super::ca::SandboxCertificateAuthority;
-        use super::super::tls_intercept::TlsInterceptConfig;
+        use super::super::tls_intercept::{TlsInterceptConfig, VerifiedOriginConnector};
         use rustls::pki_types::ServerName;
         use tokio_rustls::TlsConnector;
 
@@ -2077,11 +2086,11 @@ mod tests {
         // synchronization this test needs — it can only happen after the
         // server side has already minted (and served) a leaf for that
         // CONNECT's host, so awaiting it proves the mint already ran.
-        let origin_connector = TlsConnector::from(Arc::new(
+        let origin_connector = VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth(),
-        ));
+        )));
         let tls_intercept = Arc::new(TlsInterceptConfig::new(
             ca,
             std::collections::HashSet::from([bound_host.to_string()]),
