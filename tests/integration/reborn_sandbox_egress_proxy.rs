@@ -307,13 +307,11 @@ mod dual_homed_topology {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
-    pub const NET_INTERNAL: &str = "ironclaw-egress-test-internal";
-    pub const NET_EGRESS: &str = "ironclaw-egress-test-egress";
+    // `PROXY_IMAGE` is a shared, content-addressed build cache (see
+    // `content_digest_tag` below) — it is never mutated by a running test,
+    // only built-or-reused, so concurrent tests sharing it is not a
+    // resource-contention hazard the way live containers/networks are.
     pub const PROXY_IMAGE: &str = "ironclaw-egress-proxy-standalone:test";
-    pub const PROXY_NAME: &str = "ironclaw-egress-test-proxy";
-    pub const ORIGIN_ALLOWED_NAME: &str = "ironclaw-egress-test-origin-allowed";
-    pub const ORIGIN_DENIED_NAME: &str = "ironclaw-egress-test-origin-denied";
-    pub const WORKER_NAME: &str = "ironclaw-egress-test-worker";
     pub const ORIGIN_ALLOWED_BODY: &str = "allowed-origin-response-body";
     pub const ORIGIN_DENIED_BODY: &str = "denied-origin-response-body";
 
@@ -328,29 +326,124 @@ mod dual_homed_topology {
             .expect("docker CLI invocation should spawn")
     }
 
-    /// Best-effort teardown of every resource this module creates; safe to
-    /// call before setup (idempotent against a leftover run) and is always
-    /// called at the end via `TopologyGuard`'s `Drop`, so a panicking
-    /// assertion still cleans up.
-    pub fn cleanup() {
-        for name in [
-            WORKER_NAME,
-            PROXY_NAME,
-            ORIGIN_ALLOWED_NAME,
-            ORIGIN_DENIED_NAME,
-        ] {
-            let _ = docker(&["rm", "-f", name]);
+    /// Cheap process-local-ish uniqueness for a resource-name suffix. Two
+    /// tests in the same process racing to call this within the same
+    /// nanosecond is not observed in practice (each call additionally
+    /// crosses a `docker` subprocess spawn before its name is used), and a
+    /// collision would only cost an extra `docker rm -f`/`network rm`
+    /// no-op in the losing test's `cleanup()`, never cross-test data
+    /// corruption — so this doesn't need a true UUID dependency.
+    fn unique_suffix() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        format!("{nanos:x}-{:?}", std::thread::current().id())
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect()
+    }
+
+    /// Derives a `/24` subnet for `net_egress`, unique per topology, from
+    /// its `unique_suffix()` string — deterministically hashed into
+    /// `198.18.0.0/15` (IANA's benchmarking-methodology range, RFC 2544:
+    /// not private/loopback/link-local/CGNAT/documentation/multicast, so it
+    /// passes the SSRF guard the same way the module-level fixed subnet
+    /// used to). That `/15` covers 512 distinct `/24`s
+    /// (`198.18.0.0/24`..`198.19.255.0/24`); Docker rejects a network whose
+    /// subnet overlaps an already-existing one regardless of name, so a
+    /// shared fixed subnet would still collide two concurrently-running
+    /// topologies even after their names stopped colliding.
+    fn unique_egress_subnet(suffix: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        suffix.hash(&mut hasher);
+        let slot = (hasher.finish() % 512) as u16;
+        let second_octet = 18 + slot / 256;
+        let third_octet = slot % 256;
+        format!("198.{second_octet}.{third_octet}.0/24")
+    }
+
+    /// Docker resource names for ONE test's topology, suffixed uniquely per
+    /// `setup()` call so concurrent tests (default `cargo test` parallelism,
+    /// which is what CI runs) never contend over the same network/container
+    /// name — see this file's module doc for the concurrent-failure history
+    /// this fixes.
+    pub struct Topology {
+        pub net_internal: String,
+        pub net_egress: String,
+        pub proxy_name: String,
+        pub origin_allowed_name: String,
+        pub origin_denied_name: String,
+        pub worker_name: String,
+        /// This topology's own `--subnet=` CIDR for `net_egress`. Docker's
+        /// default bridge driver rejects creating a SECOND network whose
+        /// subnet overlaps an existing one, even under different names — so
+        /// giving every topology a unique NAME but the same fixed
+        /// `198.18.0.0/24` subnet still collides two topologies together
+        /// under concurrent tests (this was caught turning up as a second,
+        /// distinct failure once name collisions were fixed: "creating the
+        /// normal-bridge egress network should succeed"). Deriving a
+        /// distinct /24 per topology from its own suffix, still inside the
+        /// SSRF-guard-safe `198.18.0.0/15` benchmarking range (see the
+        /// call site's doc), fixes this the same way the unique names do.
+        pub net_egress_subnet: String,
+    }
+
+    impl Topology {
+        fn new() -> Self {
+            let suffix = unique_suffix();
+            Self {
+                net_internal: format!("ironclaw-egress-test-internal-{suffix}"),
+                net_egress: format!("ironclaw-egress-test-egress-{suffix}"),
+                proxy_name: format!("ironclaw-egress-test-proxy-{suffix}"),
+                origin_allowed_name: format!("ironclaw-egress-test-origin-allowed-{suffix}"),
+                origin_denied_name: format!("ironclaw-egress-test-origin-denied-{suffix}"),
+                worker_name: format!("ironclaw-egress-test-worker-{suffix}"),
+                net_egress_subnet: unique_egress_subnet(&suffix),
+            }
         }
-        for net in [NET_INTERNAL, NET_EGRESS] {
-            let _ = docker(&["network", "rm", net]);
+
+        /// Best-effort teardown of every resource THIS topology (and only
+        /// this one — every name carries this instance's unique suffix)
+        /// created; safe to call before setup (idempotent against a
+        /// leftover from a prior ungraceful kill of a run carrying the SAME
+        /// suffix, vanishingly unlikely but harmless to attempt) and is
+        /// always called at the end via `TopologyGuard`'s `Drop`, so a
+        /// panicking assertion still cleans up this test's own resources
+        /// without touching any concurrently-running sibling test's.
+        fn cleanup(&self) {
+            for name in [
+                &self.worker_name,
+                &self.proxy_name,
+                &self.origin_allowed_name,
+                &self.origin_denied_name,
+            ] {
+                let _ = docker(&["rm", "-f", name]);
+            }
+            for net in [&self.net_internal, &self.net_egress] {
+                let _ = docker(&["network", "rm", net]);
+            }
         }
     }
 
-    pub struct TopologyGuard;
+    pub struct TopologyGuard {
+        topology: Topology,
+    }
+
+    impl std::ops::Deref for TopologyGuard {
+        type Target = Topology;
+
+        fn deref(&self) -> &Topology {
+            &self.topology
+        }
+    }
 
     impl Drop for TopologyGuard {
         fn drop(&mut self) {
-            cleanup();
+            self.topology.cleanup();
         }
     }
 
@@ -470,11 +563,15 @@ mod dual_homed_topology {
     }
 
     pub fn setup(worker_image: &str) -> TopologyGuard {
-        cleanup();
-        let guard = TopologyGuard;
+        let topology = Topology::new();
+        // Idempotent against a leftover from a prior ungraceful kill under
+        // this exact (vanishingly unlikely to repeat) suffix; never touches
+        // a concurrently-running sibling test's differently-suffixed
+        // resources, unlike the old fixed-name `cleanup()` this replaces.
+        topology.cleanup();
 
         assert!(
-            docker(&["network", "create", "--internal", NET_INTERNAL])
+            docker(&["network", "create", "--internal", &topology.net_internal])
                 .status
                 .success(),
             "creating the internal (no-route-off-host) network should succeed"
@@ -492,10 +589,22 @@ mod dual_homed_topology {
         // not private/loopback/link-local/CGNAT/documentation/multicast, so
         // it passes the SSRF guard — while still being a purely local Docker
         // bridge with no real route to the internet.
+        //
+        // Docker rejects creating a network whose subnet overlaps an
+        // EXISTING one regardless of name — a shared fixed `/24` here would
+        // still collide two concurrently-running topologies even after
+        // their names stopped colliding, so each topology gets its own
+        // subnet derived from its unique suffix (`net_egress_subnet`, see
+        // `Topology`'s doc).
         assert!(
-            docker(&["network", "create", "--subnet=198.18.0.0/24", NET_EGRESS,])
-                .status
-                .success(),
+            docker(&[
+                "network",
+                "create",
+                &format!("--subnet={}", topology.net_egress_subnet),
+                &topology.net_egress,
+            ])
+            .status
+            .success(),
             "creating the normal-bridge egress network should succeed"
         );
 
@@ -504,8 +613,8 @@ mod dual_homed_topology {
         let origin_script = origin_script.to_str().expect("valid utf8 path");
 
         for (name, body) in [
-            (ORIGIN_ALLOWED_NAME, ORIGIN_ALLOWED_BODY),
-            (ORIGIN_DENIED_NAME, ORIGIN_DENIED_BODY),
+            (&topology.origin_allowed_name, ORIGIN_ALLOWED_BODY),
+            (&topology.origin_denied_name, ORIGIN_DENIED_BODY),
         ] {
             let run = docker(&[
                 "run",
@@ -514,7 +623,7 @@ mod dual_homed_topology {
                 "--name",
                 name,
                 "--network",
-                NET_EGRESS,
+                &topology.net_egress,
                 "-v",
                 &format!("{origin_script}:/recording_origin.py:ro"),
                 "-e",
@@ -545,22 +654,25 @@ mod dual_homed_topology {
         // with_tls_intercept`'s `interception_bound_hosts` binds it (exact
         // match, no wildcard) and the proxy's `VerifiedOriginConnector`
         // (real system roots) can actually verify the real origin when
-        // re-originating. The dual-homed proxy reaches it over `NET_EGRESS`
-        // (a normal, non-`--internal` bridge — NATs to the real internet),
-        // while the worker stays on the internal-only network and can only
-        // reach it through the proxy.
+        // re-originating. The dual-homed proxy reaches it over
+        // `net_egress` (a normal, non-`--internal` bridge — NATs to the
+        // real internet), while the worker stays on the internal-only
+        // network and can only reach it through the proxy.
         let run_proxy = docker(&[
             "run",
             "-d",
             "--rm",
             "--name",
-            PROXY_NAME,
+            &topology.proxy_name,
             "--network",
-            NET_INTERNAL,
+            &topology.net_internal,
             "-e",
             "EGRESS_PROXY_BIND_ADDR=0.0.0.0:8080",
             "-e",
-            &format!("EGRESS_PROXY_ALLOWED_HOSTS={ORIGIN_ALLOWED_NAME},pypi.org"),
+            &format!(
+                "EGRESS_PROXY_ALLOWED_HOSTS={},pypi.org",
+                topology.origin_allowed_name
+            ),
             PROXY_IMAGE,
         ]);
         assert!(
@@ -568,7 +680,12 @@ mod dual_homed_topology {
             "starting the proxy container should succeed: {}",
             String::from_utf8_lossy(&run_proxy.stderr)
         );
-        let connect_proxy_to_egress = docker(&["network", "connect", NET_EGRESS, PROXY_NAME]);
+        let connect_proxy_to_egress = docker(&[
+            "network",
+            "connect",
+            &topology.net_egress,
+            &topology.proxy_name,
+        ]);
         assert!(
             connect_proxy_to_egress.status.success(),
             "dual-homing the proxy onto the egress network should succeed: {}",
@@ -581,9 +698,9 @@ mod dual_homed_topology {
             "-d",
             "--rm",
             "--name",
-            WORKER_NAME,
+            &topology.worker_name,
             "--network",
-            NET_INTERNAL,
+            &topology.net_internal,
             "--entrypoint",
             "sh",
             worker_image,
@@ -596,104 +713,102 @@ mod dual_homed_topology {
             String::from_utf8_lossy(&run_worker.stderr)
         );
 
-        guard
+        TopologyGuard { topology }
     }
 
-    /// Runs `command` inside the worker container via `docker exec`.
-    pub fn exec_worker(command: &str) -> Output {
-        docker(&["exec", WORKER_NAME, "sh", "-c", command])
-    }
+    impl TopologyGuard {
+        /// Runs `command` inside the worker container via `docker exec`.
+        pub fn exec_worker(&self, command: &str) -> Output {
+            docker(&["exec", &self.worker_name, "sh", "-c", command])
+        }
 
-    /// Reads the recording origin's structured request log back out of its
-    /// container (proves the origin observed real bytes, not asserted
-    /// state).
-    pub fn read_origin_log(container_name: &str) -> String {
-        let output = docker(&[
-            "exec",
-            container_name,
-            "cat",
-            "/var/log/origin_requests.log",
-        ]);
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        /// Reads the recording origin's structured request log back out of
+        /// its container (proves the origin observed real bytes, not
+        /// asserted state).
+        pub fn read_origin_log(&self, container_name: &str) -> String {
+            let output = docker(&[
+                "exec",
+                container_name,
+                "cat",
+                "/var/log/origin_requests.log",
+            ]);
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+
+        /// `docker cp`s the proxy's exported CA trust bundle out to a fresh
+        /// host tempfile and returns its path. The standalone binary writes
+        /// the bundle synchronously before it starts serving, but `docker
+        /// run -d` returns as soon as the container is created — so this
+        /// polls `docker cp` for up to 5s rather than assuming the file
+        /// already exists the instant the container is reported running.
+        pub fn export_ca_bundle_from_proxy(&self) -> PathBuf {
+            let dest =
+                std::env::temp_dir().join(format!("ironclaw-egress-test-ca-{}", unique_suffix()));
+            for _ in 0..50 {
+                let cp = docker(&[
+                    "cp",
+                    &format!("{}:{CA_BUNDLE_EXPORT_PATH}", self.proxy_name),
+                    dest.to_str().expect("valid utf8 path"),
+                ]);
+                if cp.status.success() {
+                    return dest;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            panic!(
+                "timed out waiting for the proxy container to export its CA bundle to \
+                 {CA_BUNDLE_EXPORT_PATH}"
+            );
+        }
+
+        /// `docker cp`s a host file into the worker container at
+        /// `dest_path`. `docker cp` writes directly into the container's
+        /// filesystem without needing a bind mount declared at `docker run`
+        /// time, so this can run against the already-started worker
+        /// container from `setup` above — exactly the shape production's
+        /// read-only bind mount achieves via a different mechanism
+        /// (host-side file present before container create), proven here
+        /// through the equivalent "file exists at a fixed path inside the
+        /// container" outcome.
+        pub fn install_file_into_worker(&self, host_path: &Path, dest_path: &str) {
+            let cp = docker(&[
+                "cp",
+                host_path.to_str().expect("valid utf8 path"),
+                &format!("{}:{dest_path}", self.worker_name),
+            ]);
+            assert!(
+                cp.status.success(),
+                "docker cp into the worker container should succeed: {}",
+                String::from_utf8_lossy(&cp.stderr)
+            );
+        }
+
+        /// The container's IPv4 address on this topology's egress network,
+        /// for the raw-IP bypass assertion (rules out a DNS-only
+        /// enforcement gap: even with no hostname to resolve, the internal
+        /// network still must not route to this address).
+        pub fn ip_on_egress_network(&self, container_name: &str) -> String {
+            // The network name contains hyphens, which the Go template
+            // parser cannot traverse via plain dot-field access
+            // (`.Networks.foo-bar` fails to parse) — `index` looks the key
+            // up as a map access instead.
+            let output = docker(&[
+                "inspect",
+                "-f",
+                &format!(
+                    "{{{{index .NetworkSettings.Networks \"{}\" \"IPAddress\"}}}}",
+                    self.net_egress
+                ),
+                container_name,
+            ]);
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
     }
 
     /// The path the standalone proxy binary
     /// (`examples/egress_proxy_standalone.rs`) writes its container trust
     /// bundle to, inside its OWN container.
     pub const CA_BUNDLE_EXPORT_PATH: &str = "/ca-bundle.pem";
-
-    /// `docker cp`s the proxy's exported CA trust bundle out to a fresh host
-    /// tempfile and returns its path. The standalone binary writes the
-    /// bundle synchronously before it starts serving, but `docker run -d`
-    /// returns as soon as the container is created — so this polls `docker
-    /// cp` for up to 5s rather than assuming the file already exists the
-    /// instant the container is reported running.
-    pub fn export_ca_bundle_from_proxy() -> PathBuf {
-        let dest = std::env::temp_dir().join(format!("ironclaw-egress-test-ca-{}", uuid_like()));
-        for _ in 0..50 {
-            let cp = docker(&[
-                "cp",
-                &format!("{PROXY_NAME}:{CA_BUNDLE_EXPORT_PATH}"),
-                dest.to_str().expect("valid utf8 path"),
-            ]);
-            if cp.status.success() {
-                return dest;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        panic!(
-            "timed out waiting for the proxy container to export its CA bundle to \
-             {CA_BUNDLE_EXPORT_PATH}"
-        );
-    }
-
-    /// `docker cp`s a host file into the worker container at `dest_path`.
-    /// `docker cp` writes directly into the container's filesystem without
-    /// needing a bind mount declared at `docker run` time, so this can run
-    /// against the already-started worker container from `setup` above —
-    /// exactly the shape production's read-only bind mount achieves via a
-    /// different mechanism (host-side file present before container
-    /// create), proven here through the equivalent "file exists at a fixed
-    /// path inside the container" outcome.
-    pub fn install_file_into_worker(host_path: &Path, dest_path: &str) {
-        let cp = docker(&[
-            "cp",
-            host_path.to_str().expect("valid utf8 path"),
-            &format!("{WORKER_NAME}:{dest_path}"),
-        ]);
-        assert!(
-            cp.status.success(),
-            "docker cp into the worker container should succeed: {}",
-            String::from_utf8_lossy(&cp.stderr)
-        );
-    }
-
-    /// Cheap process-local uniqueness for a tempfile name — this module
-    /// already has no `uuid` dependency in its own scope, and the tempfile
-    /// only needs to not collide within one test run.
-    fn uuid_like() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
-    }
-
-    /// The container's IPv4 address on `NET_EGRESS`, for the raw-IP bypass
-    /// assertion (rules out a DNS-only enforcement gap: even with no
-    /// hostname to resolve, the internal network still must not route to
-    /// this address).
-    pub fn ip_on_egress_network(container_name: &str) -> String {
-        // `NET_EGRESS` contains hyphens, which the Go template parser cannot
-        // traverse via plain dot-field access (`.Networks.foo-bar` fails to
-        // parse) — `index` looks the key up as a map access instead.
-        let output = docker(&[
-            "inspect",
-            "-f",
-            &format!("{{{{index .NetworkSettings.Networks \"{NET_EGRESS}\" \"IPAddress\"}}}}"),
-            container_name,
-        ]);
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
 }
 
 #[tokio::test]
@@ -715,14 +830,13 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
     }
 
     topo::ensure_proxy_image_built();
-    let _guard = topo::setup(&worker_image);
+    let guard = topo::setup(&worker_image);
 
     // Assertion 1: allowed host succeeds THROUGH the proxy, and the exact
     // response body the origin sent comes back byte-for-byte.
-    let allowed = topo::exec_worker(&format!(
+    let allowed = guard.exec_worker(&format!(
         "curl -sS -x http://{}:8080 http://{}/hello",
-        topo::PROXY_NAME,
-        topo::ORIGIN_ALLOWED_NAME
+        guard.proxy_name, guard.origin_allowed_name
     ));
     let allowed_body = String::from_utf8_lossy(&allowed.stdout);
     assert!(
@@ -738,10 +852,9 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
     // format), not merely a failed connection, so this could only have come
     // from the proxy's allowlist check, never a network hiccup or the
     // (never-dialed) origin.
-    let denied = topo::exec_worker(&format!(
+    let denied = guard.exec_worker(&format!(
         "curl -sS -o /dev/null -w '%{{http_code}}' -x http://{}:8080 http://{}/",
-        topo::PROXY_NAME,
-        topo::ORIGIN_DENIED_NAME
+        guard.proxy_name, guard.origin_denied_name
     ));
     let denied_status_code = String::from_utf8_lossy(&denied.stdout).into_owned();
     assert_eq!(
@@ -750,10 +863,9 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
         "the proxy should reply 403 for a non-allowlisted host: stderr={}",
         String::from_utf8_lossy(&denied.stderr)
     );
-    let denied_body = topo::exec_worker(&format!(
+    let denied_body = guard.exec_worker(&format!(
         "curl -sS -x http://{}:8080 http://{}/",
-        topo::PROXY_NAME,
-        topo::ORIGIN_DENIED_NAME
+        guard.proxy_name, guard.origin_denied_name
     ));
     let denied_body_text = String::from_utf8_lossy(&denied_body.stdout);
     assert!(
@@ -768,9 +880,9 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
     // the worker's network, and the internal network has no route off its
     // own bridge — this must fail, or the sandbox's whole isolation claim is
     // false.
-    let bypass_by_name = topo::exec_worker(&format!(
+    let bypass_by_name = guard.exec_worker(&format!(
         "curl -sf --max-time 5 http://{}/hello",
-        topo::ORIGIN_ALLOWED_NAME
+        guard.origin_allowed_name
     ));
     assert!(
         !bypass_by_name.status.success(),
@@ -780,15 +892,15 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
         String::from_utf8_lossy(&bypass_by_name.stderr)
     );
 
-    // Same bypass attempt against the origin's raw IP literal on
-    // `NET_EGRESS`, ruling out a DNS-only enforcement mechanism (worker has
-    // no name to resolve here at all, only a route to prove or disprove).
-    let allowed_origin_ip = topo::ip_on_egress_network(topo::ORIGIN_ALLOWED_NAME);
+    // Same bypass attempt against the origin's raw IP literal on the egress
+    // network, ruling out a DNS-only enforcement mechanism (worker has no
+    // name to resolve here at all, only a route to prove or disprove).
+    let allowed_origin_ip = guard.ip_on_egress_network(&guard.origin_allowed_name);
     assert!(
         !allowed_origin_ip.is_empty(),
         "should be able to read the allowed origin's IP on the egress network"
     );
-    let bypass_by_ip = topo::exec_worker(&format!(
+    let bypass_by_ip = guard.exec_worker(&format!(
         "curl -sf --max-time 5 http://{allowed_origin_ip}/hello"
     ));
     assert!(
@@ -804,11 +916,11 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
     // structured request log (real bytes it received, not asserted state)
     // and confirm the allowed-origin request that assertion 1 sent actually
     // arrived, addressed to the expected host.
-    let allowed_origin_log = topo::read_origin_log(topo::ORIGIN_ALLOWED_NAME);
+    let allowed_origin_log = guard.read_origin_log(&guard.origin_allowed_name);
     assert!(
         allowed_origin_log.contains("\"method\": \"GET\"")
             && allowed_origin_log.contains("/hello")
-            && allowed_origin_log.contains(topo::ORIGIN_ALLOWED_NAME),
+            && allowed_origin_log.contains(&guard.origin_allowed_name),
         "the allowed origin's own request log should show the GET /hello request the proxy \
          forwarded, addressed to its own host — proving the request reached the origin for \
          real: {allowed_origin_log}"
@@ -819,7 +931,7 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
     // connection attempt (mirrors the composition-path test's
     // `origin_saw_a_connection` proof, read back through the real log
     // instead of a probe future).
-    let denied_origin_log = topo::read_origin_log(topo::ORIGIN_DENIED_NAME);
+    let denied_origin_log = guard.read_origin_log(&guard.origin_denied_name);
     assert!(
         denied_origin_log.trim().is_empty(),
         "the denied origin must never have been dialed by the proxy; found log entries: \
@@ -869,20 +981,20 @@ async fn sandbox_egress_proxy_dual_homed_tls_interception() {
     }
 
     topo::ensure_proxy_image_built();
-    let _guard = topo::setup(&worker_image);
+    let guard = topo::setup(&worker_image);
 
-    let host_bundle_path = topo::export_ca_bundle_from_proxy();
+    let host_bundle_path = guard.export_ca_bundle_from_proxy();
     const WORKER_BUNDLE_PATH: &str = "/tmp/ironclaw-ca-bundle.pem";
-    topo::install_file_into_worker(&host_bundle_path, WORKER_BUNDLE_PATH);
+    guard.install_file_into_worker(&host_bundle_path, WORKER_BUNDLE_PATH);
 
     // Assertion 1: WITHOUT the distributed CA bundle, the worker's own
     // baked-in system trust store (`ca-certificates`, real Mozilla-derived
     // roots) must REJECT the intercepted leaf — proving a real MITM leaf is
     // presented here, not pypi.org's own genuinely-trusted certificate that
     // an opaque tunnel would pass straight through.
-    let without_bundle = topo::exec_worker(&format!(
+    let without_bundle = guard.exec_worker(&format!(
         "curl -sS -o /dev/null -x http://{}:8080 https://pypi.org/simple/ 2>&1",
-        topo::PROXY_NAME
+        guard.proxy_name
     ));
     assert!(
         !without_bundle.status.success(),
@@ -907,10 +1019,10 @@ async fn sandbox_egress_proxy_dual_homed_tls_interception() {
     // interception actually happened for this connection, not merely that
     // curl exited 0 (which an opaque tunnel to the real pypi.org would also
     // do).
-    let with_bundle = topo::exec_worker(&format!(
+    let with_bundle = guard.exec_worker(&format!(
         "SSL_CERT_FILE={WORKER_BUNDLE_PATH} curl -sS -v -o /dev/null -x http://{}:8080 \
          https://pypi.org/simple/ 2>&1",
-        topo::PROXY_NAME
+        guard.proxy_name
     ));
     let with_bundle_output = String::from_utf8_lossy(&with_bundle.stdout);
     assert!(
