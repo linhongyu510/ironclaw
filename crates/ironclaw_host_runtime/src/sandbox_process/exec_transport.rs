@@ -38,6 +38,7 @@ use super::{
     broker::{
         SANDBOX_EGRESS_NETWORK_GATEWAY, SANDBOX_EGRESS_NETWORK_NAME, SANDBOX_EGRESS_NETWORK_SUBNET,
     },
+    mounts,
     registry::{self, build_user_container_labels, user_container_label_filter},
     shell_single_quote,
 };
@@ -569,13 +570,7 @@ pub(super) async fn user_container_launch_config(
     // any more — `posture.user` (below, and see [`security_posture_fields`])
     // pins PID 1 to uid 1000 directly instead, matching the fixed identity
     // every `docker exec` (`SANDBOX_EXEC_UID`/`GID`) already assumes.
-    let mut binds = config
-        .mount_sources
-        .prepare_container_binds(workspace, None)
-        .await?
-        .into_iter()
-        .map(|bind| bind.into_docker_bind())
-        .collect::<Vec<_>>();
+    let mut binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
     config.append_broker_binds(&mut binds)?;
     let host_config = HostConfig {
         binds: Some(binds),

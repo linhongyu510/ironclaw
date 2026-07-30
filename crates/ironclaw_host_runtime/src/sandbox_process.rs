@@ -40,7 +40,6 @@ pub(crate) mod shell_limits;
 mod tls_intercept;
 mod user_key;
 
-use mounts::RebornSandboxMountSources;
 use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
 pub use attribution::ConnectionAttributionResolver;
@@ -106,7 +105,6 @@ impl ContainerWorkdir {
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
-    mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
     memory_bytes: u64,
@@ -122,7 +120,6 @@ impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
@@ -186,16 +183,6 @@ impl RebornSandboxConfig {
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
         self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
-        Ok(self)
-    }
-
-    pub fn with_local_mount_source(
-        mut self,
-        virtual_root: ironclaw_host_api::VirtualPath,
-        host_root: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.mount_sources
-            .add_local_source(virtual_root, host_root)?;
         Ok(self)
     }
 
