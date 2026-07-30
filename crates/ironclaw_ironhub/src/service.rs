@@ -23,7 +23,8 @@ use super::catalog::{
     compact_skill_summary, compact_tool_summary, entry_matches, invalid,
     network_policy_for_url_from_origin, sha256_hex, skill_summary, tool_summary,
     validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
-    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
+    validate_manifest_freshness, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest,
 };
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
@@ -490,6 +491,7 @@ impl IronHubService {
         let generated_at = DateTime::parse_from_rfc3339(&manifest.generated_at)
             .map_err(|error| catalog(format!("manifest generated_at is not RFC3339: {error}")))?
             .with_timezone(&Utc);
+        validate_manifest_freshness(generated_at, Utc::now())?;
         self.link_state
             .as_ref()
             .ok_or_else(|| catalog("public manifest fetch requires durable replay protection"))?
@@ -523,6 +525,7 @@ impl IronHubService {
                 ))
             })?
             .with_timezone(&Utc);
+        validate_manifest_freshness(generated_at, Utc::now())?;
         let state = self.link_state.as_ref().ok_or_else(|| {
             catalog("private manifest installation requires durable replay protection")
         })?;

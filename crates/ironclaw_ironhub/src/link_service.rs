@@ -207,8 +207,14 @@ impl IronhubLinkStateStore {
                     {
                         return Err(IronhubLinkStateError::Unavailable);
                     }
-                    if desired.generated_at <= prior.generated_at {
+                    if desired.generated_at < prior.generated_at
+                        || (desired.generated_at == prior.generated_at
+                            && desired.signed_manifest_digest != prior.signed_manifest_digest)
+                    {
                         return Err(IronhubLinkStateError::ManifestReplay);
+                    }
+                    if desired == prior {
+                        return Ok(());
                     }
                     CasExpectation::Version(versioned.version)
                 }
@@ -635,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_manifest_key_ignores_rotating_url_token() {
+    async fn identical_private_manifest_is_idempotent_across_store_reconstruction() {
         let filesystem = shared_filesystem();
         let first = IronhubLinkStateStore::new(Arc::clone(&filesystem));
         let generated_at = Utc::now();
@@ -645,9 +651,18 @@ mod tests {
             .expect("first manifest");
 
         let reconstructed = IronhubLinkStateStore::new(filesystem);
+        reconstructed
+            .record_private_manifest("catalog.example", "org/repo", generated_at, "digest-a")
+            .await
+            .expect("identical signed manifest remains retryable");
         assert_eq!(
             reconstructed
-                .record_private_manifest("catalog.example", "org/repo", generated_at, "digest-a",)
+                .record_private_manifest(
+                    "catalog.example",
+                    "org/repo",
+                    generated_at,
+                    "digest-conflict",
+                )
                 .await,
             Err(IronhubLinkStateError::ManifestReplay)
         );

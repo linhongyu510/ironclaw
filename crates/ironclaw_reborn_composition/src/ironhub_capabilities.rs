@@ -149,10 +149,8 @@ struct InstallInput {
     kind: Option<IronHubEntryKind>,
     #[serde(default)]
     force: bool,
-    #[serde(default)]
-    expected_version: Option<String>,
-    #[serde(default)]
-    expected_artifact_digest: Option<String>,
+    expected_version: String,
+    expected_artifact_digest: String,
 }
 
 #[async_trait]
@@ -187,8 +185,8 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         kind: input.kind,
                         force: input.force,
                         acknowledge_unverified: false,
-                        expected_version: input.expected_version,
-                        expected_artifact_digest: input.expected_artifact_digest,
+                        expected_version: Some(input.expected_version),
+                        expected_artifact_digest: Some(input.expected_artifact_digest),
                         private_manifest_url: None,
                     },
                 }
@@ -244,4 +242,27 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
     };
     tracing::debug!(?kind, "IronHub capability dispatch failed");
     FirstPartyCapabilityError::new(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_install_input_requires_the_inspected_version_and_digest() {
+        let missing_pins = serde_json::json!({"name": "example-tool"});
+        assert!(
+            serde_json::from_value::<InstallInput>(missing_pins).is_err(),
+            "model install must not proceed without the package identity the user approved"
+        );
+
+        let input = serde_json::from_value::<InstallInput>(serde_json::json!({
+            "name": "example-tool",
+            "expected_version": "1.2.3",
+            "expected_artifact_digest": "sha256:abc"
+        }))
+        .expect("complete approval pins deserialize");
+        assert_eq!(input.expected_version, "1.2.3");
+        assert_eq!(input.expected_artifact_digest, "sha256:abc");
+    }
 }
