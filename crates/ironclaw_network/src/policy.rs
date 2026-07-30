@@ -268,6 +268,19 @@ pub fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPat
 }
 
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    host_matches_host_pattern(host, pattern)
+}
+
+/// Canonical host-only match: exact hostname, or one leading wildcard label
+/// (`*.example.com`) — see this crate's `CLAUDE.md` ("Keep host matching
+/// intentionally simple"). A `*.suffix` pattern admits exactly one non-empty,
+/// dot-free label before the suffix; it never admits the bare suffix itself
+/// and never admits a multi-label chain. Public so other Reborn runtime
+/// crates gating egress by host (e.g. the sandboxed shell's egress proxy in
+/// `ironclaw_host_runtime`) reuse this exact decision instead of maintaining
+/// a second, independently-drifting copy of the same pattern logic — see
+/// [`network_denies_resolved_ip`] for the analogous split on the IP side.
+pub fn host_matches_host_pattern(host: &str, pattern: &str) -> bool {
     let host = host.to_ascii_lowercase();
     let pattern = pattern.to_ascii_lowercase();
     if pattern == "*" {

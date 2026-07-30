@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkPolicy;
-use ironclaw_network::network_denies_resolved_ip;
+use ironclaw_network::{host_matches_host_pattern, network_denies_resolved_ip};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
@@ -493,21 +493,18 @@ impl BoundEgressAllowlistProxy {
 /// (see that function's doc); a host that fails to normalize (empty,
 /// whitespace-only, all-dots) can never match a real target and is denied
 /// outright, never coerced into an empty string that a `*` allow-all
-/// pattern would otherwise match.
+/// pattern would otherwise match. Delegates the per-pattern decision to
+/// [`ironclaw_network::host_matches_host_pattern`] — this crate composes
+/// `ironclaw_network` rather than hand-rolling a second, independently
+/// drifting copy of the wildcard-match rule (`ironclaw_host_runtime/CLAUDE.md`).
 fn host_allowed(host: &str, policy: &NetworkPolicy) -> bool {
     let Some(host) = normalize_host(host) else {
         return false;
     };
-    policy.allowed_targets.iter().any(|target| {
-        let pattern = target.host_pattern.to_ascii_lowercase();
-        if pattern == "*" {
-            return true;
-        }
-        match pattern.strip_prefix("*.") {
-            Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
-            None => host == pattern,
-        }
-    })
+    policy
+        .allowed_targets
+        .iter()
+        .any(|target| host_matches_host_pattern(&host, &target.host_pattern))
 }
 
 /// One HTTP request line plus its headers, as read off the client socket.
@@ -1590,6 +1587,34 @@ mod tests {
         assert!(
             !host_allowed("notgithub.com", &policy),
             "an unrelated host must stay denied"
+        );
+    }
+
+    /// CR-005/CR-006: `host_allowed`'s wildcard arm must match
+    /// `ironclaw_network::policy::host_matches_pattern` exactly, not a
+    /// looser hand-rolled `ends_with` check. For pattern `*.pypi.org` the
+    /// canonical matcher admits exactly one non-empty, dot-free label before
+    /// the suffix — never the bare suffix itself, never multiple labels, and
+    /// never a bare leading-dot host that happens to `ends_with` the pattern.
+    #[test]
+    fn host_allowed_matches_exactly_one_wildcard_label() {
+        let policy = policy_allowing(&["*.pypi.org"]);
+
+        assert!(
+            !host_allowed("pypi.org", &policy),
+            "CR-005: the bare suffix itself must not satisfy a `*.` wildcard"
+        );
+        assert!(
+            !host_allowed("a.b.pypi.org", &policy),
+            "CR-005: a `*.` wildcard must admit exactly one label, not a multi-label chain"
+        );
+        assert!(
+            !host_allowed(".pypi.org", &policy),
+            "CR-006: a bare leading-dot host must not self-match via `ends_with`"
+        );
+        assert!(
+            host_allowed("files.pypi.org", &policy),
+            "a single-label subdomain must still be allowed"
         );
     }
 
