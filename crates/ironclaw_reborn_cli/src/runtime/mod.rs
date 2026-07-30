@@ -612,22 +612,28 @@ pub(crate) fn build_runtime_input_with_options(
             }
         }
     }
-    match std::env::var("IRONHUB_MANIFEST_URL") {
-        Ok(manifest_url) => {
-            runtime_input = runtime_input.with_ironhub_manifest_url(
-                ironclaw_reborn_composition::ironhub::validated_manifest_url(&manifest_url)
-                    .context("IRONHUB_MANIFEST_URL is invalid")?,
-            );
-        }
-        Err(std::env::VarError::NotPresent) => {}
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
-        }
+    if let Some(manifest_url) = ironhub_manifest_url_from_env()? {
+        runtime_input = runtime_input.with_ironhub_manifest_url(manifest_url);
     }
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
+}
+
+pub(crate) fn ironhub_manifest_url_from_env() -> anyhow::Result<Option<String>> {
+    match std::env::var("IRONHUB_MANIFEST_URL") {
+        Ok(manifest_url) => {
+            let manifest_url =
+                ironclaw_reborn_composition::ironhub::validated_manifest_url(&manifest_url)
+                    .context("IRONHUB_MANIFEST_URL is invalid")?;
+            Ok(Some(manifest_url))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
+        }
+    }
 }
 
 pub(crate) fn with_binary_host_extension_bindings(
@@ -664,6 +670,7 @@ fn with_binary_host_extension_bindings_from_bundles(
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornHostBindings,
+    pub(crate) profile: RebornProfile,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
@@ -763,6 +770,7 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
+        profile,
         config_file,
     })
 }
@@ -1179,6 +1187,27 @@ pub(crate) fn local_runtime_storage_root(
         .home()
         .path()
         .join(profile.local_runtime_storage_subdir())
+}
+
+pub(crate) fn initialize_local_runtime_storage_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> anyhow::Result<()> {
+    if matches!(
+        profile,
+        RebornProfile::Standalone
+            | RebornProfile::StandaloneUnrestricted
+            | RebornProfile::HostedSingleTenantVolume
+    ) {
+        let root = local_runtime_storage_root(config, profile);
+        std::fs::create_dir_all(&root).with_context(|| {
+            format!(
+                "failed to initialize Reborn runtime state at {}",
+                root.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
