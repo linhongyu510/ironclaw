@@ -197,14 +197,25 @@ fn execute_ironhub_command(
         let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(services_input))
             .await
             .context("failed to assemble Reborn runtime for IronHub command")?;
-        let response = execute_reborn_ironhub_command(&runtime, command)
+        let command_result = execute_reborn_ironhub_command(&runtime, command)
             .await
-            .map_err(anyhow::Error::from)?;
-        runtime
+            .map_err(anyhow::Error::from);
+        let shutdown_result = runtime
             .shutdown()
             .await
-            .context("failed to shut down Reborn runtime after IronHub command")?;
-        Ok(response)
+            .context("failed to shut down Reborn runtime after IronHub command");
+        match (command_result, shutdown_result) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(command_error), Ok(())) => Err(command_error),
+            (Ok(_), Err(shutdown_error)) => Err(shutdown_error),
+            (Err(command_error), Err(shutdown_error)) => {
+                tracing::debug!(
+                    %shutdown_error,
+                    "Reborn runtime shutdown also failed after IronHub command failure"
+                );
+                Err(command_error)
+            }
+        }
     })
 }
 

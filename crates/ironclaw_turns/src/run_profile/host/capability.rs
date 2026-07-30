@@ -146,6 +146,12 @@ pub struct ProviderToolDefinition {
     pub name: ProviderToolName,
     /// Provider-safe tool description sent to the model.
     pub description: String,
+    /// Host-only provenance used when the description is projected back into prompts.
+    ///
+    /// Unknown and legacy sources default to the fully checked path. This is
+    /// deliberately omitted from the provider wire representation.
+    #[serde(default, skip_serializing)]
+    pub description_trust: CapabilityDescriptionTrust,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
 }
@@ -179,6 +185,7 @@ impl ProviderToolDefinition {
             capability_id,
             name,
             description: description.into(),
+            description_trust: Default::default(),
             parameters,
         }
     }
@@ -649,6 +656,7 @@ mod tests {
                 capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
                 name: ProviderToolName::new("demo__allowed").expect("provider tool name"),
                 description: "allowed".to_string(),
+                description_trust: Default::default(),
                 parameters: serde_json::json!({"type": "object"}),
             }],
         };
@@ -658,6 +666,21 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_wire_omits_host_description_provenance() {
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("demo.catalog").expect("valid capability id"),
+            name: ProviderToolName::new("demo__catalog").expect("provider tool name"),
+            description: "verified catalog entry".to_string(),
+            description_trust: CapabilityDescriptionTrust::VerifiedCatalog,
+            parameters: serde_json::json!({"type": "object"}),
+        };
+
+        let encoded = serde_json::to_value(definition).expect("serialize provider tool");
+
+        assert!(encoded.get("description_trust").is_none());
     }
 
     #[test]

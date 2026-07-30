@@ -4,12 +4,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InstallationState, InvocationId, NetworkMethod, ResourceScope,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, TrustClass,
-};
-use ironclaw_host_runtime::{
-    BUILTIN_FIRST_PARTY_PROVIDER, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
+    CapabilityId, InstallationState, InvocationId, NetworkMethod, ResourceScope, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
@@ -48,17 +44,14 @@ static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static MANIFEST_FETCH_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-static MANIFEST_LAST_SEEN: LazyLock<std::sync::Mutex<HashMap<String, DateTime<Utc>>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-static INSTALL_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 pub trait RebornIronHubRuntime {
     fn ironhub_skill_management(&self) -> Arc<ScopedSkillManagementPort>;
     fn ironhub_extension_management(&self) -> Arc<ExtensionLifecycleManager>;
-    fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort>;
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>>;
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext;
     fn ironhub_link_state(&self) -> Arc<IronhubLinkStateStore>;
+    fn ironhub_manifest_url(&self) -> String;
 }
 
 pub async fn execute_reborn_ironhub_command(
@@ -66,7 +59,7 @@ pub async fn execute_reborn_ironhub_command(
     command: IronHubCommand,
 ) -> Result<IronHubResponse, IronHubCommandError> {
     let egress = runtime
-        .ironhub_host_runtime_http_egress()
+        .ironhub_runtime_http_egress()
         .ok_or(IronHubCommandError::RuntimeHttpEgressUnavailable)?;
     let context = runtime.ironhub_surface_context();
     let scope = ResourceScope {
@@ -78,13 +71,14 @@ pub async fn execute_reborn_ironhub_command(
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
-    let service = IronHubService::new_with_host_egress(
+    let service = IronHubService::new_with_runtime_egress(
         runtime.ironhub_skill_management(),
         runtime.ironhub_extension_management(),
         egress,
         scope,
         ironhub_command_capability_id(&command)?,
     )
+    .with_manifest_url(runtime.ironhub_manifest_url())
     .with_link_state(runtime.ironhub_link_state());
     service.execute(command).await
 }
@@ -93,6 +87,8 @@ pub async fn execute_reborn_ironhub_service_command(
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    link_state: Arc<IronhubLinkStateStore>,
+    manifest_url: String,
     scope: ResourceScope,
     command: IronHubCommand,
 ) -> Result<IronHubResponse, IronHubCommandError> {
@@ -104,54 +100,27 @@ pub async fn execute_reborn_ironhub_service_command(
         scope,
         capability_id,
     )
+    .with_link_state(link_state)
+    .with_manifest_url(manifest_url)
     .execute(command)
     .await
 }
 
-enum IronHubEgress {
-    Host {
-        port: HostRuntimeHttpEgressPort,
-        capability_id: CapabilityId,
-    },
-    Runtime {
-        egress: Arc<dyn RuntimeHttpEgress>,
-        capability_id: CapabilityId,
-    },
+struct IronHubEgress {
+    egress: Arc<dyn RuntimeHttpEgress>,
+    capability_id: CapabilityId,
 }
 
 impl IronHubEgress {
     fn capability_id(&self) -> CapabilityId {
-        match self {
-            Self::Host { capability_id, .. } | Self::Runtime { capability_id, .. } => {
-                capability_id.clone()
-            }
-        }
+        self.capability_id.clone()
     }
 
     async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        match self {
-            Self::Host { port, .. } => {
-                let extension_id =
-                    ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).map_err(|error| {
-                        RuntimeHttpEgressError::Request {
-                            reason: format!("invalid builtin provider id: {error}"),
-                            request_bytes: 0,
-                            response_bytes: 0,
-                        }
-                    })?;
-                port.execute(HostRuntimeHttpEgressRequest {
-                    extension_id,
-                    trust: TrustClass::FirstParty,
-                    request,
-                    credentials: Vec::new(),
-                })
-                .await
-            }
-            Self::Runtime { egress, .. } => egress.execute(request).await,
-        }
+        self.egress.execute(request).await
     }
 }
 
@@ -177,7 +146,7 @@ impl IronHubService {
             extension_management,
             egress,
             scope,
-            manifest_url: resolve_manifest_url(),
+            manifest_url: DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
             verify_keys: super::model::MANIFEST_VERIFY_KEYS,
             link_state: None,
         }
@@ -193,26 +162,8 @@ impl IronHubService {
         Self::new(
             skill_management,
             extension_management,
-            IronHubEgress::Runtime {
+            IronHubEgress {
                 egress,
-                capability_id,
-            },
-            scope,
-        )
-    }
-
-    pub(super) fn new_with_host_egress(
-        skill_management: Arc<ScopedSkillManagementPort>,
-        extension_management: Arc<ExtensionLifecycleManager>,
-        port: HostRuntimeHttpEgressPort,
-        scope: ResourceScope,
-        capability_id: CapabilityId,
-    ) -> Self {
-        Self::new(
-            skill_management,
-            extension_management,
-            IronHubEgress::Host {
-                port,
                 capability_id,
             },
             scope,
@@ -221,6 +172,11 @@ impl IronHubService {
 
     pub(super) fn with_link_state(mut self, link_state: Arc<IronhubLinkStateStore>) -> Self {
         self.link_state = Some(link_state);
+        self
+    }
+
+    pub(super) fn with_manifest_url(mut self, manifest_url: String) -> Self {
+        self.manifest_url = manifest_url;
         self
     }
 
@@ -325,10 +281,7 @@ impl IronHubService {
         };
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options, source)?;
-        let lock_key = format!("{}:{name}", kind.as_str());
-        let lock = install_lock(&lock_key);
-        let result = async {
-            let _guard = lock.lock().await;
+        async {
             let lifecycle = match kind {
                 IronHubEntryKind::Skill => {
                     let entry = manifest
@@ -447,10 +400,7 @@ impl IronHubService {
                 lifecycle: Some(lifecycle),
             })
         }
-        .await;
-        drop(lock);
-        evict_idle_async_locks(&INSTALL_LOCKS);
-        result
+        .await
     }
 
     async fn install_skill(
@@ -566,7 +516,15 @@ impl IronHubService {
                 reason: format!("manifest parse failed: {error}"),
             })?;
         validate_manifest(&manifest)?;
-        enforce_manifest_monotonic(&self.manifest_url, &manifest)?;
+        let generated_at = DateTime::parse_from_rfc3339(&manifest.generated_at)
+            .map_err(|error| catalog(format!("manifest generated_at is not RFC3339: {error}")))?
+            .with_timezone(&Utc);
+        self.link_state
+            .as_ref()
+            .ok_or_else(|| catalog("public manifest fetch requires durable replay protection"))?
+            .record_public_manifest(&self.manifest_url, generated_at, &sha256_hex(&bytes))
+            .await
+            .map_err(map_link_state_error)?;
         Ok(manifest)
     }
 
@@ -699,6 +657,11 @@ pub(crate) fn configure_test_catalog(
 ) -> IronHubService {
     service.manifest_url = manifest_url.into();
     service.verify_keys = verify_keys;
+    if service.link_state.is_none() {
+        service.link_state = Some(Arc::new(IronhubLinkStateStore::new(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::new(),
+        ))));
+    }
     service
 }
 
@@ -727,23 +690,15 @@ pub(crate) fn test_manifest_fetch_lock_exists(url: &str) -> bool {
         .contains_key(url)
 }
 
-#[cfg(test)]
-pub(crate) fn test_install_lock_exists(key: &str) -> bool {
-    INSTALL_LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains_key(key)
-}
-
 fn ironhub_command_capability_id(
     command: &IronHubCommand,
 ) -> Result<CapabilityId, IronHubCommandError> {
     let value = match command {
         IronHubCommand::Search { .. } | IronHubCommand::List { .. } => {
-            super::capabilities::IRONHUB_SEARCH_CAPABILITY_ID
+            crate::IRONHUB_SEARCH_CAPABILITY_ID
         }
-        IronHubCommand::Info { .. } => super::capabilities::IRONHUB_INFO_CAPABILITY_ID,
-        IronHubCommand::Install { .. } => super::capabilities::IRONHUB_INSTALL_CAPABILITY_ID,
+        IronHubCommand::Info { .. } => crate::IRONHUB_INFO_CAPABILITY_ID,
+        IronHubCommand::Install { .. } => crate::IRONHUB_INSTALL_CAPABILITY_ID,
     };
     CapabilityId::new(value).map_err(|error| invalid(error.to_string()))
 }
@@ -790,11 +745,10 @@ fn map_link_state_error(error: IronhubLinkStateError) -> IronHubCommandError {
     }
 }
 
-fn resolve_manifest_url() -> String {
-    std::env::var("IRONHUB_MANIFEST_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_IRONHUB_MANIFEST_URL.to_string())
+pub fn validated_manifest_url(value: &str) -> Result<String, IronHubCommandError> {
+    let value = value.trim();
+    validate_artifact_url("hub-manifest", "manifest_url", value)?;
+    Ok(value.to_string())
 }
 
 fn manifest_cache_get(url: &str, now: Instant) -> Option<Arc<IronHubManifest>> {
@@ -842,44 +796,6 @@ fn evict_idle_async_locks(locks: &std::sync::Mutex<HashMap<String, Arc<AsyncMute
     // the map is the sole owner. Remove those idle entries; live/waiting
     // operations retain an Arc and therefore keep their shared lock.
     guard.retain(|_, lock| Arc::strong_count(lock) > 1);
-}
-
-fn enforce_manifest_monotonic(
-    url: &str,
-    manifest: &IronHubManifest,
-) -> Result<(), IronHubCommandError> {
-    let generated_at = DateTime::parse_from_rfc3339(&manifest.generated_at)
-        .map_err(|error| catalog(format!("manifest generated_at is not RFC3339: {error}")))?
-        .with_timezone(&Utc);
-    let mut guard = MANIFEST_LAST_SEEN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(previous) = guard.get(url)
-        && generated_at < *previous
-    {
-        return Err(catalog(format!(
-            "signed manifest replay rejected: generated_at {} is older than last seen {}",
-            generated_at.to_rfc3339(),
-            previous.to_rfc3339()
-        )));
-    }
-    if !guard.contains_key(url) && guard.len() >= MANIFEST_CACHE_MAX_ENTRIES {
-        return Err(catalog(
-            "manifest replay tracking capacity exceeded; refusing untracked manifest URL",
-        ));
-    }
-    guard.insert(url.to_string(), generated_at);
-    Ok(())
-}
-
-fn install_lock(key: &str) -> Arc<AsyncMutex<()>> {
-    let mut guard = INSTALL_LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard
-        .entry(key.to_string())
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone()
 }
 
 fn install_message(

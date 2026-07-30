@@ -4,8 +4,8 @@ use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, ProviderToolName, ResourceEstimate, RuntimeKind,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,
-    ProviderToolCall, ProviderToolDefinition,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
+    CapabilityDescriptorView, ConcurrencyHint, ProviderToolCall, ProviderToolDefinition,
 };
 
 use crate::capability_info::{self, CapabilityInfoEntry};
@@ -16,6 +16,7 @@ pub(super) struct RuntimeSurfaceCapabilitySnapshot {
     pub(super) runtime: RuntimeKind,
     pub(super) estimate: ResourceEstimate,
     pub(super) safe_description: String,
+    pub(super) description_trust: CapabilityDescriptionTrust,
     pub(super) parameters_schema: serde_json::Value,
     pub(super) effects: Vec<EffectKind>,
     pub(super) provider_tool_name: ProviderToolName,
@@ -177,6 +178,7 @@ impl SurfaceCapabilitySnapshot {
                     capability_id: capability_id.clone(),
                     name: capability.provider_tool_name.clone(),
                     description: capability.safe_description.clone(),
+                    description_trust: capability.description_trust,
                     parameters: capability.parameters_schema.clone(),
                 }))
             }
@@ -271,6 +273,7 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     capability_id: capability_id.clone(),
                     name: self.provider_tool_name.clone(),
                     description: self.safe_description.clone(),
+                    description_trust: Default::default(),
                     parameters: self.parameters_schema.clone(),
                 })
             }

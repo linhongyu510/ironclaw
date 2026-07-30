@@ -26,7 +26,7 @@ use super::model::{
 };
 use super::service::{
     IronHubService, clear_test_manifest_cache, configure_test_catalog, configure_test_link_state,
-    test_install_lock_exists, test_manifest_fetch_lock_exists,
+    test_manifest_fetch_lock_exists,
 };
 
 const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
@@ -173,6 +173,19 @@ fn private_manifest_origin_is_pinned_to_configured_catalog() {
         )
         .is_err()
     );
+    assert!(
+        validate_private_manifest_origin(configured, "http://catalog.example/api/private/manifest")
+            .is_err()
+    );
+    for url in [
+        "https://user@catalog.example/api/private/manifest",
+        "https://user:password@catalog.example/api/private/manifest",
+    ] {
+        assert!(
+            validate_private_manifest_origin(configured, url).is_err(),
+            "private manifest URLs with userinfo must be rejected"
+        );
+    }
 
     let cross_origin_artifact = skill_manifest(
         "private-skill",
@@ -887,7 +900,10 @@ async fn forced_skill_replacement_failure_restores_url_source() {
         .expect("restored skill is readable");
     assert_eq!(restored.content.as_bytes(), old_skill);
     assert_eq!(restored.source, ManagedSkillSource::Installed);
-    assert_eq!(restored.source_url.as_deref(), Some(old_skill_url));
+    assert_eq!(
+        restored.source_url.as_deref(),
+        Some("https://hub.ironclaw.com")
+    );
     let listed = skill_management
         .list_for_scope(scope)
         .await
@@ -947,9 +963,6 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         IronHubCommandError::Install { reason } if reason.contains("size mismatch")
     ));
     assert!(!test_manifest_fetch_lock_exists(size_manifest_url));
-    assert!(!test_install_lock_exists(
-        "skill:ironhub-lock-eviction-size-artifact-skill"
-    ));
 
     let sha_skill_name = "ironhub-lock-eviction-sha-artifact-skill";
     let sha_manifest_url = "https://hub.ironclaw.com/tests/lock-eviction-sha/sha-manifest.json";
@@ -987,9 +1000,6 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
         IronHubCommandError::Install { reason } if reason.contains("checksum mismatch")
     ));
     assert!(!test_manifest_fetch_lock_exists(sha_manifest_url));
-    assert!(!test_install_lock_exists(
-        "skill:ironhub-lock-eviction-sha-artifact-skill"
-    ));
 }
 
 #[tokio::test]

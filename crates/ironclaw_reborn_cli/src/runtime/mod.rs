@@ -598,15 +598,30 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
-    if caller == RuntimeInputCaller::Serve
-        && let Ok(shared_key) = std::env::var("IRONHUB_AGENT_SHARED_KEY")
-    {
-        let shared_key = shared_key.trim();
-        if !shared_key.is_empty() {
-            runtime_input = runtime_input.with_ironhub_agent_shared_key(
-                ironclaw_reborn_composition::ironhub::IronhubSharedKey::new(shared_key)
-                    .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
+    if caller == RuntimeInputCaller::Serve {
+        match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
+            Ok(shared_key) => {
+                runtime_input = runtime_input.with_ironhub_agent_shared_key(
+                    ironclaw_reborn_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
+                        .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
+                );
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid");
+            }
+        }
+    }
+    match std::env::var("IRONHUB_MANIFEST_URL") {
+        Ok(manifest_url) => {
+            runtime_input = runtime_input.with_ironhub_manifest_url(
+                ironclaw_reborn_composition::ironhub::validated_manifest_url(&manifest_url)
+                    .context("IRONHUB_MANIFEST_URL is invalid")?,
             );
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
         }
     }
 
@@ -1943,6 +1958,34 @@ mod tests {
 
         let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
             Ok(_) => panic!("short shared key must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("IRONHUB_AGENT_SHARED_KEY is invalid"),
+            "error must identify the invalid setting without exposing it: {error:#}"
+        );
+    }
+
+    #[test]
+    fn serve_rejects_a_present_but_blank_ironhub_shared_key() {
+        let _lock = lock_runtime_env();
+        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", " \t ");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("blank shared key must fail closed"),
             Err(error) => error,
         };
 

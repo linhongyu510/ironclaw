@@ -952,4 +952,105 @@ signed_payload = [ { body = true } ]
         let back: VendorAuthRecipe = serde_json::from_str(&json).unwrap();
         assert_eq!(recipe, back);
     }
+
+    #[test]
+    fn oauth_and_api_key_setup_metadata_parse_default_and_round_trip() {
+        let oauth_toml = slack_shaped_recipe_toml().replace(
+            "display_name = \"Example account\"",
+            "display_name = \"Example account\"\n\
+             instructions = \"Register an OAuth app.\"\n\
+             setup_url = \"https://vendor.example/settings/apps\"",
+        );
+        let api_key_toml = r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+instructions = "Create a personal access token."
+setup_url = "https://vendor.example/settings/tokens"
+"#;
+
+        for (label, source, expected_instructions, expected_url) in [
+            (
+                "oauth",
+                oauth_toml.as_str(),
+                "Register an OAuth app.",
+                "https://vendor.example/settings/apps",
+            ),
+            (
+                "api-key",
+                api_key_toml,
+                "Create a personal access token.",
+                "https://vendor.example/settings/tokens",
+            ),
+        ] {
+            let recipe: VendorAuthRecipe = toml::from_str(source).expect(label);
+            let (instructions, setup_url) = match &recipe {
+                VendorAuthRecipe::Oauth2Code(recipe) => {
+                    (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
+                }
+                VendorAuthRecipe::ApiKey(recipe) => {
+                    (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
+                }
+            };
+            assert_eq!(instructions, Some(expected_instructions), "{label}");
+            assert_eq!(
+                setup_url.map(HttpsEndpoint::as_str),
+                Some(expected_url),
+                "{label}"
+            );
+
+            let json = serde_json::to_string(&recipe).expect("serialize JSON");
+            assert_eq!(
+                serde_json::from_str::<VendorAuthRecipe>(&json).expect("deserialize JSON"),
+                recipe,
+                "{label} JSON round trip"
+            );
+            let encoded_toml = toml::to_string(&recipe).expect("serialize TOML");
+            assert_eq!(
+                toml::from_str::<VendorAuthRecipe>(&encoded_toml).expect("deserialize TOML"),
+                recipe,
+                "{label} TOML round trip"
+            );
+        }
+
+        let oauth_without_metadata: VendorAuthRecipe =
+            toml::from_str(slack_shaped_recipe_toml()).expect("OAuth without setup metadata");
+        let api_key_without_metadata: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+"#,
+        )
+        .expect("API key without setup metadata");
+        for recipe in [oauth_without_metadata, api_key_without_metadata] {
+            let (instructions, setup_url) = match recipe {
+                VendorAuthRecipe::Oauth2Code(recipe) => (recipe.instructions, recipe.setup_url),
+                VendorAuthRecipe::ApiKey(recipe) => (recipe.instructions, recipe.setup_url),
+            };
+            assert!(instructions.is_none());
+            assert!(setup_url.is_none());
+        }
+    }
+
+    #[test]
+    fn setup_metadata_rejects_non_https_urls() {
+        for source in [
+            slack_shaped_recipe_toml().replace(
+                "display_name = \"Example account\"",
+                "display_name = \"Example account\"\nsetup_url = \"http://vendor.example/apps\"",
+            ),
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+setup_url = "http://vendor.example/tokens"
+"#
+            .to_string(),
+        ] {
+            let error = toml::from_str::<VendorAuthRecipe>(&source)
+                .expect_err("non-HTTPS setup URL must fail");
+            assert!(error.to_string().contains("https"), "{error}");
+        }
+    }
 }

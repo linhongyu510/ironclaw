@@ -850,6 +850,42 @@ async fn read_skill_content_rejects_invalid_or_missing_user_skill() {
 }
 
 #[tokio::test]
+async fn read_skill_content_exposes_only_safe_source_origin() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, user_skill_mounts());
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("private-source", "description", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::InstalledUrl,
+            source_url: Some(
+                "https://catalog.example/private/token-value/SKILL.md?access=secret#fragment",
+            ),
+        },
+    )
+    .await
+    .expect("install skill");
+
+    let result = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "private-source",
+        },
+    )
+    .await
+    .expect("read skill");
+
+    assert_eq!(
+        result.source_url.as_deref(),
+        Some("https://catalog.example")
+    );
+    assert!(!format!("{result:?}").contains("secret"));
+    assert!(!format!("{result:?}").contains("token-value"));
+}
+
+#[tokio::test]
 async fn update_skill_rejects_invalid_missing_oversized_and_name_change() {
     let filesystem = Arc::new(InMemoryBackend::default());
     write_file(

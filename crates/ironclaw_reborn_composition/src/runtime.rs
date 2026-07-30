@@ -93,7 +93,7 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
-use ironclaw_host_runtime::{HostRuntime, HostRuntimeHttpEgressPort};
+use ironclaw_host_runtime::HostRuntime;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -551,10 +551,10 @@ pub struct RebornRuntime {
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     /// Durable nonce and signed-manifest replay state shared by CLI IronHub
     /// installs and the optional deep-link gateway.
     pub(crate) ironhub_link_state: Arc<ironclaw_ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_manifest_url: String,
     /// Single composed IronHub deep-link service. `None` is the default-off
     /// registration gate; the same option controls facade and route wiring.
     pub(crate) ironhub_link_service: Option<Arc<dyn ironclaw_product::IronhubLinkService>>,
@@ -679,12 +679,16 @@ impl ironclaw_ironhub::RebornIronHubRuntime for RebornRuntime {
         Arc::clone(&self.extension_management)
     }
 
-    fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort> {
-        self.host_runtime_http_egress.clone()
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        self.runtime_http_egress.clone()
     }
 
     fn ironhub_link_state(&self) -> Arc<ironclaw_ironhub::IronhubLinkStateStore> {
         Arc::clone(&self.ironhub_link_state)
+    }
+
+    fn ironhub_manifest_url(&self) -> String {
+        self.ironhub_manifest_url.clone()
     }
 
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
@@ -2851,6 +2855,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         llm,
         boot,
         ironhub_agent_shared_key,
+        ironhub_manifest_url,
         runner,
         tool_disclosure,
         trigger_poller,
@@ -2941,6 +2946,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .map(std::num::NonZeroU32::get),
         max_running_by_class,
     });
+    services_input = services_input.with_ironhub_manifest_url(ironhub_manifest_url.clone());
     let actor_user_id =
         UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
             reason: format!("user id: {reason}"),
@@ -4025,7 +4031,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     ));
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
-            let egress = services.host_runtime_http_egress.clone().ok_or_else(|| {
+            let egress = services.runtime_http_egress.clone().ok_or_else(|| {
                 RebornRuntimeError::MalformedConfig {
                     reason:
                         "IronHub gateway key was configured but mediated HTTP egress is unavailable"
@@ -4041,7 +4047,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             )
             .map_err(|error| RebornRuntimeError::MalformedConfig {
                 reason: error.to_string(),
-            })?;
+            })?
+            .with_manifest_url(ironhub_manifest_url.clone());
             Some(Arc::new(service) as Arc<dyn ironclaw_product::IronhubLinkService>)
         }
         None => None,
@@ -4072,8 +4079,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
         runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
-        host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         ironhub_link_state,
+        ironhub_manifest_url,
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),

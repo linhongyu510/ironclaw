@@ -4401,6 +4401,7 @@ fn provider_tool_definition(capability_id: CapabilityId, name: &str) -> Provider
         capability_id,
         name: ProviderToolName::new(name).expect("provider tool name"),
         description: "test provider tool".to_string(),
+        description_trust: Default::default(),
         parameters: serde_json::json!({"type": "object"}),
     }
 }

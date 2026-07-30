@@ -35,6 +35,10 @@ use crate::input::{
     OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
+use crate::ironhub_capabilities::{
+    extend_builtin_first_party_package as extend_builtin_ironhub_package,
+    insert_handlers as insert_ironhub_handlers,
+};
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound::outbound_preferences_capability::{
     extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
@@ -150,10 +154,6 @@ use ironclaw_host_runtime::{
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
-};
-use ironclaw_ironhub::{
-    extend_builtin_first_party_package as extend_builtin_ironhub_package,
-    insert_handlers as insert_ironhub_handlers,
 };
 use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::{
@@ -319,7 +319,6 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,

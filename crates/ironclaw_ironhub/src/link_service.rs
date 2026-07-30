@@ -8,7 +8,6 @@ use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     CapabilityId, InvocationId, ProductSurfaceCaller, ResourceScope, VirtualPath,
 };
-use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_product::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
     IronhubLinkService, IronhubRegisterRequest,
@@ -24,6 +23,7 @@ use super::model::{IronHubCommand, IronHubCommandError, IronHubInstallOptions, I
 use super::service::IronHubService;
 
 const IRONHUB_STATE_ROOT: &str = "/system/settings/ironhub";
+const MAX_LINK_ID_BYTES: usize = 256;
 const MAX_NONCE_BYTES: usize = 512;
 const MANIFEST_CAS_RETRIES: usize = 32;
 const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
@@ -55,17 +55,18 @@ pub struct IronhubLinkStateStore {
 pub struct RebornIronhubLinkService {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
-    egress: LinkEgress,
+    egress: Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
     state: Arc<IronhubLinkStateStore>,
     shared_key: IronhubSharedKey,
     install_capability: CapabilityId,
+    manifest_url: String,
 }
 
 impl RebornIronhubLinkService {
     pub fn new(
         skill_management: Arc<ScopedSkillManagementPort>,
         extension_management: Arc<ExtensionLifecycleManager>,
-        host_runtime_http_egress: HostRuntimeHttpEgressPort,
+        runtime_http_egress: Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
         state: Arc<IronhubLinkStateStore>,
         shared_key: IronhubSharedKey,
     ) -> Result<Self, IronhubLinkBuildError> {
@@ -74,45 +75,37 @@ impl RebornIronhubLinkService {
         Ok(Self {
             skill_management,
             extension_management,
-            egress: LinkEgress::Host(host_runtime_http_egress),
+            egress: runtime_http_egress,
             state,
             shared_key,
             install_capability,
+            manifest_url: crate::model::DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
         })
     }
 
+    pub fn with_manifest_url(mut self, manifest_url: String) -> Self {
+        self.manifest_url = manifest_url;
+        self
+    }
+
     fn install_service(&self, scope: ResourceScope) -> IronHubService {
-        let service = match &self.egress {
-            LinkEgress::Host(port) => IronHubService::new_with_host_egress(
-                Arc::clone(&self.skill_management),
-                Arc::clone(&self.extension_management),
-                port.clone(),
-                scope,
-                self.install_capability.clone(),
-            ),
-            #[cfg(test)]
-            LinkEgress::Runtime(egress) => IronHubService::new_with_runtime_egress(
-                Arc::clone(&self.skill_management),
-                Arc::clone(&self.extension_management),
-                Arc::clone(egress),
-                scope,
-                self.install_capability.clone(),
-            ),
-        };
+        let service = IronHubService::new_with_runtime_egress(
+            Arc::clone(&self.skill_management),
+            Arc::clone(&self.extension_management),
+            Arc::clone(&self.egress),
+            scope,
+            self.install_capability.clone(),
+        );
         #[cfg(test)]
         let service = super::service::configure_test_catalog(
             service,
             super::model::DEFAULT_IRONHUB_MANIFEST_URL,
             super::tests::test_manifest_verify_keys(),
         );
-        service.with_link_state(Arc::clone(&self.state))
+        service
+            .with_manifest_url(self.manifest_url.clone())
+            .with_link_state(Arc::clone(&self.state))
     }
-}
-
-enum LinkEgress {
-    Host(HostRuntimeHttpEgressPort),
-    #[cfg(test)]
-    Runtime(Arc<dyn RuntimeHttpEgress>),
 }
 
 #[cfg(test)]
@@ -131,10 +124,11 @@ pub(super) mod test_support {
         Ok(RebornIronhubLinkService {
             skill_management,
             extension_management,
-            egress: LinkEgress::Runtime(runtime_http_egress),
+            egress: runtime_http_egress,
             state,
             shared_key,
             install_capability,
+            manifest_url: crate::model::DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
         })
     }
 }
@@ -146,6 +140,7 @@ impl IronhubLinkStateStore {
 
     pub async fn consume_install_nonce(
         &self,
+        caller: &ProductSurfaceCaller,
         nonce: &str,
         consumed_at: DateTime<Utc>,
     ) -> Result<(), IronhubLinkStateError> {
@@ -153,9 +148,12 @@ impl IronhubLinkStateStore {
         {
             return Err(IronhubLinkStateError::InvalidInput);
         }
-        let path = nonce_path(nonce)?;
+        let path = nonce_path(caller, nonce)?;
         let record = ConsumedNonce { consumed_at };
-        let body = serde_json::to_vec(&record).map_err(|_| IronhubLinkStateError::Unavailable)?;
+        let body = serde_json::to_vec(&record).map_err(|error| {
+            tracing::debug!(%error, "failed to serialize consumed IronHub nonce");
+            IronhubLinkStateError::Unavailable
+        })?;
         match self
             .filesystem
             .put(&path, Entry::bytes(body), CasExpectation::Absent)
@@ -163,7 +161,10 @@ impl IronhubLinkStateStore {
         {
             Ok(_) => Ok(()),
             Err(FilesystemError::VersionMismatch { .. }) => Err(IronhubLinkStateError::NonceReplay),
-            Err(_) => Err(IronhubLinkStateError::Unavailable),
+            Err(error) => {
+                tracing::debug!(%error, "failed to persist consumed IronHub nonce");
+                Err(IronhubLinkStateError::Unavailable)
+            }
         }
     }
 
@@ -187,15 +188,20 @@ impl IronhubLinkStateStore {
         };
 
         for _ in 0..MANIFEST_CAS_RETRIES {
-            let current = self
-                .filesystem
-                .get(&path)
-                .await
-                .map_err(|_| IronhubLinkStateError::Unavailable)?;
+            let current = self.filesystem.get(&path).await.map_err(|error| {
+                tracing::debug!(%error, "failed to read durable IronHub manifest state");
+                IronhubLinkStateError::Unavailable
+            })?;
             let cas = match current {
                 Some(versioned) => {
                     let prior: PrivateManifestState = serde_json::from_slice(&versioned.entry.body)
-                        .map_err(|_| IronhubLinkStateError::Unavailable)?;
+                        .map_err(|error| {
+                            tracing::debug!(
+                                %error,
+                                "failed to decode durable IronHub manifest state"
+                            );
+                            IronhubLinkStateError::Unavailable
+                        })?;
                     if prior.catalog_host != desired.catalog_host
                         || prior.signed_repo != desired.signed_repo
                     {
@@ -208,14 +214,76 @@ impl IronhubLinkStateStore {
                 }
                 None => CasExpectation::Absent,
             };
-            let body =
-                serde_json::to_vec(&desired).map_err(|_| IronhubLinkStateError::Unavailable)?;
+            let body = serde_json::to_vec(&desired).map_err(|error| {
+                tracing::debug!(%error, "failed to serialize durable IronHub manifest state");
+                IronhubLinkStateError::Unavailable
+            })?;
             match self.filesystem.put(&path, Entry::bytes(body), cas).await {
                 Ok(_) => return Ok(()),
                 Err(FilesystemError::VersionMismatch { .. }) => {
                     tokio::task::yield_now().await;
                 }
-                Err(_) => return Err(IronhubLinkStateError::Unavailable),
+                Err(error) => {
+                    tracing::debug!(%error, "failed to persist durable IronHub manifest state");
+                    return Err(IronhubLinkStateError::Unavailable);
+                }
+            }
+        }
+        Err(IronhubLinkStateError::Unavailable)
+    }
+
+    pub async fn record_public_manifest(
+        &self,
+        manifest_url: &str,
+        generated_at: DateTime<Utc>,
+        signed_manifest_digest: &str,
+    ) -> Result<(), IronhubLinkStateError> {
+        let path = public_manifest_path(manifest_url)?;
+        let desired = PublicManifestState {
+            manifest_url: manifest_url.to_string(),
+            generated_at,
+            signed_manifest_digest: signed_manifest_digest.to_ascii_lowercase(),
+        };
+        for _ in 0..MANIFEST_CAS_RETRIES {
+            let current = self.filesystem.get(&path).await.map_err(|error| {
+                tracing::debug!(%error, "failed to read public IronHub manifest replay state");
+                IronhubLinkStateError::Unavailable
+            })?;
+            let cas = match current {
+                Some(versioned) => {
+                    let prior: PublicManifestState = serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|error| {
+                            tracing::debug!(
+                                %error,
+                                "failed to decode public IronHub manifest replay state"
+                            );
+                            IronhubLinkStateError::Unavailable
+                        })?;
+                    if desired.manifest_url != prior.manifest_url
+                        || desired.generated_at < prior.generated_at
+                        || (desired.generated_at == prior.generated_at
+                            && desired.signed_manifest_digest != prior.signed_manifest_digest)
+                    {
+                        return Err(IronhubLinkStateError::ManifestReplay);
+                    }
+                    if desired == prior {
+                        return Ok(());
+                    }
+                    CasExpectation::Version(versioned.version)
+                }
+                None => CasExpectation::Absent,
+            };
+            let body = serde_json::to_vec(&desired).map_err(|error| {
+                tracing::debug!(%error, "failed to serialize public IronHub manifest replay state");
+                IronhubLinkStateError::Unavailable
+            })?;
+            match self.filesystem.put(&path, Entry::bytes(body), cas).await {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => tokio::task::yield_now().await,
+                Err(error) => {
+                    tracing::debug!(%error, "failed to persist public IronHub manifest replay state");
+                    return Err(IronhubLinkStateError::Unavailable);
+                }
             }
         }
         Err(IronhubLinkStateError::Unavailable)
@@ -235,7 +303,7 @@ impl IronhubLinkService for RebornIronhubLinkService {
     ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
         authenticate_install(&self.shared_key, &request)?;
         self.state
-            .consume_install_nonce(&request.nonce, Utc::now())
+            .consume_install_nonce(&caller, &request.nonce, Utc::now())
             .await
             .map_err(map_state_error)?;
 
@@ -285,8 +353,32 @@ struct PrivateManifestState {
     signed_manifest_digest: String,
 }
 
-fn nonce_path(nonce: &str) -> Result<VirtualPath, IronhubLinkStateError> {
-    let digest = hex::encode(Sha256::digest(nonce.as_bytes()));
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PublicManifestState {
+    manifest_url: String,
+    generated_at: DateTime<Utc>,
+    signed_manifest_digest: String,
+}
+
+fn nonce_path(
+    caller: &ProductSurfaceCaller,
+    nonce: &str,
+) -> Result<VirtualPath, IronhubLinkStateError> {
+    let mut hasher = Sha256::new();
+    hash_length_prefixed(&mut hasher, caller.tenant_id.as_str().as_bytes());
+    hash_length_prefixed(&mut hasher, caller.user_id.as_str().as_bytes());
+    if let Some(agent_id) = &caller.agent_id {
+        hash_length_prefixed(&mut hasher, agent_id.as_str().as_bytes());
+    } else {
+        hash_length_prefixed(&mut hasher, &[]);
+    }
+    if let Some(project_id) = &caller.project_id {
+        hash_length_prefixed(&mut hasher, project_id.as_str().as_bytes());
+    } else {
+        hash_length_prefixed(&mut hasher, &[]);
+    }
+    hash_length_prefixed(&mut hasher, nonce.as_bytes());
+    let digest = hex::encode(hasher.finalize());
     state_path(&format!("install-nonces/{digest}.json"))
 }
 
@@ -299,6 +391,14 @@ fn manifest_path(
     hash_length_prefixed(&mut hasher, signed_repo.as_bytes());
     let digest = hex::encode(hasher.finalize());
     state_path(&format!("private-manifests/{digest}.json"))
+}
+
+fn public_manifest_path(manifest_url: &str) -> Result<VirtualPath, IronhubLinkStateError> {
+    if manifest_url.is_empty() || manifest_url.len() > 4096 {
+        return Err(IronhubLinkStateError::InvalidInput);
+    }
+    let digest = hex::encode(Sha256::digest(manifest_url.as_bytes()));
+    state_path(&format!("public-manifests/{digest}.json"))
 }
 
 fn hash_length_prefixed(hasher: &mut Sha256, field: &[u8]) {
@@ -323,6 +423,26 @@ fn authenticate_register(
     shared_key: &IronhubSharedKey,
     request: &IronhubRegisterRequest,
 ) -> Result<(), IronhubLinkError> {
+    for (field, value) in [
+        ("uid", request.uid.as_str()),
+        ("aid", request.aid.as_str()),
+        ("nonce", request.nonce.as_str()),
+    ] {
+        if value.is_empty()
+            || value.len()
+                > if field == "nonce" {
+                    MAX_NONCE_BYTES
+                } else {
+                    MAX_LINK_ID_BYTES
+                }
+            || value.contains(':')
+            || value.chars().any(char::is_control)
+        {
+            return Err(IronhubLinkError::InvalidInput {
+                reason: format!("invalid register {field}"),
+            });
+        }
+    }
     if !timestamp_fresh(request.ts) {
         return Err(IronhubLinkError::StaleTimestamp);
     }
@@ -415,6 +535,15 @@ mod tests {
         IronhubSharedKey::new(SHARED_KEY).expect("test shared key")
     }
 
+    fn caller(user_id: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            ironclaw_host_api::TenantId::new("tenant").expect("tenant"),
+            ironclaw_host_api::UserId::new(user_id).expect("user"),
+            Some(ironclaw_host_api::AgentId::new("agent").expect("agent")),
+            None,
+        )
+    }
+
     fn sign(payload: &str) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(SHARED_KEY.as_bytes()).expect("HMAC key");
         mac.update(payload.as_bytes());
@@ -460,22 +589,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn register_authentication_rejects_ambiguous_delimited_fields_before_hmac() {
+        let mut request = register_request(
+            u64::try_from(Utc::now().timestamp()).expect("current positive timestamp"),
+        );
+        request.uid = "user:alternate".to_string();
+
+        assert!(matches!(
+            authenticate_register(&shared_key(), &request),
+            Err(IronhubLinkError::InvalidInput { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn nonce_is_single_use_across_store_reconstruction() {
         let filesystem = shared_filesystem();
         let first = IronhubLinkStateStore::new(Arc::clone(&filesystem));
+        let caller = caller("user-a");
         first
-            .consume_install_nonce("one-shot", Utc::now())
+            .consume_install_nonce(&caller, "one-shot", Utc::now())
             .await
             .expect("first consumption");
 
         let reconstructed = IronhubLinkStateStore::new(filesystem);
         assert_eq!(
             reconstructed
-                .consume_install_nonce("one-shot", Utc::now())
+                .consume_install_nonce(&caller, "one-shot", Utc::now())
                 .await,
             Err(IronhubLinkStateError::NonceReplay)
         );
+    }
+
+    #[tokio::test]
+    async fn nonce_consumption_is_scoped_to_authenticated_caller() {
+        let store = IronhubLinkStateStore::new(shared_filesystem());
+        store
+            .consume_install_nonce(&caller("user-a"), "shared-nonce", Utc::now())
+            .await
+            .expect("first caller consumes nonce");
+        store
+            .consume_install_nonce(&caller("user-b"), "shared-nonce", Utc::now())
+            .await
+            .expect("another caller has an independent nonce namespace");
     }
 
     #[tokio::test]
@@ -514,6 +670,40 @@ mod tests {
                     newer - chrono::Duration::seconds(1),
                     "digest-old",
                 )
+                .await,
+            Err(IronhubLinkStateError::ManifestReplay)
+        );
+    }
+
+    #[tokio::test]
+    async fn public_manifest_replay_state_survives_store_reconstruction() {
+        let filesystem = shared_filesystem();
+        let first = IronhubLinkStateStore::new(Arc::clone(&filesystem));
+        let manifest_url = "https://hub.ironclaw.com/api/catalog/manifest.json";
+        let generated_at = Utc::now();
+        first
+            .record_public_manifest(manifest_url, generated_at, "digest-new")
+            .await
+            .expect("first manifest");
+
+        let reconstructed = IronhubLinkStateStore::new(filesystem);
+        reconstructed
+            .record_public_manifest(manifest_url, generated_at, "digest-new")
+            .await
+            .expect("identical manifest remains idempotent");
+        assert_eq!(
+            reconstructed
+                .record_public_manifest(
+                    manifest_url,
+                    generated_at - chrono::Duration::seconds(1),
+                    "digest-old",
+                )
+                .await,
+            Err(IronhubLinkStateError::ManifestReplay)
+        );
+        assert_eq!(
+            reconstructed
+                .record_public_manifest(manifest_url, generated_at, "digest-conflict")
                 .await,
             Err(IronhubLinkStateError::ManifestReplay)
         );

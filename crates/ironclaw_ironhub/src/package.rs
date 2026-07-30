@@ -1,4 +1,4 @@
-use ironclaw_extensions::{ExtensionRuntimeV2, ManifestSource};
+use ironclaw_extensions::{ExtensionAssetPath, ExtensionRuntimeV2, ManifestSource};
 
 use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
@@ -48,16 +48,19 @@ pub(crate) fn ironhub_tool_package(
         ("legacy/capabilities.json".to_string(), capabilities),
     ];
     if let ExtensionRuntimeV2::Wasm { module } = &record.manifest().runtime {
+        validate_manifest_asset_path(module)?;
         files.push((module.clone(), wasm));
     }
     // Registry tools expose one generic invoke capability whose input and output
     // schemas are host-owned constants; the manifest only says where they live.
     for capability in &record.manifest().capabilities {
+        validate_manifest_asset_path(capability.input_schema_ref.as_str())?;
         files.push((
             capability.input_schema_ref.as_str().to_string(),
             GENERIC_TOOL_INPUT_SCHEMA.to_vec(),
         ));
         if let Some(output_schema_ref) = &capability.output_schema_ref {
+            validate_manifest_asset_path(output_schema_ref.as_str())?;
             files.push((
                 output_schema_ref.as_str().to_string(),
                 GENERIC_TOOL_OUTPUT_SCHEMA.to_vec(),
@@ -84,6 +87,14 @@ pub(crate) fn ironhub_tool_package(
     }
 
     Ok(package)
+}
+
+fn validate_manifest_asset_path(path: &str) -> Result<(), IronHubCommandError> {
+    ExtensionAssetPath::new(path.to_string())
+        .map(|_| ())
+        .map_err(|error| IronHubCommandError::Catalog {
+            reason: format!("published manifest contains an invalid asset path: {error}"),
+        })
 }
 
 #[cfg(test)]
@@ -166,6 +177,24 @@ fields = [ {{ handle = "{id}_api_key", label = "API key", secret = true }} ]
         )
     }
 
+    fn oauth_auth(id: &str) -> String {
+        format!(
+            r#"
+[auth.{id}]
+method = "oauth2_code"
+display_name = "{id}"
+authorization_endpoint = "https://accounts.{id}.com/oauth/authorize"
+token_endpoint = "https://accounts.{id}.com/oauth/token"
+scopes = ["read"]
+client_credentials = {{ client_id_handle = "{id}_oauth_client_id", client_secret_handle = "{id}_oauth_client_secret" }}
+instructions = "Register an OAuth application."
+setup_url = "https://accounts.{id}.com/developers/apps"
+
+[auth.{id}.token_response]
+access_token = "/access_token""#
+        )
+    }
+
     fn build(entry: &IronHubToolEntry, manifest: Vec<u8>) -> AvailableExtensionPackage {
         ironhub_tool_package(entry, manifest, component(), b"{}".to_vec(), &[])
             .expect("package builds")
@@ -210,6 +239,49 @@ fields = [ {{ handle = "{id}_api_key", label = "API key", secret = true }} ]
             paths.contains(&"schemas/attio/raw_output.v1.json"),
             "output schema should be at the declared path, got {paths:?}"
         );
+    }
+
+    #[test]
+    fn package_rejects_manifest_asset_paths_outside_the_extension_root() {
+        let base = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+            .expect("manifest UTF-8");
+        for (label, manifest) in [
+            (
+                "absolute module",
+                base.replace(
+                    "module = \"wasm/attio-tool.wasm\"",
+                    "module = \"/tmp/attio.wasm\"",
+                ),
+            ),
+            (
+                "traversing input schema",
+                base.replace(
+                    "input_schema_ref = \"schemas/attio/invoke.input.v1.json\"",
+                    "input_schema_ref = \"../invoke.input.v1.json\"",
+                ),
+            ),
+            (
+                "traversing output schema",
+                base.replace(
+                    "output_schema_ref = \"schemas/attio/raw_output.v1.json\"",
+                    "output_schema_ref = \"schemas/../../raw_output.v1.json\"",
+                ),
+            ),
+        ] {
+            let error = ironhub_tool_package(
+                &entry_named("attio"),
+                manifest.into_bytes(),
+                component(),
+                b"{}".to_vec(),
+                &[],
+            )
+            .expect_err(label);
+            assert!(
+                error.to_string().contains("asset path")
+                    || error.to_string().contains("path segments"),
+                "{label} must fail as an invalid manifest asset path: {error}"
+            );
+        }
     }
 
     /// The credential the tool published survives the install. This is the
@@ -257,6 +329,23 @@ setup_url = "https://app.attio.com/settings/developers""#,
         assert_eq!(
             onboarding.setup_url.as_deref(),
             Some("https://app.attio.com/settings/developers")
+        );
+    }
+
+    #[test]
+    fn published_oauth_setup_instructions_reach_the_user() {
+        let package = build(
+            &entry_named("attio"),
+            published_manifest("attio", &oauth_auth("attio")),
+        );
+
+        let onboarding = package
+            .onboarding_override
+            .expect("OAuth setup metadata should become onboarding copy");
+        assert_eq!(onboarding.instructions, "Register an OAuth application.");
+        assert_eq!(
+            onboarding.setup_url.as_deref(),
+            Some("https://accounts.attio.com/developers/apps")
         );
     }
 

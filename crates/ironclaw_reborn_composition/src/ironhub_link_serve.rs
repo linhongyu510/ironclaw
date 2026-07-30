@@ -7,13 +7,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
 };
+use ironclaw_host_api::{HostPortId, NetworkMethod};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::{IronhubLinkError, IronhubLinkService, IronhubRegisterRequest};
 
@@ -85,7 +85,9 @@ fn ironhub_register_policy() -> Result<IngressPolicy, RebornBuildError> {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductSurface,
+        effect_path: AllowedEffectPath::HostPort {
+            id: HostPortId::new("host.ironhub.agent_link")?,
+        },
     })?)
 }
 

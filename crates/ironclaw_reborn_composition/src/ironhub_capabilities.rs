@@ -19,12 +19,11 @@ use serde::Deserialize;
 
 use ironclaw_extension_host::ExtensionLifecycleManager;
 
-use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
-use super::service::execute_reborn_ironhub_service_command;
-
-pub const IRONHUB_SEARCH_CAPABILITY_ID: &str = "builtin.ironhub_search";
-pub const IRONHUB_INFO_CAPABILITY_ID: &str = "builtin.ironhub_info";
-pub const IRONHUB_INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
+use ironclaw_ironhub::{
+    IRONHUB_INFO_CAPABILITY_ID, IRONHUB_INSTALL_CAPABILITY_ID, IRONHUB_SEARCH_CAPABILITY_ID,
+    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
+    IronhubLinkStateStore, execute_reborn_ironhub_service_command,
+};
 
 const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
     IRONHUB_SEARCH_CAPABILITY_ID,
@@ -32,21 +31,25 @@ const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
     IRONHUB_INSTALL_CAPABILITY_ID,
 ];
 
-pub fn extend_builtin_first_party_package(
+pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.extend(manifests()?);
     ExtensionPackage::from_manifest(package.manifest, package.root)
 }
 
-pub fn insert_handlers(
+pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
+    link_state: Arc<IronhubLinkStateStore>,
+    manifest_url: String,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(IronHubCapabilityHandler {
         skill_management,
         extension_management,
+        link_state,
+        manifest_url,
     });
     for capability_id in IRONHUB_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -122,6 +125,8 @@ fn capability_manifest(
 struct IronHubCapabilityHandler {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
+    link_state: Arc<IronhubLinkStateStore>,
+    manifest_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +203,8 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
             Arc::clone(&self.skill_management),
             Arc::clone(&self.extension_management),
             runtime_http_egress,
+            Arc::clone(&self.link_state),
+            self.manifest_url.clone(),
             request.scope,
             command,
         )
@@ -228,6 +235,7 @@ where
 }
 
 fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
+    tracing::debug!(%error, "IronHub capability dispatch failed");
     let kind = match error {
         IronHubCommandError::InvalidInput { .. } => RuntimeDispatchErrorKind::InputEncode,
         IronHubCommandError::RuntimeHttpEgressUnavailable => RuntimeDispatchErrorKind::Executor,

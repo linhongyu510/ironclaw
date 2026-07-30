@@ -38,6 +38,7 @@ mod filesystem_assembly;
 mod google_oauth_secret_store;
 mod host_access_assembly;
 mod input;
+mod ironhub_capabilities;
 mod ironhub_link_serve;
 mod llm_admin;
 mod memory_binding;
@@ -222,6 +223,7 @@ pub mod ironhub {
     pub use ironclaw_ironhub::{
         IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse, IronhubSharedKey,
         IronhubSharedKeyError, execute_reborn_ironhub_command, render_reborn_ironhub_response,
+        validated_manifest_url,
     };
 }
 

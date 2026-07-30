@@ -339,6 +339,7 @@ pub(super) async fn build_backend_production(
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
+        ironhub_manifest_url,
         workspace_filesystems,
         standalone_storage_root,
         default_system_prompt_path,
@@ -1015,6 +1016,10 @@ pub(super) async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&skill_management),
         Arc::clone(&extension_management),
+        Arc::new(ironclaw_ironhub::IronhubLinkStateStore::new(Arc::clone(
+            &fold_filesystem,
+        ))),
+        ironhub_manifest_url,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("IronHub handlers are invalid: {error}"),
@@ -1210,7 +1215,6 @@ pub(super) async fn build_backend_production(
         channel_dm_target_store,
         channel_disconnect_slot,
         runtime_http_egress,
-        host_runtime_http_egress,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,

@@ -1,6 +1,6 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
 };
 
@@ -164,7 +164,7 @@ pub struct ExtensionLifecycleManager {
     /// it coordinates. The ordinary lifecycle lock remains the state writer;
     /// this outer lock only prevents two catalog clients from replacing the
     /// same package between catalog publication and install.
-    registry_install_lock: Arc<Mutex<()>>,
+    registry_install_locks: Arc<std::sync::Mutex<BTreeMap<String, Weak<Mutex<()>>>>>,
     /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
@@ -237,7 +237,7 @@ impl ExtensionLifecycleManager {
             channel_config: std::sync::OnceLock::new(),
             discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
-            registry_install_lock: Arc::new(Mutex::new(())),
+            registry_install_locks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
@@ -978,12 +978,13 @@ impl ExtensionLifecycleManager {
                 reason: "registry install requires a registry-validated package".to_string(),
             });
         }
-        let _registry_guard = self.registry_install_lock.lock().await;
         let package_ref = package.package_ref.clone();
         let extension_id = package.package.id.clone();
+        let registry_install_lock = self.registry_install_lock(&extension_id);
+        let _registry_guard = registry_install_lock.lock().await;
         let previous = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref).ok()
+            catalog.resolve_optional(&package_ref)?
         };
         if let Some(previous) = &previous {
             let matches = previous.manifest_toml == package.manifest_toml
@@ -1104,6 +1105,20 @@ impl ExtensionLifecycleManager {
                 Err(original_error)
             }
         }
+    }
+
+    fn registry_install_lock(&self, extension_id: &ExtensionId) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .registry_install_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(extension_id.as_str()).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(extension_id.as_str().to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     async fn install_and_activate_registry_package(

@@ -35,6 +35,7 @@ sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "process", "fs"] }
 tracing = "0.1"
+url = "2"
 
 # Optional (catalog feature)
 futures = { version = "0.3", optional = true }

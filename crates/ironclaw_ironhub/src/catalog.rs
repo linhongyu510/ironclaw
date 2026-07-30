@@ -4,10 +4,13 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern, sha256_digest_token};
 use sha2::{Digest, Sha256};
 
-use super::model::{
-    IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
-    IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry, IronHubToolEntry,
-    SignedManifestEnvelope,
+use super::{
+    artifact_hosts::is_allowed_artifact_host,
+    model::{
+        IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
+        IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
+        IronHubToolEntry, SignedManifestEnvelope,
+    },
 };
 
 const MAX_SEARCH_DESCRIPTION_BYTES: usize = 120;
@@ -402,24 +405,6 @@ pub(crate) fn validate_private_manifest_origin(
         ));
     }
     Ok(configured)
-}
-
-fn is_allowed_artifact_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("hub.ironclaw.com")
-        || ironclaw_host_runtime::is_allowed_code_artifact_host(host)
-        || extra_artifact_hosts()
-            .iter()
-            .any(|allowed| host.eq_ignore_ascii_case(allowed))
-}
-
-fn extra_artifact_hosts() -> Vec<String> {
-    std::env::var("IRONHUB_EXTRA_ARTIFACT_HOSTS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .filter(|host| !host.is_empty() && !host_is_disallowed_target(host))
-        .collect()
 }
 
 pub(crate) fn host_is_disallowed_target(host: &str) -> bool {

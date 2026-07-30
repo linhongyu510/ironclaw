@@ -207,6 +207,12 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "skill-install tool description names GitHub as a skill source",
     ),
     (
+        "crates/ironclaw_ironhub/src/artifact_hosts.rs",
+        "github",
+        "IronHub's signed-package downloader pins GitHub release infrastructure as a code \
+         artifact source, independent of the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
         "github",
         "skill-install input schema names GitHub as a skill source",

@@ -447,6 +447,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ],
@@ -975,6 +976,7 @@ mod tests {
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ])
@@ -985,6 +987,10 @@ mod tests {
         );
         assert_eq!(
             search_output["properties"]["returned_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            search_output["properties"]["catalog_total"]["type"],
             "integer"
         );
         assert_eq!(search_output["properties"]["truncated"]["type"], "boolean");

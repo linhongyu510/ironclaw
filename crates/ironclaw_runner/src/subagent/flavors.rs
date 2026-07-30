@@ -539,6 +539,7 @@ mod tests {
                         name: ironclaw_host_api::ProviderToolName::new(id.replace('.', "__"))
                             .expect("provider tool name"),
                         description: format!("{id} description"),
+                        description_trust: Default::default(),
                         parameters: serde_json::json!({"type":"object"}),
                     })
                     .collect())
