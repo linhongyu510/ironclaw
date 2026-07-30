@@ -13,10 +13,19 @@
 //! never enters the container, in any form, even transiently" invariant
 //! the rest of the credential firewall enforces, applied to the CA itself.
 //!
-//! **W6 is the consumer, not built yet.** Nothing in this crate calls
-//! [`SandboxCertificateAuthority`] today; the proxy's TLS termination for
-//! bound hosts will call [`SandboxCertificateAuthority::issue_leaf_for_host`]
-//! per intercepted CONNECT, per the design doc's D1/W6 gating.
+//! **Wired into the production proxy.**
+//! `egress_proxy::bind_sandbox_egress_proxy_with_tls_intercept` generates one
+//! [`SandboxCertificateAuthority`] per proxy instance and threads it through
+//! `TlsInterceptConfig`; `tls_intercept::terminate_and_forward_core` calls
+//! [`SandboxCertificateAuthority::issue_leaf_for_host`] per intercepted
+//! CONNECT to mint (or serve from cache) the leaf certificate that
+//! terminates that connection's TLS, and
+//! [`SandboxCertificateAuthority::build_container_trust_bundle_pem`] is the
+//! artifact bind-mounted read-only into every sandbox container so it trusts
+//! that leaf's chain. [`SandboxCertificateAuthority::root_certificate_pem`]
+//! itself has no production caller — the bundle method above reads the root
+//! PEM off the struct field directly — and is exercised only by this
+//! module's and `egress_proxy`'s own tests.
 
 use std::{
     collections::HashMap,
@@ -39,7 +48,6 @@ use crate::RuntimeProcessError;
 /// artifact, unlike the root) is only useful for a bounded window. The
 /// cache TTL intentionally matches the cert's own validity: caching a leaf
 /// past its `not_after` would just hand back an already-expired cert.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) const DEFAULT_LEAF_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Clock-skew allowance applied to `not_before` so a cert issued a moment
@@ -57,14 +65,12 @@ const ROOT_VALIDITY: CertValidityDuration = CertValidityDuration::days(30);
 /// certificates for at once. Bounded so a proxy terminating TLS for an
 /// unbounded number of distinct SNI hosts cannot grow this cache without
 /// limit; the oldest-issued entry is evicted first once the bound is hit.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;
 
 /// A leaf certificate issued for exactly one host: PEM cert + PEM private
 /// key, both the *leaf's* material only. The root private key never
 /// appears in either field.
 #[derive(Clone)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct LeafCertificate {
     pub(crate) host: String,
     pub(crate) cert_pem: String,
@@ -90,7 +96,6 @@ impl std::fmt::Debug for LeafCertificate {
 /// useful to a future caller deciding whether a live connection needs a
 /// newly-issued cert pushed to it, and to this module's own cache tests.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct IssuedLeaf {
     pub(crate) certificate: LeafCertificate,
     pub(crate) cache_hit: bool,
@@ -119,7 +124,6 @@ struct CachedLeaf {
 /// host" invariant this type exists to uphold: the root signing key lives
 /// only in the private `issuer` field below, and no method on this type
 /// returns it.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct SandboxCertificateAuthority {
     root_cert_pem: String,
     issuer: Issuer<'static, KeyPair>,
@@ -155,7 +159,6 @@ impl SandboxCertificateAuthority {
     /// only in this process's memory for the lifetime of the returned
     /// value — it is never written to disk, never serialized, and never
     /// handed to a caller.
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn generate() -> Result<Self, RuntimeProcessError> {
         Self::generate_with(DEFAULT_LEAF_TTL, DEFAULT_MAX_CACHE_ENTRIES)
     }
@@ -163,7 +166,6 @@ impl SandboxCertificateAuthority {
     /// Same as [`Self::generate`] with an explicit leaf TTL and cache
     /// bound — the seam this module's own tests use to exercise TTL
     /// expiry and eviction without waiting on the production defaults.
-    #[allow(dead_code)] // exercised by this module's own tests; W6 may call it directly later
     pub(crate) fn generate_with(
         leaf_ttl: Duration,
         max_cache_entries: usize,
@@ -210,7 +212,10 @@ impl SandboxCertificateAuthority {
     /// friends is W5's remaining trust-distribution work). Contains no
     /// private key material; see this module's
     /// `root_certificate_pem_never_contains_key_material` test.
-    #[allow(dead_code)] // consumed by W6; not wired yet
+    #[allow(dead_code)] // no production caller: `build_container_trust_bundle_pem`
+    // reads `root_cert_pem` off the struct directly; this accessor is exercised
+    // only by this module's and `egress_proxy`'s own tests, which construct a CA
+    // and need the root PEM to build a client trust store.
     pub(crate) fn root_certificate_pem(&self) -> &str {
         &self.root_cert_pem
     }
@@ -282,7 +287,6 @@ impl SandboxCertificateAuthority {
     /// canonicalized (trimmed, lowercased) host string — issuing for one
     /// host can never hand back a cert valid for another, and case/padding
     /// variants of the same host share one cache entry.
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn issue_leaf_for_host(
         &self,
         host: &str,
