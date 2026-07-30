@@ -1322,6 +1322,188 @@ mod tests {
         }
     }
 
+    /// Zero-exposure credentials (`.claude/rules/safety-and-sandbox.md`):
+    /// "Capabilities, runtime lanes, containers, events, logs, and model
+    /// context carry credential references or redacted metadata" — never
+    /// raw secret material. This is the seam test for the container side of
+    /// that invariant: stage a REAL secret in the two production stores a
+    /// (not-yet-built) W6 wiring would read from —
+    /// `credential_firewall::SandboxCredentialFirewall` (the obligation
+    /// chokepoint) and `crate::obligations::RuntimeSecretInjectionStore`
+    /// (the material behind it, keyed the same way
+    /// `StagedCredentialObligationSource` documents) — under the exact
+    /// `(tenant_id, user_id)` this call builds a launch config for, then
+    /// call the real production `user_container_launch_config` and prove
+    /// the secret reaches NONE of: the container env map, any bind-mount
+    /// source path or the file tree under it, the `cmd`, or the writable
+    /// workspace directory itself.
+    ///
+    /// `user_container_launch_config` does not take a firewall/secret-store
+    /// argument today — nothing wires credential material into container
+    /// launch yet (see `credential_firewall`'s module doc: W6, the proxy
+    /// consumer, "not built yet"). So this test cannot drive an actual
+    /// resolved-and-injected credential through the real call chain; it
+    /// pins the currently-true invariant that staging a credential
+    /// alongside a launch-config build has zero effect on that build's
+    /// output, which is exactly what a regression in a future wiring would
+    /// break. See the PR description for the RED/GREEN proof that this
+    /// assertion set actually binds (a planted leak in
+    /// `user_container_launch_config` was caught and reverted).
+    #[tokio::test]
+    async fn user_container_launch_config_never_leaks_staged_credential_material() {
+        use std::sync::Arc;
+
+        use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, ResourceScope};
+        use ironclaw_secrets::SecretMaterial;
+
+        use super::super::credential_firewall::{
+            SandboxCredentialDecision, SandboxCredentialFirewall, StagedCredentialObligation,
+            StagedCredentialObligationSource,
+        };
+        use crate::obligations::RuntimeSecretInjectionStore;
+
+        const CANARY_SECRET: &str = "sbx-canary-do-not-leak-4f9c2a71bE";
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // A decoy file already living in the workspace before launch-config
+        // build, so the recursive file-content scan below is proven to
+        // actually read file bytes, not just enumerate bind path strings.
+        std::fs::write(workspace.join("decoy.txt"), "nothing secret in here").unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let tenant = ironclaw_host_api::TenantId::new("tenant-secret").unwrap();
+        let user = ironclaw_host_api::UserId::new("user-secret").unwrap();
+
+        let scope = ResourceScope {
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let capability_id = CapabilityId::new("sandbox.shell").unwrap();
+        let secret_handle = ironclaw_host_api::SecretHandle::new("github-pat").unwrap();
+        let provider = ExtensionId::new("github").unwrap();
+
+        // The real secret material, staged exactly where the future W6
+        // proxy wiring would read it from — keyed by (scope, capability_id,
+        // secret_handle), the same key `StagedCredentialObligationSource`
+        // carries (see that type's doc).
+        let secrets_store = RuntimeSecretInjectionStore::new();
+        secrets_store
+            .insert(
+                &scope,
+                &capability_id,
+                &secret_handle,
+                SecretMaterial::from(CANARY_SECRET),
+            )
+            .unwrap();
+
+        // The matching obligation staged in the real firewall chokepoint —
+        // proves the seam under test is genuinely "live" for this
+        // tenant/user, not exercised against an empty firewall.
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let _lease = firewall.stage(
+            &tenant,
+            &user,
+            StagedCredentialObligation::new(
+                StagedCredentialObligationSource {
+                    scope: scope.clone(),
+                    capability_id: capability_id.clone(),
+                    provider_or_extension_id: provider,
+                    secret_handle: secret_handle.clone(),
+                },
+                Vec::new(),
+                Duration::from_secs(60),
+            ),
+        );
+        let decision = firewall
+            .authorize(
+                Some((&tenant, &user)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("attributed lookup within deadline must not error");
+        assert!(
+            matches!(decision, SandboxCredentialDecision::Grant(_)),
+            "test setup bug: the obligation must be live before exercising the launch-config \
+             seam, otherwise this test would trivially pass with nothing staged"
+        );
+
+        let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
+            .await
+            .unwrap();
+
+        // Whole-struct scan first: catches the secret in ANY field,
+        // including ones not explicitly enumerated below.
+        let launch_json =
+            serde_json::to_string(&launch).expect("bollard's Config<String> derives Serialize");
+        assert!(
+            !launch_json.contains(CANARY_SECRET),
+            "container launch config must never carry staged credential material \
+             (zero-exposure credentials): {launch_json}"
+        );
+
+        let env = launch.env.clone().unwrap_or_default();
+        assert!(
+            !env.iter().any(|entry| entry.contains(CANARY_SECRET)),
+            "container env map must not carry the staged secret: {env:?}"
+        );
+
+        let host_config = launch.host_config.clone().unwrap_or_default();
+        for bind in host_config.binds.clone().unwrap_or_default() {
+            assert!(
+                !bind.contains(CANARY_SECRET),
+                "bind-mount spec must not carry the staged secret: {bind}"
+            );
+            let source = bind
+                .split(':')
+                .next()
+                .expect("bind spec must have a source segment");
+            assert_no_secret_under_path(Path::new(source), CANARY_SECRET);
+        }
+
+        let cmd = launch.cmd.clone().unwrap_or_default();
+        assert!(
+            !cmd.iter().any(|arg| arg.contains(CANARY_SECRET)),
+            "container cmd/exec arguments must not carry the staged secret: {cmd:?}"
+        );
+
+        // The writable workspace itself, independent of what got bind-
+        // mounted above (the workspace bind's source IS this path, but
+        // scanning it directly keeps the assertion meaningful even if the
+        // bind-building logic above changes).
+        assert_no_secret_under_path(&workspace, CANARY_SECRET);
+    }
+
+    /// Recursively asserts no file under `path` contains `secret` as a
+    /// substring. Used by
+    /// [`user_container_launch_config_never_leaks_staged_credential_material`]
+    /// to scan both bind-mount source trees and the writable workspace.
+    #[cfg(test)]
+    fn assert_no_secret_under_path(path: &Path, secret: &str) {
+        if path.is_file() {
+            let contents = std::fs::read(path)
+                .unwrap_or_else(|error| panic!("failed to read {path:?} for secret scan: {error}"));
+            let text = String::from_utf8_lossy(&contents);
+            assert!(
+                !text.contains(secret),
+                "file {path:?} must not contain the staged secret"
+            );
+            return;
+        }
+        if path.is_dir() {
+            for entry in std::fs::read_dir(path)
+                .unwrap_or_else(|error| panic!("failed to read dir {path:?}: {error}"))
+            {
+                let entry = entry.unwrap_or_else(|error| panic!("dir entry error: {error}"));
+                assert_no_secret_under_path(&entry.path(), secret);
+            }
+        }
+    }
+
     #[test]
     fn security_posture_stamp_is_deterministic_for_the_same_fields() {
         let temp = tempfile::tempdir().unwrap();
