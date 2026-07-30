@@ -5017,26 +5017,18 @@ const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
 /// contract where name + description suffice.
 /// Default stays `CriteriaOnly` — behavior-preserving.
 ///
-/// `always_available` is the direction, not the default. The current predicate keeps a
-/// skill only `if score > 0` from `activation.keywords`/`tags`/`patterns`, a static
-/// lexical guess made before the model sees anything, and measured on
-/// nearai/benchmarks#287 **0 of 30 agent-authored skills carried an `activation` block**.
-/// Under `Full` injection those never auto-activate. (Under `Listing` they are still
-/// listed — the score only orders the menu — but the model called `skill_activate` in
-/// only 3 of 30 measured runs, so in practice they were unreachable either way.)
+/// `name_and_description` is the opt-in
+/// (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`): it lets a skill match on its
+/// name and description, not only on `activation.keywords`/`tags`/`patterns`. Measured on
+/// nearai/benchmarks#287, **0 of 30 agent-authored skills carried an `activation` block**, so
+/// under criteria scoring they never auto-activate.
 ///
-/// Not flipped yet because it fails 8 tests in this crate, and the failure is NOT the
-/// setup-marker interaction an earlier version of this comment claimed: marker
-/// suppression returns `None` before scoring in `prefilter_skills_with_options`, so a
-/// floor score cannot revive a suppressed skill. What actually happens is that all 32
-/// bundled skills reach floor 1 and 3-4 unrelated ones land in `plan.activations()` in
-/// `ActivationCriteria` mode — a mode that injects nothing under `Listing`. The real
-/// defect this exposes is that a criteria "activation" which injects no body is still
-/// recorded as an activation, so the count assertions stop meaning anything.
-///
-/// Sequenced behind epic #6565 (Slice 0: word-boundary matching + a minimum activation
-/// score). Note #6565 Slice 5 requires the model to choose over a *bounded* shortlist,
-/// which an unbounded floor would contradict.
+/// A floor-score strategy (`always_available`, "every skill is a candidate") was tried and
+/// REMOVED. It bought nothing: listing membership is decided by VISIBILITY, not selection
+/// (`extension_ports/activation.rs`), so the model was already shown every visible skill; the
+/// floor only reordered that listing, and it demoted chain-loaded companions. The real gap is
+/// not that the model cannot see a skill -- it is that it rarely acts on the listing
+/// (`builtin.skill_activate` called in 3 of 30 measured runs, body read in 0 of 30).
 const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
     ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
 

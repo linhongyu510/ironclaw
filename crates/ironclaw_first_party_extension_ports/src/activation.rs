@@ -1377,14 +1377,6 @@ fn select_skill_activations(
         );
         feedback.extend(outcome.notes);
 
-        // `outcome.ranked_only` is deliberately NOT iterated here. Those skills cleared the
-        // filter only via the activation strategy's floor score -- they matched no keyword,
-        // tag or pattern. Under `SkillInjectionMode::Listing` a criteria activation injects
-        // no body (see `body_eligible_bundle_ids`, which already ignores
-        // `ActivationCriteria`), so recording one as an activation makes the word
-        // meaningless: with `always_available` all 32 bundled skills reach the floor and 3
-        // of them land in every plan, picked by descriptor order because the score sort is
-        // stable. They belong in the listing's ordering, not in the activation set.
         for skill in outcome.selected {
             let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
             let key = (

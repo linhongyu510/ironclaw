@@ -77,11 +77,21 @@ agent that can install an executable script is writing into a trusted root that 
 runs. Small in code, significant in consequence; agent-authored bundles likely warrant a
 distinct trust level. This is the real open design question, not the plumbing.
 
-## Why `always_available` is needed alongside this
+## Why activation still matters alongside this
 
-The selector scores a candidate only from `activation.keywords`/`tags`/`patterns` and
-keeps it `if score > 0`; name and description contribute nothing. **0 of 30**
-agent-authored skills contained an `activation` block, so a self-authored skill could
-never be selected again, whatever its contents. Claude Code has no such gate — **0 of 30**
-claude-code-authored skills declare activation metadata either, and several have no
-frontmatter at all. Without removing the gate, bundle quality is unobservable.
+The selector scores a candidate only from `activation.keywords`/`tags`/`patterns` and keeps it
+`if score > 0`; name and description contribute nothing. Measured on this subset, **0 of 30
+agent-authored skills contained an `activation` block**, so none of them ever auto-activates.
+
+That is *not* the same as being invisible. Listing membership is decided by **visibility, not
+selection**, so under `SkillInjectionMode::Listing` (reborn's default) an agent-authored skill
+**is** shown to the model, together with a header telling it to call `builtin.skill_activate`.
+It simply does not: measured at **3 of 30 runs** calling the tool, and **0 of 30** reading a
+body.
+
+So the reachability problem is elicitation, not filtering. A floor-score strategy
+(`always_available`) was implemented to remove the `score > 0` gate and then removed again — it
+bought no reach for exactly this reason, and it demoted chain-loaded companions. `Full`
+injection mode is the one place the gate genuinely hides a skill, since only activated bundles
+render there.
+
