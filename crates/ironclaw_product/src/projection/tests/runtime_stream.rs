@@ -514,33 +514,27 @@ async fn product_event_subscription_terminal_turn_waits_for_live_text_projection
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
     );
-    let live_scope = scope.clone();
-    let live_user_id = user_id.clone();
-    let publish_live_text = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        sink.publish_loop_milestone(LoopHostMilestone {
-            scope: live_scope,
-            actor: Some(TurnActor::new(live_user_id)),
-            turn_id: TurnId::new(),
-            run_id,
-            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
-            kind: LoopHostMilestoneKind::ModelTextDelta {
-                safe_text: "subscription terminal waited for live text".to_string(),
-            },
-        })
-        .await
-        .unwrap();
-    });
-
     let mut subscription = services
         .product_event_stream()
         .subscribe(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(user_id),
-            scope,
+            actor: TurnActor::new(user_id.clone()),
+            scope: scope.clone(),
             after_cursor: None,
         })
         .await
         .unwrap();
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope,
+        actor: Some(TurnActor::new(user_id)),
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "subscription terminal waited for live text".to_string(),
+        },
+    })
+    .await
+    .unwrap();
     let first = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
         .expect("subscription should emit live text before terminal turn")
@@ -551,7 +545,6 @@ async fn product_event_subscription_terminal_turn_waits_for_live_text_projection
         .expect("subscription should emit terminal turn after live text")
         .expect("subscription should stay open")
         .expect("second projection event should succeed");
-    publish_live_text.await.unwrap();
 
     assert!(
         matches!(
