@@ -448,32 +448,43 @@ mod dual_homed_topology {
     }
 
     /// Content-addressed tag for the proxy image: a sha256 over every file
-    /// under `crates/ironclaw_host_runtime/` (the crate that builds into the
-    /// `egress_proxy_standalone` binary — its lib code, including
-    /// `sandbox_process/ca.rs` and `egress_proxy.rs`, is what actually ends
-    /// up in the image) plus the Dockerfile itself.
+    /// the `docker build` invocation below ACTUALLY sends as build context —
+    /// i.e. every file under the repo root not excluded by the repo's own
+    /// `.dockerignore` — rather than a hand-picked subset of source paths.
+    ///
+    /// This file's Dockerfile (`docker/sandbox-egress-proxy.Dockerfile`) does
+    /// `COPY . .` from the repo root and then `cargo build -p
+    /// ironclaw_host_runtime`, which compiles the crate's ENTIRE transitive
+    /// dependency graph (`ironclaw_network`, `ironclaw_secrets`,
+    /// `ironclaw_safety`, `ironclaw_common`, …) plus whatever `Cargo.lock`
+    /// pins. An earlier version of this function hashed only
+    /// `crates/ironclaw_host_runtime/` plus the Dockerfile — a source change
+    /// in ANY other crate (or a `Cargo.lock` bump) changed the compiled
+    /// binary but NOT the tag, so `ensure_proxy_image_built` kept re-tagging
+    /// a stale cached image. Proven empirically: forcing
+    /// `ironclaw_network::host_matches_host_pattern` to `return false`
+    /// unconditionally — breaking the egress allowlist entirely — left the
+    /// live interception test passing in ~2.4s against the untouched image.
+    ///
+    /// Hashing the actual build context instead of an enumerated file list is
+    /// structurally immune to "forgot an input": there is no second list to
+    /// keep in sync with the dependency graph, and no dependency graph to
+    /// enumerate by hand at all — whatever bytes `COPY . .` would send is
+    /// exactly what gets hashed, using `.dockerignore` itself (not a
+    /// hand-copied restatement of its rules) as the filter, so a future
+    /// `.dockerignore` edit changes both the real build context and this
+    /// digest in the same commit, never one without the other.
     ///
     /// `ensure_proxy_image_built` keys its "already built" check off this
-    /// tag rather than the fixed `PROXY_IMAGE` name. Without this, the image
-    /// was cached forever under a fixed tag and a source regression in the
-    /// proxy binary (e.g. breaking CA distribution) would never invalidate
-    /// it — the live TLS-interception test would keep passing against a
-    /// stale binary on any machine (including CI runners) that persist
-    /// Docker state across runs. Hashing file contents (not mtimes) means a
-    /// no-op edit that doesn't change bytes still hits the cache, and any
-    /// real source change gets a fresh tag and forces a rebuild.
+    /// tag rather than the fixed `PROXY_IMAGE` name. Hashing file contents
+    /// (not mtimes) means a no-op edit that doesn't change bytes still hits
+    /// the cache, and any real source change (anywhere in the build context)
+    /// gets a fresh tag and forces a rebuild.
     fn content_digest_tag() -> String {
         use sha2::{Digest, Sha256};
 
         let root = repo_root();
-        let crate_dir = root.join("crates/ironclaw_host_runtime");
-        let dockerfile = root.join("docker/sandbox-egress-proxy.Dockerfile");
-
-        let mut files: Vec<PathBuf> = Vec::new();
-        collect_files(&crate_dir, &mut files);
-        files.push(dockerfile);
-        // Sort for a deterministic hash regardless of filesystem walk order.
-        files.sort();
+        let files = build_context_files(&root);
 
         let mut hasher = Sha256::new();
         for path in &files {
@@ -496,26 +507,35 @@ mod dual_homed_topology {
         )
     }
 
-    fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) => panic!("reading dir {} for content digest: {e}", dir.display()),
-        };
-        for entry in entries {
-            let entry = entry.expect("dir entry should be readable");
-            let path = entry.path();
-            let file_type = entry.file_type().expect("file type should be readable");
-            if file_type.is_dir() {
-                // Skip build output; it's not a build input and would make
-                // the digest depend on stale artifacts from prior runs.
-                if path.file_name().and_then(|n| n.to_str()) == Some("target") {
-                    continue;
-                }
-                collect_files(&path, out);
-            } else if file_type.is_file() {
-                out.push(path);
-            }
-        }
+    /// Every regular file under `root` that `docker build`'s `COPY . .`
+    /// would actually send, per the repo's root `.dockerignore` (Docker's
+    /// own build context filter — a gitignore-compatible pattern format).
+    /// Deliberately does NOT also honor `.gitignore`: Docker doesn't, and a
+    /// file excluded from git but not from `.dockerignore` (or vice versa)
+    /// must be treated exactly as Docker treats it, not as git does.
+    fn build_context_files(root: &Path) -> Vec<PathBuf> {
+        let mut builder = ignore::WalkBuilder::new(root);
+        builder
+            .git_ignore(false)
+            .git_exclude(false)
+            .git_global(false)
+            .parents(false)
+            // Docker's context walk does not skip dotfiles/dot-directories
+            // unless `.dockerignore` says so (e.g. `.env`) — only respecting
+            // `.hidden` would silently drop real build inputs like
+            // `.cargo/config.toml` from the digest.
+            .hidden(false)
+            .add_custom_ignore_filename(".dockerignore");
+
+        let mut files: Vec<PathBuf> = builder
+            .build()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
+            .map(|entry| entry.into_path())
+            .collect();
+        // Sort for a deterministic hash regardless of filesystem walk order.
+        files.sort();
+        files
     }
 
     /// Builds the proxy image (from the REAL `EgressAllowlistProxy`, see

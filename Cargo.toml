@@ -94,6 +94,13 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 regex = "1"
 sha2 = "0.11"
 hex = "0.4"
+# Parses `.dockerignore` (gitignore-compatible syntax) so
+# `reborn_sandbox_egress_proxy.rs`'s content-addressed proxy-image tag can
+# hash the ACTUAL Docker build context (everything `COPY . .` sends) instead
+# of a hand-picked subset of source files, which is what let a real
+# egress-allowlist regression outside `ironclaw_host_runtime` slip past the
+# tag unnoticed (proven empirically; see that file's `content_digest_tag` doc).
+ignore = "0.4"
 url = "2"
 toml = "1.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
