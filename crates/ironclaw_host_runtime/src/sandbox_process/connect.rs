@@ -15,15 +15,22 @@
 //! host-execution fallback path for sandboxed command execution. See
 //! `docs/safety-and-sandbox.md`.
 //!
-//! Ships unwired. `sandbox_process`'s own `connect_docker` is still the
-//! single-attempt path the live transport uses; this module is re-exported at
-//! the crate root for its two real future consumers in
-//! `ironclaw_reborn_composition`: `sandbox_reaper_task`, which calls
-//! [`connect_docker_with_retry`] before entering the reaper loop, and
-//! `sandbox_composition`'s boot diagnostic, which calls
-//! [`sandbox_docker_readiness`]. Repointing `connect_docker` at the retrying
-//! path changes the live transport's failure timing, so it ships in the PR
-//! that carries a test for it rather than riding in on this module's arrival.
+//! **Wired into production.** [`connect_docker_with_retry`] is the connect
+//! path both real production callers use:
+//! [`super::RebornScopedSandboxCommandTransport::connect`] (called by
+//! `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`,
+//! the sandbox exec-transport boot path) and
+//! `ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`
+//! (before entering the reaper loop). A Docker daemon that never becomes
+//! reachable within the bounded retry therefore already fails sandbox boot
+//! closed — there is no separate readiness gate to wire.
+//!
+//! [`sandbox_docker_readiness`] has no production caller today. It is a
+//! non-blocking diagnostic by design (see its own doc: "not a gate that
+//! blocks boot"), meant for a startup log line or health endpoint that
+//! `ironclaw_reborn_composition` has not built; the two call sites that
+//! exist (`sandbox_composition.rs`, `sandbox_boot.rs`) are both
+//! `#[cfg(test)]` Docker-availability skip-gates for their own tests.
 
 #[cfg(unix)]
 use std::path::PathBuf;
