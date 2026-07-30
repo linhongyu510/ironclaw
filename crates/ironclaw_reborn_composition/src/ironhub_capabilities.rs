@@ -22,7 +22,7 @@ use ironclaw_extension_host::ExtensionLifecycleManager;
 use ironclaw_ironhub::{
     IRONHUB_INFO_CAPABILITY_ID, IRONHUB_INSTALL_CAPABILITY_ID, IRONHUB_SEARCH_CAPABILITY_ID,
     IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronhubLinkStateStore, execute_reborn_ironhub_service_command,
+    IronhubLinkStateStore, IronhubManifestUrl, execute_reborn_ironhub_service_command,
 };
 
 const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
@@ -43,7 +43,7 @@ pub(crate) fn insert_handlers(
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
     link_state: Arc<IronhubLinkStateStore>,
-    manifest_url: String,
+    manifest_url: IronhubManifestUrl,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(IronHubCapabilityHandler {
         skill_management,
@@ -126,7 +126,7 @@ struct IronHubCapabilityHandler {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
     link_state: Arc<IronhubLinkStateStore>,
-    manifest_url: String,
+    manifest_url: IronhubManifestUrl,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,7 +235,6 @@ where
 }
 
 fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
-    tracing::debug!(%error, "IronHub capability dispatch failed");
     let kind = match error {
         IronHubCommandError::InvalidInput { .. } => RuntimeDispatchErrorKind::InputEncode,
         IronHubCommandError::RuntimeHttpEgressUnavailable => RuntimeDispatchErrorKind::Executor,
@@ -243,5 +242,6 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
         | IronHubCommandError::Install { .. }
         | IronHubCommandError::Product(_) => RuntimeDispatchErrorKind::OperationFailed,
     };
+    tracing::debug!(?kind, "IronHub capability dispatch failed");
     FirstPartyCapabilityError::new(kind)
 }

@@ -150,7 +150,7 @@ pub struct ProviderToolDefinition {
     ///
     /// Unknown and legacy sources default to the fully checked path. This is
     /// deliberately omitted from the provider wire representation.
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip)]
     pub description_trust: CapabilityDescriptionTrust,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
@@ -681,6 +681,23 @@ mod tests {
         let encoded = serde_json::to_value(definition).expect("serialize provider tool");
 
         assert!(encoded.get("description_trust").is_none());
+    }
+
+    #[test]
+    fn provider_tool_wire_cannot_forge_host_description_provenance() {
+        let definition: ProviderToolDefinition = serde_json::from_value(serde_json::json!({
+            "capability_id": "demo.catalog",
+            "name": "demo__catalog",
+            "description": "untrusted provider description",
+            "description_trust": "verified_catalog",
+            "parameters": {"type": "object"}
+        }))
+        .expect("deserialize provider tool");
+
+        assert_eq!(
+            definition.description_trust,
+            CapabilityDescriptionTrust::Untrusted
+        );
     }
 
     #[test]

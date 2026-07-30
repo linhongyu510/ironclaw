@@ -177,7 +177,7 @@ pub struct RebornHostBindings {
     /// is the one that does.
     pub(crate) deployment: DeploymentConfig,
     pub(crate) storage: RebornStorageInput,
-    pub(crate) ironhub_manifest_url: String,
+    pub(crate) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
@@ -362,7 +362,10 @@ impl RebornHostBindings {
         self
     }
 
-    pub(crate) fn with_ironhub_manifest_url(mut self, manifest_url: String) -> Self {
+    pub(crate) fn with_ironhub_manifest_url(
+        mut self,
+        manifest_url: ironclaw_ironhub::IronhubManifestUrl,
+    ) -> Self {
         self.ironhub_manifest_url = manifest_url;
         self
     }
@@ -896,7 +899,7 @@ impl RebornHostBindings {
         Self {
             deployment,
             storage,
-            ironhub_manifest_url: "https://hub.ironclaw.com/api/catalog/manifest.json".to_string(),
+            ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl::default(),
             production_trust_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),

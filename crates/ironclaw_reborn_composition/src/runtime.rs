@@ -554,7 +554,7 @@ pub struct RebornRuntime {
     /// Durable nonce and signed-manifest replay state shared by CLI IronHub
     /// installs and the optional deep-link gateway.
     pub(crate) ironhub_link_state: Arc<ironclaw_ironhub::IronhubLinkStateStore>,
-    pub(crate) ironhub_manifest_url: String,
+    pub(crate) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
     /// Single composed IronHub deep-link service. `None` is the default-off
     /// registration gate; the same option controls facade and route wiring.
     pub(crate) ironhub_link_service: Option<Arc<dyn ironclaw_product::IronhubLinkService>>,
@@ -687,7 +687,7 @@ impl ironclaw_ironhub::RebornIronHubRuntime for RebornRuntime {
         Arc::clone(&self.ironhub_link_state)
     }
 
-    fn ironhub_manifest_url(&self) -> String {
+    fn ironhub_manifest_url(&self) -> ironclaw_ironhub::IronhubManifestUrl {
         self.ironhub_manifest_url.clone()
     }
 

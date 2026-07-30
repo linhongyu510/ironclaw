@@ -362,7 +362,7 @@ pub struct RebornRuntimeInput {
     /// product-surface attachment and public register-route attachment.
     pub ironhub_agent_shared_key: Option<ironclaw_ironhub::IronhubSharedKey>,
     /// Validated signed-catalog URL resolved by the CLI/config boundary.
-    pub ironhub_manifest_url: String,
+    pub ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
@@ -440,7 +440,7 @@ impl RebornRuntimeInput {
             llm: None,
             boot: None,
             ironhub_agent_shared_key: None,
-            ironhub_manifest_url: "https://hub.ironclaw.com/api/catalog/manifest.json".to_string(),
+            ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl::default(),
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
@@ -486,7 +486,10 @@ impl RebornRuntimeInput {
         self
     }
 
-    pub fn with_ironhub_manifest_url(mut self, manifest_url: String) -> Self {
+    pub fn with_ironhub_manifest_url(
+        mut self,
+        manifest_url: ironclaw_ironhub::IronhubManifestUrl,
+    ) -> Self {
         self.ironhub_manifest_url = manifest_url;
         self
     }

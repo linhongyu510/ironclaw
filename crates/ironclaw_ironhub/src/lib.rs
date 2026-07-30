@@ -57,6 +57,6 @@ pub use model::{
 };
 pub use render::render_reborn_ironhub_response;
 pub use service::{
-    RebornIronHubRuntime, execute_reborn_ironhub_command, execute_reborn_ironhub_service_command,
-    validated_manifest_url,
+    IronhubManifestUrl, RebornIronHubRuntime, execute_reborn_ironhub_command,
+    execute_reborn_ironhub_service_command, validated_manifest_url,
 };

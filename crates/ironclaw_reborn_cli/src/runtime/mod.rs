@@ -621,7 +621,8 @@ pub(crate) fn build_runtime_input_with_options(
     })
 }
 
-pub(crate) fn ironhub_manifest_url_from_env() -> anyhow::Result<Option<String>> {
+pub(crate) fn ironhub_manifest_url_from_env()
+-> anyhow::Result<Option<ironclaw_reborn_composition::ironhub::IronhubManifestUrl>> {
     match std::env::var("IRONHUB_MANIFEST_URL") {
         Ok(manifest_url) => {
             let manifest_url =
@@ -1189,7 +1190,7 @@ pub(crate) fn local_runtime_storage_root(
         .join(profile.local_runtime_storage_subdir())
 }
 
-pub(crate) fn initialize_local_runtime_storage_root(
+pub(crate) async fn initialize_local_runtime_storage_root(
     config: &RebornBootConfig,
     profile: RebornProfile,
 ) -> anyhow::Result<()> {
@@ -1200,7 +1201,7 @@ pub(crate) fn initialize_local_runtime_storage_root(
             | RebornProfile::HostedSingleTenantVolume
     ) {
         let root = local_runtime_storage_root(config, profile);
-        std::fs::create_dir_all(&root).with_context(|| {
+        tokio::fs::create_dir_all(&root).await.with_context(|| {
             format!(
                 "failed to initialize Reborn runtime state at {}",
                 root.display()
@@ -2215,7 +2216,7 @@ api_key_env = "NEARAI_API_KEY"
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (
-            EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            EnvGuard::clear_many(&["IRONCLAW_TRIGGER_POLLER_ENABLED", "IRONHUB_MANIFEST_URL"]),
             EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS"),
         )
     }
@@ -2444,6 +2445,42 @@ regex_activation_enabled = false
         )
         .expect("boot config");
         (temp, config)
+    }
+
+    #[test]
+    fn build_runtime_input_accepts_valid_ironhub_manifest_url() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _manifest_url = EnvGuard::set(
+            "IRONHUB_MANIFEST_URL",
+            "https://hub.ironclaw.com/api/catalog/testing.json",
+        );
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert_eq!(
+            input.ironhub_manifest_url.as_str(),
+            "https://hub.ironclaw.com/api/catalog/testing.json"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_rejects_invalid_ironhub_manifest_url() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _manifest_url =
+            EnvGuard::set("IRONHUB_MANIFEST_URL", "http://127.0.0.1/private/catalog");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let error = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("private manifest URL must fail at the CLI boundary");
+
+        assert!(
+            error.to_string().contains("IRONHUB_MANIFEST_URL"),
+            "error must identify the invalid boundary input: {error:#}"
+        );
     }
 
     #[test]

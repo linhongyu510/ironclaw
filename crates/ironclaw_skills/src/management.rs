@@ -579,40 +579,12 @@ pub async fn read_skill_content(
         .as_deref()
         .map(|bytes| install_metadata_source(SkillSource::User, bytes))
         .unwrap_or(SkillSource::User);
-    let source_url = install_metadata.and_then(|bytes| {
-        match serde_json::from_slice::<crate::InstalledSkillMetadata>(&bytes) {
-            Ok(metadata) => metadata
-                .source_url
-                .as_deref()
-                .and_then(public_source_origin),
-            Err(error) => {
-                tracing::debug!(%error, "skill install metadata source URL is unavailable");
-                None
-            }
-        }
-    });
     Ok(SkillContentResult {
         name: request.name.to_string(),
         content,
         source,
-        source_url,
+        source_url: None,
     })
-}
-
-fn public_source_origin(source_url: &str) -> Option<String> {
-    let parsed = url::Url::parse(source_url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        return None;
-    }
-    let host = parsed.host_str()?;
-    let port = parsed
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Some(format!("{}://{host}{port}", parsed.scheme()))
 }
 
 pub async fn update_skill(

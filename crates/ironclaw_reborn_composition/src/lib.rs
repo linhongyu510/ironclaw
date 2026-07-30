@@ -221,9 +221,9 @@ pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 /// client only through this facade.
 pub mod ironhub {
     pub use ironclaw_ironhub::{
-        IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse, IronhubSharedKey,
-        IronhubSharedKeyError, execute_reborn_ironhub_command, render_reborn_ironhub_response,
-        validated_manifest_url,
+        IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse,
+        IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError,
+        execute_reborn_ironhub_command, render_reborn_ironhub_response, validated_manifest_url,
     };
 }
 

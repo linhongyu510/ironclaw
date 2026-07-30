@@ -51,7 +51,7 @@ pub trait RebornIronHubRuntime {
     fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>>;
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext;
     fn ironhub_link_state(&self) -> Arc<IronhubLinkStateStore>;
-    fn ironhub_manifest_url(&self) -> String;
+    fn ironhub_manifest_url(&self) -> IronhubManifestUrl;
 }
 
 pub async fn execute_reborn_ironhub_command(
@@ -78,7 +78,7 @@ pub async fn execute_reborn_ironhub_command(
         scope,
         ironhub_command_capability_id(&command)?,
     )
-    .with_manifest_url(runtime.ironhub_manifest_url())
+    .with_manifest_url(runtime.ironhub_manifest_url().into_inner())
     .with_link_state(runtime.ironhub_link_state());
     service.execute(command).await
 }
@@ -88,7 +88,7 @@ pub async fn execute_reborn_ironhub_service_command(
     extension_management: Arc<ExtensionLifecycleManager>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     link_state: Arc<IronhubLinkStateStore>,
-    manifest_url: String,
+    manifest_url: IronhubManifestUrl,
     scope: ResourceScope,
     command: IronHubCommand,
 ) -> Result<IronHubResponse, IronHubCommandError> {
@@ -101,7 +101,7 @@ pub async fn execute_reborn_ironhub_service_command(
         capability_id,
     )
     .with_link_state(link_state)
-    .with_manifest_url(manifest_url)
+    .with_manifest_url(manifest_url.into_inner())
     .execute(command)
     .await
 }
@@ -745,10 +745,29 @@ fn map_link_state_error(error: IronhubLinkStateError) -> IronHubCommandError {
     }
 }
 
-pub fn validated_manifest_url(value: &str) -> Result<String, IronHubCommandError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IronhubManifestUrl(String);
+
+impl IronhubManifestUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl Default for IronhubManifestUrl {
+    fn default() -> Self {
+        Self(DEFAULT_IRONHUB_MANIFEST_URL.to_string())
+    }
+}
+
+pub fn validated_manifest_url(value: &str) -> Result<IronhubManifestUrl, IronHubCommandError> {
     let value = value.trim();
     validate_artifact_url("hub-manifest", "manifest_url", value)?;
-    Ok(value.to_string())
+    Ok(IronhubManifestUrl(value.to_string()))
 }
 
 fn manifest_cache_get(url: &str, now: Instant) -> Option<Arc<IronHubManifest>> {

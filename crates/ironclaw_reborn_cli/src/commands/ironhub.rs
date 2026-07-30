@@ -187,15 +187,16 @@ fn execute_ironhub_command(
             confirm_host_access,
         },
     )?;
-    crate::runtime::initialize_local_runtime_storage_root(
-        context.boot_config(),
-        runtime_services.profile,
-    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to build tokio runtime for IronHub command")?;
     runtime.block_on(async move {
+        crate::runtime::initialize_local_runtime_storage_root(
+            context.boot_config(),
+            runtime_services.profile,
+        )
+        .await?;
         let services_input =
             crate::runtime::with_binary_host_extension_bindings(runtime_services.services_input)?;
         let mut runtime_input = RebornRuntimeInput::from_build_input(services_input);

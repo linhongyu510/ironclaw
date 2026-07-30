@@ -850,7 +850,7 @@ async fn read_skill_content_rejects_invalid_or_missing_user_skill() {
 }
 
 #[tokio::test]
-async fn read_skill_content_exposes_only_safe_source_origin() {
+async fn read_skill_content_never_exposes_persisted_source_url() {
     let filesystem = Arc::new(InMemoryBackend::default());
     let context = skill_management_context(filesystem, user_skill_mounts());
     install_skill(
@@ -861,7 +861,7 @@ async fn read_skill_content_exposes_only_safe_source_origin() {
             files: &[],
             source: SkillInstallSource::InstalledUrl,
             source_url: Some(
-                "https://catalog.example/private/token-value/SKILL.md?access=secret#fragment",
+                "https://github.com/example/private-source/SKILL.md?access=secret#fragment",
             ),
         },
     )
@@ -877,12 +877,38 @@ async fn read_skill_content_exposes_only_safe_source_origin() {
     .await
     .expect("read skill");
 
-    assert_eq!(
-        result.source_url.as_deref(),
-        Some("https://catalog.example")
-    );
+    assert_eq!(result.source_url, None);
     assert!(!format!("{result:?}").contains("secret"));
     assert!(!format!("{result:?}").contains("token-value"));
+}
+
+#[tokio::test]
+async fn read_skill_content_hides_internal_source_origin() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, user_skill_mounts());
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("internal-source", "description", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::InstalledUrl,
+            source_url: Some("https://tenant-git.internal/team/skill/SKILL.md"),
+        },
+    )
+    .await
+    .expect("install skill");
+
+    let result = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "internal-source",
+        },
+    )
+    .await
+    .expect("read skill");
+
+    assert_eq!(result.source_url, None);
 }
 
 #[tokio::test]

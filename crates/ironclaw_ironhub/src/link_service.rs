@@ -59,7 +59,7 @@ pub struct RebornIronhubLinkService {
     state: Arc<IronhubLinkStateStore>,
     shared_key: IronhubSharedKey,
     install_capability: CapabilityId,
-    manifest_url: String,
+    manifest_url: crate::IronhubManifestUrl,
 }
 
 impl RebornIronhubLinkService {
@@ -79,11 +79,11 @@ impl RebornIronhubLinkService {
             state,
             shared_key,
             install_capability,
-            manifest_url: crate::model::DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
+            manifest_url: crate::IronhubManifestUrl::default(),
         })
     }
 
-    pub fn with_manifest_url(mut self, manifest_url: String) -> Self {
+    pub fn with_manifest_url(mut self, manifest_url: crate::IronhubManifestUrl) -> Self {
         self.manifest_url = manifest_url;
         self
     }
@@ -103,7 +103,7 @@ impl RebornIronhubLinkService {
             super::tests::test_manifest_verify_keys(),
         );
         service
-            .with_manifest_url(self.manifest_url.clone())
+            .with_manifest_url(self.manifest_url.as_str().to_string())
             .with_link_state(Arc::clone(&self.state))
     }
 }
@@ -128,7 +128,7 @@ pub(super) mod test_support {
             state,
             shared_key,
             install_capability,
-            manifest_url: crate::model::DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
+            manifest_url: crate::IronhubManifestUrl::default(),
         })
     }
 }
