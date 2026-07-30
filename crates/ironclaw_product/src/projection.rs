@@ -406,7 +406,7 @@ impl ProjectionStream for ProductRuntimeProjectionStream {
             .await?;
         }
 
-        self.append_turn_events(&mut batch, Some(&mut subscription), &request)
+        self.append_turn_events(&mut batch, Some(&mut subscription), &request, false)
             .await?;
         self.batch_into_outbound(batch, &request)
     }
@@ -474,7 +474,7 @@ impl ProductRuntimeProjectionStream {
         if !is_resuming_runtime_payloads {
             let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
             if let Err(error) = self
-                .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                .append_turn_events(&mut batch, Some(&mut subscription), &request, true)
                 .await
             {
                 send_projection_subscription_error(&sender, error).await;
@@ -524,7 +524,7 @@ impl ProductRuntimeProjectionStream {
                         }
                     };
                     if let Err(error) = self
-                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
                         .await
                     {
                         send_projection_subscription_error(&sender, error).await;
@@ -591,7 +591,7 @@ impl ProductRuntimeProjectionStream {
             };
         }
         if let Err(error) = self
-            .append_turn_events(&mut batch, Some(&mut subscription), &request)
+            .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
             .await
         {
             send_projection_subscription_error(&sender, error).await;
@@ -632,7 +632,7 @@ impl ProductRuntimeProjectionStream {
                         }
                     };
                     if let Err(error) = self
-                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
                         .await
                     {
                         send_projection_subscription_error(&sender, error).await;
@@ -675,7 +675,7 @@ impl ProductRuntimeProjectionStream {
                         }
                     };
                     if let Err(error) = self
-                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
                         .await
                     {
                         send_projection_subscription_error(&sender, error).await;
@@ -700,6 +700,7 @@ impl ProductRuntimeProjectionStream {
         batch: &mut ProductSurfaceProjectionBatch,
         mut subscription: Option<&mut EventProjectionSubscription>,
         request: &ProjectionSubscriptionRequest,
+        defer_terminal: bool,
     ) -> Result<(), ProductAdapterError> {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
@@ -711,7 +712,8 @@ impl ProductRuntimeProjectionStream {
                 self.auth_challenges.as_deref(),
             )
             .await?;
-        if turn_drain_has_terminal_run_status(&turn_drain)
+        if !defer_terminal
+            && turn_drain_has_terminal_run_status(&turn_drain)
             && let Some(subscription) = subscription.as_mut()
         {
             drain_runtime_items_before_terminal_turn(
@@ -722,14 +724,20 @@ impl ProductRuntimeProjectionStream {
             )
             .await?;
         }
+        let mut deferred_terminal = false;
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
         } in turn_drain.payloads
         {
+            if defer_terminal && outbound_payload_has_terminal_run_status(&payload) {
+                deferred_terminal = true;
+                break;
+            }
             batch.push_turn(turn_cursor, payload);
         }
-        if let Some(next_cursor) = turn_drain.next_cursor
+        if !deferred_terminal
+            && let Some(next_cursor) = turn_drain.next_cursor
             && turn_cursor_advances(batch.cursor().turn.as_ref(), &next_cursor)
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);

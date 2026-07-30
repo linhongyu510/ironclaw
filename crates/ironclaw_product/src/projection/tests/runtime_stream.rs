@@ -517,7 +517,7 @@ async fn product_event_subscription_terminal_turn_waits_for_live_text_projection
     let live_scope = scope.clone();
     let live_user_id = user_id.clone();
     let publish_live_text = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         sink.publish_loop_milestone(LoopHostMilestone {
             scope: live_scope,
             actor: Some(TurnActor::new(live_user_id)),
