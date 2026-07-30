@@ -435,12 +435,13 @@ impl RebornRuntimeInput {
     /// the substrate decisions (standalone root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
     pub fn from_build_input(services: RebornHostBindings) -> Self {
+        let ironhub_manifest_url = services.ironhub_manifest_url.clone();
         Self {
             services: Some(services),
             llm: None,
             boot: None,
             ironhub_agent_shared_key: None,
-            ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl::default(),
+            ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
@@ -722,5 +723,23 @@ impl RebornRuntimeInput {
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_build_input_preserves_configured_ironhub_manifest_url() {
+        let manifest_url =
+            ironclaw_ironhub::validated_manifest_url("https://hub.ironclaw.com/test/manifest.json")
+                .expect("valid manifest URL");
+        let services = RebornHostBindings::disabled("test-owner")
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        let input = RebornRuntimeInput::from_build_input(services);
+
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
     }
 }
