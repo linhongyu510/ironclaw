@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
-use super::ca::SandboxCertificateAuthority;
+use super::ca::{SandboxCertificateAuthority, normalize_host};
 use super::credential_firewall::SandboxCredentialFirewall;
 use super::credential_swap::SandboxCredentialSwap;
 use super::tls_intercept::{self, TlsInterceptConfig, VerifiedOriginConnector};
@@ -488,9 +488,16 @@ impl BoundEgressAllowlistProxy {
 /// `sandbox_extra_allowed_domains` already accepts. Ports and scheme in
 /// [`ironclaw_host_api::NetworkTargetPattern`] are ignored here (the proxy
 /// allowlists by host, consistent with `sandbox_network_policy()`'s
-/// `port: None` targets).
+/// `port: None` targets). Canonicalizes `host` through the same
+/// [`normalize_host`] every other host-identity decision on this seam uses
+/// (see that function's doc); a host that fails to normalize (empty,
+/// whitespace-only, all-dots) can never match a real target and is denied
+/// outright, never coerced into an empty string that a `*` allow-all
+/// pattern would otherwise match.
 fn host_allowed(host: &str, policy: &NetworkPolicy) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let Some(host) = normalize_host(host) else {
+        return false;
+    };
     policy.allowed_targets.iter().any(|target| {
         let pattern = target.host_pattern.to_ascii_lowercase();
         if pattern == "*" {
@@ -699,22 +706,41 @@ async fn handle_connect(
 ) -> std::io::Result<()> {
     // Single normalization point: DNS hostnames are case-insensitive, and
     // every downstream use of `host` in this function treats it that way
-    // (`host_allowed` and `TlsInterceptConfig::is_bound` already lowercase
-    // their own side of the comparison). Fold it ONCE here so the exact same
-    // string flows into the allowlist check, `resolve_dial_addr`, the bound
-    // check, and — the one that actually needs this, since its cache is
-    // keyed on the literal string — `terminate_and_forward`'s cert mint and
-    // the origin `ServerName`. Without this, two different-cased CONNECTs for
-    // the same effective host would mint and cache two leaf certificates
-    // instead of sharing one.
-    let host = target
-        .rsplit_once(':')
-        .map_or(target, |(host, _port)| host)
-        .to_ascii_lowercase();
-    let host = host.as_str();
+    // (`host_allowed` and `TlsInterceptConfig::is_bound`/`bind` canonicalize
+    // through this exact same `normalize_host` on their own side of the
+    // comparison too — see that function's doc). Fold it ONCE here so the
+    // exact same string flows into the allowlist check, `resolve_dial_addr`,
+    // the bound check, and — the one that actually needs this, since its
+    // cache is keyed on the literal string — `terminate_and_forward`'s cert
+    // mint and the origin `ServerName`. Without this, two CONNECTs for the
+    // same effective host that merely differ in case, padding, or a
+    // trailing root-zone dot would mint and cache two leaf certificates
+    // instead of sharing one — or, worse, pass this allowlist check but miss
+    // the bound-hosts lookup.
+    //
+    // A host that fails to normalize to anything meaningful (empty,
+    // whitespace-only, all-dots) is rejected here, before it ever reaches
+    // `host_allowed` — `host_allowed` would independently reject it too
+    // (see its doc), but rejecting once at the single normalization point is
+    // the same "reject, don't silently canonicalize" discipline
+    // `normalize_host` itself applies.
+    let host_str = target.rsplit_once(':').map_or(target, |(host, _port)| host);
     let port: Option<u16> = target
         .rsplit_once(':')
         .and_then(|(_host, port)| port.parse().ok());
+
+    let Some(host) = normalize_host(host_str) else {
+        let reason = DenyReason::NotInAllowlist;
+        tracing::debug!(
+            host = host_str,
+            action = "deny",
+            rule = reason.audit_rule(),
+            "egress proxy: CONNECT denied"
+        );
+        write_denied_response(&mut client, Some(host_str), reason).await?;
+        return Ok(());
+    };
+    let host = host.as_str();
 
     if !host_allowed(host, policy) {
         let reason = DenyReason::NotInAllowlist;
@@ -2201,6 +2227,108 @@ mod tests {
             0,
             "an unbound host must never cause a leaf certificate to be minted"
         );
+    }
+
+    /// The divergence this PR fixes, driven through the real proxy exactly
+    /// like `connect_to_unbound_host_stays_opaque_even_with_tls_intercept_
+    /// configured` above: `host_allowed` (`egress_proxy.rs`) strips a
+    /// trailing root-zone dot before comparing against the policy, but
+    /// `TlsInterceptConfig`'s bound-hosts lookup did not, so `pypi.org.` (a
+    /// legal, equivalently-resolving FQDN) passed the allowlist as
+    /// `pypi.org` and then silently missed the bound-hosts set that still
+    /// held the dot-free form — falling through to an opaque,
+    /// un-intercepted tunnel for a host the policy meant to terminate TLS
+    /// for and swap credentials on. Latent only because
+    /// `interception_bound_hosts` returns empty in production today (see
+    /// its doc); it goes live the moment CA distribution lands and that set
+    /// is populated. This test connects to a bound host WITH a trailing dot
+    /// and asserts a leaf was actually minted for it — i.e. that
+    /// interception fired — not merely that the CONNECT was allowed.
+    #[tokio::test]
+    async fn connect_with_trailing_dot_still_intercepts_a_bound_host() {
+        use super::super::ca::SandboxCertificateAuthority;
+        use super::super::tls_intercept::{TlsInterceptConfig, VerifiedOriginConnector};
+        use rustls::pki_types::ServerName;
+        use tokio_rustls::TlsConnector;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let bound_host = "bound.example.com";
+
+        // A real listener that is NOT a TLS server: if the connection stays
+        // an opaque plaintext tunnel (the bug), the client's TLS
+        // ClientHello bytes just get echoed straight back. If TLS
+        // termination correctly fires instead, the proxy's own TLS acceptor
+        // answers with a ServerHello/leaf cert (minted just before), which
+        // this untrusting client will reject.
+        let echo_listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = echo_listener.accept().await {
+                let mut buf = [0u8; 256];
+                if let Ok(n) = socket.read(&mut buf).await {
+                    let _ = socket.write_all(&buf[..n]).await;
+                }
+            }
+        });
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let origin_connector = VerifiedOriginConnector::for_test(TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        )));
+        let tls_intercept = Arc::new(TlsInterceptConfig::new(
+            ca,
+            std::collections::HashSet::from([bound_host.to_string()]),
+            origin_connector,
+        ));
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&[bound_host]),
+            resolver: Arc::new(FixedAddrResolver(echo_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: Some(Arc::clone(&tls_intercept)),
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+        raw_client
+            .write_all(format!("CONNECT {bound_host}.:443 HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = [0u8; 128];
+        let n = raw_client.read(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"),
+            "a trailing dot must not change the allowlist decision itself"
+        );
+
+        // Force the connection-handling task forward to (and past) the leaf
+        // mint step, regardless of which branch it actually took.
+        let untrusting_client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(untrusting_client_config));
+        let server_name = ServerName::try_from(bound_host.to_string()).unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, raw_client),
+        )
+        .await;
+
+        assert_eq!(
+            tls_intercept.cached_leaf_count(),
+            1,
+            "a trailing-dot CONNECT to a bound host must still be intercepted (leaf minted), \
+             not silently fall through to an opaque tunnel"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
     }
 
     /// Host-casing normalization: `is_bound`/`host_allowed` already fold case

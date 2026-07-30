@@ -359,9 +359,14 @@ impl TlsInterceptConfig {
     ) -> Self {
         Self {
             ca,
+            // A host that doesn't normalize to anything meaningful (empty,
+            // whitespace-only, all-dots) can never be dialed as a valid DNS
+            // name anyway — drop it from the bound set rather than let it
+            // occupy a `HashSet` entry no real CONNECT target could ever
+            // match.
             bound_hosts: bound_hosts
                 .into_iter()
-                .map(|host| normalize_host(&host))
+                .filter_map(|host| normalize_host(&host))
                 .collect(),
             origin_connector,
             identity: ConfigIdentity::mint(),
@@ -395,7 +400,7 @@ impl TlsInterceptConfig {
     /// calling [`terminate_and_forward`].
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn is_bound(&self, host: &str) -> bool {
-        self.bound_hosts.contains(&normalize_host(host))
+        normalize_host(host).is_some_and(|host| self.bound_hosts.contains(&host))
     }
 
     /// D1 enforced by construction, not a runtime branch: the **only**
@@ -426,7 +431,7 @@ impl TlsInterceptConfig {
     /// to also contain the same host string.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn bind(&self, host: &str) -> Option<BoundHost> {
-        let host = normalize_host(host);
+        let host = normalize_host(host)?;
         self.bound_hosts.contains(&host).then_some(BoundHost {
             host,
             config_identity: self.identity,

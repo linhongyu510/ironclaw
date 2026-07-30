@@ -225,38 +225,30 @@ impl SandboxCertificateAuthority {
         &self,
         host: &str,
     ) -> Result<IssuedLeaf, RuntimeProcessError> {
-        // Bound the raw, untrimmed length before any allocation: a
-        // network-controlled CONNECT host that is merely oversized should
-        // fail without paying for a lowercase copy of it first. This is the
-        // same bound `validate_dns_host` enforces on the canonicalized
-        // string below; checking it here too just moves the rejection ahead
-        // of the allocation for the common "just too long" case.
-        if host.len() > MAX_DNS_HOST_LEN {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox CA: host exceeds the maximum DNS name length of {MAX_DNS_HOST_LEN}"
-            )));
-        }
         // Normalize once, at the boundary: DNS names are case-insensitive
         // and an intercepted CONNECT's SNI/host can carry incidental
-        // whitespace. Trimming only the emptiness *check* while minting and
-        // caching on the untrimmed, original-case string (the prior
-        // behavior) would bake padding into the SAN/CN and let case
-        // variants of the same host multiply cache entries — on a
-        // bounded, oldest-first-eviction cache, that lets a peer choosing
-        // SNI case variants evict unrelated live entries. Every downstream
-        // use (cache key, SAN, CN) shares this one canonical form. This is
-        // the same [`normalize_host`] callers upstream of this CA (e.g.
+        // whitespace or a trailing root-zone dot. Trimming only the
+        // emptiness *check* while minting and caching on the untrimmed,
+        // original-case string (the prior behavior) would bake padding into
+        // the SAN/CN and let case variants of the same host multiply cache
+        // entries — on a bounded, oldest-first-eviction cache, that lets a
+        // peer choosing SNI case variants evict unrelated live entries.
+        // Every downstream use (cache key, SAN, CN) shares this one
+        // canonical form. This is the same [`normalize_host`] callers
+        // upstream of this CA (e.g.
         // `tls_intercept::terminate_and_forward_with_timeout`) apply before
         // they ever call here — see that function's doc for why a *second*
         // independent normalization here still matters even once callers
         // normalize first: this method must stay safe to call with a raw,
-        // unnormalized host on its own.
-        let host = normalize_host(host);
-        if host.is_empty() {
+        // unnormalized host on its own. `None` (empty/whitespace-only/
+        // all-dots input) is rejected here rather than silently coerced to
+        // an empty string that could reach the length/DNS-syntax checks
+        // below with different semantics than callers expect.
+        let Some(host) = normalize_host(host) else {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox CA: host must not be empty".to_string(),
             ));
-        }
+        };
         // `rcgen` accepts arbitrary ASCII strings as a DNS SAN — it does not
         // itself reject control characters, wildcards, or oversized input.
         // A network-controlled CONNECT host reaches this call, so the CA
@@ -422,23 +414,40 @@ impl SandboxCertificateAuthority {
     }
 }
 
-/// The one definition of "the host" for the sandbox TLS-interception seam:
-/// trimmed and lowercased. DNS names are case-insensitive, and an
-/// intercepted CONNECT's host/SNI can carry incidental whitespace, so every
-/// consumer that decides identity from a host string — leaf-cert
-/// mint/cache key ([`SandboxCertificateAuthority::issue_leaf_for_host`]),
-/// the bound-hosts allowlist check (`tls_intercept::TlsInterceptConfig::
-/// is_bound`), and the SNI value threaded to the origin dial
-/// (`tls_intercept::terminate_and_forward_with_timeout`) — must canonicalize
-/// through this exact function. Two independently-normalizing call sites is
-/// precisely how the leaf-mint/SNI-dial asymmetry this function replaces
-/// came to exist: `issue_leaf_for_host` trimmed and lowercased, the SNI
-/// conversion did neither, so a padded host could mint a leaf and pass the
-/// client handshake, then fail `ServerName::try_from` — after the origin
-/// was one step from being dialed. One chokepoint removes the class, not
-/// just this instance of it.
-pub(crate) fn normalize_host(host: &str) -> String {
-    host.trim().to_ascii_lowercase()
+/// The one definition of "the host" for the entire sandbox egress/TLS-
+/// interception seam: trimmed of surrounding whitespace, stripped of any
+/// trailing DNS root-zone dot(s), and lowercased. DNS names are
+/// case-insensitive and `pypi.org.` is a legal, equivalently-resolving FQDN
+/// for `pypi.org`, so every consumer that decides identity from a host
+/// string — the CONNECT-target parse and hostname allowlist check
+/// (`egress_proxy::handle_connect`, `egress_proxy::host_allowed`), the
+/// bound-hosts set and its lookup (`tls_intercept::TlsInterceptConfig::new`/
+/// `is_bound`/`bind`), leaf-cert mint/cache key
+/// ([`SandboxCertificateAuthority::issue_leaf_for_host`]), and the SNI value
+/// threaded to the origin dial (`tls_intercept::terminate_and_forward_with_timeout`)
+/// — must canonicalize through this exact function. Independently-normalizing
+/// call sites is precisely how two asymmetries shipped here before: the
+/// leaf-mint/SNI-dial one this function originally replaced (one side
+/// trimmed+lowercased, the other did neither), and a second one where
+/// `host_allowed` stripped a trailing dot but the bound-hosts lookup did
+/// not — a `CONNECT pypi.org.` then passed the allowlist as `pypi.org` but
+/// missed the (dot-free) bound-hosts entry, silently falling through to an
+/// unintercepted opaque tunnel. One chokepoint removes the class, not just
+/// one instance of it.
+///
+/// Returns `None` — reject, don't silently canonicalize — for input that
+/// normalizes to nothing meaningful: empty, all-whitespace, or all-dots
+/// (`"."`, `".."`, ...) input. Turning `"."` into `""` and then matching an
+/// empty-string entry somewhere downstream would be a new bug of exactly
+/// the same shape this function exists to prevent; a host that means
+/// nothing after normalization must fail the caller's decision, never
+/// coerce into an empty string that could accidentally participate in one.
+pub(crate) fn normalize_host(host: &str) -> Option<String> {
+    let trimmed = host.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
 }
 
 fn ca_error(error: rcgen::Error) -> RuntimeProcessError {

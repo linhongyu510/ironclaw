@@ -207,6 +207,24 @@ fn whitespace_only_host_is_rejected() {
     assert!(format!("{error}").contains("host must not be empty"));
 }
 
+/// `normalize_host` strips trailing root-zone dots (see its doc); an
+/// all-dots host must not survive that as an empty string that then
+/// silently participates in some downstream empty-pattern match —
+/// `"."`/`".."`/etc. must be rejected exactly like an empty or
+/// whitespace-only host, not coerced into `""`.
+#[test]
+fn all_dots_host_is_rejected() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    for host in [".", "..", "...", " . "] {
+        let error = ca.issue_leaf_for_host(host).unwrap_err();
+        assert!(
+            format!("{error}").contains("host must not be empty"),
+            "host {host:?} must be rejected the same way an empty host is"
+        );
+    }
+}
+
 #[test]
 fn host_lookup_is_case_insensitive_and_ignores_padding() {
     let ca = SandboxCertificateAuthority::generate().unwrap();
@@ -227,6 +245,12 @@ fn host_lookup_is_case_insensitive_and_ignores_padding() {
     assert!(
         padded_variant.cache_hit,
         "padded variants of an already-cached host must be a cache hit"
+    );
+
+    let trailing_dot_variant = ca.issue_leaf_for_host("api.example.com.").unwrap();
+    assert!(
+        trailing_dot_variant.cache_hit,
+        "a trailing root-zone dot must still resolve to the same cache entry"
     );
 
     assert_eq!(ca.cached_entry_count(), 1);

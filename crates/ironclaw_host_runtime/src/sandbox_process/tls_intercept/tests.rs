@@ -860,24 +860,30 @@ fn build_server_config_fails_closed_on_empty_key_pem() {
 }
 
 /// "Test through the caller, not just the helper": an invalid host
-/// (here, empty) must make `terminate_and_forward` itself fail — before
-/// the origin is ever dialed, and before a leaf is even minted — not
-/// merely make some inner helper return an error in isolation. A unit
-/// test on `SandboxCertificateAuthority::issue_leaf_for_host` alone
-/// would not prove the *caller* (`terminate_and_forward`) actually
-/// surfaces that failure fail-closed instead of, say, dialing the
-/// origin first. Mirrors `client_handshake_failure_never_dials_the_
-/// origin`'s fake-origin/timeout-probe machinery so "no dial happened"
-/// is observed directly, not inferred from the `Err` return alone.
+/// (here, a wildcard — `validate_dns_host` explicitly rejects `*`) must
+/// make `terminate_and_forward` itself fail — before the origin is ever
+/// dialed, and before a leaf is even minted — not merely make some inner
+/// helper return an error in isolation. A unit test on
+/// `SandboxCertificateAuthority::issue_leaf_for_host` alone would not
+/// prove the *caller* (`terminate_and_forward`) actually surfaces that
+/// failure fail-closed instead of, say, dialing the origin first. Mirrors
+/// `client_handshake_failure_never_dials_the_origin`'s fake-origin/
+/// timeout-probe machinery so "no dial happened" is observed directly,
+/// not inferred from the `Err` return alone.
 ///
-/// The empty host is rejected at `issue_leaf_for_host` itself (`ca.rs`'s
-/// `host.is_empty()` check), the very first fallible step in
-/// `terminate_and_forward_with_timeout` — so this test additionally
-/// pins the strongest form of "before": no leaf is minted at all, not
-/// just "minted but never sent to the origin."
+/// Deliberately NOT an empty/whitespace-only/all-dots host: `bind` itself
+/// now rejects those via `normalize_host` (see that function's doc), so a
+/// `BoundHost` could never be constructed for one — D1 makes the empty
+/// case unreachable at `terminate_and_forward`'s call site, not merely
+/// rejected inside it. A wildcard host passes `bind` (it is a normal,
+/// non-empty string in `bound_hosts`) and is rejected at
+/// `issue_leaf_for_host` itself (`ca.rs`'s `validate_dns_host`), the
+/// first fallible step in `terminate_and_forward_with_timeout` — so this
+/// test still pins the strongest form of "before": no leaf is minted at
+/// all, not just "minted but never sent to the origin."
 #[tokio::test]
 async fn invalid_host_fails_before_the_origin_is_dialed() {
-    let host = "";
+    let host = "*.invalid-wildcard-host.example";
 
     // The timed `accept()` probe is started AFTER `server_task` resolves
     // below, not here — see `client_handshake_failure_never_dials_the_origin`
@@ -922,7 +928,7 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
             .expect("server task did not panic");
     assert!(
         matches!(result, Err(TlsInterceptError::LeafMintFailed { .. })),
-        "expected Err(LeafMintFailed) for an empty host, got: {result:?}"
+        "expected Err(LeafMintFailed) for a wildcard host, got: {result:?}"
     );
     assert_eq!(
         cached_leaf_count_after, cached_leaf_count_before,
@@ -937,8 +943,8 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
     );
 }
 
-/// The empty-host case above never reaches the SNI-conversion step at
-/// all — `ca.rs`'s `host.is_empty()` check rejects it first, at the
+/// The wildcard-host case above never reaches the SNI-conversion step at
+/// all — `ca.rs`'s `validate_dns_host` rejects it first, at the
 /// leaf-mint step, so it cannot prove the *ordering* between the origin
 /// dial and SNI-host validation specifically. This test needs a host that
 /// reaches the leaf mint and client handshake successfully but still
