@@ -1,195 +1,87 @@
-# Agent-authored skill bundles: scripts, schemas, and references
+# Agent-authored skill bundles
 
-How an agent creates and uses **multi-file** skills without changing how skills are
-stored, discovered, or selected.
+Why an agent could not author a skill containing a script, and what was changed.
 
-Raised by @henrypark133, whose objection was correct and is why this document exists.
-The earlier proposal was "move skills to the filesystem" — an overhaul — and the
-evidence did not support it. What the evidence supports is much narrower.
+## The gap
 
-## What the measurements say
+Measured on the 31-task SkillsBench/SkillLearnBench subset (nearai/benchmarks#287):
+**0 of 27** agent-authored skills shipped a single file besides `SKILL.md`, against
+**18 of 31** human-curated ones (79 `.py` scripts, 78 `.xsd` schemas, 84 `.md`
+references). An agent could only ever author the prose half of a skill, so a later run
+re-derived the method and could re-make the same mistake — `lake_warming`'s self-authored
+skill described its regression procedure in prose, the next run recomputed it slightly
+differently and missed the grader's `p < 0.05` threshold.
 
-31-task SkillsBench/SkillLearnBench subset, `deepseek/deepseek-v4-flash`, reborn.
-Two mechanisms, stratified by whether the skill ships files besides `SKILL.md`:
+## It was never a missing capability
 
-| skill type | n | prose injected | real files + listing | delta |
-|---|---:|---:|---:|---:|
-| ships resource files | 16 | 81.0% | **94.2%** | **+13.2pp**, 95% CI [+0.3, +26.2] |
-| `SKILL.md` only | 11 | **91.5%** | 84.7% | **−6.9pp**, 95% CI [−20.4, +6.7] |
+`install_skill` has always taken `files: &[SkillInstallFile]`, and `parse_install_files`
+has always read an `input["files"]` array. **Three stacked gates** made that unreachable,
+and each one looked like the whole story until it was removed:
 
-**The whole filesystem gain sits in skills that ship files. For prose-only skills,
-injection is equal or better.** Filesystem-for-everything is therefore a regression on
-13 of 31 tasks, paid to fix the other 18.
+1. `schemas/builtin/skill_install.input.v1.json` advertised only `name`/`content`/`url`
+   **and** set `additionalProperties: false` — so a model sending `files` was not merely
+   uninformed, it was rejected. Across 112 observed calls, 111 used exactly
+   `['content','name']`, which is all the schema permitted.
+2. The only encodings were `bytes_base64` and a JSON array of byte integers. A bundle file
+   an agent writes is a script, reference doc or schema fragment — all UTF-8. Base64 costs
+   ~33% more tokens and turns one encoding slip into an `InputEncode` failure of the whole
+   install.
+3. `skill_install_input` gated its direct-install arm on `!contains_key("files")`, so
+   `content` + `files` matched **no** arm and fell through to `_ => Err(InputEncode)`.
+   `files` was reachable only on the URL-fetch arm, which builds the array itself.
 
-The ten largest per-task divergences make the same point without any averaging — the
-four biggest filesystem wins all ship resources; the two biggest injection wins ship
-none:
+With all three removed the model immediately authored `scripts/verify_bib.py`,
+`references/dots_coefficients.json`, `scripts/analyze.py` and
+`references/categories.md` — it had been sending 18 correctly-shaped `{path, text}`
+entries all along and every one was refused. So neither capability nor elicitation was
+the bottleneck.
 
-| task | inject | files | resource files |
-|---|---:|---:|---:|
-| citation_check | 0.000 | **0.833** | 13 |
-| court_form_filling | 0.400 | **0.933** | 11 |
-| lab_unit_harmonization | 0.479 | **1.000** | 1 |
-| powerlifting_coef_calc | 0.700 | **0.950** | 6 |
-| lake_warming | **1.000** | 0.250 | **0** |
-| hvac_control | **1.000** | 0.929 | **0** |
+## Changes
 
-Blending each stratum's measured winner (a projection, not a measured arm):
+- `parse_install_files` accepts `text` (UTF-8) alongside `bytes_base64`/`bytes`; `text`
+  wins when both are present. Binary payloads unaffected.
+- the schema advertises `files` (`path` + `text`/`bytes_base64`) and tells the model why
+  to use it: put a reusable computation in a script rather than prose, and have `SKILL.md`
+  name the files it relies on.
+- the direct-install arm no longer rejects an author-supplied `files` array.
+  `source`/`source_url` stay excluded there — those record provenance and are set by the
+  URL path, so an agent must not be able to forge them.
+- prose-only installs are untouched: no `files` key still parses to an empty vec.
 
-| strategy | blended (n=27) |
-|---|---:|
-| inject everything (today) | 85.3% |
-| filesystem everything (the overhaul) | 90.3% |
-| **files only when the skill ships resources** | **93.1%** |
+## Reaching the files at run time
 
-### Why, mechanically
+Whether prose injection or a readable path is the better delivery mechanism was measured
+separately, and the readable path wins overall — see nearai/benchmarks#327 for the numbers
+(ceiling 90.4% vs claude-code 91.5%, paired −0.8pp; self-creation 90.1% vs 93.5%, paired
+−2.7pp, 14/20 tasks tied).
 
-Nothing here is about models preferring filesystems.
+A narrower variant — advertise a real path **only** when the skill ships resources — was
+built and **measured worse**: −25.7pp against that baseline on self-creation, −40.6pp
+against claude-code. It stratifies well on curated skills (+13.2pp where a skill ships
+files, −6.9pp where it does not), which is why it looked right, but an agent-authored
+skill is usually `SKILL.md`-only: the gate suppresses its path while the selector has
+already dropped it for scoring 0, and it reaches the model by neither route. Recorded here
+because the stratified argument for it is genuinely persuasive and someone will propose it
+again.
 
-1. **81 of the resources are executable** (`scripts/*.py`, `*.js`). A `SKILL.md` saying
-   "run `scripts/extract_metadata.py`" is worse than useless when the file is absent:
-   `citation_check` scored **0.000** that way, **0.833** once readable. You cannot
-   execute pasted Python.
-2. **Text resources are far too large to inline.** `exceltable_in_ppt` ships 986 KB of
-   references and schemas — roughly **262,000 tokens** if folded into `SKILL.md`, per
-   skill, per request. The 78 `.xsd` files are the full OOXML schema set; the agent needs
-   the one element definition it is writing, not 1.9 MB.
+## Two things an implementer should not miss
 
-Trace evidence: on `lab_unit_harmonization` the agent ran
-`find / -path "*/lab-unit-harmonization*" -name "*.md"` — searching the real filesystem
-for a file that existed only behind the virtual FS — and scored 0.458 where a harness
-exposing the file scored 1.000. Its conversion factors live in
-`reference/ckd_lab_features.md`, not `SKILL.md`.
+**`SkillBundleDescriptor` cannot advertise bundle resources.** It exposes exactly one
+path — `skill_md_path`, hardcoded to `SkillFilePath::skill_md()`. So after an agent
+installs `scripts/extract.py`, nothing tells a later run it exists unless `SKILL.md` names
+it. That is why the authoring guidance requires `SKILL.md` to list its own files. If a
+future discovery design can carry a file list, that removes the workaround.
 
-**Small text resources should simply be inlined** (`lab_unit_harmonization` ships one
-8 KB reference). A read path is only needed for executables and ooxml-scale bundles.
+**Trust.** `FilesystemSkillBundleRoot::user` marks bundles `SkillTrust::Trusted`, so an
+agent that can install an executable script is writing into a trusted root that later
+runs. Small in code, significant in consequence; agent-authored bundles likely warrant a
+distinct trust level. This is the real open design question, not the plumbing.
 
-## Design: one extension, no storage change
+## Why `always_available` is needed alongside this
 
-### Storage, discovery and selection stay as they are
-
-- `SkillBundleSource` is already a trait (`list_skill_bundles` + `read_bundle_file`) with
-  several non-filesystem implementations in tree.
-- Selection runs **per request**; there is no session-start index to migrate.
-- `MountGrant("/skills" -> /tenants/{t}/users/{u}/skills, read_write_list_delete())`
-  already exists (`factory.rs`), and discovery lists from
-  `FilesystemSkillBundleRoot::user(ScopedPath("/skills"))` — **the same root**. Writes
-  through that mount are visible to discovery with no plumbing.
-
-### The extension
-
-Grant it the existing `/skills` mount; expose three tools:
-
-| tool | purpose |
-|---|---|
-| `skill_write_file(name, path, content)` | author any bundle file: `SKILL.md`, `scripts/*.py`, `schemas/*.xsd`, `references/*.md` |
-| `skill_read_file(name, path)` | page one resource on demand (wraps `read_bundle_file`) |
-| `skill_list_files(name)` | enumerate a bundle — see the gap below |
-
-To **execute** a script the extension copies that single file into `/workspace`, which
-the agent's filesystem already mounts, and the agent runs it with `shell`. No bulk
-materialisation, no new mount for the agent.
-
-`skill_install` is untouched and stays the path for prose skills. It takes one `content`
-string capped at 64 KiB by `validate_lifecycle_text`, which is why it cannot express a
-bundle. The extension writes through the mount instead of widening it — and must impose
-its own per-file limit, since that route bypasses the cap.
-
-### Gap this design must cover
-
-`SkillBundleDescriptor` carries exactly one path — `skill_md_path`, hardcoded to
-`SkillFilePath::skill_md()`. Discovery cannot advertise `scripts/` or `references/` at
-all, so after the extension writes `scripts/extract.py` **nothing tells the agent it
-exists** unless `SKILL.md` names it. That is the failure mode that scored
-`citation_check` 0.000.
-
-`skill_list_files` covers it from the extension with no core change. Adding a file list
-to `SkillBundleDescriptor` avoids the round trip but touches core; prefer the extension
-until the round trip is shown to matter.
-
-## Scope
-
-| component | change |
-|---|---|
-| new extension | the three tools above |
-| capability grant | add the existing `/skills` MountGrant to the extension context |
-| agent loop | register the tools |
-| `ironclaw_skills` | `always_available` activation (in this PR; 2 files, opt-in) |
-| skill storage / `SkillBundleSource` / selection | **unchanged** |
-| `skill_install` | **unchanged** |
-| prompt injection | **unchanged** — better for prose-only skills |
-
-## Open decision: trust
-
-`FilesystemSkillBundleRoot::user` marks bundles `SkillTrust::Trusted`. Granting an agent
-write access there lets it author an **executable script into a trusted root** which
-later runs. Small in code, significant in consequence. Agent-authored bundles likely
-warrant a distinct trust level, and that call should be made before the write tool ships.
-This is the real design question here, not the plumbing.
-
-## Why `always_available` is needed regardless
-
-Reborn scores a candidate skill only from `activation.keywords`/`tags`/`patterns` and
-keeps it `if score > 0`; name and description contribute nothing. Measured on this
-subset, **0 of 30 agent-authored skills contained an `activation` block** — a
-self-authored skill could never be selected again, whatever its contents. Claude Code has
-no such gate, and **0 of 30 claude-code-authored skills declare activation metadata**
-either; several have no frontmatter at all. Without removing the gate, bundle quality is
-unobservable.
-
-## Validation status
-
-- Ceiling (curated skills): reborn 90.4% vs claude-code 91.5%, paired **−0.8pp**,
-  95% CI [−7.0, +5.3] — parity.
-- Self-creation (user-simulator guided): reborn 90.1% vs claude-code 93.5%, paired
-  **−2.7pp**, 95% CI [−9.0, +3.6], **14 of 20 tasks tied** — not distinguishable.
-- The stratified numbers are n=16 and n=11 with wide intervals, and the resource-bearing
-  lower bound is +0.3pp. The mechanism is trace-backed; the effect size is not tight.
-  **Measure the extension as its own arm on the resource-bearing tasks before committing
-  the trust work.**
-
-## Explicitly unchanged: creation, discovery, indexing
-
-To be unambiguous, since this is the crux of the objection — **none of the three is
-migrated to the filesystem. All stay exactly as they are today.**
-
-| concern | how it works today | after this design |
-|---|---|---|
-| **skill creation** | `skill_install` tool, one `content` string, 64 KiB cap (`commands.rs::parse_skill_install_command`) | **unchanged.** Still the path for prose skills. The extension adds `skill_write_file` alongside it for bundle files; `skill_install`'s parser is not touched. |
-| **skill discovery** | `SkillBundleSource` trait — `list_skill_bundles` + `read_bundle_file`. Storage-agnostic; several non-filesystem impls in tree (`StaticSkillBundleSource`). Descriptors carry `skill_md_path`, `trust`, `visibility`, `provenance`, `description`. | **unchanged.** No new impl, no new trait method, no descriptor change. `skill_list_files` lives in the extension precisely so discovery does not have to change. |
-| **indexing** | There is no session-start index. Selection runs **per request** (`select_activation_plan` / `activate_skills_for_run` take the current message). The only cache is a 5-minute in-memory TTL on catalog *search* results (`catalog.rs`). | **unchanged.** Nothing is pre-indexed today, so there is nothing to migrate. |
-| **selection predicate** | `score_skill` over `activation.keywords`/`tags`/`patterns`, kept `if score > 0` | the one change, and it is opt-in: `always_available` (this PR). Needed because 0/30 agent-authored skills carry an `activation` block. |
-
-The only filesystem interaction added anywhere is **runtime read** of a bundle file
-through `read_bundle_file` (which already exists), plus copying a single script into
-`/workspace` when the agent needs to execute it. Creation stays tool-based, discovery
-stays trait-based, indexing stays absent.
-
-## Capability is not behaviour: eliciting multi-file skills
-
-`skill_write_file` makes multi-file authoring possible. It does not make it happen. Two
-measured reasons to design for this explicitly:
-
-- **Reborn does not reliably invoke skill tooling even under direct instruction.** On the
-  31-task subset, **6 tasks finished with zero `skill_install` calls** despite the
-  authoring turn stating "Saving the skill is required" (`dependency_audit` twice). Adding
-  a second skill tool does not fix compliance; if anything it adds a way to half-finish.
-- **Nothing currently asks for code.** The authoring request asks for method, conventions,
-  output contract and verification — all prose. An agent following it writes prose even
-  with a write tool available.
-
-So the authoring instruction has to change alongside the tool. It should ask the agent to
-extract into files whatever prose cannot carry:
-
-- a **script** for any computation the skill describes step-by-step and that a future run
-  would otherwise re-derive (the measured failure mode: `lake_warming`'s self-authored
-  skill described a regression procedure in prose and the next run recomputed it slightly
-  differently, missing the grader's threshold);
-- a **reference file** for lookup data — conversion factors, category spellings, schema
-  fragments — rather than restating values inline where they can drift;
-- `SKILL.md` then names those files, since `SkillBundleDescriptor` cannot advertise them.
-
-Success criterion for the arm: agent-authored bundles should stop being 100% prose.
-Today **0 of 27** self-created skills ship any resource file, against **18 of 31** curated
-ones. If that ratio does not move after the tool ships, the bottleneck was elicitation,
-not capability, and the tool alone will not improve scores.
+The selector scores a candidate only from `activation.keywords`/`tags`/`patterns` and
+keeps it `if score > 0`; name and description contribute nothing. **0 of 30**
+agent-authored skills contained an `activation` block, so a self-authored skill could
+never be selected again, whatever its contents. Claude Code has no such gate — **0 of 30**
+claude-code-authored skills declare activation metadata either, and several have no
+frontmatter at all. Without removing the gate, bundle quality is unobservable.
