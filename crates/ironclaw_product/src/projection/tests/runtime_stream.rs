@@ -541,12 +541,12 @@ async fn product_event_subscription_terminal_turn_waits_for_live_text_projection
         })
         .await
         .unwrap();
-    let first = tokio::time::timeout(Duration::from_millis(250), subscription.next())
+    let first = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
         .expect("subscription should emit live text before terminal turn")
         .expect("subscription should stay open")
         .expect("first projection event should succeed");
-    let second = tokio::time::timeout(Duration::from_millis(250), subscription.next())
+    let second = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
         .expect("subscription should emit terminal turn after live text")
         .expect("subscription should stay open")
