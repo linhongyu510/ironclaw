@@ -62,6 +62,19 @@
 //! in this same file, is still policed at zero, and `dangerous(`/
 //! `with_custom_certificate_verifier` are never sanctioned anywhere, not
 //! even inside `from_system_roots`.
+//!
+//! **The tenth near-miss was a file-*selection* gap, not a lexing gap.**
+//! `sandbox_process_dir` names only the `sandbox_process/` directory; Rust
+//! 2018 module convention puts this module's own parent file —
+//! `crates/ironclaw_host_runtime/src/sandbox_process.rs` — as a *sibling* of
+//! that directory (there is no `mod.rs`), never a member of it. A
+//! directory-only recursive walk structurally cannot reach a sibling file,
+//! no matter how well-hardened the per-file matching inside it is —
+//! switching the comment/string stripper to `syn`-based parsing would not
+//! have closed this, because `syn::parse_file` is only ever called on files
+//! the walk already decided to visit. [`scan_sandbox_process_module`] is the
+//! fix: it opens the parent file through the exact same [`scan_file`] path
+//! used for every directory member, then scans the directory subtree.
 
 // Each ratchet binary gets its own copy of this shared module; this
 // binary uses only the comment/string stripper and workspace_root, so the
@@ -404,6 +417,46 @@ fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSe
     sanctioned
 }
 
+/// Scans a single `.rs` file (`path`, at `root`-relative path `relative`) for
+/// the banned patterns, applying every exemption `scan_dir` relies on: the
+/// verified-wiring standalone-`tests.rs` exclusion, the inline-`mod tests`
+/// truncation, comment/string stripping, and the scoped
+/// `from_system_roots`/`RootCertStore::empty()` carve-out. Factored out of
+/// `scan_dir`'s loop body so a caller can scan a specific file — such as a
+/// module's parent file that lives beside, not inside, the directory a
+/// recursive walk visits — through the exact same policed path instead of a
+/// second, drifting copy of it. See [`scan_sandbox_process_module`] for why
+/// that matters here.
+///
+/// Same fail-loud I/O policy as `scan_dir`: every error is propagated, never
+/// swallowed.
+fn scan_file(root: &Path, path: &Path, hits: &mut Vec<String>) -> io::Result<()> {
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if is_standalone_test_file(&relative)
+        && parent_gates_tests_module_behind_cfg_test(root, &relative)?
+    {
+        return Ok(());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let production_only = truncate_at_inline_test_module(&contents);
+    let code_only = strip_comments_and_strings(&production_only);
+    let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
+    let haystack = Haystack::build(&code_only);
+    for pattern in BANNED_PATTERNS {
+        for (line, _offset) in haystack.find_all(pattern) {
+            if *pattern == "RootCertStore::empty()" && sanctioned_lines.contains(&line) {
+                continue;
+            }
+            hits.push(format!("{relative}:{line}: `{pattern}`"));
+        }
+    }
+    Ok(())
+}
+
 /// Scans `dir` for the banned patterns, recursing into subdirectories.
 ///
 /// Every I/O error (`read_dir`, a directory-entry read, or `read_to_string`)
@@ -425,38 +478,174 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> io::Result<()> {
         if !name.ends_with(".rs") {
             continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_standalone_test_file(&relative)
-            && parent_gates_tests_module_behind_cfg_test(root, &relative)?
-        {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&path)?;
-        let production_only = truncate_at_inline_test_module(&contents);
-        let code_only = strip_comments_and_strings(&production_only);
-        let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
-        let haystack = Haystack::build(&code_only);
-        for pattern in BANNED_PATTERNS {
-            for (line, _offset) in haystack.find_all(pattern) {
-                if *pattern == "RootCertStore::empty()" && sanctioned_lines.contains(&line) {
-                    continue;
-                }
-                hits.push(format!("{relative}:{line}: `{pattern}`"));
-            }
-        }
+        scan_file(root, &path, hits)?;
     }
     Ok(())
+}
+
+/// The scan-strategy fix for the tenth near-miss: `sandbox_process_dir`
+/// names only the `sandbox_process/` *directory*, but Rust 2018 module
+/// convention puts this module's own parent file —
+/// `crates/ironclaw_host_runtime/src/sandbox_process.rs` — as a **sibling**
+/// of that directory (there is no `mod.rs`), never a member of it. A
+/// directory-only recursive walk structurally cannot reach a sibling file no
+/// matter how the per-file matching inside it is hardened — this is a file
+/// *selection* gap, not a lexing gap, so no amount of improving `scan_file`'s
+/// pattern matching would have closed it. `sandbox_process.rs` is itself
+/// production code in the exact module this gate polices: it declares every
+/// submodule and owns `RebornSandboxConfig::command_env`.
+///
+/// Scans that parent file (if present — `if let` so a hypothetical future
+/// `mod.rs` layout degrades to "just scan the directory," not an error) and
+/// then the directory subtree, through the identical `scan_file` path (same
+/// exemptions, same carve-outs) either way.
+fn scan_sandbox_process_module(root: &Path, hits: &mut Vec<String>) -> io::Result<()> {
+    let dir = sandbox_process_dir(root);
+    let parent_file = dir.with_extension("rs");
+    if parent_file.is_file() {
+        scan_file(root, &parent_file, hits)?;
+    }
+    scan_dir(root, &dir, hits)
+}
+
+/// Regression for the tenth near-miss: `sandbox_process_dir` points only at
+/// the `sandbox_process/` directory. Rust 2018 module convention puts the
+/// *parent* module file — `crates/ironclaw_host_runtime/src/sandbox_process.rs`
+/// — as a sibling of that directory, not inside it (there is no `mod.rs`).
+/// `scan_dir` recurses only under the directory it is handed, so that parent
+/// file is a 37 KB production file in the exact module this gate polices
+/// that is never opened at all. It declares every submodule and owns
+/// `RebornSandboxConfig::command_env`. Reproduces the exact hole: a banned
+/// call planted directly in the parent file passes `scan_dir` against the
+/// directory clean, mirroring exactly how the real gate test below invokes
+/// it (`scan_dir(&root, &sandbox_process_dir(&root), &mut hits)`).
+#[test]
+fn gate_catches_a_banned_call_in_the_parent_module_file_beside_the_directory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+    std::fs::write(sandbox_dir.join("ca.rs"), "pub(crate) fn noop() {}\n").expect("write ca.rs");
+
+    // The parent module file — a sibling of `sandbox_process/`, not a member
+    // of it — mirroring the real repo layout exactly.
+    let parent_file = sandbox_dir.with_extension("rs");
+    std::fs::write(
+        &parent_file,
+        "mod ca;\n\n\
+         pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n\
+         }\n",
+    )
+    .expect("write sandbox_process.rs");
+
+    // Documents the bug directly: a directory-only walk never sees it.
+    let mut directory_only_hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut directory_only_hits).expect("scan must succeed");
+    assert!(
+        directory_only_hits.is_empty(),
+        "sanity check on the fixture: scan_dir alone must NOT see the parent \
+         file's banned call (it never visits it) — if this assertion fails, \
+         the fixture no longer isolates what scan_sandbox_process_module adds; \
+         got {directory_only_hits:?}"
+    );
+
+    // The real invariant this gate must uphold: scanning the whole
+    // sandbox_process module — parent file AND directory — catches it.
+    let mut hits = Vec::new();
+    scan_sandbox_process_module(root, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a banned call planted in the parent sandbox_process.rs module file — \
+         a sibling of the sandbox_process/ directory this gate walks, never a \
+         member of it — must still be caught by the gate; a directory-only \
+         walk leaves it completely unscanned"
+    );
+}
+
+/// `sandbox_process.rs` itself has an inline `#[cfg(test)] mod tests { ... }`
+/// (the real file's own convention, distinct from the standalone-`tests.rs`
+/// files used by `ca.rs`/`credential_firewall.rs`/`tls_intercept.rs`). Once
+/// `scan_sandbox_process_module` starts opening this file, it must go
+/// through the exact same `truncate_at_inline_test_module` exemption every
+/// other file in the tree already relies on — a banned call planted only
+/// inside the parent file's own test module must stay exempt, not turn the
+/// fix into a false-positive generator against the file's own tests.
+#[test]
+fn gate_exempts_a_banned_call_inside_the_parent_files_own_inline_test_module() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    let parent_file = sandbox_dir.with_extension("rs");
+    std::fs::write(
+        &parent_file,
+        "pub(crate) fn noop() {}\n\n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             fn build_dangerous_in_tests() -> rustls::ClientConfig {\n        \
+                 rustls::ClientConfig::builder().dangerous()\n    \
+             }\n\
+         }\n",
+    )
+    .expect("write sandbox_process.rs");
+
+    let mut hits = Vec::new();
+    scan_sandbox_process_module(root, &mut hits).expect("scan must succeed");
+    assert!(
+        hits.is_empty(),
+        "a banned call confined to the parent sandbox_process.rs file's own \
+         #[cfg(test)] mod tests {{ ... }} block must stay exempt, matching \
+         every other file's inline-test-module truncation; got {hits:?}"
+    );
+}
+
+/// The other half of the same proof: a banned call in the parent file's
+/// genuine production body — sitting alongside (not inside) that same inline
+/// `mod tests {{ ... }}` block — must still be caught. Together with the
+/// test above, pins that `scan_sandbox_process_module` neither over-exempts
+/// nor under-exempts the parent file relative to every other file already
+/// covered by `truncate_at_inline_test_module`.
+#[test]
+fn gate_catches_a_banned_call_in_the_parent_files_production_body_alongside_its_inline_test_module()
+{
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    let parent_file = sandbox_dir.with_extension("rs");
+    std::fs::write(
+        &parent_file,
+        "pub(crate) fn noop() {}\n\n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             fn harmless() {\n        \
+                 let _ = 1 + 1;\n    \
+             }\n\
+         }\n\n\
+         pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n\
+         }\n",
+    )
+    .expect("write sandbox_process.rs");
+
+    let mut hits = Vec::new();
+    scan_sandbox_process_module(root, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a banned call in the parent sandbox_process.rs file's genuine \
+         production body — placed alongside its own inline #[cfg(test)] mod \
+         tests {{ ... }} block — must still be caught"
+    );
 }
 
 #[test]
 fn sandbox_process_never_hand_rolls_a_permissive_origin_connector() {
     let root = workspace_root();
     let mut hits = Vec::new();
-    scan_dir(&root, &sandbox_process_dir(&root), &mut hits)
+    scan_sandbox_process_module(&root, &mut hits)
         .unwrap_or_else(|error| panic!("scanning sandbox_process/ for escape hatches: {error}"));
     hits.sort();
     hits.dedup();
