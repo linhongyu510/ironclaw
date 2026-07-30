@@ -811,7 +811,7 @@ async fn forced_tool_replacement_failure_preserves_tenant_shared_scope() {
 }
 
 #[tokio::test]
-async fn forced_skill_replacement_failure_restores_url_source() {
+async fn forced_skill_replacement_failure_restores_installed_skill_without_exposing_source_url() {
     let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-skill-rollback-owner",
         None,
@@ -894,16 +894,22 @@ async fn forced_skill_replacement_failure_restores_url_source() {
     .expect_err("injected replacement failure reaches compensation");
 
     assert!(matches!(error, IronHubCommandError::Install { .. }));
+    let metadata_writes = skill_filesystem
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains(".ironclaw-install.json"))
+        .count();
+    assert_eq!(
+        metadata_writes, 3,
+        "old install, failed replacement, and compensation must each write metadata"
+    );
     let restored = skill_management
         .read_content_for_scope(scope.clone(), "installed-skill")
         .await
         .expect("restored skill is readable");
     assert_eq!(restored.content.as_bytes(), old_skill);
     assert_eq!(restored.source, ManagedSkillSource::Installed);
-    assert_eq!(
-        restored.source_url.as_deref(),
-        Some("https://hub.ironclaw.com")
-    );
+    assert_eq!(restored.source_url, None);
     let listed = skill_management
         .list_for_scope(scope)
         .await

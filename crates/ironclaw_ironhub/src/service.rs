@@ -12,8 +12,7 @@ use ironclaw_product::{
     LifecycleProductResponse, LifecycleProductSurfaceContext,
 };
 use ironclaw_skills::{
-    ManagedSkillSource, ScopedSkillManagementError, ScopedSkillManagementPort,
-    SkillManagementErrorKind,
+    ScopedSkillManagementError, ScopedSkillManagementPort, SkillManagementErrorKind,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -422,24 +421,9 @@ impl IronHubService {
         }
         let previous = self
             .skill_management
-            .read_content_for_scope(self.scope.clone(), name)
+            .capture_replacement_snapshot_for_scope(self.scope.clone(), name)
             .await
             .map_err(skill_install_error)?;
-        let previous_source_url = match previous.source {
-            ManagedSkillSource::Installed => Some(previous.source_url.as_deref().ok_or_else(|| {
-                IronHubCommandError::Install {
-                    reason: format!(
-                        "cannot force-replace installed skill '{name}' because its source URL is unavailable"
-                    ),
-                }
-            })?),
-            ManagedSkillSource::User => None,
-            ManagedSkillSource::System => {
-                return Err(IronHubCommandError::Install {
-                    reason: format!("cannot force-replace system skill '{name}'"),
-                });
-            }
-        };
         self.skill_management
             .remove_for_scope(self.scope.clone(), name)
             .await
@@ -451,23 +435,10 @@ impl IronHubService {
         {
             Ok(result) => Ok(result),
             Err(original_error) => {
-                let restore = match previous_source_url {
-                    Some(source_url) => {
-                        self.skill_management
-                            .install_from_url_for_scope(
-                                self.scope.clone(),
-                                Some(name),
-                                &previous.content,
-                                source_url,
-                            )
-                            .await
-                    }
-                    None => {
-                        self.skill_management
-                            .install_for_scope(self.scope.clone(), Some(name), &previous.content)
-                            .await
-                    }
-                };
+                let restore = self
+                    .skill_management
+                    .restore_replacement_snapshot(previous)
+                    .await;
                 if let Err(restore_error) = restore {
                     return Err(IronHubCommandError::Install {
                         reason: format!(

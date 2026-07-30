@@ -10,8 +10,8 @@ use crate::{
     SkillContentRequest, SkillContentResult, SkillInstallRequest, SkillInstallResult,
     SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
     SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
-    update_skill,
+    SkillUpdateResult, install_skill, list_skills, management::read_skill_content_for_restore,
+    read_skill_content, remove_skill, search_skills, update_skill,
 };
 
 pub type ScopedSkillManagementMountResolver =
@@ -41,6 +41,15 @@ pub struct ScopedSkillManagementPort {
     owner_user_id: UserId,
     filesystem: Arc<dyn RootFilesystem>,
     mount_resolver: Arc<ScopedSkillManagementMountResolver>,
+}
+
+/// Opaque host-maintenance state used to compensate a failed skill replacement.
+///
+/// Persisted source metadata remains private so it cannot leak through
+/// caller/model-visible skill reads.
+pub struct SkillReplacementSnapshot {
+    scope: ResourceScope,
+    content: SkillContentResult,
 }
 
 impl ScopedSkillManagementPort {
@@ -115,6 +124,62 @@ impl ScopedSkillManagementPort {
     ) -> Result<SkillContentResult, ScopedSkillManagementError> {
         let context = self.context_for_scope(scope)?;
         Ok(read_skill_content(&context, SkillContentRequest { name }).await?)
+    }
+
+    pub async fn capture_replacement_snapshot_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+    ) -> Result<SkillReplacementSnapshot, ScopedSkillManagementError> {
+        let context = self.context_for_scope(scope.clone())?;
+        let content =
+            read_skill_content_for_restore(&context, SkillContentRequest { name }).await?;
+        if content.source == crate::ManagedSkillSource::System {
+            return Err(SkillManagementError::with_reason(
+                crate::SkillManagementErrorKind::Conflict,
+                format!("cannot force-replace system skill '{name}'"),
+            )
+            .into());
+        }
+        Ok(SkillReplacementSnapshot { scope, content })
+    }
+
+    pub async fn restore_replacement_snapshot(
+        &self,
+        snapshot: SkillReplacementSnapshot,
+    ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
+        let context = self.context_for_scope(snapshot.scope)?;
+        let content = snapshot.content;
+        let (source, source_url) = match content.source {
+            crate::ManagedSkillSource::Installed => {
+                let source_url = content.source_url.as_deref().ok_or_else(|| {
+                    SkillManagementError::with_reason(
+                        crate::SkillManagementErrorKind::InvalidInput,
+                        "installed skill replacement snapshot is missing source metadata",
+                    )
+                })?;
+                (SkillInstallSource::InstalledUrl, Some(source_url))
+            }
+            crate::ManagedSkillSource::User => (SkillInstallSource::User, None),
+            crate::ManagedSkillSource::System => {
+                return Err(SkillManagementError::with_reason(
+                    crate::SkillManagementErrorKind::Conflict,
+                    "system skills cannot be restored into user skill storage",
+                )
+                .into());
+            }
+        };
+        Ok(install_skill(
+            &context,
+            SkillInstallRequest {
+                name: Some(&content.name),
+                content: &content.content,
+                files: &[],
+                source,
+                source_url,
+            },
+        )
+        .await?)
     }
 
     pub async fn update_for_scope(
