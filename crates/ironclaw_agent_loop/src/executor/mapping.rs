@@ -78,22 +78,31 @@ pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, 
 
 pub(super) fn model_preference_to_host(
     preference: ModelPreference,
-) -> Result<Option<ironclaw_turns::ModelProfileId>, AgentLoopExecutorError> {
+) -> Result<(Option<ironclaw_turns::ModelProfileId>, u32), AgentLoopExecutorError> {
     match preference {
-        ModelPreference::Primary => Ok(None),
+        ModelPreference::Primary => Ok((None, 0)),
+        ModelPreference::Fallback { index } if index > 0 => Ok((None, index)),
         ModelPreference::Fallback { .. } => Err(AgentLoopExecutorError::PlannerContract {
-            detail: "fallback model preference requires model route chain support",
+            detail: "fallback model preference index must be nonzero",
         }),
     }
 }
 
 pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
     match error.kind {
+        AgentLoopHostErrorKind::RateLimited => Some(ModelErrorClass::Transient),
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::ContentFiltered => Some(ModelErrorClass::ContentFiltered),
+        // Legacy generic capacity errors keep the historic context-overflow
+        // projection. Live model-call producers use the precise variants below.
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
+        AgentLoopHostErrorKind::ContextOverflow => Some(ModelErrorClass::ContextOverflow),
+        AgentLoopHostErrorKind::OutputTruncated => Some(ModelErrorClass::OutputTruncated),
+        // Exhausted configured spend is terminal: another model call cannot
+        // succeed until the budget changes, and shrinking context is irrelevant.
+        AgentLoopHostErrorKind::SpendBudgetExceeded => None,
         // Accounting storage failed before the host could establish a
         // trustworthy budget outcome. Preserve the typed host error instead
         // of retrying it as a provider availability failure.
@@ -150,6 +159,7 @@ pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass 
         ModelErrorClass::ContextOverflow => LoopRecoveryClass::ModelContextOverflow,
         ModelErrorClass::ContentFiltered => LoopRecoveryClass::ModelContentFiltered,
         ModelErrorClass::InvalidOutput => LoopRecoveryClass::ModelInvalidOutput,
+        ModelErrorClass::OutputTruncated => LoopRecoveryClass::ModelOutputTruncated,
         ModelErrorClass::Unavailable => LoopRecoveryClass::ModelUnavailable,
         ModelErrorClass::Internal => LoopRecoveryClass::ModelInternal,
         ModelErrorClass::StaleRequest => LoopRecoveryClass::ModelStaleRequest,
@@ -173,9 +183,13 @@ pub(super) fn model_recovery_class(class: ModelErrorClass) -> LoopRecoveryClass 
 pub(super) fn capability_port_error_is_terminal(kind: AgentLoopHostErrorKind) -> bool {
     match kind {
         AgentLoopHostErrorKind::Cancelled
+        | AgentLoopHostErrorKind::RateLimited
         | AgentLoopHostErrorKind::Unavailable
         | AgentLoopHostErrorKind::Internal
         | AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::ContextOverflow
+        | AgentLoopHostErrorKind::OutputTruncated
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
         | AgentLoopHostErrorKind::CheckpointRejected
@@ -295,6 +309,7 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::ContextOverflow => "model_context_overflow",
         ModelErrorClass::ContentFiltered => "model_content_filtered",
         ModelErrorClass::InvalidOutput => "model_invalid_output",
+        ModelErrorClass::OutputTruncated => "model_output_truncated",
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
         ModelErrorClass::StaleRequest => "model_stale_request",
@@ -345,12 +360,12 @@ pub(super) fn sanitized_strategy_summary_or_fallback(
     }
 }
 
-pub(super) fn honor_retry_alteration(
+pub(super) fn honor_capability_retry_alteration(
     alteration: Option<&RetryAlteration>,
 ) -> Result<(), AgentLoopExecutorError> {
-    if matches!(alteration, Some(RetryAlteration::AdvanceFallback)) {
+    if matches!(alteration, Some(RetryAlteration::AdvanceFallback { .. })) {
         return Err(AgentLoopExecutorError::PlannerContract {
-            detail: "fallback model route alteration requires model route chain support",
+            detail: "fallback advancement is valid only for model recovery",
         });
     }
     Ok(())
@@ -368,6 +383,23 @@ mod tests {
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::InputEncode),
             LoopFailureKind::ModelError
+        );
+    }
+
+    #[test]
+    fn fallback_model_preference_maps_to_ordered_host_index() {
+        assert_eq!(
+            model_preference_to_host(ModelPreference::Primary).expect("primary"),
+            (None, 0)
+        );
+        assert_eq!(
+            model_preference_to_host(ModelPreference::Fallback { index: 2 })
+                .expect("configured fallback"),
+            (None, 2)
+        );
+        assert!(
+            model_preference_to_host(ModelPreference::Fallback { index: 0 }).is_err(),
+            "fallback zero aliases primary and must be rejected as a planner bug"
         );
     }
 
@@ -485,11 +517,15 @@ mod tests {
 
         let class_for = |kind: K| model_error_class(&AgentLoopHostError::new(kind, "test"));
         let cases: &[(K, Option<C>)] = &[
+            (K::RateLimited, Some(C::Transient)),
             (K::Unavailable, Some(C::Unavailable)),
             (K::Internal, Some(C::Internal)),
             (K::InvalidOutput, Some(C::InvalidOutput)),
             (K::ContentFiltered, Some(C::ContentFiltered)),
             (K::BudgetExceeded, Some(C::ContextOverflow)),
+            (K::SpendBudgetExceeded, None),
+            (K::ContextOverflow, Some(C::ContextOverflow)),
+            (K::OutputTruncated, Some(C::OutputTruncated)),
             // Model-fixable-by-rebuild: iteration retry refreshes the surface
             // and prompt bundle; exhaustion -> `model_stale_request`.
             (K::StaleSurface, Some(C::StaleRequest)),
@@ -522,6 +558,7 @@ mod tests {
     fn stale_request_and_precise_terminal_classes_have_precise_categories() {
         for (class, category) in [
             (ModelErrorClass::StaleRequest, "model_stale_request"),
+            (ModelErrorClass::OutputTruncated, "model_output_truncated"),
             (
                 ModelErrorClass::Unauthorized,
                 "model_credentials_unavailable",
@@ -535,6 +572,14 @@ mod tests {
             let failure = model_error_failure_category(class).expect("valid category");
             assert_eq!(failure.category(), category);
         }
+    }
+
+    #[test]
+    fn output_truncation_preserves_its_recovery_identity() {
+        assert_eq!(
+            model_recovery_class(ModelErrorClass::OutputTruncated).as_str(),
+            "model_output_truncated"
+        );
     }
 
     #[test]
