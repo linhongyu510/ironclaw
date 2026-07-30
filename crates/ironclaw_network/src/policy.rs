@@ -317,6 +317,22 @@ pub fn network_denies_resolved_ip(ip: IpAddr) -> bool {
     is_private_or_loopback_ip_impl(ip)
 }
 
+/// Canonical *set-level* policy over a resolved candidate address list: deny
+/// the whole request if ANY candidate is private/loopback/reserved, per
+/// [`network_denies_resolved_ip`]. This is deliberately the only place that
+/// selection policy is decided — [`crate::resolver::resolve_public_ips`] and
+/// any other caller validating a multi-address DNS answer (e.g. the sandboxed
+/// shell's egress proxy in `ironclaw_host_runtime`, picking a concrete
+/// `SocketAddr` to dial) must call this rather than re-deriving their own
+/// "pick the first address that individually passes" selection, which is a
+/// weaker policy: it silently accepts a resolution mixing a public and a
+/// private/loopback address (split-horizon DNS abuse, a compromised or
+/// rebinding-prone resolver) by picking the public one and ignoring the
+/// private one, instead of denying the ambiguous answer outright.
+pub fn network_denies_any_resolved_ip(ips: impl IntoIterator<Item = IpAddr>) -> bool {
+    ips.into_iter().any(network_denies_resolved_ip)
+}
+
 fn is_private_or_loopback_ip_impl(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {

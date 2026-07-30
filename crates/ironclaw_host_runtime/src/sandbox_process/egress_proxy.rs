@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkPolicy;
-use ironclaw_network::{host_matches_host_pattern, network_denies_resolved_ip};
+use ironclaw_network::{
+    host_matches_host_pattern, network_denies_any_resolved_ip, network_denies_resolved_ip,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
@@ -168,13 +170,23 @@ fn denied_ip_reason(ip: IpAddr) -> Option<DenyReason> {
 }
 
 /// Resolves `host:port` and applies the dial-time private-IP guard when
-/// `deny_private_ips` is set. Returns the first candidate address that
-/// passes the guard (or the first candidate at all, when the guard is
-/// disabled) as the `Ok` half; a guard rejection is the `Err` half, carrying
-/// the [`DenyReason`] for the audit log and the client response.
+/// `deny_private_ips` is set. Returns the first resolved candidate address as
+/// the `Ok` half; a guard rejection is the `Err` half, carrying the
+/// [`DenyReason`] for the audit log and the client response.
 /// `deny_private_ips` is only ever turned off by test fixtures standing a
 /// loopback echo server in for a real origin (see the byte-plumbing test
 /// below) — production callers always pass `true`.
+///
+/// The guard applies [`network_denies_any_resolved_ip`] to the WHOLE resolved
+/// set — matching `ironclaw_network::resolver::resolve_public_ips`'s
+/// any-private-denies-all selection policy exactly — rather than picking the
+/// first individually-passing candidate. This proxy previously did the
+/// latter, which let a resolution mixing a public and a private/loopback
+/// address (split-horizon DNS abuse, a compromised or rebinding-prone
+/// resolver) through by silently skipping the private candidate and dialing
+/// the public one; that diverged from the stricter `ironclaw_network`-mediated
+/// HTTP egress path, which denies the whole request in that case. See
+/// `resolve_dial_addr_denies_a_mixed_public_and_private_resolution`.
 async fn resolve_dial_addr(
     resolver: &dyn HostResolver,
     host: &str,
@@ -182,25 +194,20 @@ async fn resolve_dial_addr(
     deny_private_ips: bool,
 ) -> std::io::Result<Result<SocketAddr, DenyReason>> {
     let addrs = resolver.resolve(host, port).await?;
+    let Some(first) = addrs.first().copied() else {
+        return Ok(Err(DenyReason::NoAddressesResolved));
+    };
     if !deny_private_ips {
-        return Ok(addrs
-            .into_iter()
-            .next()
-            .ok_or(DenyReason::NoAddressesResolved));
+        return Ok(Ok(first));
     }
-    match addrs
-        .iter()
-        .find(|addr| denied_ip_reason(addr.ip()).is_none())
-    {
-        Some(addr) => Ok(Ok(*addr)),
-        None => {
-            let reason = addrs
-                .first()
-                .and_then(|addr| denied_ip_reason(addr.ip()))
-                .unwrap_or(DenyReason::NoAddressesResolved);
-            Ok(Err(reason))
-        }
+    if network_denies_any_resolved_ip(addrs.iter().map(SocketAddr::ip)) {
+        let reason = addrs
+            .iter()
+            .find_map(|addr| denied_ip_reason(addr.ip()))
+            .unwrap_or(DenyReason::PrivateAddress);
+        return Ok(Err(reason));
     }
+    Ok(Ok(first))
 }
 
 /// Errors [`EgressAllowlistProxy::bind`] can return. Deliberately minimal —
@@ -1070,6 +1077,19 @@ mod tests {
         }
     }
 
+    /// Test-only resolver that returns a fixed, ordered *multi*-address DNS
+    /// answer, ignoring the requested host/port — lets a test simulate a
+    /// mixed public+private resolution (split-horizon DNS abuse / rebinding)
+    /// without live DNS.
+    struct MultiAddrResolver(Vec<SocketAddr>);
+
+    #[async_trait]
+    impl HostResolver for MultiAddrResolver {
+        async fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
     fn policy_allowing(hosts: &[&str]) -> NetworkPolicy {
         NetworkPolicy {
             allowed_targets: hosts
@@ -1372,6 +1392,46 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
+    }
+
+    /// Pins the divergence a dedup audit found between this proxy's
+    /// dial-time private-IP guard and `ironclaw_network::resolver::
+    /// resolve_public_ips`'s canonical selection policy: that function denies
+    /// the WHOLE request if ANY resolved address is private (via
+    /// `network_denies_any_resolved_ip`), but this proxy previously picked
+    /// the first address that individually
+    /// passed the guard, silently skipping private candidates ahead of it —
+    /// and, worse, would then actually dial that first-passing public
+    /// address. A hostname whose DNS answer mixes a public address first and
+    /// a private/loopback address second (split-horizon DNS abuse, a
+    /// compromised or rebinding-prone resolver) must be denied outright, the
+    /// same way it would be through the `ironclaw_network`-mediated HTTP
+    /// egress path — an all-private resolution proves nothing about this
+    /// selection-over-a-set divergence, only a mixed set does. Exercises
+    /// `resolve_dial_addr` directly (not a full CONNECT round trip) so the
+    /// assertion never depends on live network reachability of the
+    /// (fictitious) public address in the mix.
+    #[tokio::test]
+    async fn resolve_dial_addr_denies_a_mixed_public_and_private_resolution() {
+        let resolver = MultiAddrResolver(vec![
+            // Public address first — the bug picked this one as the dial
+            // target, silently skipping the private candidate below.
+            SocketAddr::from(([93, 184, 216, 34], 443)),
+            // Private (RFC1918) address second.
+            SocketAddr::from(([10, 0, 0, 5], 443)),
+        ]);
+
+        let result = resolve_dial_addr(&resolver, "mixed.example", 443, true)
+            .await
+            .expect("resolver itself does not error");
+
+        assert_eq!(
+            result,
+            Err(DenyReason::PrivateAddress),
+            "a resolution set containing ANY private address must deny the whole request, \
+             matching ironclaw_network::resolver::resolve_public_ips's any-private-denies-all \
+             policy — got {result:?}"
+        );
     }
 
     /// E2 hardening 2 (CONNECT port pin) — an allowlisted host is still

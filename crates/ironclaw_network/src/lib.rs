@@ -20,7 +20,8 @@ pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgres
 pub use error::NetworkHttpError;
 pub use policy::{
     NetworkPolicyError, StaticNetworkPolicyEnforcer, host_matches_host_pattern,
-    network_denies_resolved_ip, parse_egress_limit, parse_host_pattern, target_matches_pattern,
+    network_denies_any_resolved_ip, network_denies_resolved_ip, parse_egress_limit,
+    parse_host_pattern, target_matches_pattern,
 };
 pub use resolver::NetworkResolver;
 pub use test_rewrite::{
