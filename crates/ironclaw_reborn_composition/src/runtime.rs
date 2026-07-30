@@ -5015,6 +5015,28 @@ const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
 /// agent-authored skill is permanently unselectable — the agent can create a
 /// skill and never reuse it. `name_and_description` restores the Claude-Code
 /// contract where name + description suffice.
+/// Default stays `CriteriaOnly` — behavior-preserving.
+///
+/// `always_available` is the direction, not the default. The current predicate keeps a
+/// skill only `if score > 0` from `activation.keywords`/`tags`/`patterns`, a static
+/// lexical guess made before the model sees anything, and measured on
+/// nearai/benchmarks#287 **0 of 30 agent-authored skills carried an `activation` block**.
+/// Under `Full` injection those never auto-activate. (Under `Listing` they are still
+/// listed — the score only orders the menu — but the model called `skill_activate` in
+/// only 3 of 30 measured runs, so in practice they were unreachable either way.)
+///
+/// Not flipped yet because it fails 8 tests in this crate, and the failure is NOT the
+/// setup-marker interaction an earlier version of this comment claimed: marker
+/// suppression returns `None` before scoring in `prefilter_skills_with_options`, so a
+/// floor score cannot revive a suppressed skill. What actually happens is that all 32
+/// bundled skills reach floor 1 and 3-4 unrelated ones land in `plan.activations()` in
+/// `ActivationCriteria` mode — a mode that injects nothing under `Listing`. The real
+/// defect this exposes is that a criteria "activation" which injects no body is still
+/// recorded as an activation, so the count assertions stop meaning anything.
+///
+/// Sequenced behind epic #6565 (Slice 0: word-boundary matching + a minimum activation
+/// score). Note #6565 Slice 5 requires the model to choose over a *bounded* shortlist,
+/// which an unbounded floor would contradict.
 const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
     ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
 
