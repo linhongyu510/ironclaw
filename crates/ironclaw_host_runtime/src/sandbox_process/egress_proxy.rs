@@ -668,8 +668,16 @@ async fn handle_connect(
         // just be dropped.
         let leftover = client.buffer().to_vec();
         let raw_client = client.into_inner();
+        // Attribution (`ConnectionAttributionResolver`) is not consulted by
+        // this crate's proxy dispatch yet, so this proxy cannot name the peer's
+        // `{tenant, user}` — `identity: None`. That is deliberately fail-closed
+        // rather than convenient: with a credential swap configured, an
+        // unattributed connection presenting a placeholder is a
+        // CONNECTION-DENIAL, so no credential can be injected before
+        // attribution is actually wired into this dispatch path.
+        let connection = tls_intercept::InterceptedConnection::default();
         if let Err(error) = tls_intercept::terminate_and_forward(
-            raw_client, leftover, bound_host, dial_addr, config,
+            raw_client, leftover, bound_host, dial_addr, config, connection,
         )
         .await
         {

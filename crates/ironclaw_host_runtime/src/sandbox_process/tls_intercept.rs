@@ -24,11 +24,18 @@
 //! or per-binding predicates as its own, separately-justified follow-up, not
 //! something to build speculatively here.
 //!
-//! **Phase 1 scope: forward the decrypted stream unchanged.** No credential
-//! injection, no body parsing — that is phase 2, gated on a `RuntimeKind::
-//! Sandbox` variant that does not exist yet (design doc, W6 gating note).
-//! Proving the interception mechanism works (real MITM, real fail-closed
-//! behavior) stands on its own before any injection logic lands on top.
+//! **Phase 1 scope: forward the decrypted stream unchanged.** Preserved
+//! exactly when [`TlsInterceptConfig`]'s `credential_swap` is `None`.
+//!
+//! **Phase 2 scope: the credential swap.** When a
+//! [`super::credential_swap::SandboxCredentialSwap`] is configured, the first
+//! decrypted request head is read (bounded by [`MAX_REQUEST_HEAD_BYTES`]),
+//! any `icsbx_` placeholder in it is resolved/authorized/substituted, and the
+//! rewritten head is what reaches the origin. The response direction is
+//! untouched. Ordering is load-bearing: the swap runs **before** the origin is
+//! dialed, so a CONNECTION-DENIAL means no origin socket is ever opened. See
+//! `credential_swap`'s module doc for the two-refusal contract and the
+//! keep-alive limitation.
 //!
 //! **Fail closed.** Any failure — leaf mint, server handshake with the
 //! client, origin dial, or origin handshake — closes the connection. There
@@ -60,12 +67,24 @@ use std::{
 use rustls::pki_types::ServerName;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional},
     net::TcpStream,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use super::ca::{LeafCertificate, SandboxCertificateAuthority, normalize_host};
+use super::credential_firewall::SandboxCredentialFirewallError;
+use super::credential_swap::SandboxCredentialSwap;
+
+/// Cap on the decrypted request head this seam will buffer before deciding a
+/// credential swap (W6 phase 2). Bounded because the bytes come from the
+/// container: without a cap, a client that opens a request and never sends
+/// `\r\n\r\n` would grow a host-side buffer without limit. Exceeding it is
+/// fail-closed (the connection is refused), never "give up and forward it
+/// raw".
+const MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+
+const REQUEST_HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
 
 /// This module builds every `rustls::ClientConfig`/`ServerConfig` through
 /// `builder_with_provider(ring_crypto_provider())` — never the bare
@@ -127,6 +146,23 @@ pub(crate) enum TlsInterceptError {
          to mint a leaf or dial the origin"
     )]
     ConfigMismatch { host: String },
+    /// CONNECTION-DENIAL from the credential firewall (attribution failed, or
+    /// the lookup deadline passed). Kept as its own variant carrying the
+    /// firewall's own error so the caller can still tell the two refusals
+    /// apart in audit; it is deliberately **not** merged with the
+    /// GRANT-DENIAL path, which never surfaces as an error at all (D5: strip
+    /// and forward bare).
+    #[error("sandbox tls intercept: {0}")]
+    CredentialFirewallDenied(#[from] SandboxCredentialFirewallError),
+    /// The container sent more than [`MAX_REQUEST_HEAD_BYTES`] without
+    /// terminating the request head. Carries only the limit — never the bytes.
+    #[error("sandbox tls intercept: request head exceeded {limit_bytes} bytes without terminating")]
+    RequestHeadTooLarge { limit_bytes: usize },
+    /// The stream ended (or was not HTTP) before a request head could be
+    /// framed. Carries no detail: the only material available to describe it
+    /// is the container's own bytes.
+    #[error("sandbox tls intercept: decrypted stream did not contain a complete request head")]
+    MalformedRequestHead,
 }
 
 /// A [`TlsConnector`] whose trust store is guaranteed to be the real
@@ -304,6 +340,12 @@ pub(crate) struct TlsInterceptConfig {
     bound_hosts: HashSet<String>,
     origin_connector: VerifiedOriginConnector,
     identity: ConfigIdentity,
+    /// W6 phase 2. `None` reproduces phase 1 exactly: the decrypted stream is
+    /// relayed byte-for-byte with no parsing and no credential handling.
+    /// `Some` enables the placeholder → real-secret substitution described in
+    /// [`super::credential_swap`]. Production leaves this `None` today; it is
+    /// populated by future profile-gated wiring.
+    credential_swap: Option<SandboxCredentialSwap>,
 }
 
 impl TlsInterceptConfig {
@@ -321,7 +363,15 @@ impl TlsInterceptConfig {
                 .collect(),
             origin_connector,
             identity: ConfigIdentity::mint(),
+            credential_swap: None,
         }
+    }
+
+    /// Enables W6 phase 2's credential substitution on this config.
+    #[allow(dead_code)] // used by this module's tests; production wiring is future
+    pub(crate) fn with_credential_swap(mut self, swap: SandboxCredentialSwap) -> Self {
+        self.credential_swap = Some(swap);
+        self
     }
 
     /// D1's predicate: is `host` one this proxy instance terminates TLS for?
@@ -491,9 +541,62 @@ pub(crate) async fn terminate_and_forward(
     host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
+    connection: InterceptedConnection<'_>,
 ) -> Result<(), TlsInterceptError> {
-    terminate_and_forward_with_timeout(client, leftover, host, dial_addr, config, HANDSHAKE_TIMEOUT)
-        .await
+    terminate_and_forward_with_timeout(
+        client,
+        leftover,
+        host,
+        dial_addr,
+        config,
+        HANDSHAKE_TIMEOUT,
+        connection,
+    )
+    .await
+}
+
+/// Per-connection inputs the credential swap needs and the per-proxy
+/// [`TlsInterceptConfig`] cannot carry: who the proxy attributed this
+/// connection to (`None` = attribution failed), and the deadline bounding the
+/// firewall lookup.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InterceptedConnection<'a> {
+    pub(crate) identity: Option<(
+        &'a ironclaw_host_api::TenantId,
+        &'a ironclaw_host_api::UserId,
+    )>,
+    pub(crate) deadline: std::time::Instant,
+}
+
+impl Default for InterceptedConnection<'_> {
+    /// The safe default for every call site that does not (yet) have a real
+    /// attribution outcome to pass: `identity: None`. Combined with
+    /// `credential_swap: None` on [`TlsInterceptConfig`] (phase 1's default),
+    /// this reproduces phase 1 exactly — the request-head read/rewrite step
+    /// in [`terminate_and_forward_core`] only ever runs when a
+    /// [`super::credential_swap::SandboxCredentialSwap`] is configured, so an
+    /// unattributed default identity is inert unless a caller has also opted
+    /// into phase 2.
+    fn default() -> Self {
+        Self {
+            identity: None,
+            deadline: std::time::Instant::now() + Duration::from_secs(3600),
+        }
+    }
+}
+
+/// Per-call tuning `terminate_and_forward_core` needs beyond the connection
+/// identity (`client`/`leftover`/`host`/`dial_addr`/`config`) and the SNI
+/// test seam (`sni_server_name`): the handshake timeout (parameterized so
+/// tests can drive the timeout branch with a short real duration — see
+/// [`terminate_and_forward_with_timeout`]'s doc) and W6 phase 2's per-
+/// connection swap inputs. Bundled into one struct — rather than two more
+/// bare parameters — to keep `terminate_and_forward_core` under clippy's
+/// too-many-arguments ceiling now that phase 2 added `connection` on top of
+/// the D1 `BoundHost`/`ConfigIdentity` hardening's existing argument count.
+struct CoreCallOptions<'a> {
+    handshake_timeout: Duration,
+    connection: InterceptedConnection<'a>,
 }
 
 /// The timeout-parameterized core `terminate_and_forward` delegates to with
@@ -510,6 +613,7 @@ async fn terminate_and_forward_with_timeout(
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
+    connection: InterceptedConnection<'_>,
 ) -> Result<(), TlsInterceptError> {
     terminate_and_forward_core(
         client,
@@ -517,8 +621,11 @@ async fn terminate_and_forward_with_timeout(
         host,
         dial_addr,
         config,
-        handshake_timeout,
         build_sni_server_name,
+        CoreCallOptions {
+            handshake_timeout,
+            connection,
+        },
     )
     .await
 }
@@ -548,6 +655,7 @@ async fn terminate_and_forward_with_forced_sni_failure(
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
     handshake_timeout: Duration,
+    connection: InterceptedConnection<'_>,
 ) -> Result<(), TlsInterceptError> {
     terminate_and_forward_core(
         client,
@@ -555,12 +663,15 @@ async fn terminate_and_forward_with_forced_sni_failure(
         host,
         dial_addr,
         config,
-        handshake_timeout,
         |host| {
             Err(TlsInterceptError::InvalidSniHost {
                 host: host.to_string(),
                 reason: "forced by test to pin the pre-dial ordering".to_string(),
             })
+        },
+        CoreCallOptions {
+            handshake_timeout,
+            connection,
         },
     )
     .await
@@ -580,12 +691,16 @@ async fn terminate_and_forward_core<F>(
     host: BoundHost,
     dial_addr: SocketAddr,
     config: &TlsInterceptConfig,
-    handshake_timeout: Duration,
     sni_server_name: F,
+    options: CoreCallOptions<'_>,
 ) -> Result<(), TlsInterceptError>
 where
     F: FnOnce(&str) -> Result<ServerName<'static>, TlsInterceptError>,
 {
+    let CoreCallOptions {
+        handshake_timeout,
+        connection,
+    } = options;
     // D1, scoped to the specific config instance: `host` proves "some
     // config allowed this host," not "THIS config allowed this host" —
     // two independently-constructed configs can allowlist the identical
@@ -639,6 +754,27 @@ where
             })?
             .map_err(|error| TlsInterceptError::ClientHandshakeFailed(error.to_string()))?;
 
+    // W6 phase 2: read and rewrite the first request head BEFORE the origin is
+    // dialed. Ordering is load-bearing — a CONNECTION-DENIAL from the
+    // credential firewall must mean the origin socket is never opened at
+    // all, not "opened and then abandoned." `None` reproduces phase 1
+    // exactly: no request head is read here, and the decrypted stream is
+    // relayed byte-for-byte below via `copy_bidirectional`.
+    let rewritten_head = match &config.credential_swap {
+        None => None,
+        Some(swap) => {
+            let Some((head, trailing)) = read_request_head(&mut client_tls).await? else {
+                // The client closed without sending anything. Nothing to
+                // forward, and no reason to dial the origin.
+                return Ok(());
+            };
+            Some((
+                swap.rewrite_request_head(&head, &host, connection.identity, connection.deadline)?,
+                trailing,
+            ))
+        }
+    };
+
     // Only reachable once the client trusts our leaf and completed its
     // handshake — a client-side failure above never gets this far, so an
     // unbound/failed interception never opens an origin socket either.
@@ -679,10 +815,82 @@ where
     })?
     .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
 
-    copy_bidirectional(&mut client_tls, &mut origin_tls)
+    let (Some(swap), Some((rewritten_head, trailing))) = (&config.credential_swap, rewritten_head)
+    else {
+        copy_bidirectional(&mut client_tls, &mut origin_tls)
+            .await
+            .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+        return Ok(());
+    };
+
+    let (mut client_read, mut client_write) = tokio::io::split(client_tls);
+    let (mut origin_read, mut origin_write) = tokio::io::split(origin_tls);
+    origin_write
+        .write_all(rewritten_head.bytes())
         .await
         .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+    // Drop the rewritten head as soon as it is on the wire: it holds the real
+    // secret, and `SecretSlice`'s `Drop` zeroizes it.
+    drop(rewritten_head);
+
+    // `trailing` seeds the scrubbing relay so a request pipelined behind the
+    // first one is scrubbed, never swapped — see `read_request_head`'s doc.
+    let upstream = swap.relay_scrubbing_placeholders(trailing, &mut client_read, &mut origin_write);
+    let downstream = async {
+        tokio::io::copy(&mut origin_read, &mut client_write).await?;
+        client_write.shutdown().await
+    };
+    tokio::try_join!(upstream, downstream)
+        .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
     Ok(())
+}
+
+/// Reads one HTTP request head off the decrypted client stream, framed at the
+/// FIRST `\r\n\r\n` and bounded by [`MAX_REQUEST_HEAD_BYTES`]. Returns the
+/// head and any bytes that arrived behind it in the same read.
+///
+/// Framing at the first terminator is a security boundary, not tidiness: two
+/// requests can arrive in one TCP segment, and a head that ran past the
+/// terminator would let a pipelined second request's placeholder be evaluated
+/// against the FIRST request's method and path — a credential-scope bypass.
+/// The trailing bytes are handed to the scrubbing relay instead, so a
+/// placeholder in them is stripped, never swapped.
+///
+/// `Ok(None)` means the client closed without sending a byte. Anything else
+/// that fails to frame — EOF mid-head, a non-HTTP protocol, or exceeding the
+/// cap — is an `Err`, i.e. fail closed: a bound host is an HTTPS API by
+/// construction, and forwarding unframed bytes would mean forwarding a
+/// placeholder this seam never got to inspect.
+async fn read_request_head(
+    client: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, TlsInterceptError> {
+    let mut buffered = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = client
+            .read(&mut chunk)
+            .await
+            .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+        if read == 0 {
+            if buffered.is_empty() {
+                return Ok(None);
+            }
+            return Err(TlsInterceptError::MalformedRequestHead);
+        }
+        buffered.extend_from_slice(&chunk[..read]);
+        if let Some(start) = buffered
+            .windows(REQUEST_HEAD_TERMINATOR.len())
+            .position(|window| window == REQUEST_HEAD_TERMINATOR)
+        {
+            let rest = buffered.split_off(start + REQUEST_HEAD_TERMINATOR.len());
+            return Ok(Some((buffered, rest)));
+        }
+        if buffered.len() > MAX_REQUEST_HEAD_BYTES {
+            return Err(TlsInterceptError::RequestHeadTooLarge {
+                limit_bytes: MAX_REQUEST_HEAD_BYTES,
+            });
+        }
+    }
 }
 
 /// Builds the `ServerName` used for the origin TLS handshake from the

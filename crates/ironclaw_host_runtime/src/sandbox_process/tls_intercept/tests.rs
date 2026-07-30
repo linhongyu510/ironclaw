@@ -225,6 +225,7 @@ async fn unbound_host_is_not_bound_and_mints_no_leaf() {
             bound_host,
             unreachable_origin_addr,
             &config,
+            InterceptedConnection::default(),
         )
         .await;
         (result, config.cached_leaf_count())
@@ -293,6 +294,7 @@ async fn bound_host_from_one_config_is_rejected_by_a_different_config() {
             bound_via_a,
             unreachable_origin_addr,
             &config_b,
+            InterceptedConnection::default(),
         )
         .await;
         (result, config_b.cached_leaf_count())
@@ -432,7 +434,15 @@ async fn bound_host_is_intercepted_with_our_ca_and_relays_bytes() {
             .await
             .expect("reads the buffered ClientHello prefix");
         let bound_host = config.bind(host).expect("host is bound in this test");
-        terminate_and_forward(stream, leftover.to_vec(), bound_host, origin_addr, &config).await
+        terminate_and_forward(
+            stream,
+            leftover.to_vec(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection::default(),
+        )
+        .await
     });
 
     // The "container" side: a real rustls client, trusting only OUR
@@ -536,7 +546,15 @@ async fn client_handshake_failure_never_dials_the_origin() {
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let bound_host = config.bind(host).expect("host is bound in this test");
-        terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await
+        terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection::default(),
+        )
+        .await
     });
 
     let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
@@ -605,7 +623,15 @@ async fn origin_handshake_failure_never_leaks_plaintext_to_the_origin() {
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let bound_host = config.bind(host).expect("host is bound in this test");
-        terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await
+        terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection::default(),
+        )
+        .await
     });
 
     // The "container" side trusts OUR ca, so its own handshake with the
@@ -678,6 +704,7 @@ async fn client_handshake_times_out_instead_of_hanging_forever() {
             unreachable_origin_addr,
             &config,
             Duration::from_millis(200),
+            InterceptedConnection::default(),
         )
         .await
     });
@@ -871,8 +898,15 @@ async fn invalid_host_fails_before_the_origin_is_dialed() {
     let server_task = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
         let bound_host = config.bind(host).expect("host is bound in this test");
-        let result =
-            terminate_and_forward(stream, Vec::new(), bound_host, origin_addr, &config).await;
+        let result = terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection::default(),
+        )
+        .await;
         (result, config.cached_leaf_count())
     });
 
@@ -963,6 +997,7 @@ async fn invalid_sni_host_fails_before_the_origin_is_dialed() {
             origin_addr,
             &config,
             HANDSHAKE_TIMEOUT,
+            InterceptedConnection::default(),
         )
         .await
     });
