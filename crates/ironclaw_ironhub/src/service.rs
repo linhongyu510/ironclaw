@@ -25,7 +25,6 @@ use super::catalog::{
     validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
     validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
 };
-use super::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
     IronHubEntryKind, IronHubInstallOptions, IronHubManifest, IronHubPhase, IronHubProvenance,
@@ -33,6 +32,7 @@ use super::model::{
     MAX_METADATA_BYTES, MAX_SIGNED_MANIFEST_BYTES, MAX_WASM_BYTES,
 };
 use super::package::ironhub_tool_package;
+use crate::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 
 struct CachedManifest {
     manifest: Arc<IronHubManifest>,

@@ -413,3 +413,15 @@ pub use product_surface_inbound::{
     ProductSetupExtensionRequest, ProductSubmitTurnRequest, product_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;
+
+#[cfg(test)]
+mod ironhub_public_surface_tests {
+    #[test]
+    fn deliver_install_command_is_exported_at_the_crate_root() {
+        assert_eq!(
+            super::IRONHUB_DELIVER_INSTALL_COMMAND_ID,
+            "ironhub.deliver_install"
+        );
+        let _ = super::IRONHUB_DELIVER_INSTALL_COMMAND;
+    }
+}

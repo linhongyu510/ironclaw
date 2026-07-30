@@ -60,3 +60,15 @@ pub use service::{
     IronhubManifestUrl, RebornIronHubRuntime, execute_reborn_ironhub_command,
     execute_reborn_ironhub_service_command, validated_manifest_url,
 };
+
+#[cfg(test)]
+mod public_surface_tests {
+    use super::*;
+
+    #[test]
+    fn capability_ids_are_stable_at_the_crate_root() {
+        assert_eq!(IRONHUB_SEARCH_CAPABILITY_ID, "builtin.ironhub_search");
+        assert_eq!(IRONHUB_INFO_CAPABILITY_ID, "builtin.ironhub_info");
+        assert_eq!(IRONHUB_INSTALL_CAPABILITY_ID, "builtin.ironhub_install");
+    }
+}

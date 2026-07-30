@@ -126,3 +126,15 @@ pub use static_assets::{
     StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,
     static_router_with_config,
 };
+
+#[cfg(test)]
+mod ironhub_public_surface_tests {
+    #[test]
+    fn deliver_install_route_is_exported_from_webui_v2() {
+        assert_eq!(
+            super::WEBUI_V2_ROUTE_IRONHUB_DELIVER_INSTALL,
+            "webui.v2.ironhub_deliver_install"
+        );
+        let _ = super::ironhub_deliver_install;
+    }
+}

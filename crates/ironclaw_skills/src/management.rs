@@ -24,6 +24,7 @@ pub use install_bundle::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
     SkillInstallFile,
 };
+pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle};
 
 use install_bundle::{
     existing_skill_install_matches, install_metadata_source, installed_skill_source,
@@ -565,17 +566,6 @@ pub async fn read_skill_content(
     context: &SkillManagementContext,
     request: SkillContentRequest<'_>,
 ) -> Result<SkillContentResult, SkillManagementError> {
-    let mut result = read_skill_content_for_restore(context, request).await?;
-    // Persisted origins are host-maintenance metadata. Keep them out of the
-    // caller/model-visible read result.
-    result.source_url = None;
-    Ok(result)
-}
-
-pub(super) async fn read_skill_content_for_restore(
-    context: &SkillManagementContext,
-    request: SkillContentRequest<'_>,
-) -> Result<SkillContentResult, SkillManagementError> {
     if !validate_skill_name(request.name) {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
@@ -590,20 +580,13 @@ pub(super) async fn read_skill_content_for_restore(
         .as_deref()
         .map(|bytes| install_metadata_source(SkillSource::User, bytes))
         .unwrap_or(SkillSource::User);
-    let source_url = install_metadata.and_then(|bytes| {
-        match serde_json::from_slice::<crate::InstalledSkillMetadata>(&bytes) {
-            Ok(metadata) => metadata.source_url,
-            Err(error) => {
-                tracing::debug!(%error, "skill install metadata source URL is unavailable");
-                None
-            }
-        }
-    });
     Ok(SkillContentResult {
         name: request.name.to_string(),
         content,
         source,
-        source_url,
+        // Persisted origins are host-maintenance metadata. Keep them out of
+        // the caller/model-visible read result.
+        source_url: None,
     })
 }
 

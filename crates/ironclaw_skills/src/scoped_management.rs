@@ -10,7 +10,8 @@ use crate::{
     SkillContentRequest, SkillContentResult, SkillInstallRequest, SkillInstallResult,
     SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
     SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills, management::read_skill_content_for_restore,
+    SkillUpdateResult, install_skill, list_skills,
+    management::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle},
     read_skill_content, remove_skill, search_skills, update_skill,
 };
 
@@ -49,7 +50,8 @@ pub struct ScopedSkillManagementPort {
 /// caller/model-visible skill reads.
 pub struct SkillReplacementSnapshot {
     scope: ResourceScope,
-    content: SkillContentResult,
+    name: String,
+    bundle: SkillBundleSnapshot,
 }
 
 impl ScopedSkillManagementPort {
@@ -132,16 +134,12 @@ impl ScopedSkillManagementPort {
         name: &str,
     ) -> Result<SkillReplacementSnapshot, ScopedSkillManagementError> {
         let context = self.context_for_scope(scope.clone())?;
-        let content =
-            read_skill_content_for_restore(&context, SkillContentRequest { name }).await?;
-        if content.source == crate::ManagedSkillSource::System {
-            return Err(SkillManagementError::with_reason(
-                crate::SkillManagementErrorKind::Conflict,
-                format!("cannot force-replace system skill '{name}'"),
-            )
-            .into());
-        }
-        Ok(SkillReplacementSnapshot { scope, content })
+        let bundle = capture_skill_bundle(&context, name).await?;
+        Ok(SkillReplacementSnapshot {
+            scope,
+            name: name.to_string(),
+            bundle,
+        })
     }
 
     pub async fn restore_replacement_snapshot(
@@ -149,37 +147,12 @@ impl ScopedSkillManagementPort {
         snapshot: SkillReplacementSnapshot,
     ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
         let context = self.context_for_scope(snapshot.scope)?;
-        let content = snapshot.content;
-        let (source, source_url) = match content.source {
-            crate::ManagedSkillSource::Installed => {
-                let source_url = content.source_url.as_deref().ok_or_else(|| {
-                    SkillManagementError::with_reason(
-                        crate::SkillManagementErrorKind::InvalidInput,
-                        "installed skill replacement snapshot is missing source metadata",
-                    )
-                })?;
-                (SkillInstallSource::InstalledUrl, Some(source_url))
-            }
-            crate::ManagedSkillSource::User => (SkillInstallSource::User, None),
-            crate::ManagedSkillSource::System => {
-                return Err(SkillManagementError::with_reason(
-                    crate::SkillManagementErrorKind::Conflict,
-                    "system skills cannot be restored into user skill storage",
-                )
-                .into());
-            }
-        };
-        Ok(install_skill(
-            &context,
-            SkillInstallRequest {
-                name: Some(&content.name),
-                content: &content.content,
-                files: &[],
-                source,
-                source_url,
-            },
-        )
-        .await?)
+        let source = restore_skill_bundle(&context, &snapshot.name, snapshot.bundle).await?;
+        Ok(SkillInstallResult {
+            scoped_path: format!("/skills/{}/SKILL.md", snapshot.name),
+            name: snapshot.name,
+            source,
+        })
     }
 
     pub async fn update_for_scope(
@@ -321,5 +294,81 @@ pub fn build_existing_standalone_skill_management_port(
 fn invalid_skill_context(error: impl std::fmt::Display) -> ScopedSkillManagementError {
     ScopedSkillManagementError::InvalidContext {
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_filesystem::InMemoryBackend;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn replacement_snapshot_round_trips_through_scoped_port() {
+        let owner = UserId::new("replacement-snapshot-owner").expect("owner id");
+        let port =
+            build_scoped_skill_management_port(owner.clone(), Arc::new(InMemoryBackend::new()));
+        let scope =
+            ResourceScope::local_default(owner, InvocationId::new()).expect("resource scope");
+        let content =
+            "---\nname: scoped-snapshot\ndescription: rollback fixture\n---\n# Original\n";
+        port.install_from_url_for_scope(
+            scope.clone(),
+            None,
+            content,
+            "https://hub.example/scoped-snapshot/SKILL.md",
+        )
+        .await
+        .expect("install original skill");
+
+        let snapshot = port
+            .capture_replacement_snapshot_for_scope(scope.clone(), "scoped-snapshot")
+            .await
+            .expect("capture replacement snapshot");
+        port.remove_for_scope(scope.clone(), "scoped-snapshot")
+            .await
+            .expect("remove original skill");
+        let restored = port
+            .restore_replacement_snapshot(snapshot)
+            .await
+            .expect("restore replacement snapshot");
+
+        assert_eq!(restored.name, "scoped-snapshot");
+        assert_eq!(restored.source, crate::ManagedSkillSource::Installed);
+        assert_eq!(
+            port.read_content_for_scope(scope, "scoped-snapshot")
+                .await
+                .expect("read restored skill")
+                .content,
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_snapshot_rejects_missing_skill_without_creating_state() {
+        let owner = UserId::new("missing-snapshot-owner").expect("owner id");
+        let port =
+            build_scoped_skill_management_port(owner.clone(), Arc::new(InMemoryBackend::new()));
+        let scope =
+            ResourceScope::local_default(owner, InvocationId::new()).expect("resource scope");
+
+        let error = match port
+            .capture_replacement_snapshot_for_scope(scope.clone(), "missing-skill")
+            .await
+        {
+            Ok(_) => panic!("missing skill cannot produce a replacement snapshot"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ScopedSkillManagementError::Skill(ref source)
+                if source.kind() == crate::SkillManagementErrorKind::NotFound
+        ));
+        assert!(
+            port.list_for_scope(scope)
+                .await
+                .expect("list remains readable")
+                .is_empty()
+        );
     }
 }

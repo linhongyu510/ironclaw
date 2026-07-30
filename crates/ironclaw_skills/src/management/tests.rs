@@ -912,6 +912,87 @@ async fn read_skill_content_hides_internal_source_origin() {
 }
 
 #[tokio::test]
+async fn replacement_snapshot_restores_complete_bundle_and_raw_metadata() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+    let companion_bytes = b"bundled reference\n";
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("snapshot-skill", "description", "PROMPT"),
+            files: &[SkillInstallFile {
+                relative_path: "references/guide.txt",
+                contents: companion_bytes,
+            }],
+            source: SkillInstallSource::InstalledUrl,
+            source_url: Some("https://hub.example/snapshot-skill/SKILL.md"),
+        },
+    )
+    .await
+    .expect("install bundled skill");
+
+    let metadata_path = "/projects/skills/snapshot-skill/.ironclaw-install.json";
+    let metadata_virtual_path = VirtualPath::new(metadata_path).expect("metadata path");
+    let malformed_metadata = br#"{"source":"installed_url","source_url":"unterminated"#;
+    filesystem
+        .write_file(&metadata_virtual_path, malformed_metadata)
+        .await
+        .expect("corrupt metadata fixture");
+    let invalid_name_snapshot = capture_skill_bundle(&context, "snapshot-skill")
+        .await
+        .expect("capture invalid-name fixture");
+    let invalid_name_error =
+        restore_skill_bundle(&context, "../snapshot-skill", invalid_name_snapshot)
+            .await
+            .expect_err("restore rejects invalid skill name");
+    assert_eq!(
+        invalid_name_error.kind(),
+        SkillManagementErrorKind::InvalidInput
+    );
+    let conflict_snapshot = capture_skill_bundle(&context, "snapshot-skill")
+        .await
+        .expect("capture conflict fixture");
+    let conflict_error = restore_skill_bundle(&context, "snapshot-skill", conflict_snapshot)
+        .await
+        .expect_err("restore refuses to overwrite an existing bundle");
+    assert_eq!(conflict_error.kind(), SkillManagementErrorKind::Conflict);
+    let snapshot = capture_skill_bundle(&context, "snapshot-skill")
+        .await
+        .expect("capture complete bundle");
+    remove_skill(
+        &context,
+        SkillRemoveRequest {
+            name: "snapshot-skill",
+        },
+    )
+    .await
+    .expect("remove original bundle");
+
+    let source = restore_skill_bundle(&context, "snapshot-skill", snapshot)
+        .await
+        .expect("restore complete bundle");
+    assert_eq!(source, SkillSource::Installed);
+    assert_eq!(
+        filesystem
+            .read_file(&metadata_virtual_path)
+            .await
+            .expect("read restored metadata"),
+        malformed_metadata
+    );
+    assert_eq!(
+        filesystem
+            .read_file(
+                &VirtualPath::new("/projects/skills/snapshot-skill/references/guide.txt")
+                    .expect("companion path"),
+            )
+            .await
+            .expect("read restored companion"),
+        companion_bytes
+    );
+}
+
+#[tokio::test]
 async fn update_skill_rejects_invalid_missing_oversized_and_name_change() {
     let filesystem = Arc::new(InMemoryBackend::default());
     write_file(

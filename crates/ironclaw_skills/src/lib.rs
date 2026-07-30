@@ -96,3 +96,14 @@ pub use catalog::{
 };
 #[cfg(feature = "registry")]
 pub use registry::{SkillRegistry, SkillRegistryError, compute_hash};
+
+#[cfg(test)]
+mod replacement_snapshot_public_surface_tests {
+    #[test]
+    fn replacement_snapshot_is_exported_at_the_crate_root() {
+        assert!(
+            std::any::type_name::<super::SkillReplacementSnapshot>()
+                .ends_with("::SkillReplacementSnapshot")
+        );
+    }
+}

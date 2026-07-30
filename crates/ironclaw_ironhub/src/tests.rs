@@ -3,7 +3,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_extensions::{ExtensionInstallationStorePort, InstallationOwner};
-use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
+};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkPolicy, ProductSurfaceCaller, ResourceScope,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
@@ -857,6 +859,28 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     .await
     .expect("old skill installs through execute");
 
+    let metadata_path = skill_filesystem
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().ends_with("/.ironclaw-install.json"))
+        .expect("old install metadata path");
+    let skill_dir = metadata_path
+        .as_str()
+        .strip_suffix("/.ironclaw-install.json")
+        .expect("metadata has skill directory");
+    let companion_path =
+        VirtualPath::new(format!("{skill_dir}/references.txt")).expect("companion path");
+    let companion_bytes = b"old bundled reference\n";
+    skill_filesystem
+        .write_file(&companion_path, companion_bytes)
+        .await
+        .expect("seed old companion file");
+    let malformed_metadata = br#"{"source":"installed_url","source_url":"unterminated"#;
+    skill_filesystem
+        .write_file(&metadata_path, malformed_metadata)
+        .await
+        .expect("seed malformed install metadata");
+
     skill_filesystem.add_fault(
         Fault::on(FilesystemOperation::WriteFile)
             .path(".ironclaw-install.json")
@@ -900,8 +924,24 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
         .filter(|path| path.as_str().contains(".ironclaw-install.json"))
         .count();
     assert_eq!(
-        metadata_writes, 3,
-        "old install, failed replacement, and compensation must each write metadata"
+        metadata_writes, 4,
+        "old install, malformed fixture, failed replacement, and compensation must write metadata"
+    );
+    assert_eq!(
+        skill_filesystem
+            .read_file(&metadata_path)
+            .await
+            .expect("restored metadata"),
+        malformed_metadata,
+        "compensation must restore malformed metadata byte-for-byte"
+    );
+    assert_eq!(
+        skill_filesystem
+            .read_file(&companion_path)
+            .await
+            .expect("restored companion file"),
+        companion_bytes,
+        "compensation must restore every bundled file"
     );
     let restored = skill_management
         .read_content_for_scope(scope.clone(), "installed-skill")
