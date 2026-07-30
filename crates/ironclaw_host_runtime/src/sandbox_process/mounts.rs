@@ -71,6 +71,53 @@ pub(super) fn ca_bundle_bind(bundle_path: &Path) -> Result<ContainerBind, Runtim
     ContainerBind::new(bundle_path.to_path_buf(), CONTAINER_CA_BUNDLE_PATH, true)
 }
 
+/// Writes `ca_bundle_pem` (the sandbox egress proxy's container trust
+/// bundle — system roots plus its CA's public root certificate, no private
+/// key material; see `ca::SandboxCertificateAuthority::
+/// build_container_trust_bundle_pem`) to a stable host-side path under
+/// `workspace_root` and returns the canonicalized path, ready for
+/// [`ca_bundle_bind`].
+///
+/// One shared file per `workspace_root` (NOT per-user): every sandbox
+/// container in a given deployment is served by the SAME egress proxy
+/// instance and therefore must trust the SAME CA, so there is nothing
+/// tenant/user-scoped about this content — it is public certificate
+/// material, safe to be world-readable. Rewritten on every call (cheap: a
+/// few KiB, only at container-creation time, never per-exec) rather than
+/// written once behind a guard, so a proxy restart with a freshly
+/// regenerated CA (the root is regenerated fresh in memory on every process
+/// start — see `ca.rs`'s module doc) is always reflected the next time a
+/// container is created or recycled, without this transport needing to
+/// track whether the bundle is stale.
+pub(super) async fn materialize_ca_bundle(
+    workspace_root: &Path,
+    ca_bundle_pem: &str,
+) -> Result<PathBuf, RuntimeProcessError> {
+    let bundle_dir = workspace_root.join(".sandbox-ca");
+    tokio::fs::create_dir_all(&bundle_dir)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle directory could not be initialized: {error}"
+            ))
+        })?;
+    let bundle_path = bundle_dir.join("ca-bundle.pem");
+    tokio::fs::write(&bundle_path, ca_bundle_pem)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle could not be written: {error}"
+            ))
+        })?;
+    tokio::fs::canonicalize(&bundle_path)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle path could not be resolved: {error}"
+            ))
+        })
+}
+
 fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
     if value.as_bytes().contains(&0) {
         return Err(RuntimeProcessError::ExecutionFailed(format!(

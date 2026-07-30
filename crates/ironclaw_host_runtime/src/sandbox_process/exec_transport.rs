@@ -10,7 +10,7 @@
 
 use std::{
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -482,7 +482,7 @@ async fn create_and_start_user_container(
 /// container keeps trusting the OLD CA while the restarted proxy signs
 /// with a NEW one, and every intercepted bound-host TLS request inside it
 /// then fails certificate verification while both sides report healthy.
-/// Hashing `ca_bundle_pem` here — the exact bytes [`materialize_ca_bundle`]
+/// Hashing `ca_bundle_pem` here — the exact bytes [`mounts::materialize_ca_bundle`]
 /// writes into the container's bind-mounted trust bundle — makes a rotated
 /// CA force the same recycle-on-create path as any other posture change.
 struct SecurityPostureFields {
@@ -593,7 +593,8 @@ pub(super) async fn user_container_launch_config(
     // every `docker exec` (`SANDBOX_EXEC_UID`/`GID`) already assumes.
     let mut binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
     if let Some(ca_bundle_pem) = config.ca_bundle_pem.as_deref() {
-        let bundle_path = materialize_ca_bundle(&config.workspace_root, ca_bundle_pem).await?;
+        let bundle_path =
+            mounts::materialize_ca_bundle(&config.workspace_root, ca_bundle_pem).await?;
         binds.push(mounts::ca_bundle_bind(&bundle_path)?.into_docker_bind());
         // OpenSSL-linked clients (`curl`, `git`, most of Python's `ssl`
         // module) read `SSL_CERT_FILE`; `requests`/`pip` read
@@ -660,53 +661,6 @@ pub(super) async fn user_container_launch_config(
         attach_stderr: Some(false),
         ..Default::default()
     })
-}
-
-/// Writes `ca_bundle_pem` (the sandbox egress proxy's container trust
-/// bundle — system roots plus its CA's public root certificate, no private
-/// key material; see `ca::SandboxCertificateAuthority::
-/// build_container_trust_bundle_pem`) to a stable host-side path under
-/// `workspace_root` and returns the canonicalized path, ready for
-/// `mounts::ca_bundle_bind`.
-///
-/// One shared file per `workspace_root` (NOT per-user): every sandbox
-/// container in a given deployment is served by the SAME egress proxy
-/// instance and therefore must trust the SAME CA, so there is nothing
-/// tenant/user-scoped about this content — it is public certificate
-/// material, safe to be world-readable. Rewritten on every call (cheap: a
-/// few KiB, only at container-creation time, never per-exec) rather than
-/// written once behind a guard, so a proxy restart with a freshly
-/// regenerated CA (the root is regenerated fresh in memory on every process
-/// start — see `ca.rs`'s module doc) is always reflected the next time a
-/// container is created or recycled, without this transport needing to
-/// track whether the bundle is stale.
-async fn materialize_ca_bundle(
-    workspace_root: &Path,
-    ca_bundle_pem: &str,
-) -> Result<PathBuf, RuntimeProcessError> {
-    let bundle_dir = workspace_root.join(".sandbox-ca");
-    tokio::fs::create_dir_all(&bundle_dir)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox CA trust bundle directory could not be initialized: {error}"
-            ))
-        })?;
-    let bundle_path = bundle_dir.join("ca-bundle.pem");
-    tokio::fs::write(&bundle_path, ca_bundle_pem)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox CA trust bundle could not be written: {error}"
-            ))
-        })?;
-    tokio::fs::canonicalize(&bundle_path)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox CA trust bundle path could not be resolved: {error}"
-            ))
-        })
 }
 
 /// `setsid` creates a new session AND process group for `command`, isolating
