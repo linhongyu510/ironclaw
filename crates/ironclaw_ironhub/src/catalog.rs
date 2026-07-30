@@ -1,7 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern, sha256_digest_token};
 use sha2::{Digest, Sha256};
 
 use super::model::{
@@ -196,11 +196,11 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
 }
 
 pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
-    sha256_hex(format!("{}:{}", entry.wasm.sha256, entry.capabilities.sha256).as_bytes())
+    sha256_digest_token(format!("{}:{}", entry.wasm.sha256, entry.capabilities.sha256).as_bytes())
 }
 
 fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
-    sha256_hex(entry.skill_md.sha256.as_bytes())
+    sha256_digest_token(entry.skill_md.sha256.as_bytes())
 }
 
 fn compact_description(description: &str) -> String {

@@ -622,7 +622,7 @@ async fn replayed_private_manifest_is_rejected_across_rotating_access_tokens() {
 }
 
 #[tokio::test]
-async fn deep_link_install_uses_authenticated_caller_scope_not_signed_uid_or_runtime_owner() {
+async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scope() {
     const LINK_KEY: &str = "ihub_sk_CallerScopeTestKey0000000000000000000000000";
 
     let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
@@ -679,7 +679,10 @@ async fn deep_link_install_uses_authenticated_caller_scope_not_signed_uid_or_run
         IronhubSharedKey::new(LINK_KEY).expect("link key"),
     )
     .expect("link service");
-    let artifact_digest = sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes());
+    let artifact_digest = format!(
+        "sha256:{}",
+        sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())
+    );
     let timestamp = u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp");
     let mut request = IronhubInstallDeliveryRequest {
         slug: "caller-skill".to_string(),
