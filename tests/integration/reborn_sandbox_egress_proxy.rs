@@ -304,7 +304,7 @@ async fn sandbox_egress_proxy_enforces_allowlist_through_composition() {
 /// it is a genuinely different (complementary) code path from the test
 /// above, not a weakened duplicate of it.
 mod dual_homed_topology {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
     pub const NET_INTERNAL: &str = "ironclaw-egress-test-internal";
@@ -354,13 +354,93 @@ mod dual_homed_topology {
         }
     }
 
+    /// Content-addressed tag for the proxy image: a sha256 over every file
+    /// under `crates/ironclaw_host_runtime/` (the crate that builds into the
+    /// `egress_proxy_standalone` binary — its lib code, including
+    /// `sandbox_process/ca.rs` and `egress_proxy.rs`, is what actually ends
+    /// up in the image) plus the Dockerfile itself.
+    ///
+    /// `ensure_proxy_image_built` keys its "already built" check off this
+    /// tag rather than the fixed `PROXY_IMAGE` name. Without this, the image
+    /// was cached forever under a fixed tag and a source regression in the
+    /// proxy binary (e.g. breaking CA distribution) would never invalidate
+    /// it — the live TLS-interception test would keep passing against a
+    /// stale binary on any machine (including CI runners) that persist
+    /// Docker state across runs. Hashing file contents (not mtimes) means a
+    /// no-op edit that doesn't change bytes still hits the cache, and any
+    /// real source change gets a fresh tag and forces a rebuild.
+    fn content_digest_tag() -> String {
+        use sha2::{Digest, Sha256};
+
+        let root = repo_root();
+        let crate_dir = root.join("crates/ironclaw_host_runtime");
+        let dockerfile = root.join("docker/sandbox-egress-proxy.Dockerfile");
+
+        let mut files: Vec<PathBuf> = Vec::new();
+        collect_files(&crate_dir, &mut files);
+        files.push(dockerfile);
+        // Sort for a deterministic hash regardless of filesystem walk order.
+        files.sort();
+
+        let mut hasher = Sha256::new();
+        for path in &files {
+            let relative = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned();
+            hasher.update(relative.as_bytes());
+            hasher.update(b"\0");
+            let contents = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("reading {} for content digest: {e}", path.display()));
+            hasher.update(&contents);
+            hasher.update(b"\0");
+        }
+        let digest = hasher.finalize();
+        format!("ironclaw-egress-proxy-standalone:src-{}", hex::encode(digest))
+    }
+
+    fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => panic!("reading dir {} for content digest: {e}", dir.display()),
+        };
+        for entry in entries {
+            let entry = entry.expect("dir entry should be readable");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("file type should be readable");
+            if file_type.is_dir() {
+                // Skip build output; it's not a build input and would make
+                // the digest depend on stale artifacts from prior runs.
+                if path.file_name().and_then(|n| n.to_str()) == Some("target") {
+                    continue;
+                }
+                collect_files(&path, out);
+            } else if file_type.is_file() {
+                out.push(path);
+            }
+        }
+    }
+
     /// Builds the proxy image (from the REAL `EgressAllowlistProxy`, see
     /// `crates/ironclaw_host_runtime/examples/egress_proxy_standalone.rs`)
-    /// if it isn't already present locally, so repeat local runs don't pay
-    /// the full workspace compile every time.
+    /// if an image tagged with the current content digest isn't already
+    /// present locally, so repeat local runs don't pay the full workspace
+    /// compile every time a source file is untouched — but any change to
+    /// the crate or the Dockerfile mints a new tag and forces a real
+    /// rebuild. See `content_digest_tag` for why this can't be keyed off
+    /// the fixed `PROXY_IMAGE` name.
     pub fn ensure_proxy_image_built() {
-        let inspect = docker(&["image", "inspect", PROXY_IMAGE]);
+        let digest_tag = content_digest_tag();
+        let inspect = docker(&["image", "inspect", &digest_tag]);
         if inspect.status.success() {
+            // Content unchanged since the last build: re-point the stable
+            // `PROXY_IMAGE` alias at the already-built content-addressed
+            // image instead of rebuilding.
+            assert!(
+                docker(&["tag", &digest_tag, PROXY_IMAGE]).status.success(),
+                "re-tagging the cached proxy image as {PROXY_IMAGE} should succeed"
+            );
             return;
         }
         let dockerfile = repo_root().join("docker/sandbox-egress-proxy.Dockerfile");
@@ -369,6 +449,8 @@ mod dual_homed_topology {
                 "build",
                 "-f",
                 dockerfile.to_str().expect("valid utf8 path"),
+                "-t",
+                &digest_tag,
                 "-t",
                 PROXY_IMAGE,
                 ".",
@@ -451,6 +533,19 @@ mod dual_homed_topology {
         // net-egress (so it can reach the origins) — mirrors production's
         // "worker has no direct route out; the proxy is its only path"
         // semantics.
+        // `pypi.org` is appended to the standalone proxy's allowlist
+        // alongside the local recording origin. It plays no role in
+        // assertions 1-4 above (a plain-HTTP dual-homed topology test); its
+        // purpose is `sandbox_egress_proxy_dual_homed_tls_interception`
+        // below, which needs a REAL, exact-match allowlisted host with a
+        // publicly-trusted TLS certificate so `bind_sandbox_egress_proxy_
+        // with_tls_intercept`'s `interception_bound_hosts` binds it (exact
+        // match, no wildcard) and the proxy's `VerifiedOriginConnector`
+        // (real system roots) can actually verify the real origin when
+        // re-originating. The dual-homed proxy reaches it over `NET_EGRESS`
+        // (a normal, non-`--internal` bridge — NATs to the real internet),
+        // while the worker stays on the internal-only network and can only
+        // reach it through the proxy.
         let run_proxy = docker(&[
             "run",
             "-d",
@@ -462,7 +557,7 @@ mod dual_homed_topology {
             "-e",
             "EGRESS_PROXY_BIND_ADDR=0.0.0.0:8080",
             "-e",
-            &format!("EGRESS_PROXY_ALLOWED_HOSTS={ORIGIN_ALLOWED_NAME}"),
+            &format!("EGRESS_PROXY_ALLOWED_HOSTS={ORIGIN_ALLOWED_NAME},pypi.org"),
             PROXY_IMAGE,
         ]);
         assert!(
@@ -517,6 +612,63 @@ mod dual_homed_topology {
             "/var/log/origin_requests.log",
         ]);
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The path the standalone proxy binary
+    /// (`examples/egress_proxy_standalone.rs`) writes its container trust
+    /// bundle to, inside its OWN container.
+    pub const CA_BUNDLE_EXPORT_PATH: &str = "/ca-bundle.pem";
+
+    /// `docker cp`s the proxy's exported CA trust bundle out to a fresh host
+    /// tempfile and returns its path. The standalone binary writes the
+    /// bundle synchronously before it starts serving, but `docker run -d`
+    /// returns as soon as the container is created — so this polls `docker
+    /// cp` for up to 5s rather than assuming the file already exists the
+    /// instant the container is reported running.
+    pub fn export_ca_bundle_from_proxy() -> PathBuf {
+        let dest = std::env::temp_dir().join(format!("ironclaw-egress-test-ca-{}", uuid_like()));
+        for _ in 0..50 {
+            let cp = docker(&[
+                "cp",
+                &format!("{PROXY_NAME}:{CA_BUNDLE_EXPORT_PATH}"),
+                dest.to_str().expect("valid utf8 path"),
+            ]);
+            if cp.status.success() {
+                return dest;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!(
+            "timed out waiting for the proxy container to export its CA bundle to \
+             {CA_BUNDLE_EXPORT_PATH}"
+        );
+    }
+
+    /// `docker cp`s a host file into the worker container at `dest_path`.
+    /// `docker cp` writes directly into the container's filesystem without
+    /// needing a bind mount declared at `docker run` time, so this can run
+    /// against the already-started worker container from `setup` above —
+    /// exactly the shape production's read-only bind mount achieves via a
+    /// different mechanism (host-side file present before container
+    /// create), proven here through the equivalent "file exists at a fixed
+    /// path inside the container" outcome.
+    pub fn install_file_into_worker(host_path: &Path, dest_path: &str) {
+        let cp = docker(&["cp", host_path.to_str().expect("valid utf8 path"), &format!("{WORKER_NAME}:{dest_path}")]);
+        assert!(
+            cp.status.success(),
+            "docker cp into the worker container should succeed: {}",
+            String::from_utf8_lossy(&cp.stderr)
+        );
+    }
+
+    /// Cheap process-local uniqueness for a tempfile name — this module
+    /// already has no `uuid` dependency in its own scope, and the tempfile
+    /// only needs to not collide within one test run.
+    fn uuid_like() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
     }
 
     /// The container's IPv4 address on `NET_EGRESS`, for the raw-IP bypass
@@ -665,5 +817,104 @@ async fn sandbox_egress_proxy_dual_homed_isolation_topology() {
         denied_origin_log.trim().is_empty(),
         "the denied origin must never have been dialed by the proxy; found log entries: \
          {denied_origin_log}"
+    );
+}
+
+/// Docker-real, colima-compatible proof that CA distribution actually makes
+/// TLS interception work end to end — the specific gap this task closes.
+/// `sandbox_egress_proxy_enforces_allowlist_through_composition` (top of
+/// this file) cannot prove this under colima (its production gateway-IP
+/// topology is unreachable from the host — see that test's own doc), so
+/// this reuses `dual_homed_topology` (the colima-compatible shape) exactly
+/// like `sandbox_egress_proxy_dual_homed_isolation_topology`, adding a real
+/// CONNECT/TLS leg against `pypi.org` (a real, exact-match allowlisted host
+/// with a publicly-trusted certificate — required because the proxy's
+/// origin-verification leg uses real system roots, so a locally faked
+/// origin certificate could never pass it).
+///
+/// Two curls against the SAME bound host prove BOTH halves of the fix:
+///
+/// 1. WITHOUT the CA bundle installed, the worker's own system trust store
+///    rejects the intercepted leaf (proves interception is real — a plain
+///    opaque tunnel would have shown pypi.org's own, genuinely
+///    publicly-trusted certificate and this curl would have succeeded).
+/// 2. WITH the CA bundle installed at the exact path/env-var mechanism
+///    `exec_transport::user_container_launch_config` wires in production
+///    (`SSL_CERT_FILE`), the curl succeeds AND its verbose output names our
+///    own CA as the certificate issuer — proving the container trusted the
+///    distributed CA, not merely that the request happened to succeed.
+#[tokio::test]
+async fn sandbox_egress_proxy_dual_homed_tls_interception() {
+    use dual_homed_topology as topo;
+
+    if !docker_gate::docker_available() {
+        eprintln!(
+            "SKIP: no docker daemon reachable — sandbox_egress_proxy_dual_homed_tls_interception requires a real Docker daemon (CI/hosted Docker lane only)"
+        );
+        return;
+    }
+    let worker_image = docker_gate::configured_sandbox_image();
+    if !docker_gate::docker_image_available(&worker_image) {
+        eprintln!(
+            "SKIP: sandbox worker image {worker_image:?} is not built locally — sandbox_egress_proxy_dual_homed_tls_interception requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+        );
+        return;
+    }
+
+    topo::ensure_proxy_image_built();
+    let _guard = topo::setup(&worker_image);
+
+    let host_bundle_path = topo::export_ca_bundle_from_proxy();
+    const WORKER_BUNDLE_PATH: &str = "/tmp/ironclaw-ca-bundle.pem";
+    topo::install_file_into_worker(&host_bundle_path, WORKER_BUNDLE_PATH);
+
+    // Assertion 1: WITHOUT the distributed CA bundle, the worker's own
+    // baked-in system trust store (`ca-certificates`, real Mozilla-derived
+    // roots) must REJECT the intercepted leaf — proving a real MITM leaf is
+    // presented here, not pypi.org's own genuinely-trusted certificate that
+    // an opaque tunnel would pass straight through.
+    let without_bundle = topo::exec_worker(&format!(
+        "curl -sS -o /dev/null -x http://{}:8080 https://pypi.org/simple/ 2>&1",
+        topo::PROXY_NAME
+    ));
+    assert!(
+        !without_bundle.status.success(),
+        "curl to the bound host through the proxy must FAIL certificate verification when the \
+         container has not been given the sandbox CA — success here means either interception \
+         never fired (an opaque tunnel would trivially pass pypi.org's own real cert) or the \
+         container already, wrongly, trusts our CA by some other path: {}",
+        String::from_utf8_lossy(&without_bundle.stdout)
+    );
+    let without_bundle_output =
+        String::from_utf8_lossy(&without_bundle.stdout).to_ascii_lowercase();
+    assert!(
+        without_bundle_output.contains("certificate") || without_bundle_output.contains("ssl"),
+        "the failure must be a certificate-verification failure specifically, not some other \
+         transport error: {without_bundle_output}"
+    );
+
+    // Assertion 2 (THE PROOF): WITH the exact same distribution mechanism
+    // production wires (`SSL_CERT_FILE` pointed at the bind-mounted
+    // bundle), the curl succeeds AND its verbose handshake output names our
+    // own sandbox CA as the issuer — the direct, load-bearing proof that
+    // interception actually happened for this connection, not merely that
+    // curl exited 0 (which an opaque tunnel to the real pypi.org would also
+    // do).
+    let with_bundle = topo::exec_worker(&format!(
+        "SSL_CERT_FILE={WORKER_BUNDLE_PATH} curl -sS -v -o /dev/null -x http://{}:8080 \
+         https://pypi.org/simple/ 2>&1",
+        topo::PROXY_NAME
+    ));
+    let with_bundle_output = String::from_utf8_lossy(&with_bundle.stdout);
+    assert!(
+        with_bundle.status.success(),
+        "curl to the bound host through the proxy must SUCCEED once the container trusts the \
+         distributed sandbox CA: {with_bundle_output}"
+    );
+    assert!(
+        with_bundle_output.contains("IronClaw Sandbox Egress CA"),
+        "the TLS handshake's certificate issuer must be our own sandbox CA — proves the \
+         container's curl actually terminated TLS against OUR leaf (interception), not \
+         pypi.org's real certificate through an opaque tunnel: {with_bundle_output}"
     );
 }
