@@ -38,6 +38,9 @@ const MAX_REGEX_MATCH_MESSAGE_BYTES: usize = 64 * 1024;
 pub struct ScoredSkill<'a> {
     pub skill: &'a LoadedSkill,
     pub score: u32,
+    /// True when the skill scored above zero on real criteria (keyword / tag / pattern),
+    /// false when it only cleared the filter via the strategy's floor score.
+    pub matched_on_merit: bool,
 }
 
 /// Outcome of a single selection pass with human-readable notes about
@@ -51,6 +54,18 @@ pub struct ScoredSkill<'a> {
 #[derive(Debug, Default)]
 pub struct SelectionOutcome<'a> {
     pub selected: Vec<&'a LoadedSkill>,
+    /// Skills that cleared the filter ONLY because of the strategy's floor score, i.e.
+    /// they matched no keyword, tag or pattern.
+    ///
+    /// Kept apart from `selected` because they must not be reported as activations. Under
+    /// `SkillInjectionMode::Listing` a criteria selection injects no body at all -- it only
+    /// orders the listing -- so counting a floor-only skill as "activated" makes the word
+    /// meaningless: with `always_available` all 32 bundled skills reach floor 1 and 3 of
+    /// them (6000 token budget / 2000 default per-skill cost) land in the plan on every
+    /// turn, chosen by descriptor order because the score sort is stable.
+    ///
+    /// Callers may use these for ranking or to build a listing; they must not activate them.
+    pub ranked_only: Vec<&'a LoadedSkill>,
     pub notes: Vec<String>,
 }
 
@@ -217,10 +232,14 @@ pub fn prefilter_skills_with_options<'a>(
             // real match. That reproduces Claude Code / Hermes, where a seeded skill is
             // a readable file with no gate to fail; the context budget further down,
             // not this filter, decides what is actually injected.
-            let score = score_skill(skill, &message_lower, message, options)
-                .max(options.activation_strategy.floor_score());
+            let merit = score_skill(skill, &message_lower, message, options);
+            let score = merit.max(options.activation_strategy.floor_score());
             if score > 0 {
-                Some(ScoredSkill { skill, score })
+                Some(ScoredSkill {
+                    skill,
+                    score,
+                    matched_on_merit: merit > 0,
+                })
             } else {
                 None
             }
@@ -231,12 +250,18 @@ pub fn prefilter_skills_with_options<'a>(
     scored.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     // Apply candidate limit and context budget.
+    // Names that reached the budget loop on the floor score alone. Used at the end to split
+    // `selected` from `ranked_only` so a floor-only skill is never reported as an activation.
+    let mut floor_only_names: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
     let mut result: Vec<&'a LoadedSkill> = Vec::new();
     let mut selected_names: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
     let mut budget_remaining = max_context_tokens;
     let mut notes: Vec<String> = Vec::new();
 
     for entry in scored {
+        if !entry.matched_on_merit {
+            floor_only_names.insert(entry.skill.manifest.name.as_str());
+        }
         // Try to select the parent first.
         let parent_outcome = try_select(
             entry.skill,
@@ -315,8 +340,16 @@ pub fn prefilter_skills_with_options<'a>(
         }
     }
 
+    // Partition: a chain-loaded companion is intentionally NOT floor-only (its parent
+    // matched on merit and pulled it in deliberately), so only names recorded above move
+    // to `ranked_only`.
+    let (ranked_only, selected): (Vec<_>, Vec<_>) = result
+        .into_iter()
+        .partition(|skill| floor_only_names.contains(skill.manifest.name.as_str()));
+
     SelectionOutcome {
-        selected: result,
+        selected,
+        ranked_only,
         notes,
     }
 }
@@ -946,11 +979,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            always.selected.len(),
-            1,
-            "no gate: a seeded skill is always a candidate"
+        // Post-C1 semantics: a floor-only skill is a RANKING candidate, not an activation.
+        // It still reaches the model via the listing (which it can act on with
+        // `skill_activate`), but it is never auto-activated -- a criteria activation injects
+        // no body under `Listing` anyway, so calling it "activated" would be meaningless.
+        assert!(
+            always.selected.is_empty(),
+            "floor-only skills must not be reported as activations"
         );
+        assert_eq!(
+            always.ranked_only.len(),
+            1,
+            "no gate: a seeded skill is still a candidate for the listing"
+        );
+        assert_eq!(always.ranked_only[0].manifest.name, "hp-filter-detrending");
     }
 
     /// Removing the gate must not reorder anything: a real keyword match still
@@ -973,15 +1015,15 @@ mod tests {
                 ..Default::default()
             },
         );
+        // The genuine keyword match is a real activation; the floor-only one is only ranked.
+        assert_eq!(out.selected.len(), 1, "only the merit match activates");
+        assert_eq!(out.selected[0].manifest.name, "pdf-form-filler");
         assert_eq!(
-            out.selected.len(),
-            2,
-            "both are candidates under always_available"
+            out.ranked_only.len(),
+            1,
+            "the unmatched skill is still listed"
         );
-        assert_eq!(
-            out.selected[0].manifest.name, "pdf-form-filler",
-            "the genuine keyword match must still rank first"
-        );
+        assert_eq!(out.ranked_only[0].manifest.name, "hp-filter-detrending");
     }
 
     fn make_skill_with_excludes(

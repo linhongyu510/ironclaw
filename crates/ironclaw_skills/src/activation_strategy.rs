@@ -99,7 +99,16 @@ impl ActivationStrategy {
 
     /// Whether this strategy may fall back to name/description scoring.
     pub fn allows_name_fallback(&self) -> bool {
-        matches!(self, Self::NameAndDescription | Self::AlwaysAvailable)
+        // Deliberately NOT `AlwaysAvailable`. Under that strategy every skill is already a
+        // candidate via the floor, so the fallback adds no reach -- it only manufactures
+        // fake "merit": a bundled skill whose description happens to share a word with the
+        // message scores above zero and is reported as a genuine activation. That is what
+        // kept `local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists`
+        // failing after floor-only skills were already excluded from activations.
+        //
+        // The fallback exists for `NameAndDescription`, where widening the match IS the
+        // point.
+        matches!(self, Self::NameAndDescription)
     }
 
     /// Minimum score every candidate skill enters with.
