@@ -26,6 +26,7 @@ use bollard::{
     network::{CreateNetworkOptions, InspectNetworkOptions},
 };
 use futures_util::StreamExt;
+use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::{TenantId, UserId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -473,6 +474,17 @@ async fn create_and_start_user_container(
 /// `None` today): a future per-process-count hardening change only needs to
 /// populate this one field to also get automatic recycling of containers
 /// created under the old limit.
+///
+/// `ca_bundle_hash` closes RUN-001: the sandbox CA root is regenerated
+/// fresh in memory on every host-process start (see `ca.rs`'s module doc),
+/// but a persistent container survives that restart untouched. Without a
+/// stable identity of the live trust bundle in the stamp, a reused
+/// container keeps trusting the OLD CA while the restarted proxy signs
+/// with a NEW one, and every intercepted bound-host TLS request inside it
+/// then fails certificate verification while both sides report healthy.
+/// Hashing `ca_bundle_pem` here — the exact bytes [`materialize_ca_bundle`]
+/// writes into the container's bind-mounted trust bundle — makes a rotated
+/// CA force the same recycle-on-create path as any other posture change.
 struct SecurityPostureFields {
     user: Option<String>,
     cap_add: Option<Vec<String>>,
@@ -480,6 +492,7 @@ struct SecurityPostureFields {
     readonly_rootfs: Option<bool>,
     network_mode: Option<String>,
     pids_limit: Option<i64>,
+    ca_bundle_hash: Option<String>,
 }
 
 /// The security posture this code creates containers with today, given
@@ -500,6 +513,13 @@ fn security_posture_fields(config: &RebornSandboxConfig) -> SecurityPostureField
         readonly_rootfs: Some(true),
         network_mode: config.container_network_mode(),
         pids_limit: None,
+        // Same helper `materialize_ca_bundle`'s caller already threads
+        // through key_codec.rs's usage — reused here rather than adding a
+        // second hashing utility to this crate.
+        ca_bundle_hash: config
+            .ca_bundle_pem
+            .as_deref()
+            .map(|pem| sha256_hex(pem.as_bytes())),
     }
 }
 
@@ -515,13 +535,14 @@ fn security_posture_fields(config: &RebornSandboxConfig) -> SecurityPostureField
 /// changes the stamp.
 fn security_posture_stamp(fields: &SecurityPostureFields) -> String {
     let canonical = format!(
-        "user={:?}\ncap_add={:?}\ncap_drop={:?}\nreadonly_rootfs={:?}\nnetwork_mode={:?}\npids_limit={:?}",
+        "user={:?}\ncap_add={:?}\ncap_drop={:?}\nreadonly_rootfs={:?}\nnetwork_mode={:?}\npids_limit={:?}\nca_bundle_hash={:?}",
         fields.user,
         fields.cap_add,
         fields.cap_drop,
         fields.readonly_rootfs,
         fields.network_mode,
         fields.pids_limit,
+        fields.ca_bundle_hash,
     );
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -2386,6 +2407,119 @@ mod docker_tests {
         );
 
         best_effort_remove(&docker, &recreated_id).await;
+    }
+
+    /// RUN-001: a persistent container created while the sandbox egress
+    /// proxy trusted CA-A must NOT be reused once the live config's CA
+    /// bundle rotates to CA-B (the exact shape of a host-process restart:
+    /// `ca.rs`'s root is regenerated fresh in memory on every process
+    /// start, but `ensure_container` is designed to find and reuse the
+    /// container that already exists for this `{tenant, user}` pair).
+    /// Drives the real `ensure_container` caller with two configs that
+    /// differ only in `ca_bundle_pem` — not a hand-forged label — so this
+    /// pins the production posture-stamp comparison, not a helper in
+    /// isolation. Before the fix, `SecurityPostureFields` carried no CA
+    /// identity, so the second call would reuse the CA-A container
+    /// unchanged and every intercepted bound-host request inside it would
+    /// then fail TLS verification against the new CA-B leaf certificates.
+    #[tokio::test]
+    async fn ensure_container_recycles_when_ca_bundle_rotates() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — ensure_container_recycles_when_ca_bundle_rotates requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image) {
+            eprintln!(
+                "SKIP: sandbox worker image {image:?} is not built locally — requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let tenant = ironclaw_host_api::TenantId::new("ca-rotate-tenant").unwrap();
+        let user = ironclaw_host_api::UserId::new("ca-rotate-user").unwrap();
+        remove_labeled_test_containers(&docker, &tenant, &user).await;
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let workspace = key.workspace_path(temp.path());
+
+        let config_ca_a = docker_tests_config(temp.path()).with_ca_bundle_pem(
+            "-----BEGIN CERTIFICATE-----\nfake-ca-a-bundle\n-----END CERTIFICATE-----\n",
+        );
+        create_writable_workspace(&config_ca_a, &workspace).await;
+
+        let network_ready = tokio::sync::OnceCell::new();
+        let container_under_ca_a = ensure_container(
+            &docker,
+            &config_ca_a,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+            None,
+        )
+        .await
+        .expect("ensure_container succeeds under CA-A");
+
+        // Sanity: an unrelated second call under the SAME config (the
+        // steady-state case — no proxy restart) must reuse the container.
+        let reused_under_ca_a = ensure_container(
+            &docker,
+            &config_ca_a,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+            None,
+        )
+        .await
+        .expect("ensure_container succeeds on the repeat CA-A call");
+        assert_eq!(
+            reused_under_ca_a, container_under_ca_a,
+            "same CA, same posture: the container must be reused, not recreated"
+        );
+
+        // Simulates a host-process restart: same tenant/user/workspace, but
+        // the egress proxy minted a brand-new CA root this time.
+        let config_ca_b = docker_tests_config(temp.path()).with_ca_bundle_pem(
+            "-----BEGIN CERTIFICATE-----\nfake-ca-b-bundle\n-----END CERTIFICATE-----\n",
+        );
+        let container_under_ca_b = ensure_container(
+            &docker,
+            &config_ca_b,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+            None,
+        )
+        .await
+        .expect("ensure_container succeeds under CA-B");
+
+        assert_ne!(
+            container_under_ca_b, container_under_ca_a,
+            "a container created under CA-A must be recycled, not reused, once the live \
+             config's CA bundle rotates to CA-B — otherwise it keeps trusting the old root \
+             while the proxy signs with the new one and every bound-host TLS request inside \
+             it fails verification"
+        );
+        let ca_a_container_still_exists = docker
+            .inspect_container(&container_under_ca_a, None::<InspectContainerOptions>)
+            .await
+            .is_ok();
+        assert!(
+            !ca_a_container_still_exists,
+            "the CA-A container must have been destroyed on rotation, not left running \
+             alongside the recreated one"
+        );
+
+        best_effort_remove(&docker, &container_under_ca_b).await;
     }
 
     /// Creates and starts a plain `busybox` container on `network_name`,
