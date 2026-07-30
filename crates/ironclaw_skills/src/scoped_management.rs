@@ -11,7 +11,10 @@ use crate::{
     SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
     SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
     SkillUpdateResult, install_skill, list_skills,
-    management::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle},
+    management::{
+        SKILL_FILE_NAME, SkillBundleSnapshot, USER_SKILLS_ROOT, capture_skill_bundle,
+        restore_skill_bundle,
+    },
     read_skill_content, remove_skill, search_skills, update_skill,
 };
 
@@ -149,7 +152,7 @@ impl ScopedSkillManagementPort {
         let context = self.context_for_scope(snapshot.scope)?;
         let source = restore_skill_bundle(&context, &snapshot.name, snapshot.bundle).await?;
         Ok(SkillInstallResult {
-            scoped_path: format!("/skills/{}/SKILL.md", snapshot.name),
+            scoped_path: format!("{USER_SKILLS_ROOT}/{}/{SKILL_FILE_NAME}", snapshot.name),
             name: snapshot.name,
             source,
         })

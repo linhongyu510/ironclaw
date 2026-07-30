@@ -993,6 +993,45 @@ async fn replacement_snapshot_restores_complete_bundle_and_raw_metadata() {
 }
 
 #[tokio::test]
+async fn replacement_restore_reports_original_and_cleanup_failures() {
+    let inner = Arc::new(InMemoryBackend::default());
+    write_file(
+        inner.as_ref(),
+        "/projects/skills/restore-failure/SKILL.md",
+        skill_md("restore-failure", "description", "PROMPT"),
+    )
+    .await;
+    write_file(
+        inner.as_ref(),
+        "/projects/skills/restore-failure/scripts/run.py",
+        "print('fixture')\n".to_string(),
+    )
+    .await;
+    let capture_context = skill_management_context(inner.clone(), skill_mounts());
+    let snapshot = capture_skill_bundle(&capture_context, "restore-failure")
+        .await
+        .expect("capture restore failure fixture");
+    inner
+        .delete(&VirtualPath::new("/projects/skills/restore-failure").expect("skill path"))
+        .await
+        .expect("remove original fixture");
+    let restore_context = skill_management_context_with_root(
+        Arc::new(CleanupDeleteDenyingFilesystem {
+            inner: inner.clone(),
+        }),
+        skill_mounts(),
+    );
+
+    let error = restore_skill_bundle(&restore_context, "restore-failure", snapshot)
+        .await
+        .expect_err("restore and cleanup both fail");
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+    let reason = error.reason().expect("combined failure reason");
+    assert!(reason.contains("InvalidSkill"));
+    assert!(reason.contains("FilesystemDenied"));
+}
+
+#[tokio::test]
 async fn update_skill_rejects_invalid_missing_oversized_and_name_change() {
     let filesystem = Arc::new(InMemoryBackend::default());
     write_file(

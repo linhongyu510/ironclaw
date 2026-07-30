@@ -174,7 +174,7 @@ pub(crate) async fn restore_skill_bundle(
         ));
     }
 
-    let result = async {
+    let result: Result<(), SkillManagementError> = async {
         create_dir_all(context, skill_name, "restore_create_dir_all", &skill_dir).await?;
         for file in &snapshot.files {
             let relative_path = normalize_snapshot_relative_path(&file.relative_path)?;
@@ -194,7 +194,15 @@ pub(crate) async fn restore_skill_bundle(
     .await;
 
     if let Err(error) = result {
-        cleanup_partial_install(context, skill_name, &skill_dir).await?;
+        if let Err(cleanup_error) = cleanup_partial_install(context, skill_name, &skill_dir).await {
+            let original_kind = error.kind();
+            return Err(SkillManagementError::with_reason(
+                original_kind,
+                format!(
+                    "skill bundle restore failed with {error:?}; partial cleanup also failed with {cleanup_error:?}"
+                ),
+            ));
+        }
         return Err(error);
     }
     Ok(snapshot.source)
