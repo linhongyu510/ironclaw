@@ -15,8 +15,12 @@ use super::super::credential_firewall::{
     StagedCredentialObligation, StagedCredentialObligationSource, StagedObligationLease,
 };
 
-const REAL_SECRET: &str = "ghp-REAL-SECRET-MATERIAL-nsQ82hd7";
-const HOST: &str = "bound.example.com";
+// `pub(crate)`: `tls_intercept`'s caller-level ordering test (CR-004) reuses
+// both constants so its granted-swap assertion checks for the exact same
+// secret/host this module's own tests do, instead of inventing a second
+// pair that could silently drift from these.
+pub(crate) const REAL_SECRET: &str = "ghp-REAL-SECRET-MATERIAL-nsQ82hd7";
+pub(crate) const HOST: &str = "bound.example.com";
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
@@ -56,18 +60,32 @@ fn far_future() -> Instant {
     Instant::now() + std::time::Duration::from_secs(3600)
 }
 
-struct Fixture {
-    swap: SandboxCredentialSwap,
-    token: String,
-    tenant_id: TenantId,
-    user_id: UserId,
-    _lease: StagedObligationLease,
+/// `pub(crate)`: reused as-is by `tls_intercept`'s caller-level ordering
+/// test (CR-004), which needs a real granted `SandboxCredentialSwap` driven
+/// through the actual `terminate_and_forward` — see this module's own doc
+/// for why the end-to-end properties belong there, not here.
+pub(crate) struct Fixture {
+    pub(crate) swap: SandboxCredentialSwap,
+    pub(crate) token: String,
+    pub(crate) tenant_id: TenantId,
+    pub(crate) user_id: UserId,
+    /// Keeps the staged grant alive — `StagedObligationLease::drop` revokes
+    /// it (see that type's doc). `pub(crate)` (not `_`-only-private) so a
+    /// caller outside this module, like `tls_intercept`'s CR-004 test, can
+    /// destructure `Fixture` and hold this for the lifetime of its own
+    /// scope instead of the grant being revoked the instant the fixture is
+    /// unpacked.
+    pub(crate) lease: StagedObligationLease,
 }
 
 /// One staged grant for `(tenant-a, user-a, <grant_provider>)` covering
 /// `policy`, plus a placeholder minted for `(tenant-a, user-a, <token_provider>)`.
 /// Every strip-reason test varies exactly one of those inputs.
-fn fixture(token_provider: &str, grant_provider: &str, policy: CredentialTargetPolicy) -> Fixture {
+pub(crate) fn fixture(
+    token_provider: &str,
+    grant_provider: &str,
+    policy: CredentialTargetPolicy,
+) -> Fixture {
     let tenant_id = tenant("tenant-a");
     let user_id = user("user-a");
     let registry = Arc::new(CredentialPlaceholderRegistry::new());
@@ -108,7 +126,7 @@ fn fixture(token_provider: &str, grant_provider: &str, policy: CredentialTargetP
         token,
         tenant_id,
         user_id,
-        _lease: lease,
+        lease,
     }
 }
 

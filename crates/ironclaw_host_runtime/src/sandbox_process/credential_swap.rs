@@ -78,9 +78,23 @@
 //! `SandboxCredentialFirewall::stage` outside tests, so no container has
 //! ever been handed a real `icsbx_` placeholder and no connection has ever
 //! had a live grant. Every placeholder this module's swap sees today
-//! resolves to GRANT-DENIAL and is stripped (D5) — safe by construction,
-//! not yet useful. That staging (capability-dispatch obligation handoff
-//! ahead of a shell invocation) is separate, not-yet-built work.
+//! resolves to **CONNECTION-DENIAL, not GRANT-DENIAL**: the production
+//! caller (`egress_proxy::handle_connect`) has no `ConnectionAttributionResolver`
+//! wired into its dispatch yet, so every connection it terminates carries
+//! [`super::tls_intercept::InterceptedConnection::default`]'s `identity: None`.
+//! [`SandboxCredentialFirewall::authorize`] rejects an unattributed identity
+//! with `Err(AttributionFailed)` *before* it ever reaches the `NoGrant`
+//! decision this module's strip-and-forward path depends on — so a
+//! placeholder-bearing request today refuses the whole connection and the
+//! origin is never dialed, not stripped-then-forwarded. Safe by
+//! construction either way, but the two refusals in this module's own "two
+//! refusals are different, on purpose" section above are not
+//! interchangeable, and only CONNECTION-DENIAL is what production actually
+//! exercises today. GRANT-DENIAL (D5's strip-and-forward) only becomes
+//! reachable once attribution is wired and a connection is genuinely
+//! resolved to a `{tenant, user}` with no live grant. That staging
+//! (capability-dispatch obligation handoff ahead of a shell invocation) is
+//! separate, not-yet-built work.
 
 use std::{
     borrow::Cow,
@@ -641,4 +655,8 @@ fn placeholder_candidates(bytes: &[u8]) -> Vec<(usize, CredentialPlaceholderToke
 }
 
 #[cfg(test)]
-mod tests;
+// `pub(crate)`, not private: `tls_intercept`'s caller-level ordering test
+// (CR-004) reuses this module's `fixture` helper to build a real
+// `SandboxCredentialSwap` rather than inventing a second fixture — see
+// `tls_intercept/tests.rs`'s `credential_swap_tests` import.
+pub(crate) mod tests;

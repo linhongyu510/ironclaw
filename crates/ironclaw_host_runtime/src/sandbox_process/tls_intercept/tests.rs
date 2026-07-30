@@ -3,14 +3,25 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::UnixTime;
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 use x509_parser::prelude::*;
+
+// CR-004: reuses `credential_swap`'s own test fixture (constructing a real
+// granted `SandboxCredentialSwap`) instead of a second, hand-rolled fixture
+// — see that module's `tests::fixture` doc for why it lives there and is
+// `pub(crate)`.
+use crate::sandbox_process::credential_swap::tests as credential_swap_tests;
+use ironclaw_host_api::NetworkMethod;
+use ironclaw_secrets::{CredentialPathPolicy, CredentialTargetPolicy};
 
 /// Shared prefix for every test-only `rustls::ClientConfig` built in this
 /// file: the explicit-provider builder this PR's own crypto-provider fix
@@ -1180,4 +1191,323 @@ async fn http1_1_client_still_completes_the_handshake() {
         .expect("server task must finish")
         .expect("server task did not panic")
         .expect("server side must also complete the handshake");
+}
+
+/// The grant policy every CR-004 test below stages a credential for: `GET`
+/// under `/repos`, scoped to `host` — mirrors
+/// `credential_swap::tests::policy` (private to that module) so the target
+/// actually matches the `Host` line these tests send.
+fn credential_swap_grant_policy(host: &str) -> CredentialTargetPolicy {
+    CredentialTargetPolicy {
+        scheme: "https".to_string(),
+        host: host.to_string(),
+        port: None,
+        path: CredentialPathPolicy::Prefix("/repos".to_string()),
+        methods: vec![NetworkMethod::Get],
+    }
+}
+
+/// Same shape as [`spawn_fake_tls_origin`], except it captures every
+/// decrypted byte the origin ever reads instead of just a "did we get
+/// anything" bool — CR-004's assertion (b) needs to inspect exactly what
+/// reached the origin (the real secret, never the placeholder), which the
+/// existing helper's `AtomicBool` can't express.
+async fn spawn_fake_tls_origin_capturing_bytes(
+    host: &str,
+) -> (SocketAddr, String, Arc<Mutex<Vec<u8>>>) {
+    let origin_ca = SandboxCertificateAuthority::generate().expect("origin ca generates");
+    let issued = origin_ca
+        .issue_leaf_for_host(host)
+        .expect("origin leaf issues");
+    let server_config =
+        build_server_config(&issued.certificate).expect("origin server config builds");
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("origin listener binds");
+    let addr = listener.local_addr().expect("origin listener has an addr");
+    let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_writer = Arc::clone(&received);
+
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await
+            && let Ok(mut tls) = acceptor.accept(stream).await
+        {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = tls.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                received_writer
+                    .lock()
+                    .expect("origin capture mutex is never poisoned by a panicking holder")
+                    .extend_from_slice(&buf[..n]);
+            }
+            // A clean TLS close, mirroring `spawn_fake_tls_origin`'s own
+            // `tls.shutdown()`: without it, the proxy's downstream copy
+            // (origin -> client) sees an abrupt socket close instead of a
+            // close_notify alert and `terminate_and_forward` fails with
+            // `RelayFailed` even though the swap itself worked correctly —
+            // an artifact of this fake origin, not the behavior under test.
+            let _ = tls.shutdown().await;
+        }
+    });
+
+    (addr, origin_ca.root_certificate_pem().to_string(), received)
+}
+
+/// **CR-004.** `with_credential_swap` is the ONLY way to reach the
+/// `Some(swap)` branch `terminate_and_forward_core` takes, and its one
+/// production call site
+/// (`egress_proxy::bind_sandbox_egress_proxy_with_tls_intercept`) always
+/// passes it — yet every OTHER test in this file builds a
+/// `TlsInterceptConfig` with the swap left `None`, so the ordering the
+/// module doc calls load-bearing ("the swap runs before the origin is
+/// dialed, so a CONNECTION-DENIAL means no origin socket is ever opened")
+/// has never run through the real caller chain. This test closes that gap.
+///
+/// Uses a REAL `SandboxCredentialSwap` built via
+/// `credential_swap::tests::fixture` (this crate's existing fixture, now
+/// `pub(crate)` — see that module's doc for why the fixture stays there
+/// rather than being duplicated here) and drives it through the real
+/// `terminate_and_forward`, with `InterceptedConnection::default()` —
+/// `identity: None` — exactly like `egress_proxy::handle_connect` passes
+/// today (no `ConnectionAttributionResolver` wired into that dispatch yet;
+/// see that call site's own comment). The request head carries a real,
+/// registry-resolvable placeholder token, so `rewrite_request_head` actually
+/// reaches the firewall instead of short-circuiting on "no placeholder" —
+/// `authorize(None, ..)` denies with `AttributionFailed`. The assertion that
+/// matters is not the `Err` return alone: mirroring
+/// `client_handshake_failure_never_dials_the_origin`'s probe pattern, the
+/// origin listener itself must never observe an accepted connection.
+///
+/// **Discrimination proof (see the accompanying commit message for the
+/// pasted before/after run):** temporarily swapping the credential-swap
+/// rewrite block and the origin-dial block in `terminate_and_forward_core`
+/// makes this test fail — the origin listener observes a connection within
+/// the probe window. Reverting the swap restores green. A test that passes
+/// under both orderings would prove nothing about the invariant the module
+/// doc calls load-bearing, only that some `Err` came back.
+#[tokio::test]
+async fn credential_swap_connection_denial_never_dials_the_origin() {
+    let host = credential_swap_tests::HOST;
+    let fixture =
+        credential_swap_tests::fixture("github", "github", credential_swap_grant_policy(host));
+
+    // Standing in for the origin: if a regression let the CONNECTION-DENIAL
+    // fall through to a dial (or the dial ran before the denial), this is
+    // the first thing `terminate_and_forward` would reach.
+    let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin_listener.local_addr().unwrap();
+
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+    let our_root_pem = ca.root_certificate_pem().to_string();
+    let config = TlsInterceptConfig::new(
+        ca,
+        HashSet::from([host.to_string()]),
+        connector_trusting_nothing(),
+    )
+    .with_credential_swap(fixture.swap);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection::default(),
+        )
+        .await
+    });
+
+    // Real rustls client trusting our CA: the client-side handshake with
+    // the proxy must succeed so the request head is actually read and
+    // handed to the swap — only the firewall lookup that follows should
+    // deny.
+    let mut our_roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
+        our_roots.add(cert.unwrap()).unwrap();
+    }
+    let client_config = test_client_config_builder()
+        .with_root_certificates(our_roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+    let server_name = ServerName::try_from(host.to_string()).unwrap();
+    let mut client_tls = tokio::time::timeout(
+        Duration::from_secs(5),
+        connector.connect(server_name, raw_client),
+    )
+    .await
+    .expect("handshake must not hang")
+    .expect("client tls handshake must succeed against a cert chaining to OUR ca");
+
+    let request = format!(
+        "GET /repos/x HTTP/1.1\r\nHost: {host}\r\nAuthorization: token {}\r\n\r\n",
+        fixture.token
+    );
+    client_tls.write_all(request.as_bytes()).await.unwrap();
+    let _ = client_tls.shutdown().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server task must finish")
+        .expect("server task did not panic");
+    assert!(
+        matches!(
+            result,
+            Err(TlsInterceptError::CredentialFirewallDenied(
+                SandboxCredentialFirewallError::AttributionFailed
+            ))
+        ),
+        "expected a CONNECTION-DENIAL (AttributionFailed) for an unattributed \
+         connection presenting a placeholder, got: {result:?}"
+    );
+
+    // Only started after `server_task` resolved — see
+    // `client_handshake_failure_never_dials_the_origin`'s doc for why racing
+    // this probe against the task under test is unsound.
+    let origin_result =
+        tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await;
+    assert!(
+        origin_result.is_err(),
+        "origin must never be dialed on a CONNECTION-DENIAL — this is the \
+         ordering the module doc calls load-bearing: rewrite_request_head \
+         must run, and be allowed to fail closed, strictly before \
+         TcpStream::connect(dial_addr)"
+    );
+}
+
+/// **CR-004, assertion (b).** With a genuinely granted swap (the fixture
+/// stages a live obligation, unlike the denial test above), the real secret
+/// must reach the origin's decrypted bytes and the `icsbx_` placeholder must
+/// never reach them — proving the swap is not just "denies when it should,"
+/// but "substitutes when it should," through the real
+/// `terminate_and_forward` end to end.
+///
+/// A live grant can be staged in a test today (this fixture calls
+/// `SandboxCredentialFirewall::stage` directly), even though nothing in
+/// production wires the stage call yet (see `credential_swap`'s module doc,
+/// corrected by this same change) — so this covers the reachable half of
+/// (b) in full.
+#[tokio::test]
+async fn credential_swap_grant_reaches_the_origin_and_the_placeholder_never_does() {
+    let host = credential_swap_tests::HOST;
+    let fixture =
+        credential_swap_tests::fixture("github", "github", credential_swap_grant_policy(host));
+    let credential_swap_tests::Fixture {
+        swap,
+        token,
+        tenant_id,
+        user_id,
+        // Kept bound (not `..`) for the whole test: `StagedObligationLease`
+        // revokes the staged grant on `Drop`, and an unnamed `..` field
+        // would be dropped the instant this pattern match completes —
+        // before `terminate_and_forward` ever runs — which would silently
+        // turn this into the GRANT-DENIAL test instead of the granted one.
+        lease: _lease,
+    } = fixture;
+
+    let (origin_addr, origin_root_pem, origin_received) =
+        spawn_fake_tls_origin_capturing_bytes(host).await;
+
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+    let our_root_pem = ca.root_certificate_pem().to_string();
+    let config = TlsInterceptConfig::new(
+        ca,
+        HashSet::from([host.to_string()]),
+        connector_trusting_only(&origin_root_pem),
+    )
+    .with_credential_swap(swap);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await.unwrap();
+        let bound_host = config.bind(host).expect("host is bound in this test");
+        terminate_and_forward(
+            stream,
+            Vec::new(),
+            bound_host,
+            origin_addr,
+            &config,
+            InterceptedConnection {
+                identity: Some((&tenant_id, &user_id)),
+                deadline,
+            },
+        )
+        .await
+    });
+
+    let mut our_roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(our_root_pem.as_bytes()) {
+        our_roots.add(cert.unwrap()).unwrap();
+    }
+    let client_config = test_client_config_builder()
+        .with_root_certificates(our_roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+    let server_name = ServerName::try_from(host.to_string()).unwrap();
+    let mut client_tls = tokio::time::timeout(
+        Duration::from_secs(5),
+        connector.connect(server_name, raw_client),
+    )
+    .await
+    .expect("handshake must not hang")
+    .expect("client tls handshake must succeed against a cert chaining to OUR ca");
+
+    let request =
+        format!("GET /repos/x HTTP/1.1\r\nHost: {host}\r\nAuthorization: token {token}\r\n\r\n");
+    client_tls.write_all(request.as_bytes()).await.unwrap();
+    client_tls.shutdown().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server task must finish")
+        .expect("server task did not panic")
+        .expect("a granted, attributed connection must relay successfully");
+
+    // Give the origin's reader task a moment to drain what
+    // `terminate_and_forward` already wrote before this test inspects it —
+    // `terminate_and_forward` returning `Ok` only proves the proxy's side of
+    // the relay finished, not that the origin's async reader has been
+    // scheduled yet.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            {
+                let captured = origin_received
+                    .lock()
+                    .expect("origin capture mutex is never poisoned by a panicking holder");
+                if !captured.is_empty() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("origin must have received the rewritten request head");
+
+    let captured = origin_received
+        .lock()
+        .expect("origin capture mutex is never poisoned by a panicking holder")
+        .clone();
+    let text = String::from_utf8_lossy(&captured);
+    assert!(
+        text.contains(credential_swap_tests::REAL_SECRET),
+        "the real secret must reach the origin's decrypted bytes: {text}"
+    );
+    assert!(
+        !text.contains(&token),
+        "the icsbx_ placeholder must never reach the origin's decrypted \
+         bytes: {text}"
+    );
 }
