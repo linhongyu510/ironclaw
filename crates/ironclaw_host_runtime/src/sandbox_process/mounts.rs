@@ -102,13 +102,29 @@ pub(super) async fn materialize_ca_bundle(
             ))
         })?;
     let bundle_path = bundle_dir.join("ca-bundle.pem");
-    tokio::fs::write(&bundle_path, ca_bundle_pem)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox CA trust bundle could not be written: {error}"
-            ))
-        })?;
+    // Write-then-rename instead of a direct `tokio::fs::write` (open +
+    // truncate + write): this file is bind-mounted read-only into every
+    // sandbox container in the deployment (see the doc above) and rewritten
+    // on every container create/recycle for ANY user, so a direct write
+    // leaves a window where a concurrent reader in an unrelated,
+    // already-running container observes a truncated/empty PEM mid-write.
+    // `rename` is atomic within a filesystem, so a concurrent reader always
+    // sees either the complete old file or the complete new one, never a
+    // partial one. The temp file lives in the same directory so the rename
+    // stays on the same filesystem.
+    let tmp_path = bundle_dir.join(format!("ca-bundle.pem.tmp-{}", uuid::Uuid::new_v4()));
+    if let Err(error) = tokio::fs::write(&tmp_path, ca_bundle_pem).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox CA trust bundle could not be written: {error}"
+        )));
+    }
+    if let Err(error) = tokio::fs::rename(&tmp_path, &bundle_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox CA trust bundle could not be published: {error}"
+        )));
+    }
     tokio::fs::canonicalize(&bundle_path)
         .await
         .map_err(|error| {
@@ -168,5 +184,77 @@ mod tests {
         let error = ca_bundle_bind(Path::new("/tmp/has:colon/ca-bundle.pem")).unwrap_err();
 
         assert!(format!("{error}").contains("cannot contain"));
+    }
+
+    /// RUN-001 regression: `materialize_ca_bundle` is shared across every
+    /// container in the deployment (see its doc above) and is rewritten on
+    /// every container create/recycle for ANY user. A non-atomic
+    /// open+truncate+write leaves a window where a concurrent reader
+    /// (another, already-running container bind-mounting this exact host
+    /// path read-only) can observe an empty or partial PEM. This test
+    /// starts one task hammering `materialize_ca_bundle` on a shared
+    /// `workspace_root` while another task repeatedly reads the same path,
+    /// and asserts every successful read is the complete, byte-exact PEM —
+    /// never a short/torn read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn materialize_ca_bundle_never_exposes_a_torn_read_to_concurrent_readers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().to_path_buf();
+        // Large enough (~256 KiB) that a torn write has a realistically
+        // observable window even on a fast filesystem/tmpfs.
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            "A".repeat(64).repeat(4096)
+        );
+
+        // Create the file once before racing, so the reader can distinguish
+        // "not created yet" (fine — still setting up) from "was created,
+        // then observed incomplete" (the bug under test).
+        let bundle_path = materialize_ca_bundle(&workspace_root, &pem)
+            .await
+            .expect("initial write should succeed");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let reader_path = bundle_path.clone();
+        let expected = pem.clone().into_bytes();
+        let reader = tokio::spawn(async move {
+            let mut torn_reads = 0usize;
+            let mut total_reads = 0usize;
+            while !reader_stop.load(Ordering::Relaxed) {
+                if let Ok(bytes) = tokio::fs::read(&reader_path).await {
+                    total_reads += 1;
+                    if bytes != expected {
+                        torn_reads += 1;
+                    }
+                }
+            }
+            (torn_reads, total_reads)
+        });
+
+        let writer_root = workspace_root.clone();
+        let writer_pem = pem.clone();
+        let writer = tokio::spawn(async move {
+            for _ in 0..500 {
+                materialize_ca_bundle(&writer_root, &writer_pem)
+                    .await
+                    .expect("write should succeed");
+            }
+        });
+
+        writer.await.expect("writer task should not panic");
+        stop.store(true, Ordering::Relaxed);
+        let (torn_reads, total_reads) = reader.await.expect("reader task should not panic");
+
+        assert_eq!(
+            torn_reads, 0,
+            "observed {torn_reads} torn/incomplete reads out of {total_reads} total reads of \
+             the CA bundle while materialize_ca_bundle concurrently rewrote it in place — every \
+             concurrent reader must always see either the complete old file or the complete new \
+             one, never a partial one"
+        );
     }
 }
