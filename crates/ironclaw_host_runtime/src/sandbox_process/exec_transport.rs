@@ -1300,9 +1300,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let bundle_pem = "-----BEGIN CERTIFICATE-----\nfake-bundle-content\n-----END CERTIFICATE-----\n";
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_ca_bundle_pem(bundle_pem);
+        let bundle_pem =
+            "-----BEGIN CERTIFICATE-----\nfake-bundle-content\n-----END CERTIFICATE-----\n";
+        let config =
+            RebornSandboxConfig::new(temp.path().join("workspaces")).with_ca_bundle_pem(bundle_pem);
         let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
         let user = ironclaw_host_api::UserId::new("user-a").unwrap();
 
@@ -1583,8 +1584,8 @@ pub(crate) mod docker_gate;
 /// `#[ignore]` vanish.
 #[cfg(test)]
 mod docker_tests {
-    use super::*;
     use super::super::set_sandbox_writable_permissions;
+    use super::*;
     use std::collections::HashMap;
 
     use bollard::{

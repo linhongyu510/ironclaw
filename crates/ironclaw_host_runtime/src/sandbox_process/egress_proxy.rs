@@ -1135,7 +1135,7 @@ mod tests {
     /// bundle are pure host-local operations.
     #[tokio::test]
     async fn bind_sandbox_egress_proxy_with_tls_intercept_wires_interception_and_a_key_free_bundle()
-     {
+    {
         let binding = bind_sandbox_egress_proxy_with_tls_intercept(
             "127.0.0.1:0",
             policy_allowing(&["pypi.org"]),
@@ -1156,7 +1156,11 @@ mod tests {
             "the container trust bundle handed back to composition must never contain private \
              key material"
         );
-        assert!(binding.ca_bundle_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(
+            binding
+                .ca_bundle_pem
+                .contains("-----BEGIN CERTIFICATE-----")
+        );
     }
 
     #[tokio::test]

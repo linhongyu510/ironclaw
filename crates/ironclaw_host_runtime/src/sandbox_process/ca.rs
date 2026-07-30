@@ -526,8 +526,9 @@ fn der_to_pem(der: &[u8]) -> String {
     const LINE_WIDTH: usize = 64;
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut pem =
-        String::with_capacity(LABEL_BEGIN.len() + LABEL_END.len() + encoded.len() + encoded.len() / LINE_WIDTH + 1);
+    let mut pem = String::with_capacity(
+        LABEL_BEGIN.len() + LABEL_END.len() + encoded.len() + encoded.len() / LINE_WIDTH + 1,
+    );
     pem.push_str(LABEL_BEGIN);
     let mut start = 0;
     while start < encoded.len() {

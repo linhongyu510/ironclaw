@@ -112,10 +112,7 @@ mod tests {
 
         assert_eq!(
             bind.into_docker_bind(),
-            format!(
-                "{}:{CONTAINER_CA_BUNDLE_PATH}:ro",
-                bundle_path.display()
-            )
+            format!("{}:{CONTAINER_CA_BUNDLE_PATH}:ro", bundle_path.display())
         );
     }
 

@@ -397,7 +397,10 @@ mod dual_homed_topology {
             hasher.update(b"\0");
         }
         let digest = hasher.finalize();
-        format!("ironclaw-egress-proxy-standalone:src-{}", hex::encode(digest))
+        format!(
+            "ironclaw-egress-proxy-standalone:src-{}",
+            hex::encode(digest)
+        )
     }
 
     fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -653,7 +656,11 @@ mod dual_homed_topology {
     /// create), proven here through the equivalent "file exists at a fixed
     /// path inside the container" outcome.
     pub fn install_file_into_worker(host_path: &Path, dest_path: &str) {
-        let cp = docker(&["cp", host_path.to_str().expect("valid utf8 path"), &format!("{WORKER_NAME}:{dest_path}")]);
+        let cp = docker(&[
+            "cp",
+            host_path.to_str().expect("valid utf8 path"),
+            &format!("{WORKER_NAME}:{dest_path}"),
+        ]);
         assert!(
             cp.status.success(),
             "docker cp into the worker container should succeed: {}",
