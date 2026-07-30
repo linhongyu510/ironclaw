@@ -43,7 +43,7 @@ mod user_key;
 use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
 pub use attribution::ConnectionAttributionResolver;
-pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
+pub use broker::RebornSandboxNetworkBroker;
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use egress_proxy::{
@@ -112,7 +112,6 @@ pub struct RebornSandboxConfig {
     max_output_bytes: usize,
     disable_network: bool,
     network_broker: Option<RebornSandboxNetworkBroker>,
-    secret_broker: Option<RebornSandboxSecretBroker>,
     container_identity: RebornSandboxContainerIdentity,
 }
 
@@ -129,7 +128,6 @@ impl RebornSandboxConfig {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             disable_network: true,
             network_broker: None,
-            secret_broker: None,
             container_identity: RebornSandboxContainerIdentity::image_default(),
         }
     }
@@ -149,41 +147,9 @@ impl RebornSandboxConfig {
         self
     }
 
-    pub fn with_network_broker_proxy_url(
-        mut self,
-        proxy_url: impl Into<String>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::new(proxy_url)?);
-        Ok(self)
-    }
-
     pub fn with_network_broker_port(mut self, port: u16) -> Self {
         self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
         self
-    }
-
-    pub fn with_network_broker_unix_socket(
-        mut self,
-        host_socket: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
-        Ok(self)
-    }
-
-    pub fn with_secret_broker_url(
-        mut self,
-        broker_url: impl Into<String>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::new(broker_url)?);
-        Ok(self)
-    }
-
-    pub fn with_secret_broker_unix_socket(
-        mut self,
-        host_socket: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
-        Ok(self)
     }
 
     pub fn with_container_identity(mut self, identity: RebornSandboxContainerIdentity) -> Self {
@@ -205,18 +171,16 @@ impl RebornSandboxConfig {
     ///
     /// - `disable_network: false` (`with_network_enabled`, unused in
     ///   production today): `None` (Docker default bridge) — a deliberate
-    ///   fully-open mode, unrelated to the brokered-egress cases below.
-    /// - `disable_network: true` with no broker, or a Unix-socket broker
-    ///   (`requires_docker_network() == false`): `Some("none")` — no network
+    ///   fully-open mode, unrelated to the brokered-egress case below.
+    /// - `disable_network: true` with no broker: `Some("none")` — no network
     ///   interfaces at all.
-    /// - `disable_network: true` with an HTTP-proxy broker
-    ///   (`requires_docker_network() == true`): joins the pinned internal
-    ///   network (`broker::SANDBOX_EGRESS_NETWORK_NAME`) instead of the
-    ///   default bridge. **E1**: the default bridge NATs to the internet, so
-    ///   a container there could dial out directly and ignore the proxy env
-    ///   — "proxy-allowlist egress" would be advisory, not enforced. The
-    ///   internal network has no route off-host except back to its own
-    ///   gateway, where the proxy is reached (see
+    /// - `disable_network: true` with a network broker configured: joins the
+    ///   pinned internal network (`broker::SANDBOX_EGRESS_NETWORK_NAME`)
+    ///   instead of the default bridge. **E1**: the default bridge NATs to
+    ///   the internet, so a container there could dial out directly and
+    ///   ignore the proxy env — "proxy-allowlist egress" would be advisory,
+    ///   not enforced. The internal network has no route off-host except
+    ///   back to its own gateway, where the proxy is reached (see
     ///   `broker::SANDBOX_EGRESS_NETWORK_GATEWAY` and
     ///   `exec_transport::ensure_egress_network`, which creates the network
     ///   idempotently before a container joins it).
@@ -224,11 +188,7 @@ impl RebornSandboxConfig {
         if !self.disable_network {
             return None;
         }
-        let requires_docker_network = self
-            .network_broker
-            .as_ref()
-            .is_some_and(RebornSandboxNetworkBroker::requires_docker_network);
-        if requires_docker_network {
+        if self.network_broker.is_some() {
             Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
         } else {
             Some("none".to_string())
@@ -240,20 +200,8 @@ impl RebornSandboxConfig {
         extra_env: HashMap<String, String>,
     ) -> Result<Vec<String>, RuntimeProcessError> {
         let mut env = validate_env(extra_env)?;
-        broker::push_broker_env(
-            self.network_broker.as_ref(),
-            self.secret_broker.as_ref(),
-            &mut env,
-        )?;
+        broker::push_broker_env(self.network_broker.as_ref(), &mut env)?;
         Ok(env)
-    }
-
-    fn append_broker_binds(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        broker::append_broker_binds(
-            self.network_broker.as_ref(),
-            self.secret_broker.as_ref(),
-            binds,
-        )
     }
 }
 
@@ -291,7 +239,6 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .field("image", &self.config.image)
             .field("disable_network", &self.config.disable_network)
             .field("network_broker", &self.config.network_broker)
-            .field("secret_broker", &self.config.secret_broker)
             .field("container_identity", &self.config.container_identity)
             .finish_non_exhaustive()
     }
@@ -786,13 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn default_sandbox_disables_ambient_network_and_secret_affordance() {
+    fn default_sandbox_disables_ambient_network() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
         let env = config.command_env(HashMap::new()).unwrap();
 
         assert_eq!(config.container_network_mode(), Some("none".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
     }
 
     #[test]
@@ -810,30 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn network_broker_proxy_url_joins_internal_egress_network_not_default_bridge() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        // E1: an HTTP-proxy broker must NOT leave the container on Docker's
-        // default bridge (which NATs to the internet) — it joins the
-        // pinned internal network instead.
-        assert_eq!(
-            config.container_network_mode(),
-            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
-        );
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(
-            env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
-        );
-        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"https_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTP_PROXY=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
-    }
-
-    #[test]
     fn network_broker_port_uses_pinned_internal_network_gateway_proxy_url() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
         let env = config.command_env(HashMap::new()).unwrap();
@@ -844,8 +766,12 @@ mod tests {
         // `SANDBOX_EGRESS_NETWORK_NAME`), not the Docker default-bridge
         // host-gateway address — that was the E1 hole (default bridge NATs
         // to the internet).
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(env.contains(&format!("IRONCLAW_REBORN_HTTP_PROXY={proxy_url}")));
         assert!(env.contains(&format!("http_proxy={proxy_url}")));
+        assert!(env.contains(&format!("https_proxy={proxy_url}")));
+        assert!(env.contains(&format!("HTTP_PROXY={proxy_url}")));
+        assert!(env.contains(&format!("HTTPS_PROXY={proxy_url}")));
         assert_eq!(
             config.container_network_mode(),
             Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
@@ -853,75 +779,44 @@ mod tests {
     }
 
     #[test]
-    fn unix_socket_network_broker_preserves_none_network_mode_and_mounts_socket() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-        let mut binds = Vec::new();
-        config.append_broker_binds(&mut binds).unwrap();
+    fn reserved_broker_env_keys_match_the_full_fail_closed_list() {
+        // Fail-closed guarantee: a caller must never be able to inject any of
+        // these names into the sandboxed container's environment, regardless
+        // of whether a broker implementation for that name currently exists.
+        // `broker_env_rejects_all_reserved_user_overrides` iterates over
+        // `RESERVED_BROKER_ENV_KEYS` itself, so shrinking the const keeps
+        // that test green while testing fewer keys — pin the expected list
+        // here, independent of the const, so a future shrink fails loudly.
+        let expected: &[&str] = &[
+            "IRONCLAW_REBORN_NETWORK_MODE",
+            "IRONCLAW_REBORN_HTTP_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "IRONCLAW_REBORN_HTTP_BROKER_SOCKET",
+            "IRONCLAW_REBORN_HTTP_BROKER_URL",
+            "IRONCLAW_REBORN_SECRET_MODE",
+            "IRONCLAW_REBORN_SECRET_BROKER_URL",
+            "IRONCLAW_REBORN_SECRET_BROKER_SOCKET",
+        ];
 
-        assert_eq!(config.container_network_mode(), Some("none".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
-        ));
-        assert!(
-            env.contains(&"IRONCLAW_REBORN_HTTP_BROKER_URL=http://ironclaw-broker".to_string())
-        );
         assert_eq!(
-            binds,
-            vec!["/tmp/reborn-http-broker.sock:/tmp/ironclaw-http-broker.sock:rw".to_string()]
+            broker::RESERVED_BROKER_ENV_KEYS.len(),
+            expected.len(),
+            "RESERVED_BROKER_ENV_KEYS length drifted from the expected fail-closed list"
         );
-    }
-
-    #[test]
-    fn secret_broker_exposes_endpoint_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_secret_broker_url("https://broker.internal/secrets")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_SECRET_BROKER_URL=https://broker.internal/secrets".to_string()
-        ));
-        assert!(
-            env.iter()
-                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
-        );
-    }
-
-    #[test]
-    fn unix_socket_secret_broker_exposes_socket_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_secret_broker_unix_socket("/tmp/reborn-secret-broker.sock")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-        let mut binds = Vec::new();
-        config.append_broker_binds(&mut binds).unwrap();
-
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
-        ));
-        assert!(
-            env.iter()
-                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
-        );
-        assert_eq!(
-            binds,
-            vec!["/tmp/reborn-secret-broker.sock:/tmp/ironclaw-secret-broker.sock:rw".to_string()]
-        );
+        for key in expected {
+            assert!(
+                broker::RESERVED_BROKER_ENV_KEYS.contains(key),
+                "{key} must remain reserved even without a live broker implementation"
+            );
+        }
     }
 
     #[test]
     fn broker_env_rejects_all_reserved_user_overrides() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap()
-            .with_secret_broker_url("https://broker.internal/secrets")
-            .unwrap();
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
         for key in broker::RESERVED_BROKER_ENV_KEYS {
             let error = config
                 .command_env(HashMap::from([(
@@ -934,73 +829,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn broker_urls_reject_credentials_fragments_control_characters_and_non_http_schemes() {
-        assert!(RebornSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://token@broker.internal/secrets").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://broker.internal/secrets#token").is_err());
-        assert!(
-            RebornSandboxSecretBroker::new("https://broker.internal/secrets?token=abc").is_err()
-        );
-        assert!(RebornSandboxNetworkBroker::unix_socket("relative.sock").is_err());
-        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
-        assert!(RebornSandboxNetworkBroker::unix_socket("/tmp/bad\npath.sock").is_err());
-        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad\tpath.sock").is_err());
-    }
-
-    #[tokio::test]
-    async fn user_container_launch_config_applies_unix_socket_broker_env_binds_and_none_network() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let network_socket = temp.path().join("network-broker.sock");
-        let secret_socket = temp.path().join("secret-broker.sock");
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_unix_socket(&network_socket)
-            .unwrap()
-            .with_secret_broker_unix_socket(&secret_socket)
-            .unwrap();
-        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
-
-        let launch =
-            exec_transport::user_container_launch_config(&config, &tenant, &user, &workspace)
-                .await
-                .unwrap();
-        let host_config = launch.host_config.unwrap();
-        let binds = host_config.binds.unwrap();
-        let env = launch.env.unwrap();
-
-        assert_eq!(host_config.network_mode, Some("none".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
-        ));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
-        ));
-        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
-        assert!(binds.contains(&format!(
-            "{}:/tmp/ironclaw-http-broker.sock:rw",
-            network_socket.display()
-        )));
-        assert!(binds.contains(&format!(
-            "{}:/tmp/ironclaw-secret-broker.sock:rw",
-            secret_socket.display()
-        )));
-    }
-
     #[tokio::test]
     async fn user_container_launch_config_applies_http_proxy_broker_env_and_joins_internal_egress_network()
      {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
+        let config =
+            RebornSandboxConfig::new(temp.path().join("workspaces")).with_network_broker_port(8181);
         let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
         let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+        let proxy_url = format!("http://{}:8181", broker::SANDBOX_EGRESS_NETWORK_GATEWAY);
 
         let launch =
             exec_transport::user_container_launch_config(&config, &tenant, &user, &workspace)
@@ -1019,14 +858,9 @@ mod tests {
             Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
         );
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&format!("http_proxy={proxy_url}")));
+        assert!(env.contains(&format!("HTTPS_PROXY={proxy_url}")));
         assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
-        assert!(
-            binds
-                .iter()
-                .all(|bind| !bind.contains("ironclaw-http-broker.sock"))
-        );
     }
 
     #[test]

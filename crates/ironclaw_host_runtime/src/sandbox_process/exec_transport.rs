@@ -570,8 +570,7 @@ pub(super) async fn user_container_launch_config(
     // any more — `posture.user` (below, and see [`security_posture_fields`])
     // pins PID 1 to uid 1000 directly instead, matching the fixed identity
     // every `docker exec` (`SANDBOX_EXEC_UID`/`GID`) already assumes.
-    let mut binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
-    config.append_broker_binds(&mut binds)?;
+    let binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
     let host_config = HostConfig {
         binds: Some(binds),
         memory: Some(config.memory_bytes as i64),
@@ -1239,8 +1238,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let no_net_config = RebornSandboxConfig::new(temp.path().join("workspaces"));
         let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces-2"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .expect("valid proxy url");
+            .with_network_broker_port(8181);
 
         assert_ne!(
             security_posture_stamp(&security_posture_fields(&no_net_config)),
@@ -1344,9 +1342,8 @@ mod tests {
             Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
                 .expect("HTTP-transport client construction performs no I/O");
         let temp = tempfile::tempdir().unwrap();
-        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .expect("valid proxy url");
+        let egress_config =
+            RebornSandboxConfig::new(temp.path().join("workspaces")).with_network_broker_port(8181);
         assert_eq!(
             egress_config.container_network_mode(),
             Some(SANDBOX_EGRESS_NETWORK_NAME.to_string()),
@@ -1375,9 +1372,8 @@ mod tests {
             Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
                 .expect("HTTP-transport client construction performs no I/O");
         let temp = tempfile::tempdir().unwrap();
-        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .expect("valid proxy url");
+        let egress_config =
+            RebornSandboxConfig::new(temp.path().join("workspaces")).with_network_broker_port(8181);
 
         let network_ready = tokio::sync::OnceCell::new();
         let result = ensure_egress_network_once(&docker, &egress_config, &network_ready).await;
@@ -1755,9 +1751,8 @@ mod docker_tests {
             .expect("posture-mismatched network create succeeds");
 
         let temp = tempfile::tempdir().unwrap();
-        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .expect("valid proxy url");
+        let egress_config =
+            RebornSandboxConfig::new(temp.path().join("workspaces")).with_network_broker_port(8181);
         assert_eq!(
             egress_config.container_network_mode(),
             Some(SANDBOX_EGRESS_NETWORK_NAME.to_string()),
