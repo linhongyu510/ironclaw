@@ -75,6 +75,26 @@
 //! the walk already decided to visit. [`scan_sandbox_process_module`] is the
 //! fix: it opens the parent file through the exact same [`scan_file`] path
 //! used for every directory member, then scans the directory subtree.
+//!
+//! **The eleventh near-miss was a redirect-*selection* gap, one attribute
+//! over from the tenth.** `#[path = "..."]` repoints a `mod` declaration's
+//! source file anywhere on disk — `exec_transport.rs` genuinely declares
+//! `#[cfg(test)] #[path = "../../tests/support/docker_gate.rs"] pub(crate)
+//! mod docker_gate;`, whose target lives entirely outside
+//! `sandbox_process/`, the tree every scan in this file walks. Before this
+//! fix, the scanner never opened that target at all; it trusted the
+//! declaration on sight. That is the exact shape of strike #4
+//! (`is_standalone_test_file` exempting on the `/tests.rs` filename alone,
+//! before [`parent_gates_tests_module_behind_cfg_test`] existed to verify
+//! the `#[cfg(test)]` wiring behind it) recurring on a different attribute:
+//! an exemption granted without checking the mechanism that supposedly
+//! justifies it. [`scan_path_redirects`] closes it by reusing that exact
+//! verification predicate (`is_cfg_test_attribute`) rather than
+//! re-implementing a second, potentially-diverging one — a verified
+//! `#[cfg(test)]` gate exempts, matching the tests.rs precedent; anything
+//! else (no gate, an `any(test, ...)` gate) makes the scanner *follow the
+//! redirect* and scan the target through the identical [`scan_file`] path,
+//! recursively, rather than either trusting it or blanket-failing it.
 
 // Each ratchet binary gets its own copy of this shared module; this
 // binary uses only the comment/string stripper and workspace_root, so the
@@ -431,6 +451,31 @@ fn sanctioned_from_system_roots_lines(relative: &str, code_only: &str) -> HashSe
 /// Same fail-loud I/O policy as `scan_dir`: every error is propagated, never
 /// swallowed.
 fn scan_file(root: &Path, path: &Path, hits: &mut Vec<String>) -> io::Result<()> {
+    scan_file_at_depth(root, path, hits, 0)
+}
+
+/// The maximum number of `#[path]` redirect hops [`scan_path_redirects`] will
+/// follow from a single top-level file before giving up silently rather than
+/// recursing forever. Nothing in the real repository redirects more than one
+/// hop; this only guards against a *pathological or cyclic* fixture (`A`
+/// redirects to `B`, `B` redirects back to `A`) turning a scan into infinite
+/// recursion. Bounded and small on purpose — a legitimate redirect chain this
+/// deep would itself be a code-review problem, not something this gate should
+/// accommodate.
+const MAX_PATH_REDIRECT_DEPTH: u8 = 8;
+
+/// The real body of [`scan_file`], carrying the `#[path]`-redirect recursion
+/// depth so [`scan_path_redirects`] can call back into this exact same
+/// policed path for a redirect target without a caller-visible signature
+/// change to `scan_file` itself (every existing call site — `scan_dir`,
+/// `scan_sandbox_process_module`, and every test in this file — keeps
+/// calling the 3-argument `scan_file`).
+fn scan_file_at_depth(
+    root: &Path,
+    path: &Path,
+    hits: &mut Vec<String>,
+    depth: u8,
+) -> io::Result<()> {
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -443,6 +488,7 @@ fn scan_file(root: &Path, path: &Path, hits: &mut Vec<String>) -> io::Result<()>
     }
     let contents = std::fs::read_to_string(path)?;
     let production_only = truncate_at_inline_test_module(&contents);
+    scan_path_redirects(root, path, &production_only, hits, depth)?;
     let code_only = strip_comments_and_strings(&production_only);
     let sanctioned_lines = sanctioned_from_system_roots_lines(&relative, &code_only);
     let haystack = Haystack::build(&code_only);
@@ -453,6 +499,148 @@ fn scan_file(root: &Path, path: &Path, hits: &mut Vec<String>) -> io::Result<()>
             }
             hits.push(format!("{relative}:{line}: `{pattern}`"));
         }
+    }
+    Ok(())
+}
+
+/// Parses a single trimmed line as a `#[path = "..."]` attribute, returning
+/// the quoted target string. Handles both `#[path = "..."]` (rustfmt's
+/// canonical spacing, the real repo's convention) and the unspaced
+/// `#[path="..."]`. Anything else — including `#[cfg_attr(test, path =
+/// "...")]`, a materially different construct where the redirect only takes
+/// effect under `cfg(test)` and the *declaration itself* still needs a
+/// default same-directory file to exist for a non-test build to compile at
+/// all (so its default-path file is already inside the scanned tree and
+/// already walked) — returns `None` rather than a wrong guess.
+fn extract_path_attribute(trimmed: &str) -> Option<String> {
+    let inner = trimmed.strip_prefix("#[")?.strip_suffix(']')?;
+    let mut parts = inner.splitn(2, '=');
+    let key = parts.next()?.trim();
+    if key != "path" {
+        return None;
+    }
+    let value = parts.next()?.trim();
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    Some(value.to_string())
+}
+
+/// Parses a single trimmed line as a `mod name;` (external file, returns
+/// `(name, true)`) or `mod name { ... ` (inline body, returns `(name,
+/// false)`) declaration, tolerating an optional visibility prefix
+/// (`pub(crate) mod x;`) and rustfmt's usual spacing variants. Whitespace-
+/// token based, matching the rigor level `mod_declaration`'s sibling checks
+/// in this file already use (`declares_from_system_roots`, `mod tests;`
+/// exact-match) rather than a full parser — good enough for rustfmt'd
+/// source, and a missed match here only means `scan_path_redirects` treats
+/// the line as ordinary code (which resets any pending `#[path]`/`#[cfg]`
+/// state — failing toward re-scanning the file normally, never toward a
+/// silent exemption).
+fn mod_declaration(trimmed: &str) -> Option<(&str, bool)> {
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let mod_idx = tokens.iter().position(|&token| token == "mod")?;
+    let name_token = *tokens.get(mod_idx + 1)?;
+    if let Some(name) = name_token.strip_suffix(';')
+        && !name.is_empty()
+    {
+        return Some((name, true));
+    }
+    if let Some(name) = name_token.strip_suffix('{')
+        && !name.is_empty()
+    {
+        return Some((name, false));
+    }
+    match tokens.get(mod_idx + 2) {
+        Some(&";") => Some((name_token, true)),
+        Some(&"{") => Some((name_token, false)),
+        _ => None,
+    }
+}
+
+/// Resolves a `#[path = "..."]` target the same way rustc does: relative to
+/// the directory containing the file the attribute appears in.
+fn resolve_path_attribute_target(declaring_file: &Path, target: &str) -> PathBuf {
+    let base = declaring_file.parent().unwrap_or(declaring_file);
+    base.join(target)
+}
+
+/// The eleventh near-miss: a `#[path = "..."]` attribute repoints a `mod`
+/// declaration's source file anywhere on disk — including entirely outside
+/// `sandbox_process/`, the tree [`scan_dir`] walks. The scanner previously
+/// trusted any such declaration on sight, the same shape as strike #4
+/// (`is_standalone_test_file` exempting on the `/tests.rs` filename alone,
+/// before [`parent_gates_tests_module_behind_cfg_test`] existed to verify the
+/// wiring behind it): an exemption granted without checking the mechanism
+/// that supposedly justifies it. The real declaration today
+/// (`exec_transport.rs`'s `docker_gate` module) is genuinely
+/// `#[cfg(test)]`-gated — so this function reuses [`is_cfg_test_attribute`],
+/// the exact predicate the tests.rs fix already uses, rather than
+/// re-implementing a second, potentially-diverging check.
+///
+/// **Verified `#[cfg(test)]` gating exempts, matching the tests.rs
+/// precedent.** Any other shape — no gating, an `any(test, ...)` gate (which
+/// [`is_cfg_test_attribute`] already rejects for the same reason it rejects
+/// it for tests.rs), or a gate on a different attribute entirely — does
+/// **not** simply fail the declaration outright. It **follows the redirect**
+/// and scans the target file through [`scan_file_at_depth`], the identical
+/// policed path every other file in this tree goes through (same
+/// exemptions, same carve-outs, same recursive `#[path]` handling for a
+/// chained redirect). A target that cannot be read propagates its I/O error,
+/// same fail-loud policy as the rest of this module.
+///
+/// `#[path]` on an **inline** `mod name { ... }` body is not a redirect at
+/// all — rustc ignores `#[path]` when the module already has an inline body,
+/// so that code is simply wherever it is textually written and already
+/// covered by the ordinary per-file scan below. This function recognizes
+/// only the external-file form (`mod name;`).
+fn scan_path_redirects(
+    root: &Path,
+    path: &Path,
+    contents: &str,
+    hits: &mut Vec<String>,
+    depth: u8,
+) -> io::Result<()> {
+    if depth >= MAX_PATH_REDIRECT_DEPTH {
+        return Ok(());
+    }
+    let mut pending_cfg_test = false;
+    let mut pending_path: Option<String> = None;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            // Blank lines and doc comments never break a pending attribute chain.
+            continue;
+        }
+        if is_cfg_test_attribute(trimmed) {
+            pending_cfg_test = true;
+            continue;
+        }
+        if let Some(target) = extract_path_attribute(trimmed) {
+            pending_path = Some(target);
+            continue;
+        }
+        if let Some((_name, is_external)) = mod_declaration(trimmed) {
+            if is_external
+                && let Some(target) = pending_path.take()
+                && !pending_cfg_test
+            {
+                let resolved = resolve_path_attribute_target(path, &target);
+                scan_file_at_depth(root, &resolved, hits, depth + 1)?;
+            }
+            // Inline body (`mod name { ... `): #[path] has no effect;
+            // already scanned in place by the ordinary per-file pass.
+            pending_cfg_test = false;
+            pending_path = None;
+            continue;
+        }
+        if trimmed.starts_with('#') && trimmed.ends_with(']') {
+            // Some other attribute between #[cfg(test)]/#[path] and the mod
+            // declaration (e.g. #[allow(dead_code)]) — tolerated, matching
+            // parent_gates_tests_module_behind_cfg_test's tolerance.
+            continue;
+        }
+        // Any other real code line breaks the pending attribute chain.
+        pending_cfg_test = false;
+        pending_path = None;
     }
     Ok(())
 }
@@ -1263,6 +1451,327 @@ fn gate_still_exempts_the_sanctioned_call_when_split_across_a_line_break() {
         "a `RootCertStore::empty()` call split across a line break inside \
          from_system_roots's own body must still be recognized as the \
          sanctioned call site"
+    );
+}
+
+/// Computes the `#[path = "..."]` string that would take `from_dir` (the
+/// directory of a declaring file) to `to_file`, as rustc itself resolves it
+/// (relative to the declaring file's own directory) — by walking up common
+/// path components rather than hand-counting `..` hops. Test-only helper so
+/// every path-redirect fixture below can place its target in an independent
+/// `tempfile::tempdir()` (guaranteeing no filename collision with any other
+/// test running in parallel) instead of a fixed, shared sibling directory
+/// name.
+fn relative_path_between(from_dir: &Path, to_file: &Path) -> String {
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to_file.components().collect();
+    let mut common = 0;
+    while common < from_components.len()
+        && common < to_components.len()
+        && from_components[common] == to_components[common]
+    {
+        common += 1;
+    }
+    let mut parts: Vec<String> =
+        std::iter::repeat_n("..".to_string(), from_components.len() - common).collect();
+    parts.extend(
+        to_components[common..]
+            .iter()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
+}
+
+/// RED fixture for the eleventh near-miss: a `#[path = "..."]` module
+/// redirect whose target lies entirely outside the scanned
+/// `sandbox_process/` tree, with NO preceding `#[cfg(test)]` gating it. This
+/// is not a hypothetical: `exec_transport.rs`'s real `docker_gate` module
+/// declaration has exactly this shape (`#[path =
+/// "../../tests/support/docker_gate.rs"]`), just correctly `#[cfg(test)]`-
+/// gated. Drop that one attribute and the scanner — at the time this test
+/// was written — never notices: `scan_dir` only opens `.rs` files it finds
+/// by walking `sandbox_process/`'s own directory tree, and a `#[path]`
+/// redirect can point a `mod` declaration's source file completely outside
+/// that tree, so the walk structurally never visits it, no matter how
+/// hardened the per-file matching inside `scan_file` is — the same "file
+/// *selection* gap, not a lexing gap" shape as the tenth near-miss, one
+/// attribute over. Written against `scan_dir` (the gate's real entry point
+/// for `sandbox_process/`'s directory tree) with a target file placed in a
+/// wholly independent tempdir, i.e. genuinely outside the scanned root.
+#[test]
+fn gate_catches_a_banned_call_behind_an_ungated_path_redirect_outside_the_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    // The redirect target: an entirely independent tempdir, never nested
+    // under `root` — guarantees isolation from every other test in this
+    // file, including when run in parallel.
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("redirected.rs");
+    std::fs::write(
+        &target,
+        "pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n}\n",
+    )
+    .expect("write redirected.rs");
+
+    // The redirecting file: NO #[cfg(test)] before the #[path] attribute.
+    let path_attribute = relative_path_between(&sandbox_dir, &target);
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        format!(
+            "pub(crate) fn noop() {{}}\n\n#[path = \"{path_attribute}\"]\npub(crate) mod docker_gate;\n"
+        ),
+    )
+    .expect("write exec_transport.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a `#[path]` module redirect with no #[cfg(test)] gating, pointing \
+         at a banned call entirely outside the scanned sandbox_process/ \
+         tree, must be caught — the directory walk alone cannot reach it, \
+         so the gate must follow the redirect itself"
+    );
+}
+
+/// The other half of the same proof: the identical `#[path]` shape, target,
+/// and banned call, but with the real repo's own `#[cfg(test)]` gate
+/// preceding the `#[path]` attribute (order matches the real
+/// `exec_transport.rs` declaration: `#[cfg(test)]` then `#[path = "..."]`
+/// then `mod docker_gate;`) must stay exempt — the fix must not turn into a
+/// blanket false-positive generator against the one legitimate use of this
+/// pattern in the repository.
+#[test]
+fn gate_still_exempts_a_correctly_cfg_test_gated_path_redirect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("redirected.rs");
+    std::fs::write(
+        &target,
+        "pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n}\n",
+    )
+    .expect("write redirected.rs");
+
+    let path_attribute = relative_path_between(&sandbox_dir, &target);
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        format!(
+            "pub(crate) fn noop() {{}}\n\n#[cfg(test)]\n#[path = \"{path_attribute}\"]\npub(crate) mod docker_gate;\n"
+        ),
+    )
+    .expect("write exec_transport.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        hits.is_empty(),
+        "a genuinely #[cfg(test)]-gated #[path] redirect must stay exempt \
+         (matching exec_transport.rs's real docker_gate declaration), got: \
+         {hits:?}"
+    );
+}
+
+/// `any(test, ...)` gating a `#[path]` redirect must be treated the same as
+/// it already is for the standalone-`tests.rs` wiring check — it does not
+/// unconditionally require `test`, so [`is_cfg_test_attribute`] correctly
+/// rejects it and the redirect target must still be followed and scanned.
+#[test]
+fn gate_catches_a_path_redirect_gated_only_by_any_test() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("redirected.rs");
+    std::fs::write(
+        &target,
+        "pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n}\n",
+    )
+    .expect("write redirected.rs");
+
+    let path_attribute = relative_path_between(&sandbox_dir, &target);
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        format!(
+            "pub(crate) fn noop() {{}}\n\n#[cfg(any(test, feature = \"docker_gate_standalone\"))]\n#[path = \"{path_attribute}\"]\npub(crate) mod docker_gate;\n"
+        ),
+    )
+    .expect("write exec_transport.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a #[path] redirect gated only by #[cfg(any(test, ...))] does not \
+         unconditionally require test — the redirect target must still be \
+         followed and scanned, not trusted as exempt"
+    );
+}
+
+/// `#[path]` attached to an **inline** `mod name { ... }` body is not a
+/// redirect at all — rustc ignores `#[path]` on a module that already has an
+/// inline body. Proves this shape is not a hole by construction: the banned
+/// call lives directly in the same file's text, so the ordinary per-file
+/// scan already catches it regardless of the (inert) `#[path]` attribute
+/// above it, with no special-casing from `scan_path_redirects` needed.
+#[test]
+fn gate_catches_a_banned_call_inside_an_inline_module_body_with_an_inert_path_attribute() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[path = \"this/target/is/never/opened.rs\"]\n\
+         pub(crate) mod docker_gate {\n    \
+             pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n        \
+                 rustls::ClientConfig::builder().dangerous()\n    \
+             }\n\
+         }\n",
+    )
+    .expect("write exec_transport.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a #[path] attribute on an inline `mod name {{ ... }}` body is inert \
+         per rustc — the banned call inside that inline body must still be \
+         caught by the ordinary per-file scan; got: {hits:?}"
+    );
+}
+
+/// A `#[path]` chain — file A redirects (ungated) to file B, which itself
+/// redirects (ungated) to file C containing the banned call — must still be
+/// caught. Proves `scan_path_redirects`' recursive call through
+/// `scan_file_at_depth` actually recurses, not just follows one hop.
+#[test]
+fn gate_follows_a_chained_path_redirect_two_hops_deep() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    let hop_b_dir = sandbox_dir.join("hop_b_dir");
+    std::fs::create_dir_all(&hop_b_dir).expect("create hop_b dir");
+
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[path = \"hop_b_dir/hop_b.rs\"]\n\
+         pub(crate) mod hop_a;\n",
+    )
+    .expect("write exec_transport.rs");
+    std::fs::write(
+        hop_b_dir.join("hop_b.rs"),
+        "#[path = \"../hop_c.rs\"]\n\
+         pub(crate) mod hop_c_module;\n",
+    )
+    .expect("write hop_b.rs");
+    std::fs::write(
+        sandbox_dir.join("hop_c.rs"),
+        "pub(crate) fn build_dangerous() -> rustls::ClientConfig {\n    \
+             rustls::ClientConfig::builder().dangerous()\n}\n",
+    )
+    .expect("write hop_c.rs");
+
+    let mut hits = Vec::new();
+    scan_dir(root, &sandbox_dir, &mut hits).expect("scan must succeed");
+    assert!(
+        !hits.is_empty(),
+        "a two-hop #[path] redirect chain (A -> B -> C) with a banned call \
+         only in C must still be caught"
+    );
+}
+
+/// An unreadable `#[path]` redirect target (the file does not exist) must
+/// fail loudly, the same fail-loud I/O policy `scan_dir`/`scan_file` already
+/// apply to every other read in this module — a gate that silently treats
+/// "I could not open the file I claim to have scanned" as "clean" is worse
+/// than no gate.
+#[test]
+fn gate_fails_loudly_when_a_path_redirect_target_does_not_exist() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let sandbox_dir = sandbox_process_dir(root);
+    std::fs::create_dir_all(&sandbox_dir).expect("create sandbox_process dir");
+
+    std::fs::write(
+        sandbox_dir.join("exec_transport.rs"),
+        "pub(crate) fn noop() {}\n\n\
+         #[path = \"does/not/exist.rs\"]\n\
+         pub(crate) mod docker_gate;\n",
+    )
+    .expect("write exec_transport.rs");
+
+    let mut hits = Vec::new();
+    let result = scan_dir(root, &sandbox_dir, &mut hits);
+    assert!(
+        result.is_err(),
+        "an unreadable #[path] redirect target must propagate an I/O error, \
+         not report a clean scan"
+    );
+}
+
+/// End-to-end proof against the **real** repository file: `exec_transport.rs`
+/// declares `docker_gate` with exactly the `#[cfg(test)]` + `#[path = "..."]`
+/// shape this fix polices, and its target
+/// (`crates/ironclaw_host_runtime/tests/support/docker_gate.rs`) genuinely
+/// exists on disk outside `sandbox_process/`. This exercises
+/// `scan_path_redirects` against production source rather than only a
+/// fabricated fixture — if the real declaration ever loses its `#[cfg(test)]`
+/// gate, or the target file is deleted/moved, `sandbox_process_never_hand_
+/// rolls_a_permissive_origin_connector` (which also walks this exact file)
+/// would need to still behave correctly; this test pins the redirect-
+/// resolution mechanics specifically, independent of whatever content
+/// happens to be in the target today.
+#[test]
+fn scan_path_redirects_resolves_the_real_docker_gate_declaration() {
+    let root = workspace_root();
+    let exec_transport_path = sandbox_process_dir(&root).join("exec_transport.rs");
+    let contents = std::fs::read_to_string(&exec_transport_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", exec_transport_path.display()));
+    assert!(
+        contents.contains("#[path = \"../../tests/support/docker_gate.rs\"]"),
+        "expected exec_transport.rs to still declare docker_gate via \
+         #[path] — if this changed, this test needs updating, not deletion"
+    );
+    let resolved =
+        resolve_path_attribute_target(&exec_transport_path, "../../tests/support/docker_gate.rs");
+    assert!(
+        resolved
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("canonicalize {}: {error}", resolved.display()))
+            .ends_with("ironclaw_host_runtime/tests/support/docker_gate.rs"),
+        "resolved path {} did not land on the real docker_gate.rs target",
+        resolved.display()
+    );
+
+    // And, end to end: since the real declaration IS #[cfg(test)]-gated,
+    // scanning the whole module must not follow the redirect into a false
+    // positive — mirrors `sandbox_process_never_hand_rolls_a_permissive_
+    // origin_connector` but pins specifically that the gating, not merely
+    // the target's current content, is what keeps this clean.
+    let mut hits = Vec::new();
+    scan_sandbox_process_module(&root, &mut hits)
+        .unwrap_or_else(|error| panic!("scanning sandbox_process/ for escape hatches: {error}"));
+    assert!(
+        hits.is_empty(),
+        "the real, #[cfg(test)]-gated docker_gate #[path] redirect must not \
+         produce any hits: {hits:?}"
     );
 }
 
