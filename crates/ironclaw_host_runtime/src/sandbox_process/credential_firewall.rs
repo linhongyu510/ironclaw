@@ -402,10 +402,14 @@ impl SandboxCredentialFirewall {
     /// this connection — `None` means attribution failed (duplicate IP,
     /// malformed labels, a Docker query error, ...); this method does not
     /// perform attribution itself — the future W6 proxy's
-    /// connection-attribution resolver owns that. `deadline` bounds the
-    /// whole call: if it has already passed by the time this runs, the
+    /// connection-attribution resolver owns that. `deadline` is checked
+    /// once, at entry: if it has already passed by the time this runs, the
     /// lookup is treated as timed out — CONNECTION-DENIAL, never forwarded
-    /// — exactly like a hung callback into policy per §3.4.
+    /// — exactly like a hung callback into policy per §3.4. It is not
+    /// re-read after that point — the rest of this method is a synchronous,
+    /// non-yielding in-memory lookup under a `std::sync::Mutex` with no
+    /// `.await` anywhere in the call (see the inline comment on the check
+    /// below for why a single entry check suffices here).
     ///
     /// Returns every currently-live obligation for this `(tenant_id,
     /// user_id)` as one [`SandboxCredentialDecision::Grant`] — see that
