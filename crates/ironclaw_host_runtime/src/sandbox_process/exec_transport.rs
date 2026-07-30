@@ -1630,6 +1630,52 @@ mod docker_tests {
             .await;
     }
 
+    /// Removes any container already labeled for `{tenant_id, user_id}`
+    /// before a test builds a fresh workspace and calls `ensure_container`.
+    ///
+    /// `ensure_container` finds its container purely by the `{tenant, user}`
+    /// Docker labels (see its doc comment) and reuses whatever it finds
+    /// WITHOUT checking that container's `/workspace` bind-mount source
+    /// still exists on the host. These tests' labels are fixed across runs,
+    /// but each run creates its own `tempfile::tempdir()` workspace that is
+    /// deleted the moment the test function returns (`TempDir::drop`) — so
+    /// a container that survives past that point (killed test, panic before
+    /// `best_effort_remove`, a leftover from a prior local run) is bound to
+    /// an already-deleted directory. The next run's `ensure_container` finds
+    /// that same labeled container, reuses it untouched (its security-
+    /// posture stamp still matches), and every exec inside it then fails —
+    /// `mkdir: cannot create directory '/workspace/.ironclaw'` — because the
+    /// bind source is gone, regardless of how carefully THIS run chowns its
+    /// own fresh workspace (chowning a directory nothing mounts is a no-op).
+    ///
+    /// Mirrors `tests/integration/reborn_sandbox_egress_proxy.rs`'s
+    /// `remove_egress_proxy_test_sandbox_containers` (same root cause, same
+    /// fix shape); implemented over the `Docker` handle these tests already
+    /// hold instead of shelling out to the `docker` CLI, since every other
+    /// helper in this module already talks to Docker the same way.
+    async fn remove_labeled_test_containers(
+        docker: &Docker,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) {
+        let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
+        let Ok(found) = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+        else {
+            return;
+        };
+        for container in found {
+            if let Some(id) = container.id {
+                best_effort_remove(docker, &id).await;
+            }
+        }
+    }
+
     async fn best_effort_remove_network(docker: &Docker, network_name: &str) {
         let _ = docker.remove_network(network_name).await;
     }
@@ -1990,6 +2036,11 @@ mod docker_tests {
         let config = docker_tests_config(temp.path());
         let tenant = ironclaw_host_api::TenantId::new("limits-tenant").unwrap();
         let user = ironclaw_host_api::UserId::new("limits-user").unwrap();
+        // See `remove_labeled_test_containers`'s doc: a container leaked from
+        // a prior local/CI run of this test carries the same fixed labels
+        // but a bind-mount source `ensure_container` below cannot know is
+        // stale — remove it before this run's fresh workspace exists.
+        remove_labeled_test_containers(&docker, &tenant, &user).await;
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
         create_writable_workspace(&config, &workspace).await;
@@ -2226,6 +2277,12 @@ mod docker_tests {
         let config = docker_tests_config(temp.path());
         let tenant = ironclaw_host_api::TenantId::new("posture-tenant").unwrap();
         let user = ironclaw_host_api::UserId::new("posture-user").unwrap();
+        // See `remove_labeled_test_containers`'s doc — this test also
+        // creates a container under a deterministic name (`key.container_
+        // name()` below), so a leftover from a prior run would additionally
+        // fail this test's own `create_container` call with "name already
+        // in use" on top of the stale-bind-mount defect.
+        remove_labeled_test_containers(&docker, &tenant, &user).await;
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
         create_writable_workspace(&config, &workspace).await;
