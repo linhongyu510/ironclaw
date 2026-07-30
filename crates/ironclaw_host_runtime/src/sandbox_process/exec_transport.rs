@@ -1584,6 +1584,7 @@ pub(crate) mod docker_gate;
 #[cfg(test)]
 mod docker_tests {
     use super::*;
+    use super::super::set_sandbox_writable_permissions;
     use std::collections::HashMap;
 
     use bollard::{
@@ -1594,6 +1595,26 @@ mod docker_tests {
     fn docker_tests_config(workspaces_root: &Path) -> RebornSandboxConfig {
         RebornSandboxConfig::new(workspaces_root.to_path_buf())
             .with_image(docker_gate::configured_sandbox_image())
+    }
+
+    /// Creates and chowns a host workspace directory exactly the way
+    /// production's `prepare_workspace` does (`sandbox_process.rs`), so
+    /// these tests' manually-built containers see the same uid/gid-1000-
+    /// writable directory a real `ensure_container` caller would bind-mount.
+    ///
+    /// A plain `std::fs::create_dir_all` leaves the directory owned by
+    /// whatever uid this host test process runs as — never 1000 — so
+    /// without this the container's non-root PID 1 (uid 1000, no root init
+    /// window since W1) can't write into it and `mkdir -p /workspace/.ironclaw`
+    /// fails with `Permission denied` before the test's real assertions run.
+    async fn create_writable_workspace(config: &RebornSandboxConfig, workspace: &Path) {
+        std::fs::create_dir_all(workspace).unwrap();
+        set_sandbox_writable_permissions(
+            workspace.to_path_buf(),
+            config.container_identity.workspace_mode(),
+        )
+        .await
+        .expect("chowning/chmoding the test workspace should succeed");
     }
 
     async fn best_effort_remove(docker: &Docker, container_id: &str) {
@@ -1970,7 +1991,7 @@ mod docker_tests {
         let user = ironclaw_host_api::UserId::new("limits-user").unwrap();
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
-        std::fs::create_dir_all(&workspace).unwrap();
+        create_writable_workspace(&config, &workspace).await;
 
         let network_ready = tokio::sync::OnceCell::new();
         let container_id = ensure_container(
@@ -2107,7 +2128,7 @@ mod docker_tests {
         let user = ironclaw_host_api::UserId::new("ssl-cert-file-user").unwrap();
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
-        std::fs::create_dir_all(&workspace).unwrap();
+        create_writable_workspace(&config, &workspace).await;
 
         let mut launch = user_container_launch_config(&config, &tenant, &user, &workspace)
             .await
@@ -2206,7 +2227,7 @@ mod docker_tests {
         let user = ironclaw_host_api::UserId::new("posture-user").unwrap();
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
-        std::fs::create_dir_all(&workspace).unwrap();
+        create_writable_workspace(&config, &workspace).await;
 
         // Manually build and start a container carrying the right
         // tenant/user labels but a deliberately WRONG security-posture
