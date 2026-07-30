@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::Engine as _;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
@@ -212,6 +213,67 @@ impl SandboxCertificateAuthority {
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn root_certificate_pem(&self) -> &str {
         &self.root_cert_pem
+    }
+
+    /// Builds the container-side TLS trust bundle: the platform's real
+    /// system root certificates (via `rustls-native-certs`, the same source
+    /// `tls_intercept::VerifiedOriginConnector::from_system_roots` trusts
+    /// for verifying the *real* origin when re-originating a bound host's
+    /// TLS connection) concatenated with this CA's own public root
+    /// certificate, both PEM-encoded.
+    ///
+    /// This is the artifact `egress_proxy::bind_sandbox_egress_proxy_with_tls_intercept`
+    /// bind-mounts read-only into every sandbox container (W5's CA
+    /// trust-distribution work, this module's own doc comment). Contains
+    /// **no private key material** — it is built purely from `native.certs`
+    /// (public DER certificates) and [`Self::root_cert_pem`] (itself never
+    /// containing the root's private key, which lives only in the
+    /// process-local `issuer` field and is never returned by any method on
+    /// this type). See `container_trust_bundle_pem_contains_no_key_material`.
+    ///
+    /// System roots are included, not just this CA's own root: a container
+    /// only has intercepted (bound-host) connections signed by our CA — every
+    /// other allowed host (any wildcard-matched allowlist entry, since
+    /// `bound_hosts` is exact-match only) stays an opaque, un-terminated
+    /// tunnel, so the container's own TLS client verifies THAT origin's real
+    /// certificate directly. For an OpenSSL-linked client (`curl`, `git`,
+    /// Python's `ssl` module), `SSL_CERT_FILE` REPLACES the default trust
+    /// store rather than extending it — a bundle containing only our CA
+    /// would make every non-intercepted HTTPS request fail cert
+    /// verification the moment `SSL_CERT_FILE` is set.
+    ///
+    /// Fails closed (`Err`, never a silently empty bundle) when the system
+    /// trust store yields zero usable roots — mirrors
+    /// `VerifiedOriginConnector::from_system_roots`'s identical fail-closed
+    /// posture for the same underlying data source. The caller
+    /// (`bind_sandbox_egress_proxy_with_tls_intercept`) propagates this as
+    /// `EgressProxyError::TlsInterceptSetupFailed`, so a broken/empty host
+    /// trust store fails the whole sandbox-profile boot rather than shipping
+    /// containers a trust bundle that can never intercept anything.
+    pub(crate) fn build_container_trust_bundle_pem(&self) -> Result<String, RuntimeProcessError> {
+        let native = rustls_native_certs::load_native_certs();
+        for error in &native.errors {
+            // `debug!`, not `warn!`/`info!` — see the identical rationale on
+            // `VerifiedOriginConnector::from_system_roots`: an internal
+            // diagnostic on a background boot path, never REPL/TUI-visible
+            // status.
+            tracing::debug!(
+                "sandbox CA: error loading a system root cert for the container trust bundle: {error}"
+            );
+        }
+        if native.certs.is_empty() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox CA: system trust store yielded zero usable root certificates; \
+                 refusing to build a container trust bundle without them"
+                    .to_string(),
+            ));
+        }
+        let mut bundle = String::new();
+        for cert in &native.certs {
+            bundle.push_str(&der_to_pem(cert.as_ref()));
+        }
+        bundle.push_str(&self.root_cert_pem);
+        Ok(bundle)
     }
 
     /// Returns a leaf certificate for `host`: a live cached one if present,
@@ -448,6 +510,34 @@ pub(crate) fn normalize_host(host: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_ascii_lowercase())
+}
+
+/// PEM-encodes a single DER certificate: `-----BEGIN CERTIFICATE-----`,
+/// standard base64 wrapped at 64 columns, `-----END CERTIFICATE-----`.
+/// Base64's output alphabet (`A-Za-z0-9+/=`) is pure single-byte ASCII, so
+/// slicing `encoded` at fixed byte offsets below can never land inside a
+/// multi-byte character — unlike the general "never byte-slice
+/// user/external text" rule this crate otherwise enforces, `encoded` is
+/// this function's own programmatically generated output, not user or
+/// external text.
+fn der_to_pem(der: &[u8]) -> String {
+    const LABEL_BEGIN: &str = "-----BEGIN CERTIFICATE-----\n";
+    const LABEL_END: &str = "-----END CERTIFICATE-----\n";
+    const LINE_WIDTH: usize = 64;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem =
+        String::with_capacity(LABEL_BEGIN.len() + LABEL_END.len() + encoded.len() + encoded.len() / LINE_WIDTH + 1);
+    pem.push_str(LABEL_BEGIN);
+    let mut start = 0;
+    while start < encoded.len() {
+        let end = (start + LINE_WIDTH).min(encoded.len());
+        pem.push_str(&encoded[start..end]);
+        pem.push('\n');
+        start = end;
+    }
+    pem.push_str(LABEL_END);
+    pem
 }
 
 fn ca_error(error: rcgen::Error) -> RuntimeProcessError {

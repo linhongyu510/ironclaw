@@ -294,44 +294,54 @@ impl EgressAllowlistProxy {
 }
 
 /// The TLS-interception bound-host set for the production sandbox egress
-/// proxy — **deliberately empty today**, not derived from `policy`'s
-/// `allowed_targets`, even though every allowed host is the obvious
-/// candidate set and this function's `&NetworkPolicy` parameter is kept for
-/// exactly that future derivation.
+/// proxy: every EXACT-match hostname in `policy.allowed_targets`,
+/// canonicalized through [`normalize_host`]. Wildcard entries (`*.suffix`)
+/// are deliberately excluded — see "Why exact-match only" below.
 ///
-/// # Why empty, not "the full allowlist" (design fork — flagged for review)
+/// # Why exact-match only, not the full allowlist (design decision)
 ///
 /// Binding a host here means [`TlsInterceptConfig`] terminates TLS for it
 /// with a leaf minted from OUR OWN in-process CA
 /// ([`SandboxCertificateAuthority`]) instead of letting the real origin's
-/// certificate through. The sandboxed container has no way to trust that CA
-/// today: nothing bind-mounts its trust anchor into the container or sets
-/// `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`GIT_SSL_CAINFO`/
-/// `NODE_EXTRA_CA_CERTS` — `ca.rs`'s own doc on
-/// [`SandboxCertificateAuthority::root_certificate_pem`] names this
-/// explicitly as "W5's remaining trust-distribution work", and
-/// `docs/plans/2026-07-26-sandbox-credential-firewall-design.md`'s "W5 ·
-/// Internal CA" entry specs the exact mount + env plumbing as **not
-/// started**. Binding any real default-allowlist host (pypi.org,
-/// registry.npmjs.org, github.com, ...) before that lands would make every
-/// `pip install`/`npm install`/`git clone`/`curl` to that host fail
-/// certificate verification from inside the container — breaking the
-/// sandboxed shell's core purpose for every deployment, today, with no
-/// workaround. That is a functional regression, not a security one, but it
-/// is severe enough that this function ships the conservative answer
-/// instead of guessing: an empty bound-host set means D1 keeps every
-/// connection an opaque, unmodified `copy_bidirectional` tunnel — byte-for-
-/// byte the same behavior every sandboxed-shell workflow had before this
-/// wiring landed. The rest of [`bind_sandbox_egress_proxy_with_tls_intercept`]
-/// still unconditionally constructs and wires the CA, the verified origin
-/// connector, and the credential swap, so the interception SEAM is live and
-/// fails closed on setup failure; only "which hosts it actually
-/// intercepts" stays at zero pending the CA-distribution follow-up. Once
-/// that lands, flipping this to derive from `policy.allowed_targets`
-/// (filtering wildcard patterns — `bound_hosts` is an exact-match
-/// `HashSet<String>` with no wildcard matching) is the natural next step.
-fn interception_bound_hosts(_policy: &NetworkPolicy) -> HashSet<String> {
-    HashSet::new()
+/// certificate through. That is now safe for the sandboxed container to
+/// trust: [`bind_sandbox_egress_proxy_with_tls_intercept`] builds a
+/// container trust bundle from the same CA
+/// (`SandboxCertificateAuthority::build_container_trust_bundle_pem`) and
+/// `exec_transport::user_container_launch_config` bind-mounts it read-only
+/// plus points `SSL_CERT_FILE` and friends at it — W5's CA
+/// trust-distribution work, previously the blocker this function's doc
+/// named, now landed.
+///
+/// `bound_hosts` itself, however, is a plain `HashSet<String>` doing
+/// EXACT string matching (see [`TlsInterceptConfig::is_bound`]/[`bind`]
+/// (Self::bind)) — it has no wildcard-matching capability, unlike
+/// [`host_allowed`] below (which delegates to
+/// [`ironclaw_network::host_matches_host_pattern`] and does support
+/// `*.suffix` patterns for the ALLOWLIST decision). A `*.suffix` allowlist
+/// pattern — today only ever operator-configured via
+/// `SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV`; [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`]
+/// itself has no wildcard entries — cannot be expanded into a finite set of
+/// concrete hostnames to bind, so it is left out of `bound_hosts` entirely.
+/// A wildcard-matched host therefore still passes the allowlist and still
+/// gets proxied, but takes the opaque `copy_bidirectional` tunnel path (D1)
+/// exactly as every host did before this wiring — never denied, never
+/// silently downgraded, just not intercepted. This is the safe, partial
+/// choice: it never breaks egress for a host the operator explicitly
+/// allowlisted, and it keeps this crate from having to invent a second,
+/// independently-maintained wildcard matcher for the intercept path (this
+/// crate composes [`ironclaw_network::host_matches_host_pattern`] rather
+/// than hand-rolling wildcard matching — see [`host_allowed`]'s doc).
+/// Extending interception to wildcard entries (matching a live SNI/CONNECT
+/// host against the pattern set at handshake time rather than pre-expanding
+/// into `bound_hosts`) is the natural next step if operator-configured
+/// wildcard domains ever need interception too.
+fn interception_bound_hosts(policy: &NetworkPolicy) -> HashSet<String> {
+    policy
+        .allowed_targets
+        .iter()
+        .filter(|target| !target.host_pattern.starts_with("*."))
+        .filter_map(|target| normalize_host(&target.host_pattern))
+        .collect()
 }
 
 /// Production factory: binds an [`EgressAllowlistProxy`] to `bind_addr` with
@@ -364,9 +374,20 @@ fn interception_bound_hosts(_policy: &NetworkPolicy) -> HashSet<String> {
 pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
     bind_addr: &str,
     policy: NetworkPolicy,
-) -> Result<BoundEgressAllowlistProxy, EgressProxyError> {
+) -> Result<SandboxEgressProxyBinding, EgressProxyError> {
     let bound_hosts = interception_bound_hosts(&policy);
     let ca = SandboxCertificateAuthority::generate().map_err(|error| {
+        EgressProxyError::TlsInterceptSetupFailed {
+            reason: error.to_string(),
+        }
+    })?;
+    // Captured from `ca` BEFORE it moves into `TlsInterceptConfig::new`
+    // below. Fail-closed: a broken/empty host system trust store here fails
+    // this whole call (see `build_container_trust_bundle_pem`'s doc),
+    // exactly like the sibling `VerifiedOriginConnector::from_system_roots`
+    // failure a few lines down — neither ships a proxy whose containers
+    // could never trust anything, or silently interception-less.
+    let ca_bundle_pem = ca.build_container_trust_bundle_pem().map_err(|error| {
         EgressProxyError::TlsInterceptSetupFailed {
             reason: error.to_string(),
         }
@@ -385,10 +406,31 @@ pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
         TlsInterceptConfig::new(ca, bound_hosts, origin_connector)
             .with_credential_swap(credential_swap),
     );
-    EgressAllowlistProxy::new(policy)
+    let proxy = EgressAllowlistProxy::new(policy)
         .with_tls_intercept(tls_intercept_config)
         .bind(bind_addr)
-        .await
+        .await?;
+    Ok(SandboxEgressProxyBinding {
+        proxy,
+        ca_bundle_pem,
+    })
+}
+
+/// Return value of [`bind_sandbox_egress_proxy_with_tls_intercept`]: the
+/// bound, ready-to-`serve` proxy plus the PEM container trust bundle its
+/// [`SandboxCertificateAuthority`] instance backs
+/// (`SandboxCertificateAuthority::build_container_trust_bundle_pem` — system
+/// roots plus this CA's own public root certificate, no private key
+/// material). Composition
+/// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+/// threads `ca_bundle_pem` into
+/// [`super::RebornSandboxConfig::with_ca_bundle_pem`] so every sandbox
+/// container this proxy instance serves trusts the exact CA that mints its
+/// intercepted connections' leaf certificates — this is a plain data carrier,
+/// not a second proxy handle, so there is exactly one bound proxy per call.
+pub struct SandboxEgressProxyBinding {
+    pub proxy: BoundEgressAllowlistProxy,
+    pub ca_bundle_pem: String,
 }
 
 /// A proxy bound to a real local address, ready to `serve`.
@@ -1041,6 +1083,80 @@ mod tests {
             deny_private_ip_ranges: true,
             max_egress_bytes: None,
         }
+    }
+
+    /// `interception_bound_hosts` is the exact-match filter feeding
+    /// `TlsInterceptConfig`'s `bound_hosts`: exact hostnames from the
+    /// allowlist are bound; `*.suffix` wildcard entries are excluded (see
+    /// its doc for why — `bound_hosts` has no wildcard-matching capability).
+    /// Pins both halves plus normalization (case/whitespace/trailing dot).
+    #[test]
+    fn interception_bound_hosts_binds_exact_matches_and_excludes_wildcards() {
+        let policy = policy_allowing(&[
+            "pypi.org",
+            "GITHUB.com",
+            "  registry.npmjs.org.  ",
+            "*.corp.example.com",
+        ]);
+
+        let bound = interception_bound_hosts(&policy);
+
+        assert_eq!(
+            bound,
+            HashSet::from([
+                "pypi.org".to_string(),
+                "github.com".to_string(),
+                "registry.npmjs.org".to_string(),
+            ]),
+            "exact-match allowlist entries must be bound (normalized); the wildcard entry must \
+             be excluded entirely"
+        );
+        assert!(
+            !bound.contains("*.corp.example.com"),
+            "a wildcard pattern must never appear in bound_hosts verbatim — it cannot match \
+             anything in an exact-match HashSet"
+        );
+    }
+
+    #[test]
+    fn interception_bound_hosts_is_empty_for_an_empty_allowlist() {
+        let policy = policy_allowing(&[]);
+
+        assert!(interception_bound_hosts(&policy).is_empty());
+    }
+
+    /// `bind_sandbox_egress_proxy_with_tls_intercept` is the sole production
+    /// door to a real `SandboxEgressProxyBinding`: this pins that it always
+    /// wires TLS interception AND returns a non-empty container trust
+    /// bundle containing no private-key material — the two properties
+    /// `RebornSandboxConfig::with_ca_bundle_pem` and
+    /// `exec_transport::user_container_launch_config` depend on. No Docker
+    /// or real network needed: binding a listener and building the CA/trust
+    /// bundle are pure host-local operations.
+    #[tokio::test]
+    async fn bind_sandbox_egress_proxy_with_tls_intercept_wires_interception_and_a_key_free_bundle()
+     {
+        let binding = bind_sandbox_egress_proxy_with_tls_intercept(
+            "127.0.0.1:0",
+            policy_allowing(&["pypi.org"]),
+        )
+        .await
+        .expect("binding an ephemeral port and building the CA/trust bundle should succeed");
+
+        assert!(
+            binding.proxy.tls_intercept_is_active(),
+            "the production factory must always wire TLS interception"
+        );
+        assert!(
+            !binding.ca_bundle_pem.is_empty(),
+            "the container trust bundle must not be empty"
+        );
+        assert!(
+            !binding.ca_bundle_pem.contains("PRIVATE KEY"),
+            "the container trust bundle handed back to composition must never contain private \
+             key material"
+        );
+        assert!(binding.ca_bundle_pem.contains("-----BEGIN CERTIFICATE-----"));
     }
 
     #[tokio::test]
@@ -2263,12 +2379,13 @@ mod tests {
     /// `pypi.org` and then silently missed the bound-hosts set that still
     /// held the dot-free form — falling through to an opaque,
     /// un-intercepted tunnel for a host the policy meant to terminate TLS
-    /// for and swap credentials on. Latent only because
-    /// `interception_bound_hosts` returns empty in production today (see
-    /// its doc); it goes live the moment CA distribution lands and that set
-    /// is populated. This test connects to a bound host WITH a trailing dot
-    /// and asserts a leaf was actually minted for it — i.e. that
-    /// interception fired — not merely that the CONNECT was allowed.
+    /// for and swap credentials on. `interception_bound_hosts` now derives
+    /// `bound_hosts` from the real allowlist in production (see its doc),
+    /// so this divergence would be live for any exact-match allowlisted
+    /// host reached with a trailing root-zone dot. This test connects to a
+    /// bound host WITH a trailing dot and asserts a leaf was actually
+    /// minted for it — i.e. that interception fired — not merely that the
+    /// CONNECT was allowed.
     #[tokio::test]
     async fn connect_with_trailing_dot_still_intercepts_a_bound_host() {
         use super::super::ca::SandboxCertificateAuthority;

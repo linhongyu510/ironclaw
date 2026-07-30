@@ -47,7 +47,7 @@ pub use broker::RebornSandboxNetworkBroker;
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use egress_proxy::{
-    BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError,
+    BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError, SandboxEgressProxyBinding,
     bind_sandbox_egress_proxy_with_tls_intercept,
 };
 pub use network_allowlist::{
@@ -113,6 +113,16 @@ pub struct RebornSandboxConfig {
     disable_network: bool,
     network_broker: Option<RebornSandboxNetworkBroker>,
     container_identity: RebornSandboxContainerIdentity,
+    /// PEM container trust bundle (system roots + the sandbox egress
+    /// proxy's CA public root certificate — see
+    /// `ca::SandboxCertificateAuthority::build_container_trust_bundle_pem`,
+    /// no private key material) to bind-mount read-only into every
+    /// container this config launches. `None` means no TLS interception is
+    /// configured for this transport (e.g. direct construction in a test)
+    /// — `exec_transport::user_container_launch_config` then adds neither
+    /// the bind nor the `SSL_CERT_FILE`-family env vars, exactly
+    /// reproducing pre-W5 behavior. Set via [`Self::with_ca_bundle_pem`].
+    ca_bundle_pem: Option<String>,
 }
 
 impl RebornSandboxConfig {
@@ -129,6 +139,7 @@ impl RebornSandboxConfig {
             disable_network: true,
             network_broker: None,
             container_identity: RebornSandboxContainerIdentity::image_default(),
+            ca_bundle_pem: None,
         }
     }
 
@@ -149,6 +160,27 @@ impl RebornSandboxConfig {
 
     pub fn with_network_broker_port(mut self, port: u16) -> Self {
         self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
+        self
+    }
+
+    /// Wires the sandbox egress proxy's container trust bundle (system
+    /// roots plus its CA's public root certificate — see
+    /// [`SandboxEgressProxyBinding::ca_bundle_pem`](super::egress_proxy::SandboxEgressProxyBinding))
+    /// into every container this config launches. `exec_transport::
+    /// user_container_launch_config` materializes `ca_bundle_pem` to a host
+    /// file under this config's `workspace_root`, bind-mounts it read-only,
+    /// and points `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/
+    /// `GIT_SSL_CAINFO`/`NODE_EXTRA_CA_CERTS` at it — this is W5's CA
+    /// trust-distribution wiring
+    /// (`crates/ironclaw_host_runtime/src/sandbox_process/ca.rs`'s module
+    /// doc). Composition
+    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+    /// is the only production caller, threading the SAME bundle the egress
+    /// proxy's `TlsInterceptConfig` mints leaf certificates from — a
+    /// mismatched bundle here would make every bound-host CONNECT fail
+    /// certificate verification inside the container.
+    pub fn with_ca_bundle_pem(mut self, ca_bundle_pem: impl Into<String>) -> Self {
+        self.ca_bundle_pem = Some(ca_bundle_pem.into());
         self
     }
 

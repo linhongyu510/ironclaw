@@ -10,7 +10,7 @@
 
 use std::{
     net::IpAddr,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -570,7 +570,35 @@ pub(super) async fn user_container_launch_config(
     // any more — `posture.user` (below, and see [`security_posture_fields`])
     // pins PID 1 to uid 1000 directly instead, matching the fixed identity
     // every `docker exec` (`SANDBOX_EXEC_UID`/`GID`) already assumes.
-    let binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
+    let mut binds = vec![mounts::workspace_bind(workspace)?.into_docker_bind()];
+    if let Some(ca_bundle_pem) = config.ca_bundle_pem.as_deref() {
+        let bundle_path = materialize_ca_bundle(&config.workspace_root, ca_bundle_pem).await?;
+        binds.push(mounts::ca_bundle_bind(&bundle_path)?.into_docker_bind());
+        // OpenSSL-linked clients (`curl`, `git`, most of Python's `ssl`
+        // module) read `SSL_CERT_FILE`; `requests`/`pip` read
+        // `REQUESTS_CA_BUNDLE`; `curl` also honors `CURL_CA_BUNDLE`
+        // specifically; `git`'s own libcurl wrapper reads `GIT_SSL_CAINFO`;
+        // Node.js reads `NODE_EXTRA_CA_CERTS` (additive there, unlike the
+        // others). Setting all five covers `curl`/`pip`/`npm`/`git` — the
+        // tools `Dockerfile.process-sandbox` installs and the sandboxed
+        // shell's stated purpose (module doc) targets. NOT covered: JVM
+        // (`-Djavax.net.ssl.trustStore`), Go's `net/http` (no env var; reads
+        // `SSL_CERT_FILE`/`SSL_CERT_DIR` ONLY via its own cgo/non-cgo system
+        // pool resolution, which does honor `SSL_CERT_FILE` on Linux) — Go
+        // is therefore covered incidentally, but this list does not
+        // guarantee it — and any client with its own bundled trust store
+        // (e.g. some Electron/Node native binaries) that ignores
+        // `NODE_EXTRA_CA_CERTS`.
+        for var in [
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
+            env.push(format!("{var}={}", mounts::CONTAINER_CA_BUNDLE_PATH));
+        }
+    }
     let host_config = HostConfig {
         binds: Some(binds),
         memory: Some(config.memory_bytes as i64),
@@ -611,6 +639,53 @@ pub(super) async fn user_container_launch_config(
         attach_stderr: Some(false),
         ..Default::default()
     })
+}
+
+/// Writes `ca_bundle_pem` (the sandbox egress proxy's container trust
+/// bundle — system roots plus its CA's public root certificate, no private
+/// key material; see `ca::SandboxCertificateAuthority::
+/// build_container_trust_bundle_pem`) to a stable host-side path under
+/// `workspace_root` and returns the canonicalized path, ready for
+/// `mounts::ca_bundle_bind`.
+///
+/// One shared file per `workspace_root` (NOT per-user): every sandbox
+/// container in a given deployment is served by the SAME egress proxy
+/// instance and therefore must trust the SAME CA, so there is nothing
+/// tenant/user-scoped about this content — it is public certificate
+/// material, safe to be world-readable. Rewritten on every call (cheap: a
+/// few KiB, only at container-creation time, never per-exec) rather than
+/// written once behind a guard, so a proxy restart with a freshly
+/// regenerated CA (the root is regenerated fresh in memory on every process
+/// start — see `ca.rs`'s module doc) is always reflected the next time a
+/// container is created or recycled, without this transport needing to
+/// track whether the bundle is stale.
+async fn materialize_ca_bundle(
+    workspace_root: &Path,
+    ca_bundle_pem: &str,
+) -> Result<PathBuf, RuntimeProcessError> {
+    let bundle_dir = workspace_root.join(".sandbox-ca");
+    tokio::fs::create_dir_all(&bundle_dir)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle directory could not be initialized: {error}"
+            ))
+        })?;
+    let bundle_path = bundle_dir.join("ca-bundle.pem");
+    tokio::fs::write(&bundle_path, ca_bundle_pem)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle could not be written: {error}"
+            ))
+        })?;
+    tokio::fs::canonicalize(&bundle_path)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox CA trust bundle path could not be resolved: {error}"
+            ))
+        })
 }
 
 /// `setsid` creates a new session AND process group for `command`, isolating
@@ -1178,6 +1253,97 @@ mod tests {
             "the label baked into the launch config must match what \
              ensure_container computes as the expected posture"
         );
+    }
+
+    /// When `RebornSandboxConfig` carries no CA bundle (the default — no
+    /// production caller sets one unless TLS interception is configured),
+    /// `user_container_launch_config` must add neither the CA bind nor any
+    /// of the `SSL_CERT_FILE`-family env vars: exactly the pre-W5 shape.
+    #[tokio::test]
+    async fn user_container_launch_config_omits_ca_bundle_wiring_when_unconfigured() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+
+        let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
+            .await
+            .unwrap();
+
+        let host_config = launch.host_config.unwrap();
+        let binds = host_config.binds.unwrap();
+        assert_eq!(
+            binds.len(),
+            1,
+            "no CA bundle configured: only the workspace bind should be present: {binds:?}"
+        );
+        let env = launch.env.unwrap();
+        assert!(
+            !env.iter().any(|e| e.starts_with("SSL_CERT_FILE=")),
+            "no CA bundle configured: SSL_CERT_FILE must not be set: {env:?}"
+        );
+    }
+
+    /// When `RebornSandboxConfig` carries a CA bundle (composition wires
+    /// this from `SandboxEgressProxyBinding::ca_bundle_pem` — see
+    /// `RebornSandboxConfig::with_ca_bundle_pem`'s doc), the launch config
+    /// must bind-mount a real, readable file at the fixed container path
+    /// and point every `SSL_CERT_FILE`-family env var at it. Verifies the
+    /// bind's HOST-side source is a real file containing the exact bundle
+    /// text (not merely that a bind string was appended), proving
+    /// `materialize_ca_bundle` actually wrote it before the bind referenced
+    /// it.
+    #[tokio::test]
+    async fn user_container_launch_config_wires_ca_bundle_when_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let bundle_pem = "-----BEGIN CERTIFICATE-----\nfake-bundle-content\n-----END CERTIFICATE-----\n";
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_ca_bundle_pem(bundle_pem);
+        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+
+        let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
+            .await
+            .unwrap();
+
+        let host_config = launch.host_config.unwrap();
+        let binds = host_config.binds.unwrap();
+        let ca_bind = binds
+            .iter()
+            .find(|bind| bind.contains(mounts::CONTAINER_CA_BUNDLE_PATH))
+            .unwrap_or_else(|| panic!("expected a CA bundle bind in {binds:?}"));
+        assert!(
+            ca_bind.ends_with(":ro"),
+            "the CA bundle bind must be read-only: {ca_bind}"
+        );
+        let host_source = ca_bind
+            .rsplit_once(&format!(":{}:ro", mounts::CONTAINER_CA_BUNDLE_PATH))
+            .map(|(source, _)| source)
+            .unwrap_or_else(|| panic!("could not parse the host source out of {ca_bind}"));
+        let written = tokio::fs::read_to_string(host_source).await.unwrap();
+        assert_eq!(
+            written, bundle_pem,
+            "the bind-mounted file must contain exactly the configured bundle text"
+        );
+
+        let env = launch.env.unwrap();
+        for var in [
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
+            let expected = format!("{var}={}", mounts::CONTAINER_CA_BUNDLE_PATH);
+            assert!(
+                env.contains(&expected),
+                "expected {expected:?} in launch env: {env:?}"
+            );
+        }
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub(crate) async fn spawn_sandbox_egress_proxy()
     // does and does not mean yet (the credential-grant staging side is
     // separate, not-yet-built work; today every intercepted connection's
     // placeholder resolves to a fail-safe GRANT-DENIAL strip).
-    let bound = ironclaw_host_runtime::bind_sandbox_egress_proxy_with_tls_intercept(
+    let binding = ironclaw_host_runtime::bind_sandbox_egress_proxy_with_tls_intercept(
         EGRESS_PROXY_BIND_ADDR,
         policy,
     )
@@ -59,6 +59,10 @@ pub(crate) async fn spawn_sandbox_egress_proxy()
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("sandbox egress allowlist proxy failed to bind: {error}"),
     })?;
+    let ironclaw_host_runtime::SandboxEgressProxyBinding {
+        proxy: bound,
+        ca_bundle_pem,
+    } = binding;
     let local_addr = bound.local_addr();
     // Read before `bound` moves into the spawned task below — mirrors
     // `local_addr` immediately above. Threaded onto the returned handle so
@@ -75,7 +79,8 @@ pub(crate) async fn spawn_sandbox_egress_proxy()
         bound.serve(shutdown_rx).await;
     });
 
-    let runtime_handle = SandboxEgressProxyRuntimeHandle::new(shutdown_tx, handle, local_addr);
+    let runtime_handle =
+        SandboxEgressProxyRuntimeHandle::new(shutdown_tx, handle, local_addr, ca_bundle_pem);
     #[cfg(any(test, feature = "test-support"))]
     let runtime_handle = runtime_handle.with_tls_intercept_active(tls_intercept_active);
 

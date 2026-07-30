@@ -657,3 +657,77 @@ fn concurrent_issuance_for_same_and_different_hosts_stays_correct() {
         "the cached cert must match one of the racing issuances"
     );
 }
+
+/// Security constraint: the CA's root private key must NEVER reach a
+/// container. `build_container_trust_bundle_pem` is the one function whose
+/// output is bind-mounted into a container, so this asserts its output
+/// contains no PEM private-key block of any shape (`RSA PRIVATE KEY`,
+/// `EC PRIVATE KEY`, or the PKCS#8 `PRIVATE KEY` rcgen actually emits for
+/// `KeyPair::serialize_pem`) and consists solely of `CERTIFICATE` blocks.
+#[test]
+fn container_trust_bundle_pem_contains_no_key_material() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    let bundle = ca
+        .build_container_trust_bundle_pem()
+        .expect("the test host's system trust store yields at least one usable root");
+
+    assert!(
+        !bundle.contains("PRIVATE KEY"),
+        "the container trust bundle must never contain any private key material"
+    );
+    assert!(
+        bundle.contains("-----BEGIN CERTIFICATE-----"),
+        "the container trust bundle must contain at least one certificate"
+    );
+    // Every PEM block in the bundle must be a certificate — no other block
+    // type (of any kind) belongs in a file bind-mounted into a container.
+    let begin_markers = bundle.matches("-----BEGIN ").count();
+    let cert_markers = bundle.matches("-----BEGIN CERTIFICATE-----").count();
+    assert_eq!(
+        begin_markers, cert_markers,
+        "every PEM block in the container trust bundle must be a CERTIFICATE block"
+    );
+}
+
+/// The container trust bundle must carry both this CA's own root (so
+/// intercepted/bound hosts verify) and at least one system root (so
+/// non-intercepted hosts, reached as an opaque tunnel, still verify against
+/// a real trust anchor once `SSL_CERT_FILE` is set — see the method's own
+/// doc for why `SSL_CERT_FILE` replaces rather than extends the default
+/// store for OpenSSL-linked clients).
+#[test]
+fn container_trust_bundle_pem_contains_own_root_and_system_roots() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    let bundle = ca
+        .build_container_trust_bundle_pem()
+        .expect("the test host's system trust store yields at least one usable root");
+
+    assert!(
+        bundle.contains(ca.root_certificate_pem()),
+        "the container trust bundle must contain this CA's own public root certificate verbatim"
+    );
+    let cert_count = bundle.matches("-----BEGIN CERTIFICATE-----").count();
+    assert!(
+        cert_count >= 2,
+        "expected at least one system root plus this CA's own root; got {cert_count} certificate(s)"
+    );
+}
+
+/// Two independently generated CAs must produce container trust bundles
+/// carrying THEIR OWN root, not a mixed-up or shared one — a regression
+/// here would mean a container could end up trusting an unrelated proxy
+/// instance's CA.
+#[test]
+fn container_trust_bundle_pem_is_scoped_to_its_own_ca() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+    let other_ca = SandboxCertificateAuthority::generate().unwrap();
+
+    let bundle = ca
+        .build_container_trust_bundle_pem()
+        .expect("the test host's system trust store yields at least one usable root");
+
+    assert!(bundle.contains(ca.root_certificate_pem()));
+    assert!(!bundle.contains(other_ca.root_certificate_pem()));
+}

@@ -51,8 +51,15 @@ pub async fn tenant_sandbox_process_binding(
 ) -> Result<TenantSandboxBinding, RebornBuildError> {
     let egress_proxy = crate::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy().await?;
     let broker_port = egress_proxy.local_addr.port();
-    let config =
-        RebornSandboxConfig::new(sandbox_workspaces_root).with_network_broker_port(broker_port);
+    // Threads the SAME CA the egress proxy's `TlsInterceptConfig` mints
+    // leaf certificates from into every container this config launches
+    // (`RebornSandboxConfig::with_ca_bundle_pem`'s doc) — W5's CA
+    // trust-distribution wiring. A mismatched or missing bundle here would
+    // make every bound-host CONNECT fail certificate verification inside
+    // the container.
+    let config = RebornSandboxConfig::new(sandbox_workspaces_root)
+        .with_network_broker_port(broker_port)
+        .with_ca_bundle_pem(egress_proxy.ca_bundle_pem().to_string());
     let activity = Arc::new(SandboxActivityRegistry::new());
     // W17/W6: one shared attribution resolver, wired into BOTH this
     // transport and (via `TenantSandboxBinding::attribution`, threaded

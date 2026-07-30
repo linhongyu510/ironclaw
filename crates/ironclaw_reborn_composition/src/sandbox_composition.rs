@@ -37,6 +37,14 @@ pub struct SandboxEgressProxyRuntimeHandle {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
     pub(crate) local_addr: std::net::SocketAddr,
+    /// PEM container trust bundle (system roots + this proxy instance's
+    /// sandbox CA public root certificate — no private key material; see
+    /// `ironclaw_host_runtime::SandboxEgressProxyBinding::ca_bundle_pem`'s
+    /// doc). `tenant_sandbox_process_binding` (`sandbox_boot.rs`) threads
+    /// this into `RebornSandboxConfig::with_ca_bundle_pem` so every sandbox
+    /// container trusts the exact CA this proxy instance mints leaf
+    /// certificates from.
+    ca_bundle_pem: String,
     /// Test-support only: whether the underlying `BoundEgressAllowlistProxy`
     /// had TLS interception wired in when `spawn_sandbox_egress_proxy`
     /// built it. See `BoundEgressAllowlistProxy::tls_intercept_is_active`'s
@@ -50,14 +58,23 @@ impl SandboxEgressProxyRuntimeHandle {
         shutdown_tx: tokio::sync::watch::Sender<bool>,
         handle: tokio::task::JoinHandle<()>,
         local_addr: std::net::SocketAddr,
+        ca_bundle_pem: String,
     ) -> Self {
         Self {
             shutdown_tx,
             handle,
             local_addr,
+            ca_bundle_pem,
             #[cfg(any(test, feature = "test-support"))]
             tls_intercept_active: false,
         }
+    }
+
+    /// The container trust bundle this proxy instance's CA backs — see the
+    /// field doc. `tenant_sandbox_process_binding` is the one production
+    /// reader.
+    pub(crate) fn ca_bundle_pem(&self) -> &str {
+        &self.ca_bundle_pem
     }
 
     #[cfg(any(test, feature = "test-support"))]

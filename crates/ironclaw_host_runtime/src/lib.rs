@@ -139,8 +139,9 @@ pub use sandbox_process::{
     RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
     RebornSandboxScopeKey, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
     RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness, SandboxReaper,
-    SandboxReaperConfig, bind_sandbox_egress_proxy_with_tls_intercept, connect_docker_with_retry,
+    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    SandboxEgressProxyBinding, SandboxReaper, SandboxReaperConfig,
+    bind_sandbox_egress_proxy_with_tls_intercept, connect_docker_with_retry,
     sandbox_allowed_domains, sandbox_docker_readiness, sandbox_extra_allowed_domains,
     sandbox_max_egress_bytes, sandbox_network_policy,
 };
