@@ -1,6 +1,10 @@
-use std::{collections::BTreeMap, error::Error, time::Duration};
-#[cfg(feature = "postgres")]
-use std::{collections::HashSet, sync::OnceLock};
+// arch-exempt: large_file, PostgreSQL RootFilesystem remains cohesive while projection DDL is isolated in helpers, plan #5274
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
+    sync::{Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -15,36 +19,56 @@ use crate::db::{
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
-    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
     VersionedEntry,
 };
-
-#[cfg(feature = "postgres")]
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
     pool: deadpool_postgres::Pool,
+    index_ddl_lock: tokio::sync::Mutex<()>,
+    projection_specs: StdMutex<HashMap<(String, IndexName), IndexSpec>>,
 }
-
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV: &str =
     "IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS";
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(300);
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
-#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
-#[cfg(feature = "postgres")]
 static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
     OnceLock::new();
 
-#[cfg(feature = "postgres")]
+fn projection_cache_error(path: &VirtualPath) -> FilesystemError {
+    FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::EnsureIndex,
+        reason: "projection index cache mutex poisoned".to_string(),
+    }
+}
+
+fn cached_projection_result(
+    path: &VirtualPath,
+    requested: &IndexSpec,
+    existing: &IndexSpec,
+) -> Result<(), FilesystemError> {
+    if existing == requested {
+        Ok(())
+    } else {
+        Err(FilesystemError::IndexConflict {
+            path: path.clone(),
+            name: requested.name.clone(),
+            reason: crate::IndexConflictReason::SpecMismatch,
+        })
+    }
+}
+
 impl PostgresRootFilesystem {
     pub fn new(pool: deadpool_postgres::Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            index_ddl_lock: tokio::sync::Mutex::new(()),
+            projection_specs: StdMutex::new(HashMap::new()),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -127,8 +151,6 @@ impl PostgresRootFilesystem {
         })
     }
 }
-
-#[cfg(feature = "postgres")]
 async fn drop_legacy_projection_indexes(
     transaction: &tokio_postgres::Transaction<'_>,
 ) -> Result<(), FilesystemError> {
@@ -139,7 +161,6 @@ async fn drop_legacy_projection_indexes(
              WHERE schemaname = current_schema() \
                AND tablename = 'root_filesystem_entries' \
                AND indexname LIKE 'idx_rfs_%' \
-               AND indexname NOT LIKE 'idx_rfs_shared_%' \
                AND indexdef LIKE '%btree (((indexed ->>%'",
             &[],
         )
@@ -155,13 +176,9 @@ async fn drop_legacy_projection_indexes(
     }
     Ok(())
 }
-
-#[cfg(feature = "postgres")]
 fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_root_filesystem_migration_key(
     client: &deadpool_postgres::Object,
 ) -> Result<String, FilesystemError> {
@@ -190,15 +207,11 @@ async fn postgres_root_filesystem_migration_key(
         "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
     ))
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_migration_connect_backoff(attempt: u32) -> Duration {
     POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF
         .saturating_mul(2u32.saturating_pow(attempt.min(16)))
         .min(POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF)
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_migration_connect_max_wait() -> Result<Duration, FilesystemError> {
     match std::env::var(POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV) {
         Ok(raw) => {
@@ -228,8 +241,6 @@ fn postgres_migration_connect_max_wait() -> Result<Duration, FilesystemError> {
         }),
     }
 }
-
-#[cfg(feature = "postgres")]
 fn format_error_chain(error: &(dyn Error + 'static)) -> String {
     let mut reason = error.to_string();
     let mut source = error.source();
@@ -240,8 +251,6 @@ fn format_error_chain(error: &(dyn Error + 'static)) -> String {
     }
     reason
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl RootFilesystem for PostgresRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
@@ -292,6 +301,28 @@ impl RootFilesystem for PostgresRootFilesystem {
                 reason: crate::IndexConflictReason::EmptyKeys,
             });
         }
+        let shared_projection = matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix);
+        let projection_key = (path.as_str().to_string(), spec.name.clone());
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return cached_projection_result(path, spec, existing);
+            }
+        }
+        let _ddl_guard = self.index_ddl_lock.lock().await;
+        if shared_projection {
+            let cache = self
+                .projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?;
+            if let Some(existing) = cache.get(&projection_key) {
+                return cached_projection_result(path, spec, existing);
+            }
+        }
+        let catalog_prefix = path.as_str();
         let keys_json = serde_json::to_value(
             spec.keys
                 .iter()
@@ -303,7 +334,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             operation: FilesystemOperation::EnsureIndex,
         })?;
 
-        let client = self.client().await?;
+        let mut client = self.client().await?;
         // PR #3661 reviewer fix: race-idempotent declaration. Single
         // INSERT ... ON CONFLICT DO NOTHING followed by a read-back +
         // canonical-spec equality check. Two concurrent declarers of the
@@ -314,7 +345,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             "INSERT INTO root_filesystem_index_specs (prefix, name, keys, kind) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (prefix, name) DO NOTHING",
-            &[&path.as_str(), &spec.name.as_str(), &keys_json, &kind_str],
+            &[&catalog_prefix, &spec.name.as_str(), &keys_json, &kind_str],
         )
         .await
         .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
@@ -322,7 +353,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         let row = cached_query_opt(
             &client,
             "SELECT keys, kind FROM root_filesystem_index_specs WHERE prefix = $1 AND name = $2",
-            &[&path.as_str(), &spec.name.as_str()],
+            &[&catalog_prefix, &spec.name.as_str()],
         )
         .await
         .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?
@@ -343,21 +374,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
         match &spec.kind {
             IndexKind::Exact | IndexKind::Prefix => {
-                let index_name = postgres_shared_projection_index_name(spec);
-                let expressions: Vec<String> = spec
-                    .keys
-                    .iter()
-                    .map(|k| format!("((indexed->>'{}'))", k.as_str()))
-                    .collect();
-                let mut columns = expressions;
-                columns.push("path".to_string());
-                let ddl = format!(
-                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-                    columns.join(", ")
-                );
-                client.batch_execute(&ddl).await.map_err(|error| {
-                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-                })?;
+                ensure_postgres_ordered_projection(&mut client, path, spec).await?;
             }
             IndexKind::Fts => {
                 if spec.keys.len() != 1 {
@@ -415,6 +432,12 @@ impl RootFilesystem for PostgresRootFilesystem {
                 // (`SELECT * FROM pg_extension WHERE extname='vector'`)
                 // without changing this trait surface.
             }
+        }
+        if shared_projection {
+            self.projection_specs
+                .lock()
+                .map_err(|_| projection_cache_error(path))?
+                .insert(projection_key, spec.clone());
         }
         Ok(())
     }
@@ -477,6 +500,144 @@ impl RootFilesystem for PostgresRootFilesystem {
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         let rows = client
             .query(&statement, &params_ref[..])
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let row_path: String = row.get("path");
+                let row_path = VirtualPath::new(row_path)?;
+                let body: Vec<u8> = row.get("contents");
+                let content_type_raw: String = row.get("content_type");
+                let kind_raw: Option<String> = row.get("kind");
+                let indexed_value: serde_json::Value = row.get("indexed");
+                let version_raw: i64 = row.get("version");
+                let entry =
+                    build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+                let version = record_version_from_i64(&row_path, version_raw)?;
+                Ok(VersionedEntry {
+                    path: row_path,
+                    entry,
+                    version,
+                })
+            })
+            .collect()
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let spec_row = cached_query_opt(
+            &client,
+            "SELECT keys, kind FROM root_filesystem_index_specs \
+             WHERE prefix IN ($1, '/shared') AND name = $2 \
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END \
+             LIMIT 1",
+            &[&path.as_str(), &page.index.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let spec = if let Some(row) = spec_row {
+            let keys_json: serde_json::Value = row.get("keys");
+            let keys = serde_json::from_value::<Vec<String>>(keys_json)
+                .map_err(|_| FilesystemError::DeserializeIndexed {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                })?
+                .into_iter()
+                .map(IndexKey::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            let kind: String = row.get("kind");
+            let kind = match kind.as_str() {
+                "exact" => IndexKind::Exact,
+                "prefix" => IndexKind::Prefix,
+                _ => {
+                    return Err(FilesystemError::Unsupported {
+                        path: path.clone(),
+                        operation: FilesystemOperation::Query,
+                    });
+                }
+            };
+            Some(IndexSpec::new(page.index.clone(), keys, kind))
+        } else {
+            None
+        };
+        let Some(spec) = spec else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let Some(prefix_values) = crate::index::ordered_query_prefix_values(&spec, filter, page)
+        else {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        };
+        let sort_position = prefix_values.len();
+        let tie_position = sort_position.saturating_add(1);
+        if tie_position >= 8 {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        }
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+        params.push(Box::new(page.index.as_str().to_string()));
+        let path_str = path.as_str().to_string();
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        params.push(Box::new(path_str));
+        params.push(Box::new(prefix_lower));
+        params.push(Box::new(prefix_upper));
+        let expression = format!("ordered.k{sort_position}");
+        let tie_expression = format!("ordered.k{tie_position}");
+        let mut sql = String::from(
+            "SELECT entry.path, entry.contents, entry.content_type, entry.kind, \
+                    entry.indexed, entry.version \
+             FROM root_filesystem_ordered_index_rows AS ordered \
+             JOIN root_filesystem_entries AS entry ON entry.path = ordered.path \
+             WHERE ordered.index_name = $1 \
+               AND (ordered.path = $2 OR (ordered.path >= $3 AND ordered.path < $4))",
+        );
+        for (position, value) in prefix_values.iter().enumerate() {
+            let value_index = bind_ordered_index_value(path, value, &mut params)?;
+            sql.push_str(&format!(" AND ordered.k{position} = ${value_index}"));
+        }
+        if let Some(cursor) = &page.after {
+            let value_index = bind_ordered_index_value(path, &cursor.value, &mut params)?;
+            let tie_index = bind_ordered_index_value(path, &cursor.tie_breaker, &mut params)?;
+            let comparison = match page.direction {
+                crate::SortDirection::Ascending => ">",
+                crate::SortDirection::Descending => "<",
+            };
+            sql.push_str(&format!(
+                " AND ({expression} {comparison} ${value_index} \
+                 OR ({expression} = ${value_index} AND {tie_expression} {comparison} ${tie_index}))"
+            ));
+        }
+        let direction = match page.direction {
+            crate::SortDirection::Ascending => "ASC",
+            crate::SortDirection::Descending => "DESC",
+        };
+        params.push(Box::new(i64::from(page.limit.min(crate::Page::MAX_LIMIT))));
+        let limit_index = params.len();
+        sql.push_str(&format!(
+            " ORDER BY {expression} {direction}, {tie_expression} {direction} LIMIT ${limit_index}"
+        ));
+        let params_ref = params
+            .iter()
+            .map(|param| param.as_ref() as _)
+            .collect::<Vec<&(dyn tokio_postgres::types::ToSql + Sync)>>();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let rows = client
+            .query(&statement, &params_ref)
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         rows.into_iter()
@@ -909,8 +1070,6 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 }
-
-#[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
     async fn exact_entry_with_client(
         &self,
@@ -1082,15 +1241,11 @@ impl PostgresRootFilesystem {
         Ok(out)
     }
 }
-
-#[cfg(feature = "postgres")]
 struct PostgresStorageTxn {
     client: Option<deadpool_postgres::Object>,
     prefix: VirtualPath,
     active: bool,
 }
-
-#[cfg(feature = "postgres")]
 impl PostgresStorageTxn {
     fn client(&self) -> Result<&deadpool_postgres::Object, FilesystemError> {
         self.client
@@ -1110,8 +1265,6 @@ impl PostgresStorageTxn {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl StorageTxn for PostgresStorageTxn {
     async fn put(
@@ -1137,6 +1290,15 @@ impl StorageTxn for PostgresStorageTxn {
     async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         self.check_path(path)?;
         postgres_reserve_sequence_with_client(self.client()?, path).await
+    }
+
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_range_with_client(self.client()?, path, count).await
     }
 
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
@@ -1168,8 +1330,6 @@ impl StorageTxn for PostgresStorageTxn {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_reserve_sequence_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1192,7 +1352,38 @@ async fn postgres_reserve_sequence_with_client(
     seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
 }
 
-#[cfg(feature = "postgres")]
+async fn postgres_reserve_sequence_range_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    count: u64,
+) -> Result<SeqNo, FilesystemError> {
+    if count == 0 {
+        return Ok(SeqNo::ZERO);
+    }
+    let count = i64::try_from(count).map_err(|_| {
+        backend_error(
+            path.clone(),
+            FilesystemOperation::ReserveSeq,
+            "sequence reservation range exceeds i64",
+        )
+    })?;
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, $2 + 1, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + $2,
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str(), &count],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+}
 impl Drop for PostgresStorageTxn {
     fn drop(&mut self) {
         if !self.active {
@@ -1221,7 +1412,6 @@ impl Drop for PostgresStorageTxn {
 /// at the call site. Index DDL remains uncached. The error type stays
 /// `tokio_postgres::Error` so existing `db_error` mapping at call sites is
 /// unchanged.
-#[cfg(feature = "postgres")]
 async fn cached_query_opt(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1230,8 +1420,6 @@ async fn cached_query_opt(
     let statement = client.prepare_cached(sql).await?;
     client.query_opt(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_query(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1240,8 +1428,6 @@ async fn cached_query(
     let statement = client.prepare_cached(sql).await?;
     client.query(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_query_one(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1250,8 +1436,6 @@ async fn cached_query_one(
     let statement = client.prepare_cached(sql).await?;
     client.query_one(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_execute(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1264,7 +1448,6 @@ async fn cached_execute(
 /// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory
 /// (no descendant in the half-open `[prefix/, prefix0)` range); the `ON CONFLICT
 /// DO NOTHING` also blocks an explicit directory or existing file at `path`.
-#[cfg(feature = "postgres")]
 const PUT_ABSENT_SQL: &str = r#"
     INSERT INTO root_filesystem_entries
         (path, contents, is_dir, content_type, kind, indexed, version)
@@ -1280,7 +1463,6 @@ const PUT_ABSENT_SQL: &str = r#"
 /// `CasExpectation::Version` put: update the file row at the expected version,
 /// rejecting an explicit directory (`is_dir = FALSE`) and — for parity with the
 /// insert arms — any implicit-directory descendant.
-#[cfg(feature = "postgres")]
 const PUT_VERSION_SQL: &str = r#"
     UPDATE root_filesystem_entries
     SET contents = $1,
@@ -1300,7 +1482,6 @@ const PUT_VERSION_SQL: &str = r#"
 /// `CasExpectation::Any` put: upsert unless a descendant makes `path` an
 /// implicit directory; the `ON CONFLICT` guard rejects an explicit directory.
 /// `RETURNING version` removes the separate version read-back.
-#[cfg(feature = "postgres")]
 const PUT_ANY_SQL: &str = r#"
     INSERT INTO root_filesystem_entries
         (path, contents, is_dir, content_type, kind, indexed, version)
@@ -1339,7 +1520,6 @@ const PUT_ANY_SQL: &str = r#"
 /// version) to reproduce the exact error the old pre-check and version read
 /// would have produced: `directory_write_error` for a directory conflict,
 /// `VersionMismatch` otherwise. The happy path never pays for it.
-#[cfg(feature = "postgres")]
 async fn postgres_put_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1471,7 +1651,6 @@ async fn postgres_put_with_client(
 /// pre-existing (the old 3-read pre-check had a wider window) and tracked
 /// separately — see `put_statements_are_single_round_trip` for the boundary of
 /// what the single-statement guard does and does not guarantee.
-#[cfg(feature = "postgres")]
 async fn diagnose_put_failure(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1489,8 +1668,6 @@ async fn diagnose_put_failure(
         found,
     })
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_get_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1525,8 +1702,6 @@ async fn postgres_get_with_client(
         version: record_version_from_i64(path, version_raw)?,
     }))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_stat_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1593,8 +1768,6 @@ async fn postgres_stat_with_client(
         sensitive: false,
     })
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_delete_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1658,7 +1831,6 @@ async fn postgres_delete_with_client(
 /// relies on `created_at` being immutable after row creation; if a future
 /// writer mutates it on update, replacement detection would classify that
 /// update as a new incarnation.
-#[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH candidate AS MATERIALIZED (
         SELECT version, created_at
@@ -1728,7 +1900,6 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
 /// `diagnose_put_failure` / `postgres_current_version_with_client` are
 /// deliberately not reused here: reusing them would require a second
 /// statement, reopening the race this fix closes.
-#[cfg(feature = "postgres")]
 async fn postgres_delete_if_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1760,8 +1931,6 @@ async fn postgres_delete_if_version_with_client(
     }
     Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_current_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1785,7 +1954,6 @@ async fn postgres_current_version_with_client(
 /// Used only on the rare CAS-put failure path. Selects the `is_dir` flag alone
 /// and never reads `OCTET_LENGTH(contents)`, so it does not touch the
 /// (potentially TOAST'd) body to answer a question that only needs one boolean.
-#[cfg(feature = "postgres")]
 async fn postgres_is_dir_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1799,8 +1967,6 @@ async fn postgres_is_dir_with_client(
     .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.is_some_and(|row| row.get::<_, bool>("is_dir")))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_has_child_entry_with_client(
     client: &deadpool_postgres::Object,
     parent: &VirtualPath,
@@ -1815,8 +1981,6 @@ async fn postgres_has_child_entry_with_client(
     .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.is_some())
 }
-
-#[cfg(feature = "postgres")]
 fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     let prefix = path.as_str().trim_end_matches('/');
     // Descendants share the literal "{prefix}/" component boundary. The
@@ -1824,25 +1988,141 @@ fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     // in the normalized virtual path alphabet used by these storage paths.
     (format!("{prefix}/"), format!("{prefix}0"))
 }
-
-#[cfg(feature = "postgres")]
-fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
-    let kind = match &spec.kind {
-        IndexKind::Exact => "exact",
-        IndexKind::Prefix => "prefix",
-        IndexKind::Fts => "fts",
-        IndexKind::Vector { .. } => "vector",
-    };
-    let mut keys = postgres_projection_index_component(kind);
-    for key in &spec.keys {
-        keys.push_str(&postgres_projection_index_component(key.as_str()));
+async fn ensure_postgres_ordered_projection(
+    client: &mut deadpool_postgres::Object,
+    path: &VirtualPath,
+    spec: &IndexSpec,
+) -> Result<(), FilesystemError> {
+    const MAX_ORDERED_INDEX_KEYS: usize = 8;
+    if spec.keys.len() > MAX_ORDERED_INDEX_KEYS {
+        return Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::EnsureIndex,
+        });
     }
-    sql_index_name(&format!("/shared/{kind}/{keys}"), spec.name.as_str())
-}
-
-#[cfg(feature = "postgres")]
-fn postgres_projection_index_component(value: &str) -> String {
-    format!("{}:{value}", value.len())
+    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
+    let legacy_trigger_name = format!(
+        "{}_sync",
+        sql_index_name("/ordered_projection", spec.name.as_str())
+    );
+    // Hash each final identifier independently. Appending suffixes to an
+    // already-capped 62-byte base lets PostgreSQL truncate every trigger name
+    // to the same identifier on long tenant paths.
+    let function_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_sync_fn", spec.name.as_str()),
+    );
+    let insert_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_insert", spec.name.as_str()),
+    );
+    let update_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_update", spec.name.as_str()),
+    );
+    let delete_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_delete", spec.name.as_str()),
+    );
+    let legacy_scoped_trigger_name = format!("{trigger_base}_sync");
+    let index_name = spec.name.as_str().replace('\'', "''");
+    let escaped_prefix = path.as_str().replace('\'', "''");
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let prefix_lower = prefix_lower.replace('\'', "''");
+    let prefix_upper = prefix_upper.replace('\'', "''");
+    let new_path_matches = format!(
+        "(NEW.path = '{escaped_prefix}' OR (NEW.path >= '{prefix_lower}' AND NEW.path < '{prefix_upper}'))"
+    );
+    let old_path_matches = format!(
+        "(OLD.path = '{escaped_prefix}' OR (OLD.path >= '{prefix_lower}' AND OLD.path < '{prefix_upper}'))"
+    );
+    let projected_values = spec
+        .keys
+        .iter()
+        .map(|key| format!("NEW.indexed->'{}'", key.as_str()))
+        .chain(
+            std::iter::repeat_with(|| "NULL".to_string())
+                .take(MAX_ORDERED_INDEX_KEYS.saturating_sub(spec.keys.len())),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate = spec
+        .keys
+        .iter()
+        .map(|key| {
+            format!(
+                "(NEW.indexed->'{}') IS NOT NULL AND (NEW.indexed->'{}') <> 'null'::jsonb",
+                key.as_str(),
+                key.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let updates = (0..MAX_ORDERED_INDEX_KEYS)
+        .map(|position| format!("k{position} = EXCLUDED.k{position}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ddl = format!(
+        "CREATE OR REPLACE FUNCTION {function_name}() RETURNS trigger \
+         LANGUAGE plpgsql AS $projection$ \
+         BEGIN \
+           IF TG_OP = 'DELETE' THEN \
+             IF {old_path_matches} THEN \
+               DELETE FROM root_filesystem_ordered_index_rows \
+                WHERE index_name = '{index_name}' AND path = OLD.path; \
+             END IF; \
+             RETURN OLD; \
+           END IF; \
+           IF TG_OP = 'UPDATE' AND {old_path_matches} THEN \
+             DELETE FROM root_filesystem_ordered_index_rows \
+              WHERE index_name = '{index_name}' AND path = OLD.path; \
+           END IF; \
+           IF {new_path_matches} AND NEW.is_dir = FALSE AND {predicate} THEN \
+             INSERT INTO root_filesystem_ordered_index_rows(\
+               index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+             ) VALUES ('{index_name}', NEW.path, {projected_values}) \
+             ON CONFLICT (index_name, path) DO UPDATE SET {updates}; \
+           END IF; \
+           RETURN NEW; \
+         END; \
+         $projection$; \
+         DROP TRIGGER IF EXISTS {legacy_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {legacy_scoped_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {insert_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {update_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {delete_trigger_name} ON root_filesystem_entries; \
+         CREATE TRIGGER {insert_trigger_name} \
+           AFTER INSERT ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({new_path_matches}) \
+           EXECUTE FUNCTION {function_name}(); \
+         CREATE TRIGGER {update_trigger_name} \
+           AFTER UPDATE ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({old_path_matches} OR {new_path_matches}) \
+           EXECUTE FUNCTION {function_name}(); \
+         CREATE TRIGGER {delete_trigger_name} \
+           AFTER DELETE ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({old_path_matches}) \
+           EXECUTE FUNCTION {function_name}();"
+    );
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+    transaction
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&spec.name.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+    transaction
+        .batch_execute(&ddl)
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
 }
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
@@ -1853,7 +2133,6 @@ fn postgres_projection_index_component(value: &str) -> String {
 ///   `FALSE` (matching in-memory `all`/`any` semantics).
 /// - `Filter::Range` on `IndexValue::I64` bounds casts both sides to
 ///   `BIGINT` so the comparison is numeric, not lexicographic on text.
-#[cfg(feature = "postgres")]
 fn translate_filter(
     path: &VirtualPath,
     filter: &Filter,
@@ -1958,8 +2237,6 @@ fn translate_filter(
         Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
     }
 }
-
-#[cfg(feature = "postgres")]
 fn translate_compound(
     path: &VirtualPath,
     children: &[Filter],
@@ -1987,7 +2264,6 @@ fn translate_compound(
 /// Used to guard `Filter::Range` so cross-variant stored values are filtered
 /// out before any cast/comparison (PR #3659 review fix). Postgres returns:
 /// `"string"` / `"number"` / `"boolean"` / `"null"` / `"object"` / `"array"`.
-#[cfg(feature = "postgres")]
 fn index_value_jsonb_typeof(value: &IndexValue) -> &'static str {
     match value {
         IndexValue::Text(_) | IndexValue::Bytes(_) => "string",
@@ -1995,8 +2271,6 @@ fn index_value_jsonb_typeof(value: &IndexValue) -> &'static str {
         IndexValue::Bool(_) => "boolean",
     }
 }
-
-#[cfg(feature = "postgres")]
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,
@@ -2025,7 +2299,24 @@ fn bind_index_value(
     Ok(params.len())
 }
 
-#[cfg(feature = "postgres")]
+fn bind_ordered_index_value(
+    path: &VirtualPath,
+    value: &IndexValue,
+    params: &mut Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+) -> Result<usize, FilesystemError> {
+    if matches!(value, IndexValue::Bytes(_)) {
+        return Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        });
+    }
+    let value = serde_json::to_value(value).map_err(|_| FilesystemError::SerializeIndexed {
+        path: path.clone(),
+        operation: FilesystemOperation::Query,
+    })?;
+    params.push(Box::new(value));
+    Ok(params.len())
+}
 fn build_entry(
     path: &VirtualPath,
     body: Vec<u8>,
@@ -2053,8 +2344,6 @@ fn build_entry(
         indexed,
     })
 }
-
-#[cfg(feature = "postgres")]
 fn seq_no_from_i64(
     path: &VirtualPath,
     raw: i64,
@@ -2068,8 +2357,6 @@ fn seq_no_from_i64(
             reason: format!("event seq {raw} is not representable"),
         })
 }
-
-#[cfg(feature = "postgres")]
 fn backend_error(
     path: VirtualPath,
     operation: FilesystemOperation,
@@ -2081,8 +2368,6 @@ fn backend_error(
         reason: reason.into(),
     }
 }
-
-#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V26__root_filesystem_entries.sql"),
     "\n",
@@ -2097,9 +2382,13 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V31__root_filesystem_path_collation.sql"),
     "\n",
     include_str!("../../../migrations/V32__root_filesystem_sequences.sql"),
+    "\n",
+    include_str!("../../../migrations/V33__root_filesystem_ordered_index_rows.sql"),
+    "\n",
+    include_str!("../../../migrations/V34__root_filesystem_ordered_index_path_collation.sql"),
 );
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2285,70 +2574,6 @@ mod tests {
         assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
         assert!("/secrets/a/b" < lower); // the path itself is excluded
         assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
-    }
-
-    #[test]
-    fn shared_projection_index_name_ignores_prefix_specific_declarations() {
-        let spec = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![crate::IndexKey::new("bucket").unwrap()],
-            IndexKind::Exact,
-        );
-        let first = postgres_shared_projection_index_name(&spec);
-        let second = postgres_shared_projection_index_name(&spec);
-        assert_eq!(first, second);
-        assert!(first.contains("shared"));
-        assert!(first.contains("bucket_exact"));
-        assert!(first.len() <= 62);
-    }
-
-    #[test]
-    fn shared_projection_index_name_separates_kind_and_keys() {
-        let exact_bucket = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![crate::IndexKey::new("bucket").unwrap()],
-            IndexKind::Exact,
-        );
-        let prefix_bucket = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![crate::IndexKey::new("bucket").unwrap()],
-            IndexKind::Prefix,
-        );
-        let exact_tenant = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![crate::IndexKey::new("tenant_id").unwrap()],
-            IndexKind::Exact,
-        );
-        assert_ne!(
-            postgres_shared_projection_index_name(&exact_bucket),
-            postgres_shared_projection_index_name(&prefix_bucket)
-        );
-        assert_ne!(
-            postgres_shared_projection_index_name(&exact_bucket),
-            postgres_shared_projection_index_name(&exact_tenant)
-        );
-    }
-
-    #[test]
-    fn shared_projection_index_name_uses_injective_key_encoding() {
-        let split_keys = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![
-                crate::IndexKey::new("a").unwrap(),
-                crate::IndexKey::new("b").unwrap(),
-            ],
-            IndexKind::Exact,
-        );
-        let joined_key = IndexSpec::new(
-            crate::IndexName::new("bucket_exact").unwrap(),
-            vec![crate::IndexKey::new("a_b").unwrap()],
-            IndexKind::Exact,
-        );
-
-        assert_ne!(
-            postgres_shared_projection_index_name(&split_keys),
-            postgres_shared_projection_index_name(&joined_key)
-        );
     }
 
     #[test]

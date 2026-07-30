@@ -17,13 +17,12 @@ layer = "substrates"
 dist = false
 
 [features]
-default = []
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 # Opt-in registry-provider factory for composition roots that already own
 # provider resolution and do not want v1 SessionManager plumbing.
 registry-provider-factory = []
 # Opt-in StubLlm + credentials helpers for downstream test code.
-testing = []
+test-support = []
 
 [dependencies]
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
@@ -62,6 +61,11 @@ aws-smithy-types       = { version = "1", optional = true }
 
 [dev-dependencies]
 insta = { version = "1.46.3", features = ["yaml"] }
+# Property testing for provider-response parsing (#6524 workstream 9). Chosen
+# over a hand-rolled random loop because shrinking is the whole value: a
+# failure reports the minimal input that breaks the invariant, not whichever
+# 40-character string happened to trip it.
+proptest = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-test = "0.2"

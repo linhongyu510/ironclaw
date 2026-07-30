@@ -33,7 +33,7 @@
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/list_conversations.md
 - Modify: crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/get_conversation_history.md
 - Modify: crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 
 **Interfaces:**
 - Consumes: OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION and the bundled Slack manifest catalog.
@@ -93,7 +93,7 @@ cargo test -p ironclaw_reborn_composition \
 git add crates/ironclaw_reborn_composition/src/outbound/outbound_delivery_capability_surface.rs \
   crates/ironclaw_first_party_extensions/assets/slack \
   crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs \
-  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 git commit -m "fix(reborn): clarify Slack capability selection"
 ~~~
 
@@ -104,7 +104,7 @@ git commit -m "fix(reborn): clarify Slack capability selection"
 **Files:**
 - Delete: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
 - Modify: crates/ironclaw_reborn_composition/src/runtime.rs
-- Modify: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+- Modify: crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs
 - Modify: crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
 - Modify: scripts/reborn_webui_v2_live_qa/run_live_qa.py
 - Modify: scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
@@ -152,7 +152,7 @@ cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta --lib
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git add crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs \
   crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs \
+  crates/ironclaw_reborn_composition/src/runtime/capability_host/tests.rs \
   scripts/reborn_webui_v2_live_qa/run_live_qa.py \
   scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git commit -m "refactor(reborn): remove Slack policy from core runtime"
@@ -163,8 +163,8 @@ git commit -m "refactor(reborn): remove Slack policy from core runtime"
 ### Task 3: Make terminal replies and provider errors structural
 
 **Files:**
-- Modify: crates/ironclaw_webui_v2/frontend/src/pages/chat/components/message-bubble.tsx
-- Modify: crates/ironclaw_webui_v2/frontend/src/pages/chat/components/message-bubble.test.ts
+- Modify: crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.tsx
+- Modify: crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.test.ts
 - Modify: scripts/reborn_webui_v2_live_qa/run_live_qa.py
 - Modify: scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 
@@ -178,7 +178,7 @@ git commit -m "refactor(reborn): remove Slack policy from core runtime"
 Render a real ErrorChatMessage with model_unavailable/failed and assert both data attributes.
 
 ~~~bash
-cd crates/ironclaw_webui_v2/frontend
+cd crates/ironclaw_webui/frontend
 node --test --import tsx src/pages/chat/components/message-bubble.test.ts
 ~~~
 
@@ -234,11 +234,11 @@ _live_chat_case records the error-bubble count before submit and persists catego
 - [ ] **Step 6: Run GREEN and commit**
 
 ~~~bash
-(cd crates/ironclaw_webui_v2/frontend && \
+(cd crates/ironclaw_webui/frontend && \
   node --test --import tsx src/pages/chat/components/message-bubble.test.ts)
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
-git add crates/ironclaw_webui_v2/frontend/src/pages/chat/components/message-bubble.tsx \
-  crates/ironclaw_webui_v2/frontend/src/pages/chat/components/message-bubble.test.ts \
+git add crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.tsx \
+  crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.test.ts \
   scripts/reborn_webui_v2_live_qa/run_live_qa.py \
   scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 git commit -m "fix(canary): observe terminal model failures"
@@ -441,7 +441,7 @@ cargo test --test reborn_qa_recorded_behavior --features libsql -- --nocapture
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 python3 scripts/live-canary/test_notify_slack.py
 python3 scripts/live-canary/test_run_dispatch.py
-(cd crates/ironclaw_webui_v2/frontend && \
+(cd crates/ironclaw_webui/frontend && \
   node --test --import tsx src/pages/chat/components/message-bubble.test.ts)
 cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta -- --nocapture
 cargo test -p ironclaw_host_runtime --test github_wasm_runtime_contract slack_ -- --nocapture

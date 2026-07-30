@@ -30,8 +30,9 @@ use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
+use crate::session::SessionManager;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
-use crate::{costs, session::SessionManager};
+use ironclaw_common::llm_costs as costs;
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +151,8 @@ pub fn default_models() -> Vec<(String, String)> {
 /// NEAR AI provider (Chat Completions API, dual auth).
 pub struct NearAiChatProvider {
     client: Client,
+    streaming_client: Client,
+    stream_idle_timeout: Duration,
     config: NearAiConfig,
     /// Session manager for session token auth (used when no API key is set).
     session: Arc<SessionManager>,
@@ -202,12 +205,19 @@ impl NearAiChatProvider {
             &config.base_url,
             crate::config::hardened_client_builder(request_timeout_secs),
         )?;
+        let streaming_client = crate::url_check::build_http_client(
+            "nearai_chat",
+            &config.base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let pricing = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
         let provider = Self {
             client,
+            streaming_client,
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             config,
             session,
             active_model,
@@ -360,16 +370,12 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
-        // header was actually present on the response — `None` otherwise, so
-        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
-        // schedule instead of the 60s default `parse_retry_after` applies to
-        // missing headers. The 60s floor for 429 (rate limit) is re-added
-        // explicitly at the 429 call site below via `.or(Some(...))`.
-        let retry_after_header: Option<Duration> = response
-            .headers()
-            .get("retry-after")
-            .map(crate::retry::parse_retry_after_value);
+        // The shared status-aware parser preserves absence for 5xx backoff and
+        // applies the historical 60-second default only to HTTP 429.
+        let retry_after = crate::retry::retry_after_for_status(
+            status.as_u16(),
+            response.headers().get("retry-after"),
+        );
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -396,34 +402,7 @@ impl NearAiChatProvider {
                         });
                     }
                 }
-                return Err(LlmError::AuthFailed {
-                    provider: "nearai_chat".to_string(),
-                });
             }
-
-            if status_code == 429 {
-                // Preserve existing rate-limit behavior: fall back to a 60s
-                // default when the server omits Retry-After. Long sleeps are
-                // appropriate for rate-limit backpressure.
-                return Err(LlmError::RateLimited {
-                    provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
-                });
-            }
-
-            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
-                return Err(error);
-            }
-
-            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
-            // so the retry layer backs off, the circuit breaker counts a
-            // transient failure, and the channel boundary produces a user-safe
-            // message. HTTP 500 is the most important case for the #2546
-            // traceback-leak report: upstream application errors frequently
-            // return 500 with a Python traceback in the body. 502/503/504 are
-            // the proxy-layer variants. The `status` field preserves the
-            // specific code for operators; the body is logged at debug and
-            // never carried on the error.
             if matches!(status_code, 500..=599) {
                 tracing::debug!(
                     provider = "nearai_chat",
@@ -432,18 +411,16 @@ impl NearAiChatProvider {
                         ironclaw_common::truncate_for_preview(&response_text, 512).as_str(),
                     "NEAR AI Chat upstream 5xx response"
                 );
-                return Err(LlmError::BadGateway {
-                    provider: "nearai_chat".to_string(),
-                    status: status_code,
-                    retry_after: retry_after_header,
-                });
             }
-
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::NearAiChat,
+                    model: &self.active_model_name(),
+                    status: status_code,
+                    body: &response_text,
+                    retry_after,
+                },
+            ));
         }
 
         serde_json::from_str(&response_text).map_err(|e| {
@@ -483,54 +460,47 @@ impl NearAiChatProvider {
 
         tracing::debug!("Sending streaming request to NEAR AI Chat: {}", url);
 
-        let response = self
-            .client
+        let request = self
+            .streaming_client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .json(body)
-            .send()
+            .json(body);
+        let response = tokio::time::timeout(self.stream_idle_timeout, request.send())
             .await
+            .map_err(|_| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!(
+                    "timed out waiting {}s for streaming response headers",
+                    self.stream_idle_timeout.as_secs()
+                ),
+            })?
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
                 reason: e.to_string(),
             })?;
 
         let status = response.status();
-        let retry_after_header: Option<Duration> = response
-            .headers()
-            .get("retry-after")
-            .map(crate::retry::parse_retry_after_value);
+        let retry_after = crate::retry::retry_after_for_status(
+            status.as_u16(),
+            response.headers().get("retry-after"),
+        );
         if !status.is_success() {
             let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
                 reason: format!("Failed to read response body: {}", e),
             })?;
             let status_code = status.as_u16();
-            if status_code == 401 {
-                if !self.uses_api_key() {
-                    let lower = response_text.to_lowercase();
-                    let is_session_expired = lower.contains("session")
-                        && (lower.contains("expired") || lower.contains("invalid"));
-                    if is_session_expired {
-                        return Err(LlmError::SessionExpired {
-                            provider: "nearai_chat".to_string(),
-                        });
-                    }
+            if status_code == 401 && !self.uses_api_key() {
+                let lower = response_text.to_lowercase();
+                let is_session_expired = lower.contains("session")
+                    && (lower.contains("expired") || lower.contains("invalid"));
+                if is_session_expired {
+                    return Err(LlmError::SessionExpired {
+                        provider: "nearai_chat".to_string(),
+                    });
                 }
-                return Err(LlmError::AuthFailed {
-                    provider: "nearai_chat".to_string(),
-                });
-            }
-            if status_code == 429 {
-                return Err(LlmError::RateLimited {
-                    provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
-                });
-            }
-            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
-                return Err(error);
             }
             if matches!(status_code, 500..=599) {
                 tracing::debug!(
@@ -540,17 +510,16 @@ impl NearAiChatProvider {
                         ironclaw_common::truncate_for_preview(&response_text, 512).as_str(),
                     "NEAR AI Chat upstream 5xx streaming response"
                 );
-                return Err(LlmError::BadGateway {
-                    provider: "nearai_chat".to_string(),
-                    status: status_code,
-                    retry_after: retry_after_header,
-                });
             }
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::NearAiChat,
+                    model: &self.active_model_name(),
+                    status: status_code,
+                    body: &response_text,
+                    retry_after,
+                },
+            ));
         }
 
         let mut stream = response
@@ -561,20 +530,23 @@ impl NearAiChatProvider {
         let mut stream_completed = false;
         let mut tool_calls: HashMap<usize, NearAiStreamingToolCallState> = HashMap::new();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            let next_event = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+                .await
+                .map_err(|_| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!(
+                        "SSE stream was idle for {} seconds",
+                        self.stream_idle_timeout.as_secs()
+                    ),
+                })?;
+            let Some(event) = next_event else {
+                break;
+            };
             let event = match event {
                 Ok(event) => event,
                 Err(e) => {
-                    if stream_completed || can_salvage_incomplete_text_stream(&parsed, &tool_calls)
-                    {
-                        tracing::debug!(
-                            provider = "nearai_chat",
-                            error = %e,
-                            stream_completed,
-                            content_bytes = parsed.content.len(),
-                            reasoning_bytes = parsed.reasoning.len(),
-                            "NEAR AI Chat SSE stream ended with a transport error after usable assistant text; preserving streamed response"
-                        );
+                    if stream_completed {
                         break;
                     }
                     return Err(LlmError::RequestFailed {
@@ -643,16 +615,10 @@ impl NearAiChatProvider {
             }
         }
 
-        let salvaged_incomplete_text_stream =
-            !stream_completed && can_salvage_incomplete_text_stream(&parsed, &tool_calls);
-        if !stream_completed && !salvaged_incomplete_text_stream {
-            return Err(LlmError::InvalidResponse {
-                provider: "nearai_chat".to_string(),
-                reason: "stream ended before terminal completion marker".to_string(),
-            });
-        }
-        if salvaged_incomplete_text_stream {
-            parsed.finish_reason = FinishReason::Stop;
+        if !stream_completed {
+            return Err(incomplete_stream_error(
+                "stream ended before terminal completion marker",
+            ));
         }
 
         let mut ordered_tool_calls = tool_calls.into_iter().collect::<Vec<_>>();
@@ -738,6 +704,10 @@ impl NearAiChatProvider {
 
 #[async_trait]
 impl LlmProvider for NearAiChatProvider {
+    fn provider_id(&self) -> String {
+        "nearai_chat".to_string()
+    }
+
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req
             .take_model_override()
@@ -1622,12 +1592,11 @@ impl NearAiStreamingToolCallState {
     }
 }
 
-fn can_salvage_incomplete_text_stream(
-    parsed: &NearAiStreamingResponse,
-    tool_calls: &HashMap<usize, NearAiStreamingToolCallState>,
-) -> bool {
-    (!parsed.content.trim().is_empty() || !parsed.reasoning.trim().is_empty())
-        && tool_calls.is_empty()
+fn incomplete_stream_error(reason: impl Into<String>) -> LlmError {
+    LlmError::InvalidResponse {
+        provider: "nearai_chat".to_string(),
+        reason: reason.into(),
+    }
 }
 
 fn saturate_u32(val: u64) -> u32 {
@@ -1885,6 +1854,20 @@ mod tests {
             .expect("write response");
     }
 
+    async fn accept_chat_request(
+        listener: &tokio::net::TcpListener,
+    ) -> (tokio::net::TcpStream, serde_json::Value) {
+        loop {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            if headers.starts_with("POST /v1/chat/completions ") {
+                let request = serde_json::from_str(&body).expect("chat request json");
+                return (socket, request);
+            }
+            write_http_json_response(&mut socket, serde_json::json!({ "models": [] })).await;
+        }
+    }
+
     struct RecordingCompletionStreamSink {
         sender: tokio::sync::mpsc::UnboundedSender<String>,
     }
@@ -2023,106 +2006,91 @@ data: [DONE]
     }
 
     #[tokio::test]
-    async fn complete_streaming_salvages_text_when_stream_ends_after_delta() {
+    async fn complete_streaming_allows_total_duration_longer_than_idle_timeout() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
-        use tokio::sync::mpsc;
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{Duration, sleep, timeout};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let (headers, body) = read_http_request_body(&mut socket).await;
-            assert!(headers.starts_with("POST /v1/chat/completions "));
-            let request_json: serde_json::Value =
-                serde_json::from_str(&body).expect("request json");
-            assert_eq!(request_json["stream"], true);
-
+            let (mut socket, _) = accept_chat_request(&listener).await;
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"one\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
-                .expect("write sse headers");
+                .expect("write first event");
+            sleep(Duration::from_millis(600)).await;
             socket
                 .write_all(
-                    br#"data: {"choices":[{"delta":{"content":"partial answer"},"finish_reason":null}]}
-
-"#,
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\" two\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
-                .expect("write partial content chunk");
+                .expect("write second event");
+            sleep(Duration::from_millis(600)).await;
+            socket
+                .write_all(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\" three\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .expect("write terminal events");
         });
 
-        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
-            .expect("provider");
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
-        let response = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("say something")]),
-                sink,
-            )
-            .await
-            .expect("streamed assistant text should be preserved after abrupt EOF");
+        let provider =
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+                .expect("provider");
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = timeout(
+            Duration::from_secs(3),
+            provider.complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("count")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            ),
+        )
+        .await
+        .expect("active stream should finish")
+        .expect("active stream should not hit its idle timeout");
 
         server_task.await.expect("server task");
-        let delta = timeout(Duration::from_secs(2), delta_rx.recv())
-            .await
-            .expect("stream delta should be captured")
-            .expect("stream delta");
-        assert_eq!(delta, "partial answer");
-        assert_eq!(response.content, "partial answer");
-        assert_eq!(response.finish_reason, FinishReason::Stop);
-        assert_eq!(response.input_tokens, 0);
-        assert_eq!(response.output_tokens, 0);
+        assert_eq!(response.content, "one two three");
     }
 
     #[tokio::test]
-    async fn complete_streaming_salvages_text_when_decoder_errors_after_delta() {
+    async fn complete_streaming_rejects_partial_text_without_terminal_marker() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let (headers, body) = read_http_request_body(&mut socket).await;
-            assert!(headers.starts_with("POST /v1/chat/completions "));
-            let request_json: serde_json::Value =
-                serde_json::from_str(&body).expect("request json");
-            assert_eq!(request_json["stream"], true);
-
+            let (mut socket, _) = accept_chat_request(&listener).await;
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
-                .expect("write sse headers");
-            socket
-                .write_all(
-                    b"data: {\"choices\":[{\"delta\":{\"content\":\"usable\"},\"finish_reason\":null}]}\n\n\xff",
-                )
-                .await
-                .expect("write invalid utf-8 after content chunk");
+                .expect("write incomplete response");
         });
 
         let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
             .expect("provider");
         let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
-        let response = provider
+        let result = provider
             .complete_streaming(
                 CompletionRequest::new(vec![ChatMessage::user("say something")]),
-                sink,
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
             )
-            .await
-            .expect("streamed assistant text should be preserved after decode error");
+            .await;
 
         server_task.await.expect("server task");
-        assert_eq!(response.content, "usable");
-        assert_eq!(response.finish_reason, FinishReason::Stop);
+        match result {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(reason.contains("terminal completion marker"), "{reason}");
+            }
+            other => panic!("expected incomplete stream failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2570,6 +2538,141 @@ data: [DONE]
             }
             other => panic!("expected context-length error, got {other:?}"),
         }
+    }
+
+    async fn complete_with_http_error(
+        status: &str,
+        body: &str,
+        retry_after: Option<&str>,
+    ) -> LlmError {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_string();
+        let body = body.to_string();
+        let retry_after = retry_after.map(str::to_string);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let (headers, _) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("POST /v1/chat/completions ") {
+                    let retry_after_header = retry_after
+                        .map(|value| format!("retry-after: {value}\r\n"))
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         {retry_after_header}content-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write error response");
+                    break;
+                }
+
+                assert!(
+                    headers.starts_with("GET /v1/model/list "),
+                    "unexpected startup request: {headers}"
+                );
+                let pricing_body = r#"{"models":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\n\r\n{pricing_body}",
+                    pricing_body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write pricing response");
+            }
+        });
+
+        let error = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider")
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect_err("scripted HTTP error must reach the adapter mapper");
+        server.await.expect("loopback server");
+        error
+    }
+
+    #[tokio::test]
+    async fn complete_passes_status_body_model_and_retry_metadata_to_shared_mapper() {
+        let forbidden = complete_with_http_error(
+            "403 Forbidden",
+            r#"{"error":{"message":"permission denied"}}"#,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            forbidden,
+            LlmError::AuthFailed { ref provider } if provider == "nearai_chat"
+        ));
+
+        let missing_model = complete_with_http_error(
+            "404 Not Found",
+            r#"{"error":{"message":"model does not exist"}}"#,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                missing_model,
+                LlmError::ModelNotAvailable { ref provider, ref model }
+                    if provider == "nearai_chat" && model == "test-model"
+            ),
+            "{missing_model:?}"
+        );
+
+        let unrelated_not_found = complete_with_http_error(
+            "404 Not Found",
+            r#"{"error":{"message":"route not found"}}"#,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                unrelated_not_found,
+                LlmError::RequestFailed { ref provider, ref reason }
+                    if provider == "nearai_chat" && reason.contains("route not found")
+            ),
+            "{unrelated_not_found:?}"
+        );
+
+        let rate_limited = complete_with_http_error(
+            "429 Too Many Requests",
+            r#"{"error":{"message":"slow down"}}"#,
+            Some("17"),
+        )
+        .await;
+        assert!(matches!(
+            rate_limited,
+            LlmError::RateLimited {
+                ref provider,
+                retry_after: Some(delay),
+            } if provider == "nearai_chat" && delay == Duration::from_secs(17)
+        ));
+
+        let upstream_body = "gateway exploded with secret response details";
+        let unavailable = complete_with_http_error("502 Bad Gateway", upstream_body, None).await;
+        assert!(
+            matches!(
+                unavailable,
+                LlmError::BadGateway {
+                    ref provider,
+                    status: 502,
+                    retry_after: None,
+                } if provider == "nearai_chat"
+            ),
+            "{unavailable:?}"
+        );
+        assert!(
+            !unavailable.to_string().contains(upstream_body),
+            "adapter must not leak an upstream 5xx body"
+        );
     }
 
     #[tokio::test]

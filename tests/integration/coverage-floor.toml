@@ -55,18 +55,42 @@
 
 [global]
 enforce = true
-# Recaptured from the first green main coverage-report run AFTER #5656 merged
-# (slack-v2-host-beta onto the int-tier lane): run 28817755166 at 28da8bd13,
-# aggregate 273132 / 320188 = 85.30%. Denominator moved only +246 lines vs the
-# prior 073cc3d6b capture — the slack-v2-host-beta sources already lived in
-# ironclaw_reborn_composition's counted set; #5656 mostly added numerator via
-# the new pairing suites. See nearai/ironclaw#5638 / #5718.
-floor_percent = 85.3
+# Recaptured from PR #6696's successful merged CI artifact before the behavioral
+# coverage additions in this PR: aggregate 307208 / 360961 = 85.11%. New tests
+# may raise this value; this floor prevents either test removal or denominator
+# shrinkage from returning to the previous permissive 80.81% baseline.
+floor_percent = 85.11
 tolerance_percent = 0.5
-captured_total_lines = 320188
-captured_date = "2026-07-06"
-captured_from = "28da8bd13"
+captured_total_lines = 360961
+captured_date = "2026-07-28"
+captured_from = "cef5eab53f47b2fc603a6dffc6cdeb7e12ed9ef5"
 
-# No [[crate]] entries at initial landing — opt-in, added as owners choose to
-# ratchet a crate they care about (e.g. ironclaw_reborn_composition,
-# ironclaw_product_workflow) as a fast-follow, not blocking this landing.
+[[crate]]
+name = "ironclaw_runner"
+floor_percent = 83.58
+floor_covered_lines = 13083
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 15653
+captured_date = "2026-07-28"
+rationale = "Protects runner orchestration and await-edge caller paths after the process-journal migration."
+
+[[crate]]
+name = "ironclaw_processes"
+floor_percent = 82.29
+floor_covered_lines = 5140
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 6246
+captured_date = "2026-07-28"
+rationale = "Protects the process journal state machine with both percentage and deletion-resistant covered-line floors."
+
+[[crate]]
+name = "ironclaw_turns"
+floor_percent = 85.36
+floor_covered_lines = 9181
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 10755
+captured_date = "2026-07-28"
+rationale = "Protects child submission, retry, admission, and process-projection behavior."

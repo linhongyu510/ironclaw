@@ -1,16 +1,18 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
-    PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
+    InvocationOrigin, PermissionMode, ResourceScope, ResourceUsage, RunId,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
-    TriggerState,
+    ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
+    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
+    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,7 +37,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. Without delivery_target_id, the user's default outbound target applies at fire time; builtin__outbound_delivery_target_set changes that user-wide default.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. When delivery_target_id is omitted, the host first inherits the current source run's authorized delivery route; only when no source route exists does it fall back to the user's default outbound target at fire time. This inheritance uses trusted run state, never prompt parsing or model-authored conversation ids. builtin__outbound_delivery_target_set changes the user-wide fallback default.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -81,13 +83,22 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+    // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
+    // callers through this path never project an `active_hold`, mirroring
+    // `NoopTriggerCreateHook` below (#5886).
+    insert_handlers_with_create_hook(
+        registry,
+        repository,
+        Arc::new(NoopTriggerCreateHook),
+        Arc::new(MissingTriggerActiveRunLookup),
+    )
 }
 
 pub(super) fn insert_handlers_with_create_hook(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
@@ -95,6 +106,7 @@ pub(super) fn insert_handlers_with_create_hook(
             repository,
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
+            active_run_lookup,
         }),
     )
 }
@@ -111,6 +123,7 @@ pub(super) fn insert_handlers_with_clock(
             repository,
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
+            active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
         }),
     )
 }
@@ -152,6 +165,41 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Resolve the delivery target that should be sealed into a new trigger.
+    ///
+    /// `requested` is untrusted model input. The default implementation only
+    /// accepts it after [`Self::validate_delivery_target`] succeeds. Hosts may
+    /// additionally derive a target from the authoritative source run when
+    /// `requested` is absent; that derivation must use `run_id` plus trusted
+    /// host state, never prompt text or a model-authored conversation id.
+    async fn resolve_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        run_id: Option<RunId>,
+        requested: Option<ironclaw_triggers::TriggerDeliveryTargetId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        if let Some(target) = requested {
+            self.validate_delivery_target(scope, &target).await?;
+            Ok(Some(target))
+        } else {
+            self.resolve_implicit_delivery_target(scope, run_id).await
+        }
+    }
+
+    /// Resolve an omitted delivery target from trusted host state.
+    ///
+    /// The trigger tool owns the precedence rule: a caller-supplied target is
+    /// always validated and wins. Hosts only adapt the authoritative source
+    /// run into an implicit target through this narrower seam.
+    async fn resolve_implicit_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        run_id: Option<RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        let _ = (scope, run_id);
+        Ok(None)
+    }
+
     /// Validate a model-supplied per-trigger delivery target id before the
     /// record is persisted (ownership, existence, product availability).
     ///
@@ -197,6 +245,7 @@ struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 }
 
 #[async_trait]
@@ -205,6 +254,38 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        // Defense-in-depth backstop (issue #5505): a scheduled/automation origin
+        // must never create, remove, pause, or resume a routine — that is
+        // self-referential automation that could silence or reschedule itself.
+        //
+        // The PRIMARY structural guarantees live one layer up, in the runner's
+        // capability surface (`ironclaw_runner::runtime`):
+        //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
+        //     profile, whose `PerSurfaceCapabilityDenyDecorator`
+        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
+        //     capabilities before the model can see them (`trigger_list` stays);
+        //   * a subagent runs on the `subagent_tools` surface, whose per-flavor
+        //     tool allowlist (`BUILTIN_SUBAGENT_FLAVORS`) never includes any
+        //     trigger capability, so a subagent cannot reach these ids at all.
+        //
+        // This origin check is the belt to those suspenders: a caller that
+        // reaches dispatch directly (bypassing the model-visible surface) is
+        // still refused. Residual it cannot close on its own: a subagent spawned
+        // from a scheduled run inherits `product_context: None`, so its dispatch
+        // origin is `LoopRun`, not `ScheduledLoopRun` — the scheduled lineage is
+        // not visible here. The subagent *surface* exclusion above is what
+        // protects that path today (and `spawn_subagent` is globally disabled
+        // pending #4147); if a trigger capability is ever added to a subagent
+        // flavor, the parent's `ScheduledTrigger`/`ScheduledLoopRun` lineage must
+        // also be propagated onto spawned runs so this backstop catches them too.
+        if origin_forbids_routine_mutation(request.origin.as_ref())
+            && is_trigger_mutation(request.capability_id.as_str())
+        {
+            return Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::PolicyDenied,
+                "scheduled automation cannot mutate routines",
+            ));
+        }
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
@@ -213,13 +294,21 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                     &*self.repository,
                     &*self.create_hook,
                     &request.scope,
+                    request.run_id,
                     request.input,
                     self.clock.now(),
                 )
                 .await?
             }
             TRIGGER_LIST_CAPABILITY_ID => {
-                list_triggers(&*self.repository, &request.scope, request.input).await?
+                list_triggers(
+                    &*self.repository,
+                    &*self.active_run_lookup,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
             }
             TRIGGER_REMOVE_CAPABILITY_ID => {
                 remove_trigger(&*self.repository, &request.scope, request.input).await?
@@ -254,6 +343,35 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             elapsed_usage_with_bytes(started, output_bytes),
         ))
     }
+}
+
+fn is_trigger_mutation(capability_id: &str) -> bool {
+    matches!(
+        capability_id,
+        TRIGGER_CREATE_CAPABILITY_ID
+            | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRIGGER_PAUSE_CAPABILITY_ID
+            | TRIGGER_RESUME_CAPABILITY_ID
+    )
+}
+
+/// Origins that must never mutate routines. Both the model-initiated scheduled
+/// loop-run ([`InvocationOrigin::ScheduledLoopRun`]) and the non-model
+/// routine/heartbeat ([`InvocationOrigin::Automation`]) are refused: a scheduled
+/// routine editing routines is self-referential automation. This matches the
+/// builtin descriptors' declared `origin_gate_matrix`, which sets
+/// `automation = Forbidden` for every trigger-mutation capability — so an
+/// `Automation`-origin caller is already denied at the authorization gate; the
+/// runtime backstop refuses it too, independent of that gate having run.
+///
+/// Interactive `LoopRun` and direct-user `Product` origins are intentionally
+/// *not* here: creating a routine is a normal thing for an interactive turn or a
+/// settings action to do (subject to the per-capability gate).
+fn origin_forbids_routine_mutation(origin: Option<&InvocationOrigin>) -> bool {
+    matches!(
+        origin,
+        Some(InvocationOrigin::ScheduledLoopRun(_) | InvocationOrigin::Automation(_))
+    )
 }
 
 #[derive(Deserialize)]
@@ -326,6 +444,7 @@ async fn create_trigger(
     repository: &dyn TriggerRepository,
     create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
+    run_id: Option<RunId>,
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
@@ -338,18 +457,15 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
-    let delivery_target = match input.delivery_target_id {
-        Some(raw) => {
-            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
-                .map_err(trigger_record_error)?;
-            create_hook
-                .validate_delivery_target(scope, &target)
-                .await
-                .map_err(trigger_record_error)?;
-            Some(target)
-        }
-        None => None,
-    };
+    let requested_delivery_target = input
+        .delivery_target_id
+        .map(ironclaw_triggers::parse_trigger_delivery_target_id)
+        .transpose()
+        .map_err(trigger_record_error)?;
+    let delivery_target = create_hook
+        .resolve_delivery_target(scope, run_id, requested_delivery_target)
+        .await
+        .map_err(trigger_record_error)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -389,14 +505,16 @@ async fn create_trigger(
         return Err(hook_error);
     }
     Ok(json!({
-        "trigger": trigger_output(&record, &[]),
+        "trigger": trigger_output(&record, &[], None),
     }))
 }
 
 async fn list_triggers(
     repository: &dyn TriggerRepository,
+    active_run_lookup: &dyn TriggerActiveRunLookup,
     scope: &ResourceScope,
     input: Value,
+    now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
@@ -426,16 +544,45 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    // Reason/elapsed-occurrence derivation and lookup batching live in
+    // `ironclaw_triggers::active_holds_for_records`, shared with the
+    // automations service so both read surfaces stay in lockstep (#5886).
+    let mut holds: HashMap<TriggerId, Value> =
+        active_holds_for_records(active_run_lookup, &records, now, ACTIVE_HOLD_LOOKUP_TIMEOUT)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, active_hold_json(hold)))
+            .collect();
     let output = records
         .into_iter()
         .map(|record| {
             let runs = runs_by_trigger
                 .remove(&record.trigger_id)
                 .unwrap_or_default();
-            trigger_output(&record, &runs)
+            let hold = holds.remove(&record.trigger_id);
+            trigger_output(&record, &runs, hold)
         })
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": output }))
+}
+
+/// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
+/// capability's `active_hold` wire object — same shape the automations service
+/// maps to `RebornAutomationActiveHold`, just JSON instead of a typed DTO
+/// (#5886).
+fn active_hold_json(hold: ActiveHoldProjection) -> Value {
+    let reason = match hold.reason {
+        ActiveHoldReason::Approval => "approval",
+        ActiveHoldReason::Auth => "auth",
+        ActiveHoldReason::InProgress => "in_progress",
+        ActiveHoldReason::Other => "other",
+    };
+    json!({
+        "reason": reason,
+        "since": hold.since,
+        "elapsed_occurrences": hold.elapsed_occurrences,
+        "elapsed_occurrences_capped": hold.elapsed_occurrences_capped,
+    })
 }
 
 async fn remove_trigger(
@@ -485,14 +632,18 @@ async fn set_trigger_state(
         .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
     Ok(json!({
         "updated": updated.is_some(),
-        "trigger": updated.as_ref().map(|record| trigger_output(record, &[])),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[], None)),
     }))
 }
 
-fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+fn trigger_output(
+    record: &TriggerRecord,
+    recent_runs: &[TriggerRunRecord],
+    active_hold: Option<Value>,
+) -> Value {
     let is_enabled = record.state == TriggerState::Scheduled;
     let has_active_fire = record.has_active_fire();
-    json!({
+    let mut output = json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
         "project_id": record.project_id.as_ref().map(|id| id.as_str()),
@@ -511,7 +662,14 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "is_active": is_enabled,
         "has_active_fire": has_active_fire,
         "created_at": record.created_at,
-    })
+    });
+    // `active_hold` is omitted entirely (not null) when there is no live hold
+    // to report — Missing/Terminal active-run states and lookup failures both
+    // resolve to `None` upstream (#5886).
+    if let Some(hold) = active_hold {
+        output["active_hold"] = hold;
+    }
+    output
 }
 
 fn trigger_run_output(run: &TriggerRunRecord) -> Value {
@@ -842,196 +1000,4 @@ fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsag
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{Datelike, TimeZone};
-
-    use super::*;
-
-    /// Duplicate-delivery contract: the stored trigger prompt is replayed to a
-    /// fresh model at fire time, so the description must teach that each
-    /// fire's final reply is delivered by the host (otherwise the fired model
-    /// both calls a messaging capability and emits a final reply, delivering
-    /// the result twice), while messaging-as-task automations ("send Firat a
-    /// joke every morning") stay expressible with recipients pinned at
-    /// creation time instead of guessed at fire time.
-    #[test]
-    fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains(
-                "If delivery_target_id is set, never put a send, post, or deliver-results step"
-            ),
-            "trigger_create description must front-load the no-duplicate-delivery rule: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
-            "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
-            "trigger_create description must say the prompt is the task, not routing: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION
-                .contains("Do not tell the prompt to send results back to the requesting user"),
-            "trigger_create description must forbid result self-delivery phrasing in the stored prompt: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("resolved while the user is present"),
-            "trigger_create description must require creation-time recipient pinning: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        // Laundering guard: a live QA fire executed a duplicate user-identity
-        // send because the creating model set delivery_target_id AND pinned
-        // the requester's own DM into the prompt as if it were a third-party
-        // recipient. The description must say receiving results is routing,
-        // never a prompt step — pinned conversation id or not.
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("delivery routing, not a task step"),
-            "trigger_create description must frame 'send me the result' as routing: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("even one with a pinned conversation id"),
-            "trigger_create description must forbid laundering a self-send behind a pinned id: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-        assert!(
-            TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")
-                && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
-            "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-    }
-
-    #[test]
-    fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
-        let future_year = Utc::now().year() + 1;
-        let schedule = TriggerSchedule::cron(format!("0 0 8 * * * {future_year}"))
-            .expect("future finite schedule is valid");
-        let after_schedule_expires = Utc
-            .with_ymd_and_hms(future_year + 1, 1, 1, 0, 0, 0)
-            .unwrap();
-
-        let error = next_run_at_for_schedule(&schedule, after_schedule_expires)
-            .expect_err("exhausted schedule rejected");
-
-        assert!(matches!(
-            error,
-            TriggerError::InvalidSchedule {
-                kind: TriggerScheduleValidationKind::NoFutureFireTime,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_missing_timezone() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
-        });
-        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
-        assert!(
-            result.is_err(),
-            "missing timezone must fail deserialization"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_invalid_timezone() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(result.is_err(), "invalid timezone must be rejected");
-    }
-
-    #[test]
-    fn trigger_create_input_accepts_cron_schedule() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let schedule = parsed
-            .schedule
-            .into_schedule()
-            .expect("valid cron schedule accepted");
-        match &schedule {
-            TriggerSchedule::Cron { timezone, .. } => {
-                assert_eq!(timezone, "America/Los_Angeles");
-            }
-            TriggerSchedule::Once { .. } => panic!("expected Cron"),
-        }
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_missing_schedule() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail"
-        });
-        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
-        assert!(
-            result.is_err(),
-            "omitting schedule must fail deserialization"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
-        // 2099-06-24T17:00:00 UTC is unambiguous and in the future
-        let input = serde_json::json!({
-            "name": "one-off reminder",
-            "prompt": "remind me about the meeting",
-            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
-        });
-        let parsed: TriggerCreateInput =
-            serde_json::from_value(input).expect("deserialize one-shot input");
-        let schedule = parsed
-            .schedule
-            .into_schedule()
-            .expect("valid once schedule accepted");
-        match &schedule {
-            TriggerSchedule::Once { at, timezone } => {
-                assert_eq!(timezone, "UTC");
-                // Wall-clock 17:00:00 UTC → stored UTC timestamp must match
-                assert_eq!(at.to_rfc3339(), "2099-06-24T17:00:00+00:00");
-            }
-            TriggerSchedule::Cron { .. } => panic!("expected Once"),
-        }
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_dst_ambiguous_time() {
-        // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
-        let input = serde_json::json!({
-            "name": "ambiguous",
-            "prompt": "test",
-            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(
-            result.is_err(),
-            "DST-ambiguous time must be rejected as input error"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_dst_gap_time() {
-        // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
-        let input = serde_json::json!({
-            "name": "dst-gap",
-            "prompt": "test",
-            "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(
-            result.is_err(),
-            "DST-gap time must be rejected as input error"
-        );
-    }
-}
+mod tests;

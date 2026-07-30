@@ -1,5 +1,5 @@
 //! No-op `ProjectService` for harness-port-seam P1 Change 2: production's
-//! `RefreshingLocalDevCapabilityPortConfig::project_service` is a plain
+//! `RefreshingCapabilityPortConfig::project_service` is a plain
 //! required `Arc<dyn ProjectService>` (the synthetic `project_create`
 //! capability is always assembled by `build_inner`, independent of whether
 //! `PROJECT_CREATE_CAPABILITY_ID` is in a harness's `capability_ids`), so
@@ -8,7 +8,7 @@
 //! genuinely dispatches `project_create` supplies its own real
 //! `Arc<dyn ProjectService>` via `project_service_for_test` instead.
 use async_trait::async_trait;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,

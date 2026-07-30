@@ -1,3 +1,4 @@
+// arch-exempt: large_file, host-managed model error contract remains at the crate service, plan #4088
 //! Loop host adapters for IronClaw Reborn.
 //!
 //! This crate adapts durable Reborn support boundaries (threads/transcripts plus
@@ -25,21 +26,26 @@ mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
 mod context_window_cache;
-mod filesystem_checkpoint_state;
+mod external_tool_capability;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod memory_context;
 mod model_capability_view;
+mod model_visible_scrub;
 mod prompt_context_budget;
+mod result_read;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
+mod surface_disclosure;
+mod synthetic_capability;
 mod system_inference;
+mod thread_scope;
 mod token_estimator;
-mod turn_event_publisher;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -49,10 +55,10 @@ pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
 pub use cancellation_port::{
-    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
-    CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe, ProductLiveCancellationReadiness,
-    RunCancellationFactory, RunCancellationHandle, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, TurnStateRunCancellationFactory,
+    AgentTurnRunCancellationFactory, AlwaysAliveLoopCancellationPort,
+    AlwaysAliveRunCancellationFactory, CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe,
+    ProductLiveCancellationReadiness, RunCancellationFactory, RunCancellationHandle,
+    RunCancellationObservationKind, RunStateLoopCancellationPort,
     verify_product_live_cancellation_probe,
 };
 pub use capability_allow_set::{
@@ -75,7 +81,7 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
-pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
+pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -87,6 +93,10 @@ pub use identity_context::{
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
+pub use model_visible_scrub::scrub_model_visible_detail;
+pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
+#[cfg(feature = "test-support")]
+pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -108,10 +118,16 @@ pub use subagent_spawn_port::{
     InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
     SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
-    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentSpawnDeps, SubagentSpawnLimits, SubagentThreadKind, SubagentThreadMetadata,
+    build_spawn_subagent_parameters_schema,
+};
+pub use surface_disclosure::wrap_surface_disclosure;
+pub use synthetic_capability::{
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation, wrap_synthetic_capabilities,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use thread_scope::ThreadScopeResolver;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
@@ -125,7 +141,6 @@ pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
-pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 
@@ -143,16 +158,16 @@ use ironclaw_turns::{
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
+        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
@@ -204,10 +219,12 @@ pub fn raw_agent_loop_host_error(
         "agent loop host error mapped to safe summary"
     );
     // Carry the raw cause to the model as a secret-scrubbed diagnostic. Only
-    // secret VALUES are redacted; paths/codes/raw error text reach the model so
-    // it can retry or explain. The word/delimiter ban is NOT applied here.
+    // secret VALUES are redacted (via the full leak-detector registry + prefix
+    // matcher) and any injection payload is fenced; paths/codes/raw error text
+    // reach the model so it can retry or explain. The word/delimiter ban is NOT
+    // applied here.
     let mut error = AgentLoopHostError::new(kind, safe_summary);
-    let scrubbed = sanitize_model_visible_text(raw_detail);
+    let scrubbed = scrub_model_visible_detail(raw_detail);
     if !scrubbed.trim().is_empty() {
         error = error.with_detail(scrubbed);
     }
@@ -250,6 +267,18 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    /// Optional proactive-memory source. When wired, memory snippets are fetched
+    /// ONCE per run (cached in `memory_snippets_cache`) and surfaced into the
+    /// prompt's `"memory"` section; when absent, `memory_snippets` stays empty.
+    /// Optional; production wires `None` pending #5013 — a composition without a
+    /// memory backend degrades to no memory, never failing the turn. (Unlike the
+    /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// `Arc` so the "fetch once per run" guarantee holds even if the port is
+    /// cloned, exactly like `identity_candidates`.
+    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
 }
 
 struct IdentityCandidateCache {
@@ -317,11 +346,25 @@ where
             context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
+            memory_context_service: None,
+            memory_snippets_cache: Arc::new(OnceCell::new()),
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Installs the proactive-memory source. When wired, the loop fetches both
+    /// the short-term (per-thread) and long-term memory lanes ONCE at the first
+    /// prompt build of the run, caches the admitted snippets, and surfaces them
+    /// into the prompt every turn. When not called the loop carries no memory.
+    pub fn with_memory_context_service(
+        mut self,
+        service: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_service = Some(service);
         self
     }
 
@@ -468,6 +511,11 @@ where
             tokio::try_join!(context_window, skill_snippets, identity_context)?;
         self.publish_personal_context_admitted(mode, &admitted_personal_context_paths);
 
+        // Proactive memory: fetch both lanes ONCE per run (cached) using the
+        // latest user message as the query, and surface them into the prompt's
+        // "memory" section. Derived from `context.messages` before the move below.
+        let memory_snippets = self.load_memory_snippets_once(&context.messages).await;
+
         let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context
             .messages
@@ -494,7 +542,7 @@ where
                 .collect(),
             compaction_message_index,
             instruction_snippets,
-            memory_snippets: Vec::new(),
+            memory_snippets,
         })
     }
 }
@@ -742,19 +790,24 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let safe_summary = LoopSafeSummary::new(request.safe_summary).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool result reference summary is not safe",
-            )
-        })?;
-        let safe_summary =
-            ToolResultSafeSummary::new(safe_summary.as_str().to_string()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "tool result reference summary is not safe",
-                )
-            })?;
+        // Fail soft on a summary that trips either strict validator: the
+        // summary is only the inline label for the result reference (the model
+        // sees the real output via the result ref / observation), so a
+        // malformed label must not end the run
+        // (capability-access contract). Degrade to a
+        // fixed host-authored marker; the raw text stays out of the transcript.
+        let safe_summary = LoopSafeSummary::new(request.safe_summary)
+            .and_then(|summary| {
+                ToolResultSafeSummary::new(summary.as_str().to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|reason| {
+                tracing::debug!(
+                    %reason,
+                    "tool result summary failed strict validation; degrading to redaction marker"
+                );
+                ToolResultSafeSummary::redacted_tool_result_summary()
+            });
         let model_observation = request
             .model_observation
             .and_then(|observation| match observation.validate() {
@@ -820,7 +873,6 @@ where
         {
             tracing::debug!(
                 kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
                 "loop assistant_reply_finalized milestone failed after finalized transcript write"
             );
             return Ok(());
@@ -899,8 +951,8 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        request: LoopRequest,
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request.surface_version != empty_surface_version {
             return Err(AgentLoopHostError::new(
@@ -913,8 +965,8 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        request: LoopRequestBatch,
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request
             .invocations
@@ -926,18 +978,19 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
                 "capability surface is stale or unknown",
             ));
         }
-        let outcomes = request
+        let resolutions = request
             .invocations
             .into_iter()
             .map(|_| {
-                CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "no capabilities are available to this loop".to_string(),
-                })
+                resolution::denied(
+                    CapabilityDeniedReasonKind::EmptySurface,
+                    "no capabilities are available to this loop".to_string(),
+                )
+                .resolution
             })
             .collect();
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ironclaw_host_api::ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -1182,6 +1235,7 @@ where
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
+            fallback_index: request.fallback_index,
             messages: resolved_messages,
             surface_version: request.surface_version.clone(),
             resolved_model_route: self.run_context.resolved_model_route.clone(),
@@ -1226,21 +1280,29 @@ where
                     safe_reasoning_deltas,
                     output,
                     usage,
+                    effective_fallback_index,
                 } = response;
-                let chunks = safe_text_deltas
-                    .into_iter()
-                    .map(|safe_text_delta| ModelStreamChunk {
-                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                    })
-                    .collect::<Vec<_>>();
-                let loop_response = LoopModelResponse {
-                    chunks,
-                    safe_reasoning_deltas,
-                    output,
-                    effective_model_profile_id: model_profile_id.clone(),
-                    usage,
-                };
-                Ok(loop_response)
+                if effective_fallback_index != request.fallback_index {
+                    Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "model gateway returned mismatched fallback route evidence",
+                    ))
+                } else {
+                    let chunks = safe_text_deltas
+                        .into_iter()
+                        .map(|safe_text_delta| ModelStreamChunk {
+                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                        })
+                        .collect::<Vec<_>>();
+                    let loop_response = LoopModelResponse {
+                        chunks,
+                        safe_reasoning_deltas,
+                        output,
+                        effective_model_profile_id: model_profile_id.clone(),
+                        usage,
+                    };
+                    Ok(loop_response)
+                }
             }
             Err(error) => Err(model_gateway_error(error)),
         };
@@ -1270,7 +1332,6 @@ where
             if let Err(error) = milestones.model_started(requested_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_started milestone failed before model request"
                 );
             }
@@ -1284,7 +1345,6 @@ where
             if let Err(error) = milestones.model_completed(effective_model_profile_id).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
                 );
             }
@@ -1298,7 +1358,6 @@ where
             if let Err(error) = milestones.model_failed(reason_kind).await {
                 tracing::debug!(
                     kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_failed milestone failed after model error"
                 );
             }
@@ -1566,6 +1625,7 @@ where
             let content_ref = skill_context::snippet_model_message_ref(
                 &snippet.snippet_ref,
                 &snippet.safe_summary,
+                &snippet.model_content,
                 ordinal,
             )?;
             messages.insert(
@@ -1638,6 +1698,9 @@ pub trait HostManagedModelStreamSink: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelRequest {
     pub model_profile_id: ModelProfileId,
+    /// Zero-based index into the gateway provider's ordered fallback chain.
+    #[serde(default)]
+    pub fallback_index: u32,
     pub messages: Vec<HostManagedModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1761,6 +1824,9 @@ pub struct HostManagedModelResponse {
     /// USD spend instead of the conservative reservation estimate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LoopModelUsage>,
+    /// Authoritative ordered-chain index used for this successful call.
+    #[serde(default)]
+    pub effective_fallback_index: u32,
 }
 
 impl HostManagedModelResponse {
@@ -1774,6 +1840,7 @@ impl HostManagedModelResponse {
                 content: sanitized_content,
             }),
             usage: None,
+            effective_fallback_index: 0,
         }
     }
 
@@ -1800,6 +1867,7 @@ impl HostManagedModelResponse {
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
+            effective_fallback_index: 0,
         }
     }
 
@@ -1819,6 +1887,11 @@ impl HostManagedModelResponse {
         self.usage = Some(usage);
         self
     }
+
+    pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.effective_fallback_index = fallback_index;
+        self
+    }
 }
 
 fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
@@ -1834,16 +1907,32 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 pub enum HostManagedModelErrorKind {
     /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
+    /// The request was valid when built but no longer matches current host
+    /// state. Callers may rebuild the prompt/surface and retry.
+    StaleRequest,
     /// Provider/model output was structurally invalid for the active loop contract.
     /// This is model-side bad output, not caller misuse.
     #[serde(alias = "invalid_output")]
     InvalidOutput,
+    /// The provider refused the completion because its content filter rejected
+    /// the request or response. Distinct from host/profile policy denial so the
+    /// loop can ask the model to rephrase exactly once.
+    ContentFiltered,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
     BudgetApprovalRequired,
+    /// Durable host-side resource accounting failed. This is an
+    /// infrastructure failure, not a provider credit or configured-budget
+    /// outcome, and must remain distinct while it crosses the model port.
+    BudgetAccountingFailed,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
+    /// Provider throttled the request. `retry_after_ms` carries the bounded
+    /// provider instruction when present.
+    RateLimited,
+    /// Provider returned a typed upstream 5xx availability failure.
+    ProviderUnavailable,
     Unavailable,
     Cancelled,
 }
@@ -1855,6 +1944,12 @@ pub struct HostManagedModelError {
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub gate_ref: Option<LoopGateRef>,
+    /// Provider-supplied retry delay. Typed so the recovery strategy does not
+    /// have to parse model-visible detail text.
+    pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that the provider chain has another configured
+    /// route. Recovery may advance only when this is present.
+    pub next_fallback_index: Option<u32>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1871,6 +1966,8 @@ impl HostManagedModelError {
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -1881,6 +1978,8 @@ impl HostManagedModelError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
             detail: None,
         }
     }
@@ -1892,13 +1991,14 @@ impl HostManagedModelError {
         self
     }
 
-    /// Attach a model-visible detail, scrubbing credential-looking tokens via
-    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`] before it is
-    /// stored. Use when the raw cause has not already been sanitized.
+    /// Attach a model-visible detail, hardening it via
+    /// [`crate::scrub_model_visible_detail`] first: secret VALUES are redacted
+    /// through the full leak-detector registry + prefix matcher, and any
+    /// surviving injection payload is fenced as untrusted external content. Use
+    /// when the raw cause has not already been sanitized (e.g. a provider HTTP
+    /// body).
     pub fn safe_with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
-            detail.into(),
-        ));
+        self.detail = Some(crate::scrub_model_visible_detail(detail));
         self
     }
 
@@ -1909,6 +2009,22 @@ impl HostManagedModelError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after: std::time::Duration) -> Self {
+        self.retry_after_ms = Some(
+            retry_after
+                .as_millis()
+                .min(u64::MAX as u128)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        self
+    }
+
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -2096,17 +2212,19 @@ fn invalid_transcript_ref_error() -> AgentLoopHostError {
 fn provider_call_reference_to_envelope(
     provider_call: ironclaw_turns::run_profile::ProviderToolCallReference,
 ) -> ProviderToolCallReferenceEnvelope {
+    let capability_id = provider_call.capability_id;
+    let replay = provider_call.replay;
     ProviderToolCallReferenceEnvelope {
-        provider_id: provider_call.provider_id,
-        provider_model_id: provider_call.provider_model_id,
-        provider_turn_id: provider_call.provider_turn_id,
-        provider_call_id: provider_call.provider_call_id,
-        provider_tool_name: provider_call.provider_tool_name,
-        capability_id: provider_call.capability_id,
-        arguments: provider_call.arguments,
-        response_reasoning: provider_call.response_reasoning,
-        reasoning: provider_call.reasoning,
-        signature: provider_call.signature,
+        provider_id: replay.provider_id,
+        provider_model_id: replay.provider_model_id,
+        provider_turn_id: replay.provider_turn_id,
+        provider_call_id: replay.provider_call_id,
+        provider_tool_name: replay.provider_tool_name,
+        capability_id,
+        arguments: replay.arguments,
+        response_reasoning: replay.response_reasoning,
+        reasoning: replay.reasoning,
+        signature: replay.signature,
     }
 }
 
@@ -2202,11 +2320,28 @@ fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
-    let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
-        error.safe_summary
-    } else {
-        safe_model_summary(error.kind).to_string()
-    };
+    // Phase 2: the host-managed *model provider* summary is the highest-leak-risk
+    // error string in the system — provider errors routinely embed prompt text,
+    // tool input, host paths, and keys. When it fails strict card validation the
+    // summary degrades to a fixed category sentence, but the rejected cause is no
+    // longer dropped: it rides the model-visible detail channel through the
+    // hardened scrubber (`scrub_model_visible_detail` — full leak-detector
+    // registry redaction of secret VALUES + injection fencing). Descriptive cause
+    // text (paths, status codes) survives so the failure explainer can describe
+    // the real fault; secret values and injection payloads do not. A genuine
+    // structured `error.detail`, which producers already scrub deliberately, wins
+    // over the rejected-summary fallback.
+    let (safe_summary, rejected_summary_detail) =
+        match LoopSafeSummary::new(error.safe_summary.clone()) {
+            Ok(_) => (error.safe_summary, None),
+            Err(_) => {
+                tracing::debug!("host-managed model summary rejected; using fixed fallback");
+                (
+                    safe_model_summary(error.kind).to_string(),
+                    Some(scrub_model_visible_detail(error.safe_summary)),
+                )
+            }
+        };
     let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);
     if let Some(reason_kind) = error.reason_kind {
         host_error = host_error.with_reason_kind(reason_kind);
@@ -2214,7 +2349,15 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
-    if let Some(detail) = error.detail {
+    if let Some(retry_after_ms) = error.retry_after_ms {
+        host_error = host_error.with_retry_after_ms(retry_after_ms);
+    }
+    if let Some(next_fallback_index) = error.next_fallback_index {
+        host_error = host_error.with_next_fallback_index(next_fallback_index);
+    }
+    // `error.detail` is already producer-scrubbed; fall back to the scrubbed
+    // rejected summary only when there is no structured detail.
+    if let Some(detail) = error.detail.or(rejected_summary_detail) {
         host_error = host_error.with_detail(detail);
     }
     host_error
@@ -2223,16 +2366,23 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::StaleRequest => AgentLoopHostErrorKind::StaleSurface,
         HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::InvalidOutput,
+        HostManagedModelErrorKind::ContentFiltered => AgentLoopHostErrorKind::ContentFiltered,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
         HostManagedModelErrorKind::BudgetApprovalRequired => {
             AgentLoopHostErrorKind::BudgetApprovalRequired
         }
+        HostManagedModelErrorKind::BudgetAccountingFailed => {
+            AgentLoopHostErrorKind::BudgetAccountingFailed
+        }
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
+        HostManagedModelErrorKind::RateLimited => AgentLoopHostErrorKind::RateLimited,
+        HostManagedModelErrorKind::ProviderUnavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
     }
@@ -2241,12 +2391,21 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::StaleRequest => "model request surface is stale",
         HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
+        HostManagedModelErrorKind::ContentFiltered => "model completion was content filtered",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
         HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
+        HostManagedModelErrorKind::BudgetAccountingFailed => {
+            "resource accounting storage is unavailable"
+        }
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
+        HostManagedModelErrorKind::RateLimited => "model provider rate limited the request",
+        HostManagedModelErrorKind::ProviderUnavailable => {
+            "model provider is temporarily unavailable"
+        }
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
     }
@@ -2254,7 +2413,101 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use crate::memory_context::latest_user_message_text;
+
     use super::*;
+
+    #[test]
+    fn typed_provider_errors_reach_distinct_loop_recovery_classes_with_retry_payload() {
+        for (kind, expected) in [
+            (
+                HostManagedModelErrorKind::RateLimited,
+                AgentLoopHostErrorKind::RateLimited,
+            ),
+            (
+                HostManagedModelErrorKind::ProviderUnavailable,
+                AgentLoopHostErrorKind::Unavailable,
+            ),
+        ] {
+            let mut error = HostManagedModelError::safe(kind, safe_model_summary(kind))
+                .with_retry_after(std::time::Duration::from_millis(1_750));
+            if kind == HostManagedModelErrorKind::ProviderUnavailable {
+                error = error.with_next_fallback_index(1);
+            }
+            let mapped = model_gateway_error(error);
+
+            assert_eq!(
+                mapped.kind, expected,
+                "{kind:?} must reach its distinct loop recovery class"
+            );
+            assert_eq!(
+                mapped.retry_after_ms,
+                Some(1_750),
+                "{kind:?} must preserve its typed provider retry hint"
+            );
+            assert_eq!(
+                mapped.next_fallback_index,
+                (kind == HostManagedModelErrorKind::ProviderUnavailable).then_some(1),
+                "{kind:?} must preserve only applicable fallback route evidence"
+            );
+        }
+    }
+
+    fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
+        ContextMessage {
+            message_id: None,
+            summary_id: None,
+            sequence,
+            kind,
+            tool_result_provider_call: None,
+            content: content.to_string(),
+            image_attachments: Vec::new(),
+        }
+    }
+
+    /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
+    /// message — a blank trailing user turn must not drop memory for the run when
+    /// an earlier user turn has content, and non-user rows are skipped.
+    #[test]
+    fn latest_user_message_text_uses_latest_non_blank_user_turn() {
+        // A blank newest user turn must fall back to the earlier non-blank one.
+        let blank_trailing = vec![
+            ctx_msg(1, MessageKind::User, "remember the launch is friday"),
+            ctx_msg(2, MessageKind::User, "   \n  "),
+        ];
+        assert_eq!(
+            latest_user_message_text(&blank_trailing).as_deref(),
+            Some("remember the launch is friday"),
+            "a blank trailing user turn must not drop the earlier non-blank one"
+        );
+
+        // All-blank user rows → None (nothing to query memory with).
+        let all_blank = vec![
+            ctx_msg(1, MessageKind::User, "   "),
+            ctx_msg(2, MessageKind::User, ""),
+        ];
+        assert_eq!(latest_user_message_text(&all_blank), None);
+
+        // The newest non-blank user turn wins over an older one.
+        let two_users = vec![
+            ctx_msg(1, MessageKind::User, "older"),
+            ctx_msg(2, MessageKind::User, "newest"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&two_users).as_deref(),
+            Some("newest")
+        );
+
+        // A newer non-user row is skipped in favor of the latest user turn.
+        let user_then_assistant = vec![
+            ctx_msg(1, MessageKind::User, "the user turn"),
+            ctx_msg(2, MessageKind::Assistant, "model reply"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&user_then_assistant).as_deref(),
+            Some("the user turn")
+        );
+    }
 
     #[test]
     fn model_gateway_error_threads_detail_into_host_error() {
@@ -2270,6 +2523,35 @@ mod tests {
             host_error.detail.as_deref(),
             Some("HTTP 404 model not found")
         );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_budget_accounting_failure_kind() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        );
+
+        let mapped = model_gateway_error(error);
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
+        assert_eq!(
+            mapped.safe_summary,
+            "resource accounting storage is unavailable"
+        );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_stale_request_kind() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::StaleRequest,
+            "model request surface is stale",
+        );
+
+        let mapped = model_gateway_error(error);
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::StaleSurface);
+        assert_eq!(mapped.safe_summary, "model request surface is stale");
     }
 
     #[test]
@@ -2334,6 +2616,71 @@ mod tests {
     }
 
     #[test]
+    fn model_gateway_error_carries_rejected_summary_as_scrubbed_detail() {
+        // Phase 2 (item 4): a provider summary that fails strict card validation
+        // (path/delimiter-bearing) is no longer dropped — it rides the
+        // model-visible detail channel, secret VALUES redacted, injection fenced.
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            concat!(
+                "provider 500 at /host/route with ghp",
+                "_012345678901234567890123456789012345",
+                " body"
+            ),
+        );
+
+        let host_error = model_gateway_error(error);
+
+        // Card summary degrades to the fixed category sentence.
+        assert_eq!(host_error.safe_summary, "model service is unavailable");
+        let detail = host_error
+            .detail
+            .expect("rejected summary should ride detail");
+        // Secret value redacted, descriptive cause (path) preserved.
+        assert!(
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "credential token must be redacted: {detail}"
+        );
+        assert!(
+            detail.contains("/host/route"),
+            "path must survive on detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn model_visible_detail_path_survives_but_never_reaches_public_projection() {
+        // Phase 2 (item 3): a detail carrying a path and a credential token must
+        // (a) scrub the token at ingestion, (b) preserve the path to the model,
+        // and (c) expose NEITHER on the public projection surface.
+        let raw = concat!(
+            "read_file failed at /workspace/config.json using \
+                   ghp",
+            "_012345678901234567890123456789012345",
+            ""
+        );
+        let detail = scrub_model_visible_detail(raw);
+        assert!(
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "token must be scrubbed at ingestion: {detail}"
+        );
+        assert!(
+            detail.contains("/workspace/config.json"),
+            "path must survive: {detail}"
+        );
+
+        let failure = ironclaw_turns::SanitizedFailure::new("host_unavailable")
+            .expect("category")
+            .with_detail(detail.clone());
+        assert_eq!(failure.detail(), Some(detail.as_str()));
+
+        // Public projection strips the whole detail channel — neither the path
+        // nor any redaction marker reaches the browser.
+        let public = failure.public_projection();
+        assert_eq!(public.detail(), None);
+        assert_eq!(public.category(), "host_unavailable");
+    }
+
+    #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {
         let summary = personal_context_admitted_summary(&[]).unwrap();
 
@@ -2369,5 +2716,69 @@ mod tests {
             Some("2Fassistant-directives.md")
         );
         assert_eq!(personal_context_source_label("///"), None);
+    }
+
+    /// Every recovery hint the loop can emit must survive persistence.
+    ///
+    /// The vocabulary now has a single home (`host_api`) and `ironclaw_threads`
+    /// deserializes that enum rather than re-declaring its variants, so drift is
+    /// structurally impossible. This test guards the seam anyway, because the
+    /// *failure mode* is what makes it worth a test: an unaccepted value does
+    /// not surface a validation error to anyone — the caller **drops the whole
+    /// observation**, so the model loses the cause *and* the guidance and sees
+    /// only a bare summary.
+    ///
+    /// That is not hypothetical. #6284 item 4 added six hints while the
+    /// vocabulary was still duplicated by hand, missed the copy, and every
+    /// denial it was meant to improve persisted with no observation at all.
+    /// Crate-level tests all passed; only the persistence seam revealed it.
+    ///
+    /// This crate is the lowest one that sees both the emitting and persisting
+    /// sides. Driven through the real envelope constructor, not the validator,
+    /// so it pins what production actually stores.
+    #[test]
+    fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
+        use ironclaw_host_api::{CapabilityRecoveryHint, SameCallRetryConstraint};
+        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+        use ironclaw_turns::run_profile::{
+            MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+            ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+            ToolRecoveryObservation,
+        };
+
+        for hint in CapabilityRecoveryHint::ALL {
+            let observation = ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Error,
+                summary: "The capability failed.".to_string(),
+                detail: ToolObservationDetail::GenericFailure {
+                    failure_kind: ironclaw_host_api::FailureKind::PolicyDenied,
+                    detail: None,
+                },
+                artifacts: Vec::new(),
+                recovery: Some(
+                    ToolRecoveryObservation::new(SameCallRetryConstraint::Forbidden, *hint)
+                        // Exercise the optional delay field too: it is a key on
+                        // the same object, and an unknown KEY is rejected the
+                        // same silent way an unknown hint is.
+                        .with_retry_after(Some(30_000)),
+                ),
+                trust: ObservationTrust::UntrustedToolOutput,
+            };
+            let value = serde_json::to_value(&observation).expect("observation serializes");
+
+            let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+                "result:hint-conformance",
+                ToolResultSafeSummary::new("The capability failed.").expect("summary"),
+                Some(value),
+            )
+            .expect("envelope constructs");
+
+            assert!(
+                envelope.model_observation.is_some(),
+                "recovery hint {hint:?} does not survive persistence, so storing it DROPS THE \
+                 WHOLE OBSERVATION — the model would lose the cause and the guidance."
+            );
+        }
     }
 }

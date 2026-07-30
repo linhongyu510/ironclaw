@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProcessAuthorizedContinuation, ProcessId, ProjectId, ResourceEstimate,
+    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, ThreadId,
+    UserId, VirtualPath,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -43,12 +44,21 @@ pub struct ProcessRecord {
     pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
+    // `ProcessRecord` is a durable host-written record the process store re-reads;
+    // its `runtime` may be a host-assigned `System`/`FirstParty` that the derived
+    // `RuntimeKind` deserialize rejects (anti-forgery for untrusted input). Read it
+    // back through the trusted path so the store round-trips privileged kinds
+    // (arch-simplification §4.3 exposed this when the InMemory store — which never
+    // serialized — was replaced by the serde-round-tripping filesystem store).
+    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
     pub runtime: RuntimeKind,
     pub status: ProcessStatus,
     pub grants: CapabilitySet,
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub error_kind: Option<String>,
 }
 
@@ -66,6 +76,7 @@ pub struct ProcessStart {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
 }
 
@@ -145,8 +156,6 @@ pub enum ProcessError {
         original: Box<ProcessError>,
         cleanup: ResourceError,
     },
-    #[error("process result store is not configured")]
-    ProcessResultStoreUnavailable,
     #[error("process result is unavailable for {process_id}")]
     ProcessResultUnavailable { process_id: ProcessId },
     #[error("invalid stored process record: {reason}")]
@@ -202,6 +211,7 @@ pub struct ProcessExecutionRequest {
     pub estimate: ResourceEstimate,
     pub mounts: MountView,
     pub resource_reservation: Option<ResourceReservation>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
     pub cancellation: ProcessCancellationToken,
 }
@@ -239,7 +249,16 @@ pub trait ProcessManager: Send + Sync {
 }
 
 #[async_trait]
-pub trait ProcessResultStore: Send + Sync {
+pub trait ProcessSubmissionLifecycle: Send + Sync {
+    async fn before_submit(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submit_failed(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submitted(&self, record: &ProcessRecord) -> Result<(), ProcessError>;
+}
+
+#[async_trait]
+pub trait ProcessResultStorePort: Send + Sync {
     /// Stores successful process output separately from the lifecycle record.
     async fn complete(
         &self,
@@ -283,47 +302,6 @@ pub trait ProcessResultStore: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait ProcessStore: Send + Sync {
-    /// Persists a running process record without storing raw input.
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to completed.
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to failed with a classified error kind.
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Marks a scoped process killed and must not reveal cross-tenant process existence.
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Loads scoped process lifecycle metadata; wrong-scope lookups must look unknown.
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ProcessRecord>, ProcessError>;
-
-    /// Lists process lifecycle records visible to the exact resource-owner scope only.
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ProcessRecord>, ProcessError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ProcessKey {
     tenant_id: TenantId,
@@ -347,21 +325,6 @@ impl ProcessKey {
             process_id,
         }
     }
-}
-
-pub(crate) fn ensure_status_transition(
-    process_id: ProcessId,
-    from: ProcessStatus,
-    to: ProcessStatus,
-) -> Result<(), ProcessError> {
-    if from != ProcessStatus::Running {
-        return Err(ProcessError::InvalidTransition {
-            process_id,
-            from,
-            to,
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
@@ -396,6 +359,7 @@ mod tests {
             mounts: MountView::default(),
             estimated_resources: ResourceEstimate::default(),
             resource_reservation_id: None,
+            authorized_continuation: None,
             error_kind: None,
         };
         let mut legacy = serde_json::to_value(record).unwrap();

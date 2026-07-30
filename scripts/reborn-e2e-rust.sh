@@ -23,8 +23,58 @@ run_test() {
   echo "::endgroup::"
 }
 
+run_test_exact() {
+  local package="$1"
+  local test_target="$2"
+  local test_name="$3"
+  local listed
+  listed=$(cargo test -p "${package}" --test "${test_target}" "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact test selector matched zero tests: ${package}/${test_target} ${test_name}" >&2
+    return 1
+  fi
+  echo "::group::cargo test -p ${package} --test ${test_target} ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --test "${test_target}" "${test_name}" ${extra_args} --exact
+  echo "::endgroup::"
+}
+
+run_lib_test() {
+  local package="$1"
+  local test_filter="$2"
+  echo "::group::cargo test -p ${package} --lib ${test_filter}"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --lib "${test_filter}" ${extra_args}
+  echo "::endgroup::"
+}
+
+run_lib_test_exact() {
+  local package="$1"
+  local test_name="$2"
+  local listed
+  listed=$(cargo test -p "${package}" --lib "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact library test selector matched zero tests: ${package} ${test_name}" >&2
+    return 1
+  fi
+  echo "::group::cargo test -p ${package} --lib ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --lib "${test_name}" ${extra_args} --exact
+  echo "::endgroup::"
+}
+
 run_architecture() {
   run_test ironclaw_architecture reborn_dependency_boundaries
+  # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
+  # routes from re-entering the Reborn context.
+  run_test ironclaw_architecture telegram_extension_gates
+  # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
+  # an inline model diagnostic, and legacy omissions upgrade explicitly.
+  run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
+  run_lib_test_exact ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
+  # payloads remain readable but the retired field is never written again.
+  run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -37,17 +87,21 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_contract
   run_test ironclaw_capabilities capability_host_dispatcher_integration
   run_test ironclaw_capabilities capability_host_process_integration
-  run_test ironclaw_capabilities capability_host_run_state_contract
+  run_test ironclaw_capabilities capability_host_invocation_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
+  # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
+  # keep nested dispatcher failures attached to capability activity, not runs.
+  run_lib_test ironclaw_reborn_composition projection::tests::nested_dispatch_stream
 }
 
 run_runtimes() {
   run_test ironclaw_dispatcher boundary_contract
   run_test ironclaw_dispatcher dispatch_contract
   run_test ironclaw_dispatcher event_dispatch_contract
-  run_test ironclaw_dispatcher runtime_dispatcher_integration
-  run_test ironclaw_dispatcher vertical_slice_contract
+  # main's runtime_dispatcher_integration / vertical_slice_contract test the
+  # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
+  # pipeline is pinned by the three dispatcher contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract
@@ -56,14 +110,20 @@ run_runtimes() {
   run_test ironclaw_scripts script_runner_contract
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
-  run_test ironclaw_processes process_dispatch_integration
+  # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
+  # turn: the scrubbed, bounded MCP cause reaches the next model request.
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
   run_test ironclaw_processes process_host_contract
+  run_test ironclaw_processes process_journal_store_contract
+  run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
-  run_test ironclaw_processes process_store_contract
 }
 
 run_substrates() {
   run_test ironclaw_events durable_log_contract
+  # Pins docs/reborn/contracts/events.md: runtime snapshot/replay projections
+  # preserve nested dispatcher failures without synthesizing child run rows.
+  run_test ironclaw_event_projections nested_dispatch_projection_contract
   run_test ironclaw_filesystem catalog_contract
   run_test ironclaw_filesystem filesystem_contract
   run_test ironclaw_network boundary_contract
@@ -72,8 +132,7 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
-  run_test ironclaw_run_state approval_resolution_contract
-  run_test ironclaw_run_state run_state_contract
+  run_test ironclaw_approvals approval_store_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract

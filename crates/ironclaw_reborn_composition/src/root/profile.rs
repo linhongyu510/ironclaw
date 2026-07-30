@@ -8,8 +8,10 @@ use thiserror::Error;
 pub enum RebornCompositionProfile {
     #[default]
     Disabled,
-    LocalDev,
-    LocalDevYolo,
+    #[serde(rename = "local-dev")]
+    Standalone,
+    #[serde(rename = "local-dev-yolo")]
+    StandaloneUnrestricted,
     HostedSingleTenant,
     HostedSingleTenantVolume,
     Production,
@@ -20,8 +22,8 @@ impl RebornCompositionProfile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::LocalDev => "local-dev",
-            Self::LocalDevYolo => "local-dev-yolo",
+            Self::Standalone => "local-dev",
+            Self::StandaloneUnrestricted => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
@@ -33,58 +35,31 @@ impl RebornCompositionProfile {
         self != Self::Disabled
     }
 
-    pub fn requires_production_shape(self) -> bool {
-        matches!(self, Self::Production | Self::MigrationDryRun)
+    /// The deployment data this profile name selects.
+    ///
+    /// Every predicate below reads this rather than `match`ing on `self`:
+    /// `DeploymentConfig::for_profile` is the one profile match in the crate
+    /// (§4.4). The `confirm_host_access` argument only affects the yolo
+    /// *policy request*, which none of these predicates read, so passing
+    /// `false` here cannot change any answer.
+    fn deployment(self) -> crate::deployment::DeploymentConfig {
+        crate::deployment::DeploymentConfig::for_profile(self, false)
     }
 
-    pub fn uses_local_runtime_substrate(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev
-                | Self::LocalDevYolo
-                | Self::HostedSingleTenant
-                | Self::HostedSingleTenantVolume
-        )
-    }
-
-    pub fn uses_local_dev_storage_input(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
-        )
+    pub fn uses_local_filesystem_storage(self) -> bool {
+        self.deployment().uses_local_filesystem_storage()
     }
 
     pub fn starts_live_runtime(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev
-                | Self::LocalDevYolo
-                | Self::HostedSingleTenant
-                | Self::HostedSingleTenantVolume
-                | Self::Production
-        )
+        self.deployment().traffic().starts_live_runtime()
     }
 
     pub fn uses_hosted_extension_installation_state(self) -> bool {
-        matches!(
-            self,
-            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
-        )
+        self.deployment().uses_hosted_extension_installation_state()
     }
 
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
-        match self {
-            Self::Disabled
-            | Self::LocalDev
-            | Self::LocalDevYolo
-            | Self::HostedSingleTenant
-            | Self::HostedSingleTenantVolume => {
-                ironclaw_reborn_event_store::RebornProfile::LocalDev
-            }
-            Self::Production | Self::MigrationDryRun => {
-                ironclaw_reborn_event_store::RebornProfile::Production
-            }
-        }
+        self.deployment().event_store_profile()
     }
 }
 
@@ -95,8 +70,8 @@ impl FromStr for RebornCompositionProfile {
         let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
         match normalized.as_str() {
             "disabled" => Ok(Self::Disabled),
-            "local-dev" => Ok(Self::LocalDev),
-            "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "local-dev" => Ok(Self::Standalone),
+            "local-dev-yolo" => Ok(Self::StandaloneUnrestricted),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),

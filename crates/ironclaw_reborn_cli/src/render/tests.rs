@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use super::Renderable;
 use crate::dto::{
     CheckCategory, CheckOutcome, ComponentStatus, ConfigEntry, ConfigGetDto, ConfigListDto,
-    ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence, StatusDto,
+    ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence,
+    ServiceStateDto, StatusDto,
 };
 
 fn render_to_string(dto: &impl Renderable) -> String {
@@ -17,7 +18,7 @@ fn sample_status() -> StatusDto {
         version: "0.1.0".to_string(),
         reborn_home: PathBuf::from("/home/user/.ironclaw/reborn"),
         home_source: "default",
-        profile: "local-dev".to_string(),
+        profile: "standalone".to_string(),
         config_file: FilePresence {
             path: PathBuf::from("/home/user/.ironclaw/reborn/config.toml"),
             present: true,
@@ -35,6 +36,10 @@ fn sample_status() -> StatusDto {
             },
             planned_default_profile: ComponentStatus::Initialized,
         },
+        login_link: Some("http://127.0.0.1:3000/login?token=sample-token".to_string()),
+        login_note: None,
+        service: ServiceStateDto::Running,
+        google_oauth_degraded: None,
     }
 }
 
@@ -80,7 +85,7 @@ fn sample_config_list() -> ConfigListDto {
         entries: vec![
             ConfigEntry {
                 key: "boot.profile".to_string(),
-                value: Some(ConfigValue::String("local-dev".to_string())),
+                value: Some(ConfigValue::String("standalone".to_string())),
             },
             ConfigEntry {
                 key: "identity.tenant".to_string(),
@@ -100,7 +105,7 @@ fn status_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["version"], "0.1.0");
-    assert_eq!(parsed["profile"], "local-dev");
+    assert_eq!(parsed["profile"], "standalone");
     assert_eq!(parsed["config_file"]["present"], true);
     assert_eq!(parsed["providers_file"]["present"], false);
     assert_eq!(parsed["drivers"]["text_only"]["status"], "initialized");
@@ -108,6 +113,20 @@ fn status_json_round_trips() {
     assert_eq!(
         parsed["drivers"]["subagent_planned"]["reason"],
         "missing loop family"
+    );
+    assert_eq!(parsed["service"], "running");
+    // login_link embeds a live bearer token; must never reach JSON output.
+    assert!(
+        parsed.get("login_link").is_none(),
+        "login_link must be skipped in JSON serialization: {json}"
+    );
+    assert!(
+        !json.contains("sample-token"),
+        "token leaked into JSON: {json}"
+    );
+    assert!(
+        parsed.get("google_oauth_degraded").is_none(),
+        "unset Google OAuth diagnostics should be omitted from JSON: {json}"
     );
 }
 
@@ -121,18 +140,64 @@ fn status_render_text_contains_all_fields() {
     assert!(text.contains("/home/user/.ironclaw/reborn"));
     assert!(text.contains("home_source:"));
     assert!(text.contains("profile:"));
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(text.contains("config_file:"));
     assert!(text.contains("(present)"));
     assert!(text.contains("providers_file:"));
     assert!(text.contains("(absent)"));
     assert!(text.contains("model_slots:"));
     assert!(text.contains("default, mission"));
+    assert!(text.contains("service:"));
+    assert!(text.contains("running"));
     assert!(text.contains("drivers:"));
     assert!(text.contains("text_only: initialized"));
     assert!(text.contains("planned: initialized"));
     assert!(text.contains("subagent_planned: unavailable (missing loop family)"));
     assert!(text.contains("planned_default_profile: initialized"));
+    assert!(text.contains("login_link:"));
+    assert!(text.contains("http://127.0.0.1:3000/login?token=sample-token"));
+}
+
+#[test]
+fn status_render_text_omits_login_link_line_when_absent() {
+    let mut status = sample_status();
+    status.login_link = None;
+    let text = render_to_string(&status);
+    assert!(
+        !text.contains("login_link:"),
+        "no login_link line should be printed when the DTO carries None: {text}"
+    );
+}
+
+#[test]
+fn status_render_text_omits_google_oauth_line_when_not_degraded() {
+    let text = render_to_string(&sample_status());
+    assert!(
+        !text.contains("google_oauth:"),
+        "no google_oauth line should be printed when the DTO carries None: {text}"
+    );
+}
+
+#[test]
+fn status_render_text_includes_google_oauth_line_when_degraded() {
+    let mut status = sample_status();
+    status.google_oauth_degraded = Some(
+        "partially configured (missing google.redirect_uri) — disabled; fix with \
+         `ironclaw config set google.redirect_uri <value>`"
+            .to_string(),
+    );
+    let text = render_to_string(&status);
+    assert!(text.contains("google_oauth:"));
+    assert!(text.contains("partially configured (missing google.redirect_uri) — disabled"));
+    assert!(
+        text.contains("config set google."),
+        "status line must include the fix command: {text}"
+    );
+    let json = serde_json::to_value(&status).expect("serialize degraded status");
+    assert!(
+        json.get("google_oauth_degraded").is_some(),
+        "a present Google OAuth diagnostic must remain in JSON: {json}"
+    );
 }
 
 #[test]
@@ -168,7 +233,7 @@ fn config_list_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["entries"][0]["key"], "boot.profile");
-    assert_eq!(parsed["entries"][0]["value"], "local-dev");
+    assert_eq!(parsed["entries"][0]["value"], "standalone");
     assert!(parsed["entries"][1]["value"].is_null());
     assert_eq!(parsed["entries"][2]["value"], 5);
 }
@@ -179,7 +244,7 @@ fn config_list_render_text_covers_entries() {
     assert!(text.contains("IronClaw Reborn config"));
     assert!(text.contains("config.toml"));
     assert!(text.contains("boot.profile"));
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(text.contains("identity.tenant"));
     assert!(text.contains("(not set)"));
     assert!(text.contains("runner.heartbeat_interval_secs"));
@@ -225,12 +290,12 @@ fn text_rendering_replaces_terminal_control_characters() {
 fn config_get_json_set_value() {
     let dto = ConfigGetDto {
         key: "boot.profile".to_string(),
-        value: Some(ConfigValue::String("local-dev".to_string())),
+        value: Some(ConfigValue::String("standalone".to_string())),
     };
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["key"], "boot.profile");
-    assert_eq!(parsed["value"], "local-dev");
+    assert_eq!(parsed["value"], "standalone");
 }
 
 #[test]
@@ -249,10 +314,10 @@ fn config_get_json_unset_value() {
 fn config_get_render_text_set_value() {
     let dto = ConfigGetDto {
         key: "boot.profile".to_string(),
-        value: Some(ConfigValue::String("local-dev".to_string())),
+        value: Some(ConfigValue::String("standalone".to_string())),
     };
     let text = render_to_string(&dto);
-    assert!(text.contains("local-dev"));
+    assert!(text.contains("standalone"));
     assert!(!text.contains("(not set)"));
 }
 

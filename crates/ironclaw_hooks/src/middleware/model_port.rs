@@ -33,10 +33,8 @@ pub struct HookedLoopModelPort {
     /// Kept for future point-specific observers (e.g., `model-response-
     /// observed` at the pre-durable boundary). Currently unused — the
     /// model port is a no-op wrapper.
-    #[allow(dead_code)]
-    dispatcher: Arc<HookDispatcher>,
-    #[allow(dead_code)]
-    tenant_id: TenantId,
+    _dispatcher: Arc<HookDispatcher>,
+    _tenant_id: TenantId,
 }
 
 impl HookedLoopModelPort {
@@ -47,8 +45,8 @@ impl HookedLoopModelPort {
     ) -> Self {
         Self {
             inner,
-            dispatcher,
-            tenant_id,
+            _dispatcher: dispatcher,
+            _tenant_id: tenant_id,
         }
     }
 }
@@ -166,6 +164,7 @@ mod tests {
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         }
     }

@@ -1,15 +1,10 @@
 //! Reborn integration test — secret store durability over LibSql.
 //!
-//! Store-level durability proof: writes a secret to a `FilesystemSecretStore`
+//! Store-level durability proof: writes a secret to a `SecretStore`
 //! backed by a libSQL composite, then reopens a genuinely fresh store over the
 //! same on-disk database file and reads the secret back — real on-disk
 //! durability, without the turn/model layer.
 //!
-//! Gated on `feature = "libsql"` (directly instantiates `LibSqlRootFilesystem`,
-//! which only compiles under that feature); 0 tests without it, 2 with it.
-
-#![cfg(feature = "libsql")]
-
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
 mod reborn_support;
@@ -22,11 +17,11 @@ use std::sync::Arc;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::SecretHandle;
 use ironclaw_reborn_composition::test_support::{
-    LOCAL_DEV_DB_FILENAME, build_default_local_dev_database_roots_for_test,
-    build_local_dev_secret_store_for_test, mount_local_dev_database_roots_for_test,
+    STANDALONE_DB_FILENAME, build_default_database_roots_for_test, build_secret_store_for_test,
+    mount_database_roots_for_test,
 };
 use ironclaw_reborn_composition::wrap_scoped;
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use secrecy::ExposeSecret;
 
 use reborn_support::harness::test_product_scope;
@@ -43,12 +38,13 @@ async fn secret_persists_across_libsql_reopen() {
 
     // --- First store: write secret ---
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
-    let store = build_local_dev_secret_store_for_test(dir.path(), Arc::clone(&scoped))
+    let store = build_secret_store_for_test(dir.path(), Arc::clone(&scoped))
+        .await
         .expect("build first secret store");
 
     let scope = test_product_scope(
@@ -74,25 +70,25 @@ async fn secret_persists_across_libsql_reopen() {
     // --- Reopen: fresh libsql database, fresh composite, fresh store ---
     // Mirrors `assert_reply_persists_after_reopen` (builder.rs): same `root`
     // path yields the same cached master-key file, so decryption succeeds.
-    let db_path = dir.path().join(LOCAL_DEV_DB_FILENAME);
+    let db_path = dir.path().join(STANDALONE_DB_FILENAME);
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     // Migrations are idempotent — schema already exists from the first build.
     fresh_fs
         .run_migrations()
         .await
         .expect("run migrations on fresh libsql");
     let mut fresh_composite = CompositeRootFilesystem::new();
-    mount_local_dev_database_roots_for_test(&mut fresh_composite, fresh_fs)
-        .expect("mount fresh composite");
+    mount_database_roots_for_test(&mut fresh_composite, fresh_fs).expect("mount fresh composite");
     let fresh_composite = Arc::new(fresh_composite);
     let fresh_scoped = wrap_scoped(Arc::clone(&fresh_composite));
-    let fresh_store = build_local_dev_secret_store_for_test(dir.path(), fresh_scoped)
+    let fresh_store = build_secret_store_for_test(dir.path(), fresh_scoped)
+        .await
         .expect("build fresh secret store (same root → same crypto key)");
 
     // --- Read back: the material must survive the reopen ---
@@ -120,13 +116,14 @@ async fn secret_read_back_fails_for_unknown_handle() {
 
     // Build the store and write one secret under a known handle.
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
-    let store =
-        build_local_dev_secret_store_for_test(dir.path(), scoped).expect("build secret store");
+    let store = build_secret_store_for_test(dir.path(), scoped)
+        .await
+        .expect("build secret store");
 
     let scope = test_product_scope(
         "tenant-itest",
@@ -153,7 +150,7 @@ async fn secret_read_back_fails_for_unknown_handle() {
 /// Prove secrets don't leak across tenants: leasing a secret under a scope
 /// that differs ONLY in `tenant_id` must fail with the same
 /// `UnknownSecret` error as the unknown-handle case — `same_scope_owner`
-/// (`FilesystemSecretStore::read_secret`) treats any scope-field mismatch as
+/// (`SecretStore::read_secret`) treats any scope-field mismatch as
 /// "not found" rather than a distinct "forbidden" branch. The non-vacuity
 /// check below proves the store isn't just broadly broken.
 ///
@@ -166,13 +163,14 @@ async fn secret_read_back_fails_for_wrong_tenant_scope() {
 
     // Build the store and write one secret under a known handle/scope.
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
-    let store =
-        build_local_dev_secret_store_for_test(dir.path(), scoped).expect("build secret store");
+    let store = build_secret_store_for_test(dir.path(), scoped)
+        .await
+        .expect("build secret store");
 
     let scope = test_product_scope(
         "tenant-itest",

@@ -35,10 +35,11 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
 /// `SessionRenewalFailed`, `Http`, `Io`.
 ///
-/// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `Json`.
+/// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
 /// - `ModelNotAvailable` — the model won't appear between attempts
+/// - `QuotaExceeded` — billing or credits require user action
 /// - `Json` — a serde parse bug, not a transient failure
 ///
 /// See also `circuit_breaker::is_transient()` which answers a different
@@ -74,6 +75,20 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     };
     let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
     Duration::from_millis(delay_ms)
+}
+
+fn retry_delay_for(err: &LlmError, attempt: u32) -> Duration {
+    match err {
+        LlmError::RateLimited {
+            retry_after: Some(duration),
+            ..
+        }
+        | LlmError::BadGateway {
+            retry_after: Some(duration),
+            ..
+        } => *duration,
+        _ => retry_backoff_delay(attempt),
+    }
 }
 
 /// Clamp a provider-suggested retry delay to a safe maximum.
@@ -128,6 +143,20 @@ pub fn parse_retry_after_value(header: &reqwest::header::HeaderValue) -> Duratio
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
 
+/// Preserve whether a provider supplied `Retry-After`, except that HTTP 429
+/// retains the historical 60-second floor when the header is absent.
+pub(crate) fn retry_after_for_status(
+    status: u16,
+    header: Option<&reqwest::header::HeaderValue>,
+) -> Option<Duration> {
+    let parsed = header.map(parse_retry_after_value);
+    if status == 429 {
+        parsed.or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+    } else {
+        parsed
+    }
+}
+
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -175,17 +204,7 @@ impl RetryProvider {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        }
-                        | LlmError::BadGateway {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = retry_delay_for(&err, attempt);
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -219,13 +238,41 @@ impl RetryProvider {
         Fut: Future<Output = Result<T, LlmError>>,
     {
         let mut last_error: Option<LlmError> = None;
+        let mut retried_after_partial_text = false;
+        let mut replacement_attempt_active = false;
 
         for attempt in 0..=self.config.max_retries {
             let attempt_sink = Arc::new(StreamingAttemptSink::new(Arc::clone(&sink)));
             match op(attempt_sink.clone()).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    if replacement_attempt_active {
+                        sink.finish_text_replacement().await;
+                    }
+                    return Ok(resp);
+                }
                 Err(err) => {
                     if attempt_sink.emitted_text() {
+                        let can_replace_partial = sink.supports_text_replacement()
+                            && !retried_after_partial_text
+                            && is_retryable(&err)
+                            && attempt < self.config.max_retries;
+                        if can_replace_partial {
+                            let delay = retry_delay_for(&err, attempt);
+                            tracing::warn!(
+                                provider = %self.inner.model_name(),
+                                attempt = attempt + 1,
+                                max_retries = self.config.max_retries,
+                                delay_ms = delay.as_millis() as u64,
+                                error = %err,
+                                "Retrying interrupted stream with partial-text replacement{label}"
+                            );
+                            last_error = Some(err);
+                            retried_after_partial_text = true;
+                            tokio::time::sleep(delay).await;
+                            sink.replace_on_next_text_delta().await;
+                            replacement_attempt_active = true;
+                            continue;
+                        }
                         tracing::warn!(
                             provider = %self.inner.model_name(),
                             attempt = attempt + 1,
@@ -239,17 +286,7 @@ impl RetryProvider {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        }
-                        | LlmError::BadGateway {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = retry_delay_for(&err, attempt);
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -299,10 +336,26 @@ impl CompletionStreamSink for StreamingAttemptSink {
         }
         self.inner.text_delta(delta).await;
     }
+
+    fn supports_text_replacement(&self) -> bool {
+        self.inner.supports_text_replacement()
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.inner.replace_on_next_text_delta().await;
+    }
+
+    async fn finish_text_replacement(&self) {
+        self.inner.finish_text_replacement().await;
+    }
 }
 
 #[async_trait]
 impl LlmProvider for RetryProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -392,6 +445,14 @@ impl LlmProvider for RetryProvider {
         self.inner.effective_model_name(requested_model)
     }
 
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.active_model_name()
     }
@@ -410,6 +471,7 @@ mod tests {
     use super::*;
 
     use crate::testing::StubLlm;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
@@ -436,10 +498,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReplacingCompletionStreamSink {
+        text: Mutex<String>,
+        updates: Mutex<Vec<String>>,
+        replace_on_next_delta: AtomicBool,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for ReplacingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let update = {
+                let mut text = self.text.lock().expect("replacement sink text lock");
+                if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                    text.clear();
+                }
+                text.push_str(&delta);
+                text.clone()
+            };
+            self.updates
+                .lock()
+                .expect("replacement sink updates lock")
+                .push(update);
+        }
+
+        fn supports_text_replacement(&self) -> bool {
+            true
+        }
+
+        async fn replace_on_next_text_delta(&self) {
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
+
+        async fn finish_text_replacement(&self) {
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                let mut text = self.text.lock().expect("replacement sink text lock");
+                text.clear();
+                self.updates
+                    .lock()
+                    .expect("replacement sink updates lock")
+                    .push(String::new());
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum StreamingRetryScript {
-        FailOnceBeforeTextThenSucceed,
-        FailAfterText,
+        OnceBeforeTextThenSucceed,
+        OnceAfterTextThenSucceed,
+        OnceAfterTextThenSucceedWithoutText,
+        AlwaysAfterText,
     }
 
     struct StreamingRetryLlm {
@@ -472,14 +580,23 @@ mod tests {
         ) -> Result<(), LlmError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
             match self.script {
-                StreamingRetryScript::FailOnceBeforeTextThenSucceed if attempt == 0 => {
+                StreamingRetryScript::OnceBeforeTextThenSucceed if attempt == 0 => {
                     Err(Self::retryable_error())
                 }
-                StreamingRetryScript::FailAfterText => {
+                StreamingRetryScript::AlwaysAfterText => {
                     sink.text_delta("partial".to_string()).await;
                     Err(Self::retryable_error())
                 }
-                StreamingRetryScript::FailOnceBeforeTextThenSucceed => {
+                StreamingRetryScript::OnceAfterTextThenSucceed
+                | StreamingRetryScript::OnceAfterTextThenSucceedWithoutText
+                    if attempt == 0 =>
+                {
+                    sink.text_delta("partial".to_string()).await;
+                    Err(Self::retryable_error())
+                }
+                StreamingRetryScript::OnceAfterTextThenSucceedWithoutText => Ok(()),
+                StreamingRetryScript::OnceBeforeTextThenSucceed
+                | StreamingRetryScript::OnceAfterTextThenSucceed => {
                     sink.text_delta("Hel".to_string()).await;
                     sink.text_delta("lo".to_string()).await;
                     Ok(())
@@ -760,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn complete_with_tools_streaming_retries_before_text_then_forwards_deltas() {
         let inner = Arc::new(StreamingRetryLlm::new(
-            StreamingRetryScript::FailOnceBeforeTextThenSucceed,
+            StreamingRetryScript::OnceBeforeTextThenSucceed,
         ));
         let retry = RetryProvider::new(inner.clone(), fast_config(1));
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
@@ -779,7 +896,9 @@ mod tests {
 
     #[tokio::test]
     async fn complete_streaming_does_not_retry_after_partial_text() {
-        let inner = Arc::new(StreamingRetryLlm::new(StreamingRetryScript::FailAfterText));
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::AlwaysAfterText,
+        ));
         let retry = RetryProvider::new(inner.clone(), fast_config(3));
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
@@ -793,6 +912,88 @@ mod tests {
         assert_eq!(inner.calls(), 1);
         assert_eq!(delta_rx.recv().await.as_deref(), Some("partial"));
         assert!(delta_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_retries_once_when_sink_can_replace_partial_text() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::OnceAfterTextThenSucceed,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        let response = retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect("replacement retry should succeed");
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(response.content, "Hello");
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", "Hel", "Hello"]
+        );
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "Hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_clears_partial_when_replacement_has_no_text() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::OnceAfterTextThenSucceedWithoutText,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect("textless replacement retry should succeed");
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", ""]
+        );
+        assert!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_retries_partial_text_replacement_only_once() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::AlwaysAfterText,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        let error = retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect_err("a second interrupted partial response must not retry again");
+
+        assert!(matches!(error, LlmError::RateLimited { .. }));
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", "partial"]
+        );
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "partial"
+        );
     }
 
     #[tokio::test]
@@ -842,6 +1043,15 @@ mod tests {
         assert_eq!(
             cap_retry_after(Duration::from_secs(0)),
             Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn retry_after_presence_is_preserved_for_gateway_errors() {
+        assert_eq!(retry_after_for_status(503, None), None);
+        assert_eq!(
+            retry_after_for_status(429, None),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
         );
     }
 
@@ -912,5 +1122,115 @@ mod tests {
             diff <= Duration::from_secs(2),
             "expected ~30s, got {parsed:?} (diff {diff:?}) from header {date_str:?}"
         );
+    }
+}
+
+/// Property tests for the `Retry-After` boundary (#6524 workstream 9:
+/// "focused fuzzing for ... provider responses, and wire-format boundaries").
+///
+/// The example tests above pin specific values. These pin the invariant that
+/// makes the parser safe to point at a provider we do not control: whatever a
+/// provider sends — hostile, malformed, or absurd — the delay it can induce is
+/// bounded and the process does not panic. An uncapped or panicking parse here
+/// is remotely triggerable by anything we call.
+#[cfg(test)]
+mod retry_after_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Header values shaped like what a provider actually sends, plus noise.
+    ///
+    /// Weighted toward the numeric and date forms the parser has branches
+    /// for, because those are the only inputs that can produce a large delay.
+    fn retry_after_value() -> impl Strategy<Value = String> {
+        prop_oneof![
+            // Plain delay-seconds, including values past the cap.
+            any::<u64>().prop_map(|n| n.to_string()),
+            // Small values around the cap boundary, where off-by-one lives.
+            (3595u64..3605).prop_map(|n| n.to_string()),
+            // Padded numerics: providers are inconsistent about whitespace.
+            (any::<u64>(), 0usize..3, 0usize..3).prop_map(|(n, l, r)| format!(
+                "{}{}{}",
+                " ".repeat(l),
+                n,
+                " ".repeat(r)
+            )),
+            // Signed and float-ish shapes the parser must reject cleanly.
+            any::<i64>().prop_map(|n| n.to_string()),
+            "[0-9]{1,25}(\\.[0-9]{1,3})?",
+            // Date forms, both directions in time.
+            Just(chrono::Utc::now().to_rfc2822()),
+            (1i64..100_000)
+                .prop_map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc2822()),
+            // Arbitrary text, so nothing above narrows the space to only
+            // well-formed input.
+            "\\PC{0,32}",
+        ]
+    }
+
+    proptest! {
+        /// No header value can make the parser panic or exceed the cap.
+        ///
+        /// The generator is deliberately biased rather than uniformly random.
+        /// Purely random bytes essentially never parse as a large integer, so
+        /// a naive `vec(any::<u8>())` strategy explores none of the space this
+        /// property exists to defend — verified: with the cap removed, the
+        /// uniform version still passed while the numeric cases failed at
+        /// 3601. A generator that cannot reach the failure is decorative no
+        /// matter how many cases it runs.
+        #[test]
+        fn arbitrary_header_values_stay_bounded(value in retry_after_value()) {
+            let Ok(header) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) else {
+                // Not a legal header value; reqwest would never hand us one.
+                return Ok(());
+            };
+            let delay = parse_retry_after_value(&header);
+            prop_assert!(delay <= Duration::from_secs(MAX_RETRY_AFTER_SECS), "{delay:?}");
+        }
+
+        /// A numeric delay-seconds value is capped, never truncated or wrapped.
+        #[test]
+        fn delay_seconds_are_capped_not_wrapped(secs in any::<u64>()) {
+            let header = reqwest::header::HeaderValue::from_str(&secs.to_string())
+                .expect("digits are a legal header value");
+            let delay = parse_retry_after_value(&header);
+            let expected = Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS));
+            prop_assert_eq!(delay, expected);
+        }
+
+        /// Surrounding whitespace must not change the parse.
+        ///
+        /// Providers pad values inconsistently, and a parser that only handled
+        /// the trimmed form would silently fall back to the 60s default —
+        /// which looks like a working retry rather than a parse failure.
+        #[test]
+        fn whitespace_padding_does_not_change_the_delay(
+            secs in 0u64..7200,
+            pad_left in 0usize..4,
+            pad_right in 0usize..4,
+        ) {
+            let padded = format!("{}{}{}", " ".repeat(pad_left), secs, " ".repeat(pad_right));
+            let Ok(header) = reqwest::header::HeaderValue::from_str(&padded) else {
+                return Ok(());
+            };
+            prop_assert_eq!(
+                parse_retry_after_value(&header),
+                Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS))
+            );
+        }
+
+        /// An HTTP-date already in the past yields no delay, never a negative
+        /// one wrapping into a huge sleep.
+        #[test]
+        fn past_http_dates_never_wrap_into_a_long_sleep(secs_ago in 1i64..1_000_000) {
+            let past = chrono::Utc::now() - chrono::Duration::seconds(secs_ago);
+            let header = reqwest::header::HeaderValue::from_str(&past.to_rfc2822())
+                .expect("rfc2822 dates are legal header values");
+            let delay = parse_retry_after_value(&header);
+            // A deadline that has already passed means wait no time at all.
+            // Asserting only the cap would still pass if a past date fell back
+            // to a fixed delay, which is the regression this property is for.
+            prop_assert_eq!(delay, Duration::ZERO, "a past deadline must not delay");
+        }
     }
 }

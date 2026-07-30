@@ -70,28 +70,6 @@ MOCK_SKILLS = [
     },
 ]
 
-MOCK_CHANNEL_EXTENSION = {
-    "name": "telegram-channel",
-    "package_ref": {"kind": "extension", "id": "telegram-channel"},
-    "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
-    "description": "Configured messaging channel.",
-    "active": True,
-    "authenticated": True,
-    "onboarding_state": "ready",
-}
-
-MOCK_MCP_EXTENSION = {
-    "name": "beta-mcp",
-    "package_ref": {"kind": "extension", "id": "beta-mcp"},
-    "display_name": "Beta MCP",
-    "kind": "mcp_server",
-    "description": "Installed MCP server.",
-    "active": False,
-    "authenticated": False,
-}
-
-
 async def _open_mocked_settings_page(
     reborn_v2_server,
     reborn_v2_browser,
@@ -158,23 +136,6 @@ async def _open_mocked_settings_page(
                     "auto_activate_learned": True,
                 },
             )
-            return
-
-        await route.continue_()
-
-    async def handle_extensions(route):
-        request = route.request
-        path = urlparse(request.url).path
-
-        if path == "/api/webchat/v2/extensions" and request.method == "GET":
-            await fulfill_json(
-                route,
-                {"extensions": [MOCK_CHANNEL_EXTENSION, MOCK_MCP_EXTENSION]},
-            )
-            return
-
-        if path == "/api/webchat/v2/extensions/registry" and request.method == "GET":
-            await fulfill_json(route, {"entries": []})
             return
 
         await route.continue_()
@@ -300,10 +261,9 @@ async def _open_mocked_settings_page(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/settings/tools**", handle_settings_tools)
     await page.route("**/api/webchat/v2/skills**", handle_skills)
-    await page.route("**/api/webchat/v2/extensions**", handle_extensions)
     await page.route("**/api/webchat/v2/llm/**", handle_llm)
 
-    await page.goto(f"{reborn_v2_server}/v2/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     search = page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     try:
         await expect(search).to_be_visible(timeout=15000)
@@ -437,26 +397,26 @@ async def test_reborn_legacy_settings_skills_search_empty_state(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_settings_channels_search(
+async def test_reborn_legacy_settings_language_search(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_settings_page(
         reborn_v2_server,
         reborn_v2_browser,
-        tab="channels",
+        tab="language",
     )
     try:
         page = harness["page"]
         search = harness["search"]
 
-        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
+        await expect(page.get_by_text("Español", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Beta MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("简体中文", exact=True)).to_be_visible()
 
-        await search.fill("telegram")
-        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()
-        await expect(page.get_by_text("Beta MCP", exact=True)).to_have_count(0)
+        await search.fill("chinese")
+        await expect(page.get_by_text("简体中文", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Español", exact=True)).to_have_count(0)
 
         await search.fill("nothing-matches-this")
         await expect(

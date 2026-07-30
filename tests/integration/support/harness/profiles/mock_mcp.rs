@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::super::super::harness_mcp::{
-    build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
-    mcp_loopback_network_policy, mock_mcp_extension_package,
+    build_loopback_mcp_runtime, mcp_loopback_network_policy, mock_mcp_extension_package,
+    standalone_host_runtime_with_registry_egress_and_mcp,
 };
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
@@ -47,7 +47,7 @@ pub(crate) async fn mock_mcp_tools(
         mcp_url,
         capability_id,
     )?)?;
-    let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
+    let runtime = standalone_host_runtime_with_registry_egress_and_mcp(
         storage_root,
         registry,
         Arc::clone(&first_party_egress),
@@ -57,8 +57,9 @@ pub(crate) async fn mock_mcp_tools(
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
@@ -101,5 +102,6 @@ pub(crate) async fn mock_mcp_tools(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

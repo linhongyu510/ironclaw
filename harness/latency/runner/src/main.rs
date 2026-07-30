@@ -24,36 +24,32 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, PollSettings, PostgresProductionSubstrateConfig,
-    RebornBuildInput, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator,
-    WebuiServeConfig, build_libsql_production_host_runtime_services,
-    build_postgres_production_host_runtime_services, build_reborn_runtime, build_webui_services,
-    hosted_single_tenant_runtime_policy, local_runtime_build_input, webui_v2_app,
+    RebornHostBindings, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
+    RebornRuntimeIdentity, RebornRuntimeInput, build_libsql_production_host_runtime_services,
+    build_postgres_production_host_runtime_services, build_reborn_runtime,
+    hosted_single_tenant_runtime_policy, local_runtime_build_input,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
     FilesystemResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort, ApprovalStatus};
+use ironclaw_processes::ProcessJournalStore;
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
 use ironclaw_triggers::{
     LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateStoreKind, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointKind,
-    LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
-    run_profile::LoopCheckpointStateRef,
-    runner::{
-        BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
-        TurnRunTransitionPort,
-    },
+    AcceptedMessageRef, AgentTurnProcessRuntime, AgentTurnRuntimePort,
+    AllowAllTurnAdmissionPolicy, CancelRunRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnId, TurnRunId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnScope,
+    TurnStatus,
+};
+use ironclaw_webui::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -302,8 +298,8 @@ struct BackendContext {
     fs: Arc<dyn RootFilesystem>,
     turn_state: Arc<dyn TurnLifecycleStore>,
     trigger_repository: Arc<dyn TriggerRepository>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
     webui_session: Arc<OnceCell<WebuiRuntimeContext>>,
     webui_postgres_pool: Option<deadpool_postgres::Pool>,
@@ -321,10 +317,10 @@ struct WorkloadExecution {
     payload_bytes: Arc<[usize]>,
 }
 
-trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore {}
+trait TurnLifecycleStore: AgentTurnRuntimePort {}
 
 impl<T> TurnLifecycleStore for T where
-    T: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + Send + Sync
+    T: AgentTurnRuntimePort + Send + Sync
 {
 }
 
@@ -342,10 +338,16 @@ async fn open_backend(
         BackendName::Libsql => {
             let dir = tempfile::tempdir()?;
             let db_path = dir.path().join("latency-libsql.db");
-            let db = Arc::new(libsql::Builder::new_local(db_path).build().await?);
-            let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+            let runtime = Arc::new(
+                ironclaw_libsql_runtime::LibSqlRuntime::open(
+                    db_path.display().to_string(),
+                    None,
+                )
+                .await?,
+            );
+            let fs = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
             fs.run_migrations().await?;
-            let trigger_repository = LibSqlTriggerRepository::new(db);
+            let trigger_repository = LibSqlTriggerRepository::from_runtime(runtime);
             trigger_repository.run_migrations().await?;
             let turn_state = filesystem_turn_state_store(Arc::clone(&fs), backend, None)?;
             let control_plane = control_plane_stores(Arc::clone(&fs));
@@ -407,26 +409,25 @@ where
         .map(|pool_size| format!("pool-{pool_size}"))
         .unwrap_or_else(|| "baseline".to_string());
     let run_label = uuid::Uuid::new_v4().simple().to_string();
-    let turns_root = VirtualPath::new(format!(
-        "/tenants/latency-turns-{}-{pool_label}-{run_label}/users/latency-user/turns",
+    let processes_root = VirtualPath::new(format!(
+        "/tenants/latency-turns-{}-{pool_label}-{run_label}/users/latency-user/processes",
         backend.as_str()
     ))?;
     let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns")?,
-        turns_root,
+        MountAlias::new("/processes")?,
+        processes_root,
         MountPermissions::read_write_list_delete(),
     )])?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
-    let store = match backend {
-        BackendName::Libsql => FilesystemTurnStateStoreKind::row(scoped),
-        BackendName::Postgres => FilesystemTurnStateStoreKind::row(scoped),
-    };
-    Ok(Arc::new(store))
+    let journal = Arc::new(ProcessJournalStore::new(scoped));
+    Ok(Arc::new(AgentTurnProcessRuntime::from_process_runtime(
+        journal,
+    )))
 }
 
 struct ControlPlaneStores {
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
 }
 
@@ -435,8 +436,8 @@ where
     F: RootFilesystem + 'static,
 {
     let scoped = scoped_control_plane_fs(fs);
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped)));
-    let secret_store = Arc::new(FilesystemSecretStore::new(
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&scoped)));
+    let secret_store = Arc::new(SecretStore::new(
         Arc::clone(&scoped),
         latency_secrets_crypto(),
     ));

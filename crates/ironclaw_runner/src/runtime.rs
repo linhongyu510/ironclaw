@@ -5,30 +5,29 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
-    CompositeTurnRunWakeNotifier, DecoratingLoopCapabilityPortFactory, HostIdentityContextSource,
+    AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
     HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
     LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
     ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
     SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
     SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
-    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
+use ironclaw_memory::MemoryService;
+use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
-    TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
-    TurnStateStore,
+    AgentLoopDriverError, AgentTurnProcessCommitObserver, AgentTurnRuntimePort,
+    AgentTurnSpawnTreeRuntimePort, DefaultTurnCoordinator, LoopCheckpointStore, RunProfileResolver,
+    TurnCommittedEventObserver, TurnEventSink, TurnRunWakeNotifier, TurnSpawnTreePort,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext,
+        LoopRunContext, MemoryPromptContextService,
     },
-    runner::TurnRunTransitionPort,
 };
 
 use crate::{
@@ -36,6 +35,7 @@ use crate::{
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+        apply_capability_surface_profile, capability_resolve_error_to_agent_host_error,
     },
     loop_exit_applier::{
         AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
@@ -48,7 +48,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
-        goal_store::SubagentGoalStore, prompt_material::GateBackedSubagentPromptMaterialSource,
+        prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
@@ -58,6 +58,9 @@ use crate::{
         TurnRunSchedulerHandle, TurnRunWakeChannel,
     },
 };
+
+mod process_system;
+pub use process_system::ProcessRuntimeSystem;
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
 ///
@@ -222,24 +225,6 @@ fn default_disabled_capability_ids() -> Vec<CapabilityId> {
     ]
 }
 
-pub trait RuntimeTurnStateStore:
-    TurnSpawnTreeStateStore
-    + TurnRunTransitionPort
-    + ironclaw_turns::TurnEventProjectionSource
-    + Send
-    + Sync
-{
-}
-
-impl<T> RuntimeTurnStateStore for T where
-    T: TurnSpawnTreeStateStore
-        + TurnRunTransitionPort
-        + ironclaw_turns::TurnEventProjectionSource
-        + Send
-        + Sync
-{
-}
-
 /// Opaque carrier for the scheduler's wake-pair (notifier + channel).
 ///
 /// Keeps substrate types ([`SchedulerTurnRunWakeNotifier`], [`TurnRunWakeChannel`])
@@ -283,22 +268,17 @@ pub struct DefaultPlannedRuntimeParts<G>
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    pub turn_state: Arc<dyn RuntimeTurnStateStore>,
+    pub process_system: ProcessRuntimeSystem,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
-    pub checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    pub subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
-    /// §3 replacement: `subagent_gate_store` split into three trait-object
-    /// handles onto the same underlying await-edge store + resolver pair
-    /// (constructed together in composition, where the `filesystem-goal-store`
-    /// feature is enabled) — kept as trait objects here so `runtime.rs`
-    /// itself stays feature/backend-generic-free.
+    /// Await-edge writer, settlement, and evidence views over the process
+    /// dependency journal.
     pub subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
     pub subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     pub subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -318,6 +298,16 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9),
+    /// threaded to the turn executor so an auth block re-sources its
+    /// `credential_requirements` from the host record (render-from-record) after
+    /// the §5.3 flip moved them off the loop-facing channel. Must be the SAME
+    /// `Arc` the composition wired into the capability port's
+    /// `with_gate_record_store`, or the read scope/key will not find the saved
+    /// record. `None` only for helper/test compositions with no run-state
+    /// filesystem (they never raise a durable auth gate); a production `None` is
+    /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
+    pub gate_record_store: Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -328,6 +318,23 @@ where
     /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
     /// that do not yet wire a profile backend.
     pub user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// Proactive-memory source (#3537 / mem0 flow). Resolved once per run at the
+    /// first prompt build and surfaced into the prompt's "memory" section.
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// memory rather than failing the turn, the same optionality as
+    /// `user_profile_source`.
+    pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW bound memory
+    /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
+    /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
+    /// `Completed` run's full transcript to `record_interaction`, skipping only
+    /// runs with no user/assistant content (the provider decides what to retain).
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// after-turn recording rather than failing the turn (mirrors
+    /// `memory_context_service`).
+    pub after_turn_memory_writer: Option<Arc<dyn MemoryService>>,
     /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
     /// defaults these to no-op implementations so helper tests keep compiling.
     /// `build_product_live_planned_runtime` fails closed when any of them is
@@ -350,18 +357,8 @@ where
     /// while still ensuring the scheduler loop consumes the exact same channel.
     ///
     /// When `None` (the default), the notifier and channel are minted internally, which is
-    /// correct for local-dev and any composition that does not need to pre-mint.
+    /// correct for standalone and any composition that does not need to pre-mint.
     pub scheduler_wake_wiring: Option<SchedulerWakeWiring>,
-}
-
-pub trait RuntimeSubagentGoalStore:
-    SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
-{
-}
-
-impl<T> RuntimeSubagentGoalStore for T where
-    T: SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
-{
 }
 
 pub struct RebornRuntimeLoopComposition<S, G>
@@ -535,28 +532,28 @@ where
             ProductLiveRuntimeReadinessComponent::CancellationFactory,
         ));
     }
-    let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let agent_turn_runtime: Arc<dyn AgentTurnRuntimePort> =
+        Arc::new(parts.process_system.agent_turn_runtime());
     let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
         parts.subagent_await_edge_evidence.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::clone(&parts.thread_service),
-            turn_state_store,
+            agent_turn_runtime,
             Arc::clone(&parts.loop_checkpoint_store),
             await_dependent_run_evidence,
             parts.thread_scope.clone(),
         )
-        .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
 }
 
-fn local_development_noop_safety_context() -> InstructionSafetyContext {
+fn non_production_noop_safety_context() -> InstructionSafetyContext {
     tracing::debug!(
-        "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
+        "using standaloneelopment no-op instruction safety context; configure a real instruction safety scanner before product-live use"
     );
-    InstructionSafetyContext::local_development_noop()
+    InstructionSafetyContext::non_production_noop()
 }
 
 pub fn build_default_planned_runtime<G>(
@@ -605,6 +602,15 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
+    let process_system = parts.process_system.clone();
+    let agent_turn_runtime = Arc::new(process_system.agent_turn_runtime());
+    let cancellation_factory: Arc<dyn RunCancellationFactory> =
+        parts.cancellation_factory.clone().unwrap_or_else(|| {
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                agent_turn_runtime.clone() as Arc<dyn AgentTurnRuntimePort>,
+            ))
+        });
+
     // Resolve the scheduler wake wiring BEFORE building the coordinator, breaking
     // the coordinator↔scheduler build-order cycle.  The coordinator receives the
     // real notifier immediately; the channel is held in the carrier and passed to
@@ -618,41 +624,30 @@ where
         .scheduler_wake_wiring
         .unwrap_or_else(SchedulerWakeWiring::channel);
     let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = wake_wiring.notifier();
-    // When a cancellation factory is supplied, fan-out each coordinator wake to
-    // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
-    // this composite, the scheduler still wakes but retained product run handles
-    // never flip on `cancel_run` — breaking end-to-end product-live
-    // cancellation observation.
-    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
-        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
-            scheduler_notifier_base,
-            factory,
-        )),
-        None => scheduler_notifier_base,
-    };
+    // Fan out each coordinator wake to BOTH the scheduler and the exact
+    // cancellation factory installed on the loop host. Without this shared
+    // instance, the scheduler still wakes but retained run handles never flip
+    // on `cancel_run`.
+    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(CompositeTurnRunWakeNotifier::new(
+        scheduler_notifier_base,
+        Arc::clone(&cancellation_factory),
+    ));
     let subagent_await_edge_settler = Arc::clone(&parts.subagent_await_edge_settler);
+    subagent_await_edge_settler
+        .bind_turn_tree_store(agent_turn_runtime.clone() as Arc<dyn AgentTurnSpawnTreeRuntimePort>)
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
     let subagent_completion_observer: Arc<dyn TurnCommittedEventObserver> =
         Arc::clone(&subagent_await_edge_settler).as_turn_committed_event_observer();
-    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
-    lifecycle_bus
-        .subscribe_required(Arc::clone(&subagent_completion_observer))
-        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
-    if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
-        lifecycle_bus
-            .subscribe_best_effort(turn_event_sink)
-            .map_err(|error| {
-                DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
-            })?;
-    }
-    let turn_state = Arc::new(LifecyclePublishingTurnStateStore::new(
-        Arc::clone(&parts.turn_state),
-        lifecycle_bus,
-    ));
-    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = turn_state.clone();
-    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_state))
+    process_system
+        .subscribe_process_observer(Arc::new(AgentTurnProcessCommitObserver::new(
+            subagent_completion_observer,
+            parts.turn_event_sink.clone(),
+        )))
+        .map_err(DefaultPlannedRuntimeBuildError::SubagentCompletion)?;
+    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
-        .with_lifecycle_publication_error_port(publication_error_port);
+        .with_process_runtime(agent_turn_runtime.as_ref().clone());
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
@@ -660,10 +655,10 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let turn_state_store: Arc<dyn TurnStateStore> = turn_state.clone();
+    let agent_turn_runtime_port: Arc<dyn AgentTurnRuntimePort> = agent_turn_runtime.clone();
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
-            Arc::clone(&parts.subagent_goal_store),
+            process_system.inputs(),
             Arc::clone(&parts.thread_service),
         ));
     let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
@@ -671,9 +666,9 @@ where
         SubagentSpawnDeps {
             coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
             child_runs,
-            turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
+            agent_turn_runtime: agent_turn_runtime.clone()
+                as Arc<dyn AgentTurnSpawnTreeRuntimePort>,
             thread_service: Arc::clone(&parts.thread_service),
-            goal_store: Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
             await_edge_writer: Arc::clone(&parts.subagent_await_edge_writer),
             definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
             spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
@@ -682,18 +677,24 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let mut capability_factory_builder =
-        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator);
-    if parts.config.tool_disclosure.is_bridged() {
+    // Resolve once inside the runner-private factory below, then thread the
+    // exact same Arc through disclosure and the outer profile filter.
+    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+        Arc::new(SubagentCapabilitySurfaceResolver::new(
+            parts.capability_surface_resolver,
+            Arc::clone(&subagent_prompt_source),
+        ));
+    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_bridged() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
             "reborn tool disclosure decorator wired (bridged)"
         );
-        capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
-            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
-        ));
-    }
+        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+            Arc::clone(&parts.capability_result_writer),
+        )))
+    } else {
+        None
+    };
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
     // spawn_subagent capability from the model-facing surface across all
     // profiles. Applied as the OUTERMOST decorator so it strips the capability
@@ -722,8 +723,8 @@ where
     // re-enable `trigger_create` for scheduled fires. Kept as the OUTERMOST
     // decorator (added last, after the tool-disclosure decorator above) so
     // it strips capabilities regardless of what surfaced them.
-    capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
-        PerSurfaceCapabilityDenyDecorator::new(
+    let deny_decorator: Arc<dyn LoopCapabilityPortDecorator> =
+        Arc::new(PerSurfaceCapabilityDenyDecorator::new(
             global_denied,
             vec![(
                 ironclaw_turns::run_profile::CapabilitySurfaceProfileId::new(
@@ -732,38 +733,46 @@ where
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
                 scheduled_trigger_denied,
             )],
-        ),
-    ));
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(capability_factory_builder);
-    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-        Arc::new(SubagentCapabilitySurfaceResolver::new(
-            parts.capability_surface_resolver,
-            Arc::clone(&subagent_prompt_source),
         ));
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
+        Arc::new(RuntimeProfiledCapabilityPortFactory {
+            inner: parts.capability_factory,
+            surface_resolver: capability_surface_resolver,
+            spawn_decorator,
+            tool_disclosure_decorator,
+            deny_decorator,
+        });
     let safety_context = parts
         .safety_context
-        .unwrap_or_else(local_development_noop_safety_context);
+        .unwrap_or_else(non_production_noop_safety_context);
+    // Build the after-turn memory recorder before `parts.thread_scope` is moved
+    // into the host factory below. Present only when a bound memory
+    // provider was resolved; it owner-rewrites the base thread scope per run
+    // before reading the just-finished exchange back.
+    let after_turn_memory_recorder = parts.after_turn_memory_writer.clone().map(|memory_writer| {
+        Arc::new(crate::after_turn_memory::AfterTurnMemoryRecorder::new(
+            Arc::clone(&parts.thread_service),
+            memory_writer,
+            parts.thread_scope.clone(),
+        ))
+    });
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
         Arc::clone(&parts.model_gateway),
-        parts.checkpoint_state_store,
-        turn_state_store,
+        agent_turn_runtime_port,
         Arc::clone(&parts.loop_checkpoint_store),
         parts.milestone_sink,
         parts.config.host,
         safety_context,
     )
-    .with_profiled_capability_port_factory(capability_factory, capability_surface_resolver)
+    .with_resolved_profiled_capability_port_factory(capability_factory)
     .with_subagent_prompt_composer(subagent_prompt_composer)
     .with_driver_requirements(driver_registry.requirements_snapshot());
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
     }
-    if let Some(factory) = parts.cancellation_factory {
-        host_factory = host_factory.with_cancellation_factory(factory);
-    }
+    host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
     }
@@ -790,24 +799,37 @@ where
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
+    if let Some(service) = parts.memory_context_service {
+        host_factory = host_factory.with_memory_context_service(service);
+    }
     let host_factory = Arc::new(host_factory);
 
-    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
+    let process_transition_port: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>> =
+        process_system.transitions();
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
-        Arc::clone(&transition_port),
+        Arc::clone(&process_transition_port),
         parts.loop_exit_evidence,
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let mut executor = RebornTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
-    ));
+        parts.gate_record_store.clone(),
+    );
+    if let Some(recorder) = after_turn_memory_recorder {
+        executor = executor.with_after_turn_memory_recorder(recorder);
+    }
+    let executor = Arc::new(executor);
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
         .with_poll_interval(parts.config.poll_interval)
         .with_lease_recovery_interval(parts.config.lease_recovery_interval);
-    let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
+    let scheduler = TurnRunScheduler::new_with_process_runtime(
+        process_system.runtime(),
+        executor,
+        scheduler_config,
+    );
     let scheduler_handle = wake_wiring.start(scheduler);
 
     Ok(
@@ -837,6 +859,43 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
 ];
+
+/// Runner-private per-run factory that preserves the canonical wrapper order
+/// while passing one resolved allow-set directly to every consumer that needs
+/// it. The neutral loop-host decorator contract remains synchronous.
+struct RuntimeProfiledCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    spawn_decorator: Arc<dyn LoopCapabilityPortDecorator>,
+    tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
+    deny_decorator: Arc<dyn LoopCapabilityPortDecorator>,
+}
+
+#[async_trait::async_trait]
+impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let allow_set = Arc::new(
+            self.surface_resolver
+                .resolve(run_context)
+                .await
+                .map_err(capability_resolve_error_to_agent_host_error)?,
+        );
+        let mut capabilities = self.inner.create_capability_port(run_context).await?;
+        capabilities = self.spawn_decorator.decorate(run_context, capabilities);
+        if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
+            capabilities = decorator.decorate_with_allow_set(
+                run_context,
+                capabilities,
+                Arc::clone(&allow_set),
+            );
+        }
+        capabilities = self.deny_decorator.decorate(run_context, capabilities);
+        Ok(apply_capability_surface_profile(capabilities, allow_set))
+    }
+}
 
 struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
@@ -895,9 +954,15 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, scheduler_permit_count};
+    use super::{
+        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
+        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+    };
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
+        ThreadId,
+    };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -905,15 +970,15 @@ mod tests {
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityBatchOutcome, CapabilityDescriptorView, CapabilityInvocation,
-            CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopRunContext, RunProfileResolutionRequest, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+            LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
+            VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
 
     use ironclaw_loop_host::{
+        CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory, PerSurfaceCapabilityDenyDecorator,
     };
@@ -1048,8 +1113,8 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1058,8 +1123,8 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1104,16 +1169,16 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability_batch(request).await
         }
@@ -1206,6 +1271,70 @@ mod tests {
         }
     }
 
+    struct CountingSurfaceResolver {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CapabilitySurfaceProfileResolver for CountingSurfaceResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CapabilityAllowSet::All)
+        }
+    }
+
+    struct UnusedResultWriter;
+
+    #[async_trait]
+    impl ironclaw_loop_host::LoopCapabilityResultWriter for UnusedResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "unused in profile-resolution test",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn profiled_factory_resolves_allow_set_once_with_tool_disclosure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::clone(&calls),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::clone(&decorate_calls),
+            }),
+            tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+                Arc::new(UnusedResultWriter),
+            ))),
+            deny_decorator: Arc::new(NoopDecorator { decorate_calls }),
+        };
+
+        factory
+            .create_capability_port(&test_run_context().await)
+            .await
+            .expect("profiled capability port should build");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one resolved allow-set must be shared by disclosure and enforcement"
+        );
+    }
+
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────
 
     /// Fixed-surface inner port standing in for the host capability port —
@@ -1231,8 +1360,8 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",
@@ -1241,8 +1370,8 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",

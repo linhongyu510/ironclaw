@@ -21,8 +21,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
+use super::{filesystem::BlockingTurnStatePutFilesystem, product_surface::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -43,18 +44,18 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
+use ironclaw_product::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    ProductLiveCapabilityIo, RebornBuildInput, RebornLocalDevApprovalTestParts,
-    RebornProductAuthServices, build_reborn_services,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
+    build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
+        LoopRequest, LoopRunContext,
     },
 };
 
@@ -66,13 +67,14 @@ pub(crate) use super::doubles::{
     RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
-    LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
-    copy_dir_recursive, default_capability_io_pair, host_runtime_storage_roots, http_test_policy,
-    local_dev_all_effects, local_dev_host_runtime_with_http_egress,
-    local_dev_host_runtime_with_live_http_egress, local_dev_host_runtime_with_real_egress_pipeline,
-    local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
-    local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
-    workspace_mounts,
+    StandaloneRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,
+    capability_ids_from_strs, copy_dir_recursive, default_capability_io_pair,
+    host_runtime_storage_roots, http_test_policy, memory_mounts, qa_smoke_mounts, skill_mounts,
+    standalone_all_effects, standalone_host_runtime_with_http_egress,
+    standalone_host_runtime_with_live_http_egress,
+    standalone_host_runtime_with_real_egress_pipeline,
+    standalone_host_runtime_with_registry_and_egress, standalone_mount_descriptor,
+    standalone_root_filesystem, wildcard_test_policy, workspace_mounts,
 };
 
 pub(crate) type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -85,6 +87,21 @@ pub(crate) type HarnessCapabilityParts = (
 );
 pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
+
+fn write_system_skill_fixture(
+    storage_root: &std::path::Path,
+    name: &str,
+    description: &str,
+    prompt: &str,
+) -> HarnessResult<()> {
+    let dir = storage_root.join("system").join("skills").join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    Ok(())
+}
 
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
@@ -106,10 +123,19 @@ impl HarnessCapabilityMode {
     /// `HostRuntimeCapabilityHarness::install_durable_capability_io`'s doc
     /// for why the durable-io swap must happen here rather than at harness
     /// construction (issue #5838).
+    ///
+    /// `turn_store` is the caller's REAL shared turn-state store
+    /// (`group.rs`'s `GroupSharedStorage.turn_store`), consumed only by the
+    /// `HostRuntime` arm and only when that harness opted into
+    /// `.with_trigger_active_run_lookup_for_test()` — see
+    /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`'s
+    /// doc (#5886).
     pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        process_system: ironclaw_runner::runtime::ProcessRuntimeSystem,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -129,10 +155,24 @@ impl HarnessCapabilityMode {
             }
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
-                    harness.install_durable_capability_io(turn_thread_service);
+                    harness.install_durable_capability_io(
+                        turn_thread_service,
+                        trajectory_observer.clone(),
+                    );
+                }
+                if harness
+                    .capability_ids
+                    .iter()
+                    .any(|id| id.as_str() == ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID)
+                    && harness.reborn_services_for_test().is_some()
+                {
+                    harness.install_trigger_source_processes_for_test(&process_system)?;
+                }
+                if harness.trigger_active_run_lookup_requested {
+                    harness.install_trigger_active_run_lookup_for_test(&process_system)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink),
+                    harness.capability_factory(milestone_sink, trajectory_observer),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -145,24 +185,36 @@ impl HarnessCapabilityMode {
 
 /// Backing handles for the two synthetic `outbound_delivery_*` capabilities
 /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`. Bundles
-/// the injected facade double + the settings stores the production
+/// the injected service double + the settings stores the production
 /// `outbound_delivery_capabilities` wiring consumes, so the harness struct
 /// widens by ONE field instead of four. The auto-approve store and
 /// approval-request/lease stores are already held as sibling harness fields
 /// (`auto_approve_settings` / `approval_parts`) and re-used, not duplicated here.
 struct OutboundTargetToolsParts {
     /// Concrete double (not the trait object) so tests can read `set` calls back;
-    /// upcast to `Arc<dyn OutboundPreferencesProductFacade>` at wrap time.
-    facade: Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
+    /// upcast to `Arc<dyn OutboundPreferencesProductService>` at wrap time.
+    service: Arc<super::outbound_preferences::FakeOutboundPreferencesService>,
     requires_approval: bool,
-    tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-    persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+    tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
 }
 
 pub(crate) struct HostRuntimeCapabilityHarness {
-    runtime: Arc<dyn HostRuntime>,
-    approval_parts: Option<RebornLocalDevApprovalTestParts>,
-    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
+    /// Interior-mutable (not a plain `Arc`) so `install_trigger_active_run_lookup_for_test`
+    /// (#5886) can re-wrap it with `TriggerActiveRunLookupHostRuntime` AFTER
+    /// this harness is already `Arc`'d — the same chicken-and-egg constraint
+    /// `io`/`result_writer_io` document above `install_durable_capability_io`.
+    runtime: Mutex<Arc<dyn HostRuntime>>,
+    approval_parts: Option<RebornApprovalTestParts>,
+    /// The durable gate-record store BOTH this harness's capability port
+    /// (`GateRecord::Auth` save) and the turn executor (render-from-record read)
+    /// use — resolved ONCE here so the two never diverge onto separate
+    /// in-memory backends. Shares `approval_parts.gate_record_store` when present
+    /// (group case), else a per-harness `GateRecordStore` over a fresh
+    /// in-memory backend (single-shot case) — the same store the executor is
+    /// handed via `gate_record_store()`.
+    gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     /// Input-resolver half of this harness's capability io. Default (every
     /// existing constructor): the ephemeral `ProductLiveCapabilityIo` test
@@ -201,7 +253,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     provider_id: ExtensionId,
     additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
@@ -212,7 +264,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// request reaches this double. `None` for every other construction.
     real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
-    /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     /// Raw local-dev memory filesystem backing the user-profile source
@@ -247,16 +299,15 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// trait than `attachment_test_support`'s `LoopAttachmentReadPort`, though
     /// the same concrete reader implements both. `Some` only for
     /// `new_with_options`-built harnesses.
-    inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
-    /// Backing handles for the synthetic `outbound_delivery_*` capabilities
-    /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
-    /// `create_capability_port` wraps the port with the two capabilities via
-    /// `apply_synthetic_capability_wrappers` when this is `Some`.
+    inbound_attachment_reader: Option<Arc<dyn ironclaw_product::InboundAttachmentReader>>,
+    /// Backing handles for the synthetic outbound target list/set test seam.
+    /// `Some` only for `outbound_target_tools()`; route-current stays on the
+    /// normal first-party lane and uses the composed product service/store.
     outbound_target_tools: Option<OutboundTargetToolsParts>,
     /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
     /// capability-execution user from the RUN's owner/actor (mirroring
-    /// production `local_dev_visible_capability_request`,
-    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) instead of
+    /// production `visible_capability_request`,
+    /// `crates/ironclaw_reborn_composition/src/runtime.rs`) instead of
     /// this harness's single fixed `user_id`. That is what lets two distinct
     /// actors dispatching over the group's ONE shared capability backend run
     /// under DISTINCT `(tenant, user)` scopes, so memory, auto-approve, and
@@ -280,16 +331,16 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// dynamic `ToolPermissionOverride::AskEachTime` override on any capability
     /// via `set_ask_each_time_override_for_test`, independent of the
     /// `outbound_target_tools()`-only `OutboundTargetToolsParts` copy.
-    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
+    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>>,
     /// Local-dev persistent approval-policy store, captured unconditionally
     /// like `tool_permission_overrides`/`auto_approve_settings` above. `Some`
     /// only for `new_with_options`-built harnesses.
     persistent_approval_policies:
-        Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>>,
+        Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>>,
     /// SAME live trigger repository this harness's capability dispatch uses
     /// (Enabler B.3). `Some` only for `new_with_options`-built harnesses.
     /// Read via `trigger_repository_for_test` to wire
-    /// `RebornAutomationProductFacade` over the same repo a prior turn used.
+    /// `RebornAutomationProductService` over the same repo a prior turn used.
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
     /// The full `RebornServices` bundle this harness's `new_with_options` built
     /// (`build_reborn_services`), retained so a group can build the REAL
@@ -297,7 +348,38 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// piecewise test-support accessors. `Some` only for `new_with_options`-built
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
-    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    reborn_services: Option<ironclaw_reborn_composition::RebornRuntime>,
+    /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
+    /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
+    /// decide whether to call `install_trigger_active_run_lookup_for_test` once
+    /// the caller's real shared turn-state store is available.
+    trigger_active_run_lookup_requested: bool,
+}
+
+/// Resolve the durable gate-record store a `HostRuntimeCapabilityHarness` shares
+/// between its capability-port save and the turn executor's render-from-record
+/// read (§5.2.9): the group-shared `approval_parts` store when present, else a
+/// per-harness `GateRecordStore` over a fresh in-memory backend. Used
+/// by every `HostRuntimeCapabilityHarness` constructor so the save and read
+/// halves can never land on separate backends.
+pub(super) fn resolve_harness_gate_record_store(
+    approval_parts: &Option<RebornApprovalTestParts>,
+) -> Arc<dyn ironclaw_approvals::GateRecordStorePort> {
+    approval_parts
+        .as_ref()
+        .map(|parts| Arc::clone(&parts.gate_record_store))
+        .unwrap_or_else(fresh_in_memory_gate_record_store)
+}
+
+/// A per-harness `GateRecordStore` over a fresh in-memory backend —
+/// the `approval_parts`-less fallback used by single-shot profile constructors.
+pub(super) fn fresh_in_memory_gate_record_store() -> Arc<dyn ironclaw_approvals::GateRecordStorePort>
+{
+    Arc::new(ironclaw_approvals::GateRecordStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::new(),
+        )),
+    ))
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -345,6 +427,34 @@ impl HostRuntimeCapabilityHarness {
         label: &str,
         provider_scopes: &[&str],
     ) -> HarnessResult<()> {
+        self.seed_credential_account_with_token(
+            scope,
+            provider,
+            label,
+            provider_scopes,
+            &format!("itest-{provider}-token"),
+        )
+        .await
+    }
+
+    /// [`Self::seed_credential_account_with_material`] with the token material
+    /// chosen by the caller.
+    ///
+    /// Needed to tell one credential from another **on the wire**. A test that
+    /// seeds a credential, has the provider reject it, and then re-authenticates
+    /// cannot prove the resumed dispatch used the NEW credential if both seeds
+    /// mint the same string — the assertion would pass just as happily on a
+    /// stale-credential reuse bug, which is the whole failure it exists to
+    /// catch. Distinct material makes `assert_network_egress_header_contains`
+    /// discriminate.
+    pub(crate) async fn seed_credential_account_with_token(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+        token: &str,
+    ) -> HarnessResult<()> {
         let product_auth = self
             .product_auth
             .as_ref()
@@ -352,25 +462,21 @@ impl HostRuntimeCapabilityHarness {
         let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
         let provider_id = AuthProviderId::new(provider)?;
         let challenge = product_auth
-            .request_manual_token_setup(
-                ironclaw_reborn_composition::RebornManualTokenSetupRequest::new(
-                    scope.clone(),
-                    provider_id.clone(),
-                    CredentialAccountLabel::new(label)?,
-                    ironclaw_auth::AuthContinuationRef::SetupOnly,
-                    chrono::Utc::now() + chrono::Duration::minutes(10),
-                ),
-            )
+            .request_manual_token_setup(ironclaw_auth::RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                provider_id.clone(),
+                CredentialAccountLabel::new(label)?,
+                ironclaw_auth::AuthContinuationRef::SetupOnly,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ))
             .await
             .map_err(|error| format!("manual token setup failed: {error:?}"))?;
         let submitted = product_auth
-            .submit_manual_token(
-                ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
-                    scope.clone(),
-                    challenge.interaction_id,
-                    secrecy::SecretString::from(format!("itest-{provider}-token")),
-                ),
-            )
+            .submit_manual_token(ironclaw_auth::RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                secrecy::SecretString::from(token.to_string()),
+            ))
             .await
             .map_err(|error| format!("manual token submit failed: {error:?}"))?;
         if provider_scopes.is_empty() {
@@ -409,6 +515,50 @@ impl HostRuntimeCapabilityHarness {
             .await
             .map_err(|error| format!("scoped credential account creation failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// Flip every non-revoked credential account for `provider` under
+    /// `scope`'s credential-owner view to `Revoked`, returning how many were
+    /// flipped. Models an EXTERNAL revocation (the user revoked the grant on
+    /// the provider's side) through the same production transition the
+    /// refresh sweep's `report_terminal_refresh_status` performs:
+    /// `CredentialAccountService::update_status(.., Revoked)`. Companion to
+    /// [`Self::seed_credential_account_with_material`] for the #5878
+    /// activation-with-revoked-credential shape.
+    pub(crate) async fn revoke_credential_accounts_for_provider(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+    ) -> HarnessResult<usize> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
+        let accounts = product_auth
+            .credential_account_record_source_for_test()
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account enumeration for revoke failed: {error:?}"))?;
+        let mut revoked = 0;
+        for account in accounts {
+            if account.provider != provider_id || account.status == CredentialAccountStatus::Revoked
+            {
+                continue;
+            }
+            // Pass the account's OWN stored scope: `update_status` requires
+            // full scope equality, and the stored scope carries the minting
+            // invocation id no reconstructed scope can reproduce (same
+            // pattern as the refresh sweep's terminal-status write).
+            product_auth
+                .credential_account_service()
+                .update_status(&account.scope, account.id, CredentialAccountStatus::Revoked)
+                .await
+                .map_err(|error| format!("revoking account {} failed: {error:?}", account.id))?;
+            revoked += 1;
+        }
+        Ok(revoked)
     }
 
     /// The fixed user this harness dispatches first-party capabilities under
@@ -517,42 +667,107 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            local_runtime_identity,
             seed_extension_credentials,
             skill_activation_tenant,
-            outbound_target_facade,
+            system_skill_fixtures,
+            outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
             durable_capability_io,
+            trigger_active_run_lookup_requested,
+            fixture_extension_dirs,
+            native_extension_factories,
+            channel_extension_bindings,
+            recording_network_egress,
+            google_oauth_backend_for_test,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        for fixture in &system_skill_fixtures {
+            write_system_skill_fixture(
+                &storage_root,
+                &fixture.name,
+                &fixture.description,
+                &fixture.prompt,
+            )?;
+        }
+        let has_fixture_extensions = !fixture_extension_dirs.is_empty();
+        for (source, extension_id) in fixture_extension_dirs {
+            copy_dir_recursive(
+                &source,
+                &storage_root.join("system/extensions").join(extension_id),
+            )?;
+        }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
             let host_home_root = root.path().join("host-home");
             std::fs::create_dir_all(&host_home_root)?;
             ironclaw_reborn_composition::local_runtime_build_input_with_options(
-                ironclaw_reborn_composition::RebornCompositionProfile::LocalDevYolo,
+                ironclaw_reborn_composition::RebornCompositionProfile::StandaloneUnrestricted,
                 service_label,
                 storage_root,
-                ironclaw_reborn_composition::RebornLocalRuntimeProfileOptions {
+                ironclaw_reborn_composition::RebornRuntimeProfileOptions {
                     confirm_host_access: true,
                 },
             )?
-            .with_local_dev_confirmed_host_home_root(host_home_root)
+            .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else {
-            RebornBuildInput::local_dev(service_label, storage_root)
+            ironclaw_reborn_composition::local_filesystem_build_input(service_label, storage_root)
         };
+        if let Some((tenant_id, agent_id)) = &local_runtime_identity {
+            input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
+        }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
+        }
+        input = input.with_bundled_first_party_for_test();
+        if !native_extension_factories.is_empty() {
+            input = input.with_native_extension_factories(native_extension_factories);
+        }
+        if !channel_extension_bindings.is_empty() {
+            input = input.with_channel_extension_bindings(channel_extension_bindings);
+        }
+        if has_fixture_extensions {
+            // Fixture packages model HOST-BUNDLED extensions (overview §8), so
+            // their `first_party_requested` trust must survive filesystem
+            // discovery; without this the catalog loader stamps them
+            // `InstalledLocal` and skips them (#5459 anti-laundering rule),
+            // and lifecycle installs fail with "available extension was not
+            // found".
+            input = input.with_trusted_fixture_extensions_for_test();
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
         }
-        let services = build_reborn_services(input).await?;
+        if google_oauth_backend_for_test {
+            // Dummy but well-formed: only presence on `oauth_provider_configs`
+            // feeds `google_oauth_configured` (factory.rs) — the readiness-map
+            // check has no reason to touch the real client id/secret values.
+            let google_client = OAuthClientConfig::new(
+                "itest-google-client-id.apps.googleusercontent.com",
+                "http://127.0.0.1/oauth/callback/google",
+                None,
+            )
+            .map_err(|error| format!("test google oauth client config: {error}"))?;
+            input =
+                input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
+        }
+        let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if let Some((tenant_id, agent_id)) = local_runtime_identity {
+            runtime_input =
+                runtime_input.with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: service_label.to_string(),
+                    reply_target_binding_id: service_label.to_string(),
+                });
+        }
+        let services = build_runtime(runtime_input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -560,25 +775,26 @@ impl HostRuntimeCapabilityHarness {
         // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
-        for package in &activate_bundled_extensions_for_test {
+        for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package)
+                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
                 )??;
         }
-        let approval_parts = services.local_dev_approval_test_parts();
-        let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
+        let approval_parts = services.standalone_approval_test_parts();
+        let auto_approve_settings = services.standalone_auto_approve_settings_for_test();
         // Capture the profile filesystem + project service + attachment support
         // before `services.host_runtime` is moved out below (E-PROFILE / E-PROJ /
         // C-ATTACH seams).
-        let profile_filesystem = services.local_dev_profile_filesystem_for_test();
+        let profile_filesystem = services.standalone_profile_filesystem_for_test();
         // C-SYNTH `project_create` fault-injection seam: wrap the real service
         // in `FaultInjectingProjectService` only when the harness opted in
         // (`with_project_service_fault_injection`) — every other harness keeps
         // the real service unwrapped and behaves exactly as before.
         let project_service: Option<Arc<dyn ProjectService>> =
-            services.local_dev_project_service_for_test().map(|inner| {
+            services.standalone_project_service_for_test().map(|inner| {
                 if project_service_fault_injection {
                     super::project_service_fault::FaultInjectingProjectService::wrapping(inner)
                         as Arc<dyn ProjectService>
@@ -589,7 +805,7 @@ impl HostRuntimeCapabilityHarness {
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
-        let product_auth = services.product_auth.clone();
+        let product_auth = Some(services.product_auth_for_test());
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
         // `skill_activation_tools`). Built with the caller-supplied tenant
@@ -602,37 +818,37 @@ impl HostRuntimeCapabilityHarness {
         }) {
             let tenant = skill_activation_tenant
                 .ok_or("skill_activation_tools harness requires with_skill_activation_tenant")?;
-            ironclaw_reborn_composition::test_support::build_local_dev_skill_context_source_for_test(
+            ironclaw_reborn_composition::test_support::build_skill_context_source_for_test(
                 &services, &tenant, true,
             )
             .map(Arc::new)
         } else {
             None
         };
-        let attachment_test_support = services.local_dev_attachment_test_support_for_test();
+        let attachment_test_support = services.standalone_attachment_test_support_for_test();
         // W5-WEBUI-API-1 (attachments scenario): capture the WebUI-facing
         // reader view alongside the model-injection one above.
-        let inbound_attachment_reader = services.local_dev_inbound_attachment_reader_for_test();
+        let inbound_attachment_reader = services.standalone_inbound_attachment_reader_for_test();
         // W5-WEBUI-API-1 Enabler B.3: capture the SAME live, shared trigger
         // repository the capability dispatch path uses, before
         // `services.host_runtime` is moved out below.
-        let trigger_repository = services.local_dev_shared_trigger_repository_for_test();
+        let trigger_repository = services.standalone_shared_trigger_repository_for_test();
         // W4-ASK-EACH-ONCE: capture the local-dev per-tool permission override
         // store unconditionally (mirrors `auto_approve_settings` above), not just
-        // for `outbound_target_tools()`'s narrower `Some((facade, ..))` arm below
+        // for `outbound_target_tools()`'s narrower `Some((service, ..))` arm below
         // -- any host-runtime-backed harness/group can now install a per-capability
         // `AskEachTime` override via `set_ask_each_time_override_for_test`.
-        let tool_permission_overrides = services.local_dev_tool_permission_overrides_for_test();
+        let tool_permission_overrides = services.standalone_tool_permission_overrides_for_test();
         // W5-WEBUI-API-1 (settings scenario): capture unconditionally, mirroring
         // `tool_permission_overrides` above.
         let persistent_approval_policies =
-            services.local_dev_persistent_approval_policies_for_test();
-        // C-SYNTH outbound: pair the injected facade double with the local-dev
+            services.standalone_persistent_approval_policies_for_test();
+        // C-SYNTH outbound: pair the injected service double with the local-dev
         // settings stores production's `outbound_delivery_capabilities` consumes,
         // captured from `RebornServices` before the `host_runtime` move. Only
-        // `outbound_target_tools()` supplies the facade.
-        let outbound_target_tools = match outbound_target_facade {
-            Some((facade, requires_approval)) => {
+        // `outbound_target_tools()` supplies the service.
+        let outbound_target_tools = match outbound_target_service {
+            Some((service, requires_approval)) => {
                 let tool_permission_overrides = tool_permission_overrides
                     .clone()
                     .ok_or("outbound_target_tools requires a local-dev tool-override store")?;
@@ -640,7 +856,7 @@ impl HostRuntimeCapabilityHarness {
                     .clone()
                     .ok_or("outbound_target_tools requires a local-dev persistent-policy store")?;
                 Some(OutboundTargetToolsParts {
-                    facade,
+                    service,
                     requires_approval,
                     tool_permission_overrides,
                     persistent_approval_policies,
@@ -660,16 +876,23 @@ impl HostRuntimeCapabilityHarness {
         // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
         // not just the pieces already extracted above.
         let runtime = services
-            .host_runtime
-            .clone()
+            .host_runtime_for_test()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
             Arc::clone(&pending_approval_scopes),
         ));
+        // Resolve the durable gate-record store ONCE (§5.2.9): the capability
+        // port's `GateRecord::Auth` save and the turn executor's
+        // render-from-record read MUST hit the same store, so a single-shot
+        // harness (no `approval_parts`) cannot mint a fresh fallback per
+        // capability-port build — it would strand the saved record where the
+        // executor never reads.
+        let gate_record_store = resolve_harness_gate_record_store(&approval_parts);
         Ok(Self {
-            runtime,
+            runtime: Mutex::new(runtime),
             approval_parts,
+            gate_record_store,
             auto_approve_settings,
             pending_approval_scopes,
             io: Mutex::new(io),
@@ -691,7 +914,7 @@ impl HostRuntimeCapabilityHarness {
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
-            network_egress: None,
+            network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
             profile_filesystem,
@@ -706,6 +929,7 @@ impl HostRuntimeCapabilityHarness {
             persistent_approval_policies,
             trigger_repository,
             reborn_services: Some(services),
+            trigger_active_run_lookup_requested,
         })
     }
 
@@ -717,29 +941,35 @@ impl HostRuntimeCapabilityHarness {
     /// runtime), so parking sits outside the existing recorder at the same
     /// `HostRuntime` trait-object seam.
     pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
-        self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
+        let inner = self
+            .runtime
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.runtime = Mutex::new(Arc::new(ParkingHostRuntime::new(inner, gate)));
         self
     }
 
     /// The full `RebornServices` bundle this harness was built from, if built
     /// via `new_with_options`. Lets a caller build the REAL approval/auth
     /// interaction services over this harness's own local-dev composition
-    /// (`RebornServices::local_dev_approval_interaction_service_with_turn_state_for_test`
+    /// (`RebornServices::standalone_approval_interaction_service_with_turn_state_for_test`
     /// et al.), e.g. so a group can wire genuine `submit_inbound`-driven
     /// gate dispatch instead of the harness's direct-resume test shortcut.
     pub(crate) fn reborn_services_for_test(
         &self,
-    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
         self.reborn_services.as_ref()
     }
 
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            trajectory_observer,
         })
     }
 
@@ -765,22 +995,22 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Durable tool-result projection seam (issue #5838): swap this
-    /// harness's capability io for the REAL `LocalDevCapabilityIo`
-    /// (`ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test`,
+    /// harness's capability io for the REAL `StagedCapabilityIo`
+    /// (`ironclaw_reborn_composition::test_support::staged_capability_io_for_test`,
     /// which mirrors production's `capability_wiring`), wired over
     /// `thread_service`.
     ///
     /// `thread_service` MUST be the SAME `SessionThreadService` the calling
     /// group's turns actually dispatch against (`group.rs`'s `into_group`
     /// builds it as `group_thread_harness.service`, BEFORE this harness's
-    /// capability parts are assembled) -- `LocalDevCapabilityIo::write_capability_result`
+    /// capability parts are assembled) -- `StagedCapabilityIo::write_capability_result`
     /// resolves the run's thread scope and appends the durable record keyed
     /// by `run_context.thread_id`; a different (e.g. this harness's own
     /// local-dev-only) thread service would never have that thread and every
     /// durable append would fail closed as `UnknownThread` ->
     /// `AgentLoopHostErrorKind::Unavailable` -> a terminal
     /// `HostUnavailable { stage: Capability }` for the whole run (see
-    /// `.claude/rules/agent-loop-capabilities.md`).
+    /// capability-access contract).
     ///
     /// Interior mutability (not a builder field) because that real thread
     /// service is only constructed in `group.rs`'s `into_group`, AFTER
@@ -791,18 +1021,84 @@ impl HostRuntimeCapabilityHarness {
     fn install_durable_capability_io(
         &self,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) {
         let (io, result_writer_io) =
-            ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test(
+            ironclaw_reborn_composition::test_support::staged_capability_io_with_observer_for_test(
                 thread_service.clone(),
                 self.user_id.clone(),
+                trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
         *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
     }
 
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    /// #5886: re-wire `builtin.trigger_list` dispatch to a REAL
+    /// `TriggerActiveRunLookup` built over `turn_store` — the caller's actual
+    /// shared turn-state store, where the group's real triggered runs (and
+    /// their `BlockedApproval` gates) are recorded. This harness's own
+    /// baked-in lookup (from `new_with_options` -> `build_reborn_services`)
+    /// is scoped to a DIFFERENT, disjoint turn-state store this harness's
+    /// capability dispatch never actually writes through in group-based
+    /// tests (`group.rs`'s `into_group` routes real dispatch over its own
+    /// shared coordinator/turn_store), so it can never see the run and
+    /// `trigger_list` always omits `active_hold`.
+    ///
+    /// `turn_store` MUST be the SAME store the caller's runs actually persist
+    /// to (`group.rs`'s `GroupSharedStorage.turn_store`) — mirrors
+    /// `install_durable_capability_io`'s same interior-mutability constraint:
+    /// that store only exists AFTER this harness is already built and `Arc`'d,
+    /// so this runs post-construction, from `HarnessCapabilityMode::into_parts`,
+    /// gated on `trigger_active_run_lookup_requested`.
+    fn install_trigger_active_run_lookup_for_test(
+        &self,
+        process_system: &ironclaw_runner::runtime::ProcessRuntimeSystem,
+    ) -> HarnessResult<()> {
+        let repo = self
+            .trigger_repository_for_test()
+            .ok_or("trigger_active_run_lookup wiring requires a captured trigger repository")?;
+        let active_run_lookup =
+            ironclaw_reborn_composition::test_support::standalone_trigger_active_run_lookup_for_test(
+                process_system.lifecycle(),
+            );
+        let trigger_lookup_storage_root = self.root.path().join("trigger-active-run-lookup");
+        std::fs::create_dir_all(&trigger_lookup_storage_root)?;
+        let trigger_runtime = assembly::standalone_trigger_only_host_runtime(
+            trigger_lookup_storage_root,
+            repo,
+            active_run_lookup,
+        )?;
+        let inner = self.runtime.lock().unwrap().clone();
+        *self.runtime.lock().unwrap() = Arc::new(TriggerActiveRunLookupHostRuntime::new(
+            inner,
+            trigger_runtime,
+            CapabilityId::new(ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID)?,
+        ));
+        Ok(())
+    }
+
+    /// Route source-delivery lookup through the same turn-state store the
+    /// group coordinator writes. The production binary already uses one store
+    /// for both paths; only the integration group composes its coordinator
+    /// after the capability harness exists, so it must fill this late-bound
+    /// test seam before the first run.
+    fn install_trigger_source_processes_for_test(
+        &self,
+        process_system: &ironclaw_runner::runtime::ProcessRuntimeSystem,
+    ) -> HarnessResult<()> {
+        let runtime = self
+            .reborn_services_for_test()
+            .ok_or("trigger source turn-state wiring requires composed Reborn runtime")?;
+        ironclaw_reborn_composition::test_support::rebind_standalone_trigger_source_turn_state_for_test(
+            runtime,
+            process_system.lifecycle(),
+            Arc::new(process_system.agent_turn_runtime()),
+        )
+        .map_err(Into::into)
+    }
+
+    fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -842,7 +1138,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Snapshot of every command string recorded by the inert process port.
-    /// Empty when the harness uses the live `LocalHostProcessPort`
+    /// Empty when the harness uses the live `HostProcessPort`
     /// (`.with_live_shell()` path).
     pub(crate) fn process_commands(&self) -> Vec<String> {
         self.process_port
@@ -876,6 +1172,20 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .ok_or("host runtime harness has no recording network egress to script")?
             .push_status(status);
+        Ok(())
+    }
+
+    /// Enqueue one exact status/body response on the recording network lane.
+    /// Used when a WASM guest's error classification depends on both fields.
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        self.network_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording network egress to script")?
+            .push_response(status, body);
         Ok(())
     }
 
@@ -931,7 +1241,7 @@ impl HostRuntimeCapabilityHarness {
         self.workspace_root.join(relative.trim_start_matches('/'))
     }
 
-    pub(crate) async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -975,11 +1285,11 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Deny a pending local-dev approval gate (the model-declined path). Mirrors
-    /// [`approve_local_dev_gate`](Self::approve_local_dev_gate) but resolves the
+    /// [`approve_standalone_gate`](Self::approve_standalone_gate) but resolves the
     /// persisted request to `Denied` (no lease issued) via `ApprovalResolver::deny`.
     /// The caller then resumes the run with `GateResumeDisposition::Denied` so the
     /// executor surfaces a non-retryable authorization failure to the model.
-    pub(crate) async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -1015,10 +1325,23 @@ impl HostRuntimeCapabilityHarness {
     /// `runtime.rs:2799`) and genuinely pauses instead of failing.
     pub(crate) fn approval_requests_store(
         &self,
-    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>> {
         self.approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
+    }
+
+    /// The durable gate-record store this harness's capability port persists
+    /// `GateRecord::Auth` into (§5.2.9). The group threads this SAME `Arc` into
+    /// `DefaultPlannedRuntimeParts.gate_record_store` so the turn executor
+    /// re-reads an auth block's `credential_requirements` from the exact record
+    /// the capability port saved. Always `Some` — resolved once at construction
+    /// (shared `approval_parts` store, or a per-harness fallback) — mirroring
+    /// production, where `local_runtime` always wires it.
+    pub(crate) fn gate_record_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>> {
+        Some(Arc::clone(&self.gate_record_store))
     }
 
     /// The user id this capability harness's first-party tools execute under.
@@ -1048,15 +1371,15 @@ impl HostRuntimeCapabilityHarness {
         self.project_service.clone()
     }
 
-    /// C-SYNTH outbound: the injected facade double, for read-back that a
-    /// `target_set` actually reached the facade seam
+    /// C-SYNTH outbound: the injected service double, for read-back that a
+    /// `target_set` actually reached the service seam
     /// (`recorded_set_target_ids`). `Some` only for `outbound_target_tools()`.
-    pub(crate) fn outbound_preferences_facade_for_test(
+    pub(crate) fn outbound_preferences_service_for_test(
         &self,
-    ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>> {
+    ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesService>> {
         self.outbound_target_tools
             .as_ref()
-            .map(|parts| Arc::clone(&parts.facade))
+            .map(|parts| Arc::clone(&parts.service))
     }
 
     /// C-SYNTH outbound: persist a `Disabled` per-tool permission override for
@@ -1150,7 +1473,7 @@ impl HostRuntimeCapabilityHarness {
     /// stores persist under (`<tempdir>/local-dev`). Mirrors the `storage_root`
     /// computed inline in `new_with_options`. A durability test reopens a fresh,
     /// independent store at this path (see
-    /// `open_local_dev_extension_installation_store_for_test`) to prove capability
+    /// `open_standalone_extension_installation_store_for_test`) to prove capability
     /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
     /// Tests only.
     pub(crate) fn storage_root_for_test(&self) -> PathBuf {
@@ -1159,9 +1482,9 @@ impl HostRuntimeCapabilityHarness {
 
     /// C-DURABLE: resolve `gate_ref` (a `"gate:approval-<id>"` local-dev
     /// approval gate) to the `(ApprovalRequestId, ResourceScope)` pair a fresh,
-    /// independently-reopened `ApprovalRequestStore::get`/`read_versioned` call
-    /// needs. Reuses the SAME private lookup `approve_local_dev_gate`/
-    /// `deny_local_dev_gate` already use (`approval_request_id_from_gate_ref` +
+    /// independently-reopened `ApprovalRequestStorePort::get`/`read_versioned` call
+    /// needs. Reuses the SAME private lookup `approve_standalone_gate`/
+    /// `deny_standalone_gate` already use (`approval_request_id_from_gate_ref` +
     /// `pending_approval_scopes`) so a durability test's scope construction can
     /// never drift from the live approve/deny path. Tests only.
     pub(crate) fn approval_request_scope_for_test(
@@ -1197,16 +1520,7 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("system")
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
+        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
         Ok(())
     }
 
@@ -1243,6 +1557,36 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// C-SKILL baseline: seed the same user-scoped bundle shape as
+    /// [`Self::seed_user_skill_for_test`], then add the URL-install provenance
+    /// sidecar that makes the production filesystem source downgrade its trust
+    /// to `Installed`. This drives the caller-level "listed but not
+    /// model-activatable" behavior without bypassing descriptor discovery.
+    pub(crate) fn seed_installed_user_skill_for_test(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        self.seed_user_skill_for_test(tenant, user, name, description, prompt)?;
+        let metadata_path = self
+            .storage_root_for_test()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("users")
+            .join(user.as_str())
+            .join("skills")
+            .join(name)
+            .join(".ironclaw-install.json");
+        std::fs::write(
+            metadata_path,
+            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
+        )?;
+        Ok(())
+    }
+
     /// C-ATTACH: the attachment read port + inbound lander over this harness's
     /// local-dev workspace filesystem, for wiring `DefaultPlannedRuntimeParts.attachment_read_port`
     /// and `DefaultInboundTurnService::with_inbound_attachments` — mirrors
@@ -1258,7 +1602,7 @@ impl HostRuntimeCapabilityHarness {
     /// `RebornServices::with_inbound_attachment_reader`.
     pub(crate) fn inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
         self.inbound_attachment_reader.clone()
     }
 
@@ -1275,7 +1619,7 @@ impl HostRuntimeCapabilityHarness {
     /// override store, for wiring `RebornServices::with_operator_approval_config`.
     pub(crate) fn tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
         self.tool_permission_overrides.clone()
     }
 
@@ -1283,7 +1627,7 @@ impl HostRuntimeCapabilityHarness {
     /// store, for wiring `RebornServices::with_operator_approval_config`.
     pub(crate) fn auto_approve_settings_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>> {
         self.auto_approve_settings.clone()
     }
 
@@ -1292,17 +1636,17 @@ impl HostRuntimeCapabilityHarness {
     /// `RebornServices::with_operator_approval_config`.
     pub(crate) fn persistent_approval_policies_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>> {
         self.persistent_approval_policies.clone()
     }
 
     /// Assembles the recording `LoopCapabilityPort` for one run by driving the
     /// REAL production capability-port factory
-    /// (`create_refreshing_local_dev_capability_port`, harness-port-seam P1
+    /// (`create_refreshing_capability_port`, harness-port-seam P1
     /// Change 2) with this harness's fields, then wrapping the returned port
     /// in the invocation-recording port (outermost, unchanged). Every
     /// production wrap layer (synthetic capabilities, surface disclosure,
-    /// external tools, StaleSurface refresh, the shared `LocalDevCapabilityIo`)
+    /// external tools, StaleSurface refresh, the shared `StagedCapabilityIo`)
     /// is now exercised automatically — this method no longer hand-rebuilds
     /// any of them. Owned here (rather than in the
     /// `HostRuntimeHarnessCapabilityPortFactory` test double) because the
@@ -1312,13 +1656,14 @@ impl HostRuntimeCapabilityHarness {
     /// this method.
     ///
     /// The returned port refreshes itself internally
-    /// (`RefreshingLocalDevCapabilityPort`'s own `StaleSurface` recovery), so
+    /// (`RefreshingCapabilityPort`'s own `StaleSurface` recovery), so
     /// there is no harness-level refresh wrapper layered on top anymore — one
     /// refresh mechanism (production's), not two.
     pub(crate) async fn create_recording_capability_port(
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1327,7 +1672,7 @@ impl HostRuntimeCapabilityHarness {
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
         // ONE shared io, both roles: production assigns a single
-        // `LocalDevCapabilityIo` to both `input_resolver` and `result_writer`
+        // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
         // `RecordingCapabilityResultWriter` implements both traits over
         // `self.io` (recording only result writes) — `Arc::clone` the SAME
@@ -1354,44 +1699,70 @@ impl HostRuntimeCapabilityHarness {
         // requests directly to this store rather than through the host
         // runtime, so `RecordingHostRuntime` never sees their scope — the
         // wrapper restores the `pending_approval_scopes` bookkeeping
-        // `approve_local_dev_gate` / `deny_local_dev_gate` depend on while
+        // `approve_standalone_gate` / `deny_standalone_gate` depend on while
         // delegating every method to the inner store (single source of truth).
-        let inner_approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> = self
+        let inner_approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> = self
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
-            .unwrap_or_else(|| Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new()));
-        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store())
+            });
+        let approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
             Arc::new(super::doubles::RecordingApprovalRequestStore {
                 inner: inner_approval_requests,
                 pending_approval_scopes: Arc::clone(&self.pending_approval_scopes),
             });
-        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> = self
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> = self
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.capability_leases))
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_authorization::InMemoryCapabilityLeaseStore::new())
+                Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
-        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        // Durable gate-record store (§5.3 Stage 2a-i) — the SAME `Arc` resolved
+        // once at construction and handed to the turn executor via
+        // `gate_record_store()`, so the capability port's `GateRecord::Auth` save
+        // and the executor's render-from-record read never split onto separate
+        // backends (even for a single-shot harness with no `approval_parts`).
+        let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> =
+            Arc::clone(&self.gate_record_store);
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = self
+            .approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.replay_payload_store))
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
+                    ironclaw_reborn_composition::wrap_scoped(Arc::new(
+                        ironclaw_filesystem::InMemoryBackend::new(),
+                    )),
+                ))
+            });
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryCapabilityPermissionOverrideStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+                )
             });
-        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
             self.auto_approve_settings.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store(),
+                )
             });
         let persistent_approval_policies: Arc<
-            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+            dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
         > = self
             .persistent_approval_policies
             .clone()
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+                )
             });
-        let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
-            Arc::clone(&parts.facade)
-                as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>
+        let outbound_preferences_service = self.outbound_target_tools.as_ref().map(|parts| {
+            Arc::clone(&parts.service)
+                as Arc<dyn ironclaw_product::OutboundPreferencesProductService>
         });
         let outbound_delivery_target_set_requires_approval = self
             .outbound_target_tools
@@ -1399,8 +1770,8 @@ impl HostRuntimeCapabilityHarness {
             .map(|parts| parts.requires_approval)
             .unwrap_or(false);
         // Grantee = the loop-driver execution extension — the SAME principal
-        // production's `local_dev_visible_capability_request` executes under
-        // and mints extension grants for (`LocalDevExtensionSurface::grants`);
+        // production's `visible_capability_request` executes under
+        // and mints extension grants for (`ExtensionCapabilitySurface::grants`);
         // a `Principal::User` grantee (the pre-seam harness's choice, matched
         // to its removed hand-built User-principal authority) is skipped by
         // authorization under the production request. Computed early (moved
@@ -1411,11 +1782,11 @@ impl HostRuntimeCapabilityHarness {
             ironclaw_loop_host::loop_driver_execution_extension_id(run_context)?;
         // Which providers ALREADY have a production trust decision arriving
         // through the real activation handshake (`extension_surface_source`'s
-        // `LocalDevExtensionSurface::provider_trust()`, same
+        // `ExtensionCapabilitySurface::provider_trust()`, same
         // `extension_management` + grantee production's factory reads) --
-        // queried the SAME way `build_local_dev_extension_management_for_test`
+        // queried the SAME way `build_extension_management_for_test`
         // -> `extension_surface_source` will read it downstream in
-        // `create_refreshing_local_dev_capability_port_for_test`. NOT the same
+        // `create_refreshing_capability_port_for_test`. NOT the same
         // as "this harness has `reborn_services` wired": a harness can have
         // `reborn_services` (so `new_with_options`) while only ever calling
         // the `publish_bundled_extension_for_test` SHORTCUT (registers the
@@ -1425,8 +1796,11 @@ impl HostRuntimeCapabilityHarness {
         // this must be an empty set for it, not treated as activation-backed.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
+                // #6520 folded caller-scoping into the lifecycle facade the
+                // method reads through; provider trust decisions are
+                // tenant-level activation facts, so no per-run caller arg.
                 match services
-                    .local_dev_active_extension_authority_for_test(&execution_extension)
+                    .standalone_active_extension_authority_for_test(&execution_extension)
                     .await
                 {
                     Some(active_authority) => active_authority
@@ -1455,9 +1829,9 @@ impl HostRuntimeCapabilityHarness {
         );
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
-        // builtin/extension grant otherwise). Excludes the synthetic-capability
-        // ids, which are surfaced by wrapping the port directly. See
-        // `additional_capability_grants` doc for the invariant.
+        // builtin/extension grant otherwise). Excludes only capabilities still
+        // surfaced by wrapping the port directly; route-current deliberately
+        // remains a normal first-party capability and receives a real grant.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
@@ -1494,91 +1868,95 @@ impl HostRuntimeCapabilityHarness {
                 }
             })
             .collect();
-        let parts =
-            ironclaw_reborn_composition::test_support::RefreshingLocalDevCapabilityPortTestParts {
-                runtime: Arc::clone(&self.runtime),
-                run_context: run_context.clone(),
-                fallback_user_id: dispatch_user,
-                // All four mount views = this harness's single `mounts` view.
-                // Production splits skill/memory/system-extensions mounts off
-                // the local-dev workspace root, but this harness has ONE
-                // profile-built view and the pre-seam behavior was "every
-                // capability executes (and is granted) under `self.mounts`
-                // unless `capability_mount_overrides` says otherwise" — a
-                // `MountView::default()` here would instead OVERRIDE the
-                // memory/skill capability families down to an empty view via
-                // `build_inner`'s per-domain `with_capability_execution_mount`
-                // special-cases, silently blinding `builtin.memory_*`.
-                workspace_mounts: self.mounts.clone(),
-                skill_mounts: self.mounts.clone(),
-                memory_mounts: self.mounts.clone(),
-                system_extensions_lifecycle_mounts: self.mounts.clone(),
-                input_resolver,
-                result_writer,
-                milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
-                skill_activation_source: self.skill_activation_source.clone(),
-                project_service,
-                // result_read (durable tool-result projection seam, issue
-                // #5838): production always wires the run's session thread
-                // service into the synthetic `result_read` capability, so
-                // this is a required (non-`Option`) field. Harnesses that
-                // opted into `.with_durable_capability_io()` populate
-                // `durable_capability_io_thread_service` with the REAL group
-                // thread service; every other harness gets a fresh in-memory
-                // no-op service, mirroring the `project_service`/
-                // `tool_permission_overrides` "no opinion -> default" pattern
-                // above -- `result_read` is simply never granted for those
-                // harnesses (not in `capability_ids`), so the default is
-                // never actually read.
-                thread_service: self
-                    .durable_capability_io_thread_service
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap_or_else(|| {
-                        Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
-                    }),
-                trajectory_observer: None,
-                // Feeds the same active-extension authority (installed +
-                // activated extensions like `github`, `gmail`, MCP servers)
-                // production's `capability_wiring` folds into every refresh
-                // (`runtime/local_dev.rs:132-133`); `None` when this harness
-                // was built without `RebornServices` (mirrors the old
-                // `local_dev_active_extension_authority_for_test` early-return).
-                extension_management: self.reborn_services.as_ref().and_then(|services| {
-                    ironclaw_reborn_composition::test_support::build_local_dev_extension_management_for_test(
-                        services,
-                    )
+        let parts = ironclaw_reborn_composition::test_support::RefreshingCapabilityPortTestParts {
+            runtime: self.runtime.lock().unwrap().clone(),
+            run_context: run_context.clone(),
+            fallback_user_id: dispatch_user,
+            // All four mount views = this harness's single `mounts` view.
+            // Production splits skill/memory/system-extensions mounts off
+            // the local-dev workspace root, but this harness has ONE
+            // profile-built view and the pre-seam behavior was "every
+            // capability executes (and is granted) under `self.mounts`
+            // unless `capability_mount_overrides` says otherwise" — a
+            // `MountView::default()` here would instead OVERRIDE the
+            // memory/skill capability families down to an empty view via
+            // `build_inner`'s per-domain `with_capability_execution_mount`
+            // special-cases, silently blinding `builtin.memory_*`.
+            workspace_mounts: self.mounts.clone(),
+            skill_mounts: self.mounts.clone(),
+            memory_mounts: self.mounts.clone(),
+            system_extensions_lifecycle_mounts: self.mounts.clone(),
+            input_resolver,
+            result_writer,
+            milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
+            skill_activation_source: self.skill_activation_source.clone(),
+            project_service,
+            // result_read (durable tool-result projection seam, issue
+            // #5838): production always wires the run's session thread
+            // service into the synthetic `result_read` capability, so
+            // this is a required (non-`Option`) field. Harnesses that
+            // opted into `.with_durable_capability_io()` populate
+            // `durable_capability_io_thread_service` with the REAL group
+            // thread service; every other harness gets a fresh in-memory
+            // no-op service, mirroring the `project_service`/
+            // `tool_permission_overrides` "no opinion -> default" pattern
+            // above -- `result_read` is simply never granted for those
+            // harnesses (not in `capability_ids`), so the default is
+            // never actually read.
+            thread_service: self
+                .durable_capability_io_thread_service
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| {
+                    Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
                 }),
-                outbound_preferences_facade,
-                outbound_delivery_target_set_requires_approval,
-                tool_permission_overrides,
-                auto_approve_settings,
-                persistent_approval_policies,
-                approval_requests,
-                capability_leases,
-                // `self.capability_mount_overrides` is the SAME per-capability
-                // mount-override list production's `skill_mounts`/`memory_mounts`/
-                // `system_extensions_lifecycle_mounts` special-cases apply
-                // automatically for their own fixed capability-id lists; passing
-                // it here too (rather than splitting it across those three
-                // fields, which this harness has no per-domain tracking for)
-                // reaches the SAME final per-capability mount via the override
-                // map, applied after those defaults in `build_inner`.
-                capability_execution_mount_overrides: self
-                    .capability_mount_overrides
-                    .iter()
-                    .cloned()
-                    .collect(),
-                additional_provider_trust,
-                // Whole-set narrowing over the FULL granted-capability set to
-                // this harness's exhaustive `capability_ids` allowlist,
-                // including the empty case (zero grants). See
-                // `additional_capability_grants` doc for the invariant.
-                capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
-                additional_capability_grants,
-            };
-        let port = ironclaw_reborn_composition::test_support::create_refreshing_local_dev_capability_port_for_test(parts)
+            trajectory_observer,
+            // Feeds the same active-extension authority (installed +
+            // activated extensions like `github`, `gmail`, MCP servers)
+            // production's `capability_wiring` folds into every refresh
+            // (`runtime/standalone.rs:132-133`); `None` when this harness
+            // was built without `RebornServices` (mirrors the old
+            // `standalone_active_extension_authority_for_test` early-return).
+            extension_management: self.reborn_services.as_ref().and_then(|services| {
+                ironclaw_reborn_composition::test_support::build_extension_management_for_test(
+                    services,
+                )
+            }),
+            outbound_preferences_service,
+            outbound_delivery_target_set_requires_approval,
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            approval_requests,
+            capability_leases,
+            gate_record_store,
+            replay_payload_store,
+            // `self.capability_mount_overrides` is the SAME per-capability
+            // mount-override list production's `skill_mounts`/`memory_mounts`/
+            // `system_extensions_lifecycle_mounts` special-cases apply
+            // automatically for their own fixed capability-id lists; passing
+            // it here too (rather than splitting it across those three
+            // fields, which this harness has no per-domain tracking for)
+            // reaches the SAME final per-capability mount via the override
+            // map, applied after those defaults in `build_inner`.
+            capability_execution_mount_overrides: self
+                .capability_mount_overrides
+                .iter()
+                .cloned()
+                .collect(),
+            additional_provider_trust,
+            // Whole-set narrowing over the FULL granted-capability set to
+            // this harness's exhaustive `capability_ids` allowlist,
+            // including the empty case (zero grants). See
+            // `additional_capability_grants` doc for the invariant.
+            capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
+            additional_capability_grants,
+        };
+        let port =
+            ironclaw_reborn_composition::test_support::create_refreshing_capability_port_for_test(
+                parts,
+            )
             .await?;
         Ok(Arc::new(RecordingDelegatingCapabilityPort {
             inner: port,
@@ -1611,8 +1989,8 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// The capability-execution `UserId` for one run. Mirrors production
-    /// `local_dev_visible_capability_request`'s owner→actor→fallback resolution
-    /// (`runtime/local_dev.rs`): when [`scope_capability_by_run_owner`] is set,
+    /// `visible_capability_request`'s owner→actor→fallback resolution
+    /// (`runtime/standalone.rs`): when [`scope_capability_by_run_owner`] is set,
     /// prefer the run scope's explicit owner, then the run actor, then fall back
     /// to the fixed harness `user_id`. Without the flag, always the fixed
     /// `user_id` (legacy behavior — every existing test unaffected).
@@ -1651,7 +2029,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Builds the composition-facing `additional_provider_trust` map this
-    /// harness forwards to `RefreshingLocalDevCapabilityPortTestParts` on
+    /// harness forwards to `RefreshingCapabilityPortTestParts` on
     /// every capability-port refresh (`create_recording_capability_port`
     /// calls this and passes the result straight through).
     ///
@@ -1693,11 +2071,11 @@ impl HostRuntimeCapabilityHarness {
     /// installation, so such a provider has NO production trust decision at
     /// all and this entry is the ONLY thing that ever trusts it (see
     /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
-    /// neither of which runs a real install→activate handshake). A provider
+    /// neither of which runs the real install/readiness path). A provider
     /// IS activation-backed (must be excluded here) only once
-    /// `local_dev_active_extension_authority_for_test` actually reports a
+    /// `standalone_active_extension_authority_for_test` actually reports a
     /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
-    /// credentialed install+activate flow. See `harness_trust_tests` below
+    /// credentialed install flow. See `harness_trust_tests` below
     /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
@@ -1796,11 +2174,19 @@ pub(crate) fn scoped_turns_fs(
     // integration tier reuses it with a different prefix via
     // `scoped_turns_fs_composite` in builder.rs.
     let target = super::filesystem::turns_scope_path("/engine", binding);
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("valid turns alias"),
-        VirtualPath::new(target).expect("valid turns target"),
-        MountPermissions::read_write_list_delete(),
-    )])?;
+    let target = VirtualPath::new(target).expect("valid process target");
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("valid processes alias"),
+            target.clone(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("valid turns alias"),
+            target,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])?;
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         turn_state_root_filesystem(backend)?,
         mounts,
@@ -1812,13 +2198,13 @@ fn turn_state_root_filesystem(
 ) -> HarnessResult<Arc<HarnessTurnBackend>> {
     let mut root = CompositeRootFilesystem::new();
     root.mount(
-        local_dev_mount_descriptor(
+        standalone_mount_descriptor(
             "/engine",
             "reborn-harness-turn-state",
             BackendKind::MemoryDocuments,
             StorageClass::StructuredRecords,
             ContentKind::StructuredRecord,
-            IndexPolicy::NotIndexed,
+            IndexPolicy::BackendDefined,
             backend.capabilities(),
         )?,
         backend,
@@ -1834,7 +2220,7 @@ fn turn_state_root_filesystem(
 /// that decision (`additional_provider_trust` extends the base map AFTER
 /// `extension_surface.provider_trust()`, last-writer-wins). Pure unit tests
 /// against the extracted helper, independent of the full async harness/tokio
-/// runtime, so the invariant is pinned even without a live extension-activation
+/// runtime, so the invariant is pinned even without a live extension-install
 /// scenario.
 #[cfg(test)]
 mod harness_trust_tests {
@@ -1843,7 +2229,7 @@ mod harness_trust_tests {
     /// The exact shape `extension_lifecycle_tools_profile_for_user` builds:
     /// a blanket `bundled_extension_provider_trust()`-style entry for
     /// `gmail` (the provider CodeRabbit's finding named), where `gmail` IS in
-    /// `activation_backed_providers` (its real credentialed install+activate
+    /// `activation_backed_providers` (its real credentialed install
     /// handshake already produced a production trust decision). Before the
     /// fix this test would have observed an unbounded `gmail` entry here; the
     /// fix must make it absent so the activation-backed production decision
@@ -1855,20 +2241,20 @@ mod harness_trust_tests {
             ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
                 .expect("builtin provider id");
         let gmail_provider = ExtensionId::new("gmail").expect("gmail provider id");
-        let blanket_additional = vec![(gmail_provider.clone(), local_dev_all_effects())];
+        let blanket_additional = vec![(gmail_provider.clone(), standalone_all_effects())];
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             [gmail_provider.clone()].into_iter().collect();
 
         let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
             &builtin_provider,
-            &local_dev_all_effects(),
+            &standalone_all_effects(),
             &blanket_additional,
             &activation_backed_providers,
         );
 
         assert!(
             !result.contains_key(&gmail_provider),
-            "a provider already reported by `local_dev_active_extension_authority_for_test` \
+            "a provider already reported by `standalone_active_extension_authority_for_test` \
              must never get a synthetic trust entry -- production's \
              `extension_surface.provider_trust()` must be the sole source of `gmail`'s \
              ceiling once it is activated, and this entry would silently overwrite it: \
@@ -1913,7 +2299,7 @@ mod harness_trust_tests {
     /// `extension_visibility_probe_tools_profile` build through
     /// `new_with_options` (so `reborn_services` IS wired) but only ever call
     /// the `publish_bundled_extension_for_test` shortcut for their provider
-    /// -- no enabled installation, so `local_dev_active_extension_authority_for_test`
+    /// -- no enabled installation, so `standalone_active_extension_authority_for_test`
     /// never reports a trust entry for it. The OLD `has_reborn_services: bool`
     /// gate treated "reborn_services wired" as "activation-backed" and
     /// wrongly suppressed this provider's only trust source. The per-provider
@@ -1925,11 +2311,11 @@ mod harness_trust_tests {
             ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
                 .expect("builtin provider id");
         let visprobe_provider = ExtensionId::new("visprobe").expect("visprobe provider id");
-        let effects = local_dev_all_effects();
+        let effects = standalone_all_effects();
         let additional = vec![(visprobe_provider.clone(), effects.clone())];
         // reborn_services is wired for this harness shape (`new_with_options`)
         // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
-        // never installed+activated -- so it must be ABSENT from
+        // never installed to active -- so it must be ABSENT from
         // `activation_backed_providers`, not folded in via a blanket
         // `reborn_services.is_some()` check.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
@@ -1947,9 +2333,10 @@ mod harness_trust_tests {
                 .get(&visprobe_provider)
                 .map(|decision| &decision.authority_ceiling.allowed_effects),
             Some(&effects),
-            "a publish-only (never installed+activated) provider must still get its \
+            "a publish-only (never installed to active) provider must still get its \
              synthetic trust entry even when the harness has `reborn_services` wired, \
              or its capabilities become invisible: {result:?}"
         );
     }
 }
+// arch-exempt: large_file, integration harness remains centralized during fixture migration, plan #6175

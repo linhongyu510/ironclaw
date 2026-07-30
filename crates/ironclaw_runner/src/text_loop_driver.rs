@@ -85,6 +85,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -163,7 +164,7 @@ fn completed_final_reply(
         reply_message_refs: vec![reply_ref],
         result_refs: Vec::new(),
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id,
     })
 }
@@ -177,7 +178,6 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         stage,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
-        diagnostic_ref = ?error.diagnostic_ref,
         safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );
@@ -203,11 +203,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
             reason: format!("{stage}: {}", error.kind.as_str()),
         },
-        AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
-            AgentLoopDriverError::Unavailable {
-                reason: format!("{stage}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::RateLimited
+        | AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::Cancelled => AgentLoopDriverError::Unavailable {
+            reason: format!("{stage}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
             detail: error.detail.clone(),
@@ -222,6 +222,7 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         AgentLoopHostErrorKind::BudgetExceeded
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
+        | AgentLoopHostErrorKind::ContentFiltered
         | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
             detail: error.detail.clone(),
@@ -330,6 +331,25 @@ mod tests {
     }
 
     #[test]
+    fn model_budget_accounting_failure_preserves_distinct_failure_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "resource accounting storage is unavailable",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "budget_accounting_failed".to_string(),
+                detail: Some("resource accounting storage is unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn non_model_stage_with_credit_reason_does_not_map_to_credits_category() {
         const CREDIT_SUMMARY: &str = "model provider account is out of credits";
         let mapped = map_host_error(
@@ -348,6 +368,65 @@ mod tests {
                 detail: None,
             }
         );
+    }
+
+    /// All four permanent model-stage kinds, through the driver path.
+    ///
+    /// `permanent_model_stage_failures_are_not_categorized_as_transient_outages`
+    /// pins the classifier; this pins the CALLER. `map_host_error` reaches the
+    /// category via an early return that bypasses the whole kind match below
+    /// it, so the classifier being right does not prove the driver emits it —
+    /// and the emitted `reason_kind` is what `retry_disposition` keys on.
+    ///
+    /// Before the fix all four produced a generic reason kind that routed
+    /// through `host_stage_unavailable_model`, which IS auto-retriable, so a
+    /// permanently-failing call was silently re-driven.
+    #[test]
+    fn permanent_model_stage_kinds_reach_the_driver_as_non_retriable_categories() {
+        use crate::failure_categories::{
+            MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+            MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+        };
+        use crate::retry_disposition::is_auto_retriable_category;
+
+        let cases = [
+            (
+                AgentLoopHostErrorKind::InvalidInvocation,
+                MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+            ),
+            (
+                AgentLoopHostErrorKind::Invalid,
+                MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+            ),
+            (
+                AgentLoopHostErrorKind::ScopeMismatch,
+                MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+            ),
+            (
+                AgentLoopHostErrorKind::PolicyDenied,
+                MODEL_STAGE_POLICY_DENIED_CATEGORY,
+            ),
+        ];
+
+        for (kind, expected_category) in cases {
+            let mapped = map_host_error(
+                "model",
+                AgentLoopHostError::new(kind, "model stage rejected the request"),
+            );
+
+            let AgentLoopDriverError::Failed { reason_kind, .. } = &mapped else {
+                panic!("{kind:?} must surface as a Failed driver error, got {mapped:?}");
+            };
+            assert_eq!(
+                reason_kind, expected_category,
+                "{kind:?} must reach the driver as its own category, not a generic one"
+            );
+            assert!(
+                !is_auto_retriable_category(reason_kind),
+                "{kind:?} -> {reason_kind} is auto-retriable at the driver seam, so the run \
+                 would silently re-drive a call that cannot succeed"
+            );
+        }
     }
 
     #[test]

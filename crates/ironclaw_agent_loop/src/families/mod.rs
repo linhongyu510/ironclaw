@@ -21,18 +21,18 @@ pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
 /// (see `family.rs` component-identity contract).
 fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
     format!(
-        "ironclaw_agent_loop.default_family.v1:\
+        "ironclaw_agent_loop.default_family.v2:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
         strategies=\
         context:DefaultContextStrategy(max_messages=128),\
-        compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000),\
+        compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
         capability:DefaultCapabilityStrategy(all),\
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
         gate:DefaultGateHandlingStrategy(block),\
-        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts}),\
+        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},stale_request=iteration_retry,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
         stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x9b, 0x6b, 0x42, 0x36, 0x87, 0xdc, 0xbe, 0xe3, 0x5d, 0x5e, 0x4b, 0x5a, 0x41, 0xb4, 0x14, 0xad,
-    0xe3, 0x65, 0x40, 0xd0, 0x5e, 0x85, 0x64, 0xd5, 0x11, 0xfd, 0xbf, 0xf6, 0xab, 0x28, 0x69, 0xbb,
+    0x05, 0x9f, 0x9c, 0x88, 0x91, 0x15, 0xcc, 0xf1, 0x4e, 0x05, 0x7e, 0x5d, 0x9a, 0x1e, 0xb9, 0xfe,
+    0x3c, 0x39, 0xd6, 0x00, 0xae, 0x07, 0xc4, 0x2c, 0x85, 0xe8, 0x39, 0x3f, 0xcf, 0x95, 0x71, 0x9e,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -223,7 +223,8 @@ mod tests {
         let err = ModelErrorSummary {
             class: ModelErrorClass::Unavailable,
             safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
-            diagnostic_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: Some(1),
         };
 
         let state = LoopExecutionState::initial_for_run(&context);

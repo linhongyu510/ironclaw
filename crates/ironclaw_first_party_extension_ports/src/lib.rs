@@ -10,6 +10,7 @@ mod assets;
 mod error;
 mod execution;
 mod setup_markers;
+mod skill_activation_capability;
 mod skills;
 
 pub use activation::{
@@ -17,10 +18,12 @@ pub use activation::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationObserver,
     SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
     SkillActivationSelectionError, SkillActivationSelectionMode, SkillActivationSelectorConfig,
+    SkillInjectionMode,
 };
 pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
 pub use error::FirstPartySkillsExtensionError;
 pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
+pub use skill_activation_capability::{SKILL_ACTIVATE_CAPABILITY_ID, skill_activation_capability};
 pub use skills::{
     FirstPartySelectableSkillsRuntime, FirstPartySkillsExtension, FirstPartySkillsExtensionHandles,
 };

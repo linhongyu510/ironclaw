@@ -3,7 +3,9 @@
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
-use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
+use ironclaw_host_runtime::{
+    JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
@@ -27,7 +29,7 @@ fn file_tools_with_runtime_policy(
 
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true))
 }
@@ -66,13 +68,13 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 }
 
 /// Same capability set as [`file_tools`], but opts the harness into the real
-/// `LocalDevCapabilityIo` (durable tool-result projection seam, issue #5838)
+/// `StagedCapabilityIo` (durable tool-result projection seam, issue #5838)
 /// instead of the ephemeral `ProductLiveCapabilityIo` test double, so
 /// `read_file`'s large output is persisted durably and `result_read` can page
 /// through it. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
@@ -83,6 +85,13 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     profile.capability_ids.push(CapabilityId::new(
         ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
+    // `builtin.json` (`parse`) is the minimal granted capability whose output
+    // is a top-level JSON array, needed to drive the truncated-array
+    // `item_count` observation through this durable-io seam.
+    profile
+        .capability_ids
+        .push(CapabilityId::new(JSON_CAPABILITY_ID)?);
+    profile.effect_kinds.push(EffectKind::DispatchCapability);
     Ok(profile)
 }
 

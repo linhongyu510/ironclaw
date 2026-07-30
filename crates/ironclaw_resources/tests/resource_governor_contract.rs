@@ -15,7 +15,7 @@ use rust_decimal_macros::dec;
 #[derive(Clone)]
 struct AlwaysFailingStore;
 
-impl ResourceGovernorStore for AlwaysFailingStore {
+impl ResourceGovernorStorePort for AlwaysFailingStore {
     fn update<T, F>(&self, _update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
@@ -40,6 +40,7 @@ impl ResourceGovernorStore for AlwaysFailingStore {
 struct RejectAppendFilesystem<F> {
     inner: F,
     append_calls: std::sync::atomic::AtomicUsize,
+    reject_appends: std::sync::atomic::AtomicBool,
 }
 
 impl<F> RejectAppendFilesystem<F> {
@@ -47,11 +48,17 @@ impl<F> RejectAppendFilesystem<F> {
         Self {
             inner,
             append_calls: std::sync::atomic::AtomicUsize::new(0),
+            reject_appends: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
     fn append_calls(&self) -> usize {
         self.append_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn allow_appends(&self) {
+        self.reject_appends
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -102,10 +109,16 @@ where
     async fn append(
         &self,
         path: &VirtualPath,
-        _payload: Vec<u8>,
+        payload: Vec<u8>,
     ) -> Result<ironclaw_filesystem::SeqNo, ironclaw_filesystem::FilesystemError> {
         self.append_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self
+            .reject_appends
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return self.inner.append(path, payload).await;
+        }
         Err(ironclaw_filesystem::FilesystemError::Unsupported {
             path: path.clone(),
             operation: ironclaw_filesystem::FilesystemOperation::Append,
@@ -115,10 +128,16 @@ where
     async fn append_batch(
         &self,
         path: &VirtualPath,
-        _payloads: Vec<Vec<u8>>,
+        payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<ironclaw_filesystem::SeqNo>, ironclaw_filesystem::FilesystemError> {
         self.append_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self
+            .reject_appends
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return self.inner.append_batch(path, payloads).await;
+        }
         Err(ironclaw_filesystem::FilesystemError::Unsupported {
             path: path.clone(),
             operation: ironclaw_filesystem::FilesystemOperation::Append,
@@ -1318,7 +1337,7 @@ fn persistent_governor_rejects_unsupported_snapshot_schema_version() {
 /// tests. Backend choice is now a property of the underlying
 /// `RootFilesystem`; this test exercises the on-disk snapshot
 /// round-trip through `ScopedFilesystem` so durability across reopen is
-/// covered by the same surface (a single `FilesystemResourceGovernorStore`
+/// covered by the same surface (a single `ResourceGovernorStore`
 /// constructed twice over the same backing store).
 #[tokio::test]
 async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_store() {
@@ -1337,7 +1356,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         mounts,
     ));
 
-    let store = FilesystemResourceGovernorStore::new(std::sync::Arc::clone(&scoped));
+    let store = ResourceGovernorStore::new(std::sync::Arc::clone(&scoped));
 
     let scope = sample_scope("tenant1", "user1", Some("project1"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -1358,10 +1377,9 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         .unwrap();
 
     // Reload from the same on-disk snapshot via a fresh
-    // FilesystemResourceGovernorStore handle over the same ScopedFilesystem.
-    let reloaded = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(
-        std::sync::Arc::clone(&scoped),
-    ));
+    // ResourceGovernorStore handle over the same ScopedFilesystem.
+    let reloaded =
+        PersistentResourceGovernor::new(ResourceGovernorStore::new(std::sync::Arc::clone(&scoped)));
     let concurrency_denial = reloaded
         .reserve(
             scope.clone(),
@@ -1605,7 +1623,7 @@ async fn filesystem_resource_governor_releases_account_gate_before_delta_ack() {
 }
 
 #[tokio::test]
-async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_append_error() {
+async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_append_error() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
@@ -1640,10 +1658,32 @@ async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_appe
     );
     assert_eq!(backend.append_calls(), 1);
 
-    let poisoned = governor.account_snapshot(&account).unwrap_err();
+    backend.allow_appends();
+
+    let recovered = governor
+        .account_snapshot(&account)
+        .expect("governor should reload after storage recovers");
     assert!(
-        matches!(poisoned, ResourceError::Storage { .. }),
-        "authority must fail closed after a durable journal error: {poisoned:?}"
+        recovered.is_none(),
+        "the failed optimistic limit mutation must not survive authority reload"
+    );
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(2.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .expect("same governor instance should accept writes after recovery");
+    let recovered = governor
+        .account_snapshot(&account)
+        .expect("recovered account snapshot")
+        .expect("limit account exists after successful retry");
+    assert_eq!(
+        recovered.limits.expect("limits are present").max_usd,
+        Some(dec!(2.00))
     );
 }
 
@@ -1655,23 +1695,23 @@ async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_appe
 /// supports versioned CAS and therefore never takes the
 /// `CasUnsupported` branch.
 ///
-/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `DiskFilesystem` is used here because it is the canonical byte-only
 /// `RootFilesystem`: its `put` impl rejects entries with
 /// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
-/// Mirrors `ironclaw_run_state`'s
+/// Mirrors `ironclaw_approvals`'s
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend`
 /// regression
-/// (crates/ironclaw_run_state/tests/run_state_contract.rs:1027-1048) for
+/// (crates/ironclaw_approvals/tests/run_state_contract.rs:1027-1048) for
 /// the resources crate's CAS snapshot stores.
 #[tokio::test]
 async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
-    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
     };
 
     let dir = tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -1690,7 +1730,7 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
         mounts,
     ));
 
-    let governor = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped));
+    let governor = PersistentResourceGovernor::new(ResourceGovernorStore::new(scoped));
 
     let err = governor
         .try_set_limit(
@@ -1701,25 +1741,25 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
 
     assert!(
         matches!(&err, ResourceError::Storage { reason } if reason.contains("compare-and-swap")),
-        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Storage(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
 /// Mirrors `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
-/// for `FilesystemBudgetGateStore`. Both stores route through the same
+/// for `BudgetGateStore`. Both stores route through the same
 /// shared `CasSnapshotStore` encoder (cas_snapshot.rs:221-227) and
 /// `map_cas_error` (cas_snapshot.rs:243-258), so a byte-only backend must
 /// fail closed for budget-gate writes too rather than blind-overwriting a
 /// pending gate.
 #[tokio::test]
 async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
-    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
     };
 
     let dir = tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -1738,7 +1778,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
         mounts,
     ));
 
-    let store = FilesystemBudgetGateStore::new(scoped);
+    let store = BudgetGateStore::new(scoped);
     let scope = sample_scope("tenant1", "user1", None);
     let gate = BudgetApprovalGate {
         id: BudgetGateId::new(),
@@ -1760,17 +1800,17 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
     let err = store.open(&scope, gate).unwrap_err();
     assert!(
         matches!(&err, BudgetGateError::Storage { reason } if reason.contains("compare-and-swap")),
-        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Storage(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
 /// Backend wrapper that races *every* versioned `put` against a watched
 /// path, ported verbatim (mechanics) from `ironclaw_secrets`'s
 /// `AlwaysRacingBackend`
-/// (crates/ironclaw_secrets/src/filesystem_store.rs:2085-2127) for the PR
+/// (crates/ironclaw_secrets/src/resource_store.rs:2085-2127) for the PR
 /// #5234 review follow-up (Medium): no resource-caller test in this crate
 /// drove a *persistent* `FilesystemError::VersionMismatch` through
-/// `FilesystemResourceGovernorStore`/`FilesystemBudgetGateStore` to pin
+/// `ResourceGovernorStore`/`BudgetGateStore` to pin
 /// `map_cas_error`'s `CasUpdateError::RetriesExhausted` ->
 /// `ResourceError::Storage` mapping (cas_snapshot.rs:265-267). The
 /// byte-only tests above only exercise `CasUnsupported`; the helper crate
@@ -1883,7 +1923,7 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 }
 
 /// Drives a *persistent* `VersionMismatch` through
-/// `FilesystemResourceGovernorStore::try_set_limit` and pins the
+/// `ResourceGovernorStore::try_set_limit` and pins the
 /// `CasUpdateError::RetriesExhausted` -> `ResourceError::Storage` mapping
 /// (cas_snapshot.rs:265-267, PR #5234 review follow-up, Medium). Companion
 /// to `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
@@ -1905,7 +1945,7 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
     // Resolve the snapshot's virtual path the same way the production store
     // does (alias-relative `/resources/snapshot.json` under the store's
     // default scope, `ResourceScope::system()`), so the wrapper below races
-    // the exact path `FilesystemResourceGovernorStore` writes.
+    // the exact path `ResourceGovernorStore` writes.
     let bootstrap_scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&inner),
         mounts.clone(),
@@ -1924,14 +1964,12 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
     // see a race on a from-scratch snapshot. Bootstrapping ensures the
     // mutation under test lands on an *existing* snapshot whose every
     // retry attempt carries `CasExpectation::Version(_)`.
-    PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-        &bootstrap_scoped,
-    )))
-    .try_set_limit(
-        ResourceAccount::tenant(TenantId::new("tenant-bootstrap").unwrap()),
-        ResourceLimits::default(),
-    )
-    .expect("bootstrap write to seed the snapshot");
+    PersistentResourceGovernor::new(ResourceGovernorStore::new(Arc::clone(&bootstrap_scoped)))
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant-bootstrap").unwrap()),
+            ResourceLimits::default(),
+        )
+        .expect("bootstrap write to seed the snapshot");
 
     let racing = Arc::new(PersistentVersionMismatchBackend::new(
         Arc::clone(&inner),
@@ -1941,8 +1979,7 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
         Arc::clone(&racing),
         mounts,
     ));
-    let governor =
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(racing_scoped));
+    let governor = PersistentResourceGovernor::new(ResourceGovernorStore::new(racing_scoped));
 
     let err = governor
         .try_set_limit(

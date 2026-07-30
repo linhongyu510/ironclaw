@@ -1,7 +1,3 @@
-#[cfg(feature = "libsql")]
-use std::{collections::HashMap, sync::Arc};
-
-#[cfg(feature = "libsql")]
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -10,31 +6,24 @@ use crate::{
     TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
-#[cfg(feature = "libsql")]
+// arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use async_trait::async_trait;
-#[cfg(feature = "libsql")]
 use chrono::{DateTime, SecondsFormat, Utc};
-#[cfg(feature = "libsql")]
 use ironclaw_common::AutomationName;
-#[cfg(feature = "libsql")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-#[cfg(feature = "libsql")]
+use ironclaw_libsql_runtime::{
+    LibSqlReadConnectionLease, LibSqlRuntime, LibSqlWriteConnectionLease,
+};
 use ironclaw_turns::TurnRunId;
-#[cfg(feature = "libsql")]
 use libsql::params;
-
-#[cfg(feature = "libsql")]
+use std::{collections::HashMap, sync::Arc};
 const TRIGGER_TABLE: &str = "trigger_records";
-#[cfg(feature = "libsql")]
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
-
-#[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
-#[cfg(feature = "libsql")]
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = ?6
@@ -47,87 +36,60 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
        active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
-
-#[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const TENANT_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const CREATOR_USER_ID_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const AGENT_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const PROJECT_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const NAME_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const SOURCE_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const SCHEDULE_EXPRESSION_COL: usize = 7;
-#[cfg(feature = "libsql")]
 const SCHEDULE_TIMEZONE_COL: usize = 8;
-#[cfg(feature = "libsql")]
 const SCHEDULE_KIND_COL: usize = 9;
-#[cfg(feature = "libsql")]
 const PROMPT_COL: usize = 10;
-#[cfg(feature = "libsql")]
 const STATE_COL: usize = 11;
-#[cfg(feature = "libsql")]
 const NEXT_RUN_AT_COL: usize = 12;
-#[cfg(feature = "libsql")]
 const LAST_RUN_AT_COL: usize = 13;
-#[cfg(feature = "libsql")]
 const LAST_FIRED_SLOT_COL: usize = 14;
-#[cfg(feature = "libsql")]
 const LAST_STATUS_COL: usize = 15;
-#[cfg(feature = "libsql")]
 const ACTIVE_FIRE_SLOT_COL: usize = 16;
-#[cfg(feature = "libsql")]
 const ACTIVE_RUN_REF_COL: usize = 17;
-#[cfg(feature = "libsql")]
 const CREATED_AT_COL: usize = 18;
-#[cfg(feature = "libsql")]
 const SCHEDULE_AT_COL: usize = 19;
-#[cfg(feature = "libsql")]
 const DELIVERY_TARGET_COL: usize = 20;
-
-#[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
-#[cfg(feature = "libsql")]
 const RUN_TENANT_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const RUN_TRIGGER_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const RUN_FIRE_SLOT_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const RUN_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const RUN_THREAD_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const RUN_STATUS_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const RUN_SUBMITTED_AT_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const RUN_COMPLETED_AT_COL: usize = 7;
 
 /// Durable libSQL trigger repository.
-#[cfg(feature = "libsql")]
 pub struct LibSqlTriggerRepository {
-    db: Arc<libsql::Database>,
+    runtime: Arc<LibSqlRuntime>,
 }
-
-#[cfg(feature = "libsql")]
 impl LibSqlTriggerRepository {
-    pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<libsql::Database>) -> Result<Self, TriggerError> {
+        let runtime = LibSqlRuntime::new(db)
+            .map_err(|error| backend_error("build trigger connection runtime", error))?;
+        Ok(Self::from_runtime(Arc::new(runtime)))
+    }
+
+    pub fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
+        Self { runtime }
     }
 
     pub async fn run_migrations(&self) -> Result<(), TriggerError> {
-        let conn = self.connect().await?;
-        conn.execute("BEGIN IMMEDIATE", ())
+        let conn = self.write_connection().await?;
+        let transaction = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(|error| backend_error("begin trigger migration", error))?;
+        let conn = &transaction;
 
         let result = async {
             conn.execute(
@@ -382,42 +344,33 @@ impl LibSqlTriggerRepository {
         .await;
 
         match result {
-            Ok(()) => conn
-                .execute("COMMIT", ())
+            Ok(()) => transaction
+                .commit()
                 .await
-                .map(|_| ())
                 .map_err(|error| backend_error("commit trigger migration", error)),
-            Err(error) => {
-                if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
-                    tracing::debug!(
-                        migration_error = %error,
-                        rollback_error = %rollback_error,
-                        "ROLLBACK failed after libSQL trigger migration error"
-                    );
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, TriggerError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+    async fn read_connection(&self) -> Result<LibSqlReadConnectionLease, TriggerError> {
+        self.runtime
+            .read()
             .await
-            .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
-        Ok(conn)
+            .map_err(|error| backend_error("checkout trigger reader", error))
+    }
+
+    async fn write_connection(&self) -> Result<LibSqlWriteConnectionLease, TriggerError> {
+        self.runtime
+            .write()
+            .await
+            .map_err(|error| backend_error("checkout trigger writer", error))
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
         record.validate()?;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         write_record(&conn, &record).await?;
         Ok(())
     }
@@ -427,7 +380,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -448,7 +401,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -485,7 +438,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let excluded_states_json: libsql::Value = if excluded_states.is_empty() {
@@ -541,7 +494,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -568,7 +521,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let mut rows = conn
@@ -612,7 +565,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         new_state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let mut rows = conn
@@ -656,7 +609,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         trigger_id: TriggerId,
         name: AutomationName,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
         let name = name.into_inner();
@@ -690,7 +643,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -735,7 +688,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = match after {
             Some(cursor) => {
                 conn.query(
@@ -790,12 +743,12 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClaimDueFireRequest,
     ) -> Result<ClaimDueFireOutcome, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let fire_slot = fmt_ts(&request.fire_slot);
         let now = fmt_ts(&request.now);
-        begin_immediate(&conn, "begin trigger fire claim").await?;
+        let transaction = begin_immediate(&conn, "begin trigger fire claim").await?;
         let claim_result = async {
-            let mut rows = conn
+            let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
@@ -825,7 +778,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Ok(None);
             };
             upsert_run_history(
-                &conn,
+                &transaction,
                 &TriggerRunRecord::running(
                     request.tenant_id.clone(),
                     request.trigger_id,
@@ -840,17 +793,14 @@ impl TriggerRepository for LibSqlTriggerRepository {
         .await;
         match claim_result {
             Ok(Some(record)) => {
-                commit(&conn, "commit trigger fire claim").await?;
+                commit(transaction, "commit trigger fire claim").await?;
                 return Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
                     record,
                     fire_slot: request.fire_slot,
                 }));
             }
-            Ok(None) => rollback(&conn, "rollback missed trigger fire claim").await?,
-            Err(error) => {
-                rollback(&conn, "rollback failed trigger fire claim").await?;
-                return Err(error);
-            }
+            Ok(None) => rollback(transaction, "roll back missed trigger fire claim").await?,
+            Err(error) => return Err(error),
         }
 
         let Some(record) = fetch_record(&conn, &request.tenant_id, request.trigger_id).await?
@@ -879,7 +829,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireAcceptedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         mark_successful_fire_result(
             &conn,
             SuccessfulFireResultUpdate {
@@ -900,7 +850,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireReplayedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         mark_successful_fire_result(
             &conn,
             SuccessfulFireResultUpdate {
@@ -926,7 +876,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             trigger_id,
             fire_slot,
         } = request;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
         };
@@ -945,9 +895,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
 
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
-        begin_immediate(&conn, "begin retryable trigger fire failure").await?;
+        let transaction = begin_immediate(&conn, "begin retryable trigger fire failure").await?;
         let update_result = async {
-            let mut rows = conn
+            let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
@@ -976,7 +926,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Ok(None);
             };
             complete_run_history(
-                &conn,
+                &transaction,
                 &tenant_id,
                 trigger_id,
                 fire_slot,
@@ -990,14 +940,17 @@ impl TriggerRepository for LibSqlTriggerRepository {
         .await;
         match update_result {
             Ok(Some(record)) => {
-                commit(&conn, "commit retryable trigger fire failure").await?;
+                commit(transaction, "commit retryable trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => rollback(&conn, "rollback missed retryable trigger fire failure").await?,
-            Err(error) => {
-                rollback(&conn, "rollback failed retryable trigger fire failure").await?;
-                return Err(error);
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed retryable trigger fire failure",
+                )
+                .await?
             }
+            Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
@@ -1012,7 +965,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             fire_slot,
             next_run_at,
         } = request;
-        let conn = self.connect().await?;
+        let conn = self.write_connection().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
         };
@@ -1025,9 +978,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let fire_slot_text = fmt_ts(&fire_slot);
         let next_run_at = fmt_ts(&next_run_at);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
-        begin_immediate(&conn, "begin permanent trigger fire failure").await?;
+        let transaction = begin_immediate(&conn, "begin permanent trigger fire failure").await?;
         let update_result = async {
-            let mut rows = conn
+            let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
@@ -1057,7 +1010,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Ok(None);
             };
             complete_run_history(
-                &conn,
+                &transaction,
                 &tenant_id,
                 trigger_id,
                 fire_slot,
@@ -1071,14 +1024,17 @@ impl TriggerRepository for LibSqlTriggerRepository {
         .await;
         match update_result {
             Ok(Some(record)) => {
-                commit(&conn, "commit permanent trigger fire failure").await?;
+                commit(transaction, "commit permanent trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => rollback(&conn, "rollback missed permanent trigger fire failure").await?,
-            Err(error) => {
-                rollback(&conn, "rollback failed permanent trigger fire failure").await?;
-                return Err(error);
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed permanent trigger fire failure",
+                )
+                .await?
             }
+            Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
@@ -1095,10 +1051,10 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let completed = crate::state_text_codec(TriggerState::Completed);
-        let conn = self.connect().await?;
-        begin_immediate(&conn, "begin terminal trigger fire failure").await?;
+        let conn = self.write_connection().await?;
+        let transaction = begin_immediate(&conn, "begin terminal trigger fire failure").await?;
         let update_result = async {
-            let mut rows = conn
+            let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
@@ -1128,7 +1084,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Ok(None);
             };
             complete_run_history(
-                &conn,
+                &transaction,
                 &tenant_id,
                 trigger_id,
                 fire_slot,
@@ -1142,14 +1098,17 @@ impl TriggerRepository for LibSqlTriggerRepository {
         .await;
         match update_result {
             Ok(Some(record)) => {
-                commit(&conn, "commit terminal trigger fire failure").await?;
+                commit(transaction, "commit terminal trigger fire failure").await?;
                 return Ok(Some(record));
             }
-            Ok(None) => rollback(&conn, "rollback missed terminal trigger fire failure").await?,
-            Err(error) => {
-                rollback(&conn, "rollback failed terminal trigger fire failure").await?;
-                return Err(error);
+            Ok(None) => {
+                rollback(
+                    transaction,
+                    "roll back missed terminal trigger fire failure",
+                )
+                .await?
             }
+            Err(error) => return Err(error),
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
@@ -1158,11 +1117,12 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let conn = self.connect().await?;
-        begin_immediate(&conn, "begin clear active trigger fire").await?;
+        let conn = self.write_connection().await?;
+        let transaction = begin_immediate(&conn, "begin clear active trigger fire").await?;
         let clear_result = async {
             // Fetch the record inside the transaction to compute next state atomically.
-            let Some(current) = fetch_record(&conn, &request.tenant_id, request.trigger_id).await?
+            let Some(current) =
+                fetch_record(&transaction, &request.tenant_id, request.trigger_id).await?
             else {
                 return Ok(None);
             };
@@ -1180,7 +1140,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             };
             let fire_slot_text = fmt_ts(&request.fire_slot);
             let run_id_text = request.run_id.to_string();
-            let mut rows = conn
+            let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
@@ -1208,7 +1168,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Ok(None);
             };
             complete_run_history(
-                &conn,
+                &transaction,
                 &request.tenant_id,
                 request.trigger_id,
                 request.fire_slot,
@@ -1222,17 +1182,14 @@ impl TriggerRepository for LibSqlTriggerRepository {
         .await;
         match clear_result {
             Ok(Some(record)) => {
-                commit(&conn, "commit clear active trigger fire").await?;
+                commit(transaction, "commit clear active trigger fire").await?;
                 Ok(Some(record))
             }
             Ok(None) => {
-                rollback(&conn, "rollback missed clear active trigger fire").await?;
+                rollback(transaction, "roll back missed clear active trigger fire").await?;
                 Ok(None)
             }
-            Err(error) => {
-                rollback(&conn, "rollback failed clear active trigger fire").await?;
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1241,7 +1198,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         thread_id: &crate::ThreadId,
     ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         // Look up the run row by (tenant_id, thread_id) using the dedicated index.
         let mut run_rows = conn
             .query(
@@ -1293,7 +1250,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1341,7 +1298,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
              WHERE row_rank <= ?3
              ORDER BY trigger_id, fire_slot DESC"
         );
-        let conn = self.connect().await?;
+        let conn = self.read_connection().await?;
         let mut rows = conn
             .query(&sql, params![tenant_id.as_str(), trigger_ids_json, limit])
             .await
@@ -1361,8 +1318,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(runs_by_trigger)
     }
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let trigger_id = TriggerId::parse(&required_text(row, TRIGGER_ID_COL, "trigger_id")?)?;
     let tenant_id = TenantId::new(required_text(row, TENANT_ID_COL, "tenant_id")?)
@@ -1405,7 +1360,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
-        .map(crate::TriggerDeliveryTargetId::new)
+        .map(crate::parse_trigger_delivery_target_id)
         .transpose()?;
 
     let record = TriggerRecord {
@@ -1437,8 +1392,6 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     record.validate()?;
     Ok(record)
 }
-
-#[cfg(feature = "libsql")]
 async fn fetch_record(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1462,8 +1415,6 @@ async fn fetch_record(
         Err(error) => Err(backend_error("read trigger record row", error)),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn returned_record(
     rows: &mut libsql::Rows,
     operation: &str,
@@ -1474,32 +1425,28 @@ async fn returned_record(
         Err(error) => Err(backend_error(operation, error)),
     }
 }
-
-#[cfg(feature = "libsql")]
-async fn begin_immediate(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
-    conn.execute("BEGIN IMMEDIATE", ())
+async fn begin_immediate(
+    conn: &libsql::Connection,
+    operation: &str,
+) -> Result<libsql::Transaction, TriggerError> {
+    conn.transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await
-        .map(|_| ())
+        .map_err(|error| backend_error(operation, error))
+}
+async fn commit(transaction: libsql::Transaction, operation: &str) -> Result<(), TriggerError> {
+    transaction
+        .commit()
+        .await
         .map_err(|error| backend_error(operation, error))
 }
 
-#[cfg(feature = "libsql")]
-async fn commit(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
-    conn.execute("COMMIT", ())
+async fn rollback(transaction: libsql::Transaction, operation: &str) -> Result<(), TriggerError> {
+    transaction
+        .rollback()
         .await
-        .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
 
-#[cfg(feature = "libsql")]
-async fn rollback(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
-    conn.execute("ROLLBACK", ())
-        .await
-        .map(|_| ())
-        .map_err(|error| backend_error(operation, error))
-}
-
-#[cfg(feature = "libsql")]
 async fn write_record(
     conn: &libsql::Connection,
     record: &TriggerRecord,
@@ -1561,8 +1508,6 @@ async fn write_record(
     .map_err(|error| backend_error("upsert trigger record", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn resolve_missed_fire_result_update(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1588,8 +1533,6 @@ async fn resolve_missed_fire_result_update(
         "update predicate failed while claimed fire remained active without a run ref",
     ))
 }
-
-#[cfg(feature = "libsql")]
 async fn mark_successful_fire_result(
     conn: &libsql::Connection,
     update: SuccessfulFireResultUpdate<'_>,
@@ -1598,11 +1541,12 @@ async fn mark_successful_fire_result(
     let result_at = fmt_ts(&update.result_at);
     let active_run_ref = update.run_id.to_string();
     let last_status = crate::status_text_codec(TriggerRunStatus::Ok);
-    begin_immediate(conn, "begin successful trigger fire result").await?;
+    let transaction = begin_immediate(conn, "begin successful trigger fire result").await?;
     let update_result = async {
         // Fetch the record inside the transaction so we can compute next_run_at
         // atomically (no TOCTOU race between the schedule read and the UPDATE).
-        let Some(current) = fetch_record(conn, update.tenant_id, update.trigger_id).await? else {
+        let Some(current) = fetch_record(&transaction, update.tenant_id, update.trigger_id).await?
+        else {
             return Ok(None);
         };
         if current.active_fire_slot != Some(update.fire_slot) {
@@ -1619,9 +1563,10 @@ async fn mark_successful_fire_result(
         let mut rows = match next_run_at {
             Some(next) => {
                 let next_run_at_text = fmt_ts(&next);
-                conn.query(
-                    &format!(
-                        "UPDATE {TRIGGER_TABLE}
+                transaction
+                    .query(
+                        &format!(
+                            "UPDATE {TRIGGER_TABLE}
                          SET last_run_at = ?3,
                              last_fired_slot = ?4,
                              last_status = ?5,
@@ -1631,26 +1576,27 @@ async fn mark_successful_fire_result(
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
                          RETURNING {TRIGGER_COLUMNS}"
-                    ),
-                    libsql::params_from_iter([
-                        libsql::Value::Text(update.tenant_id.as_str().to_string()),
-                        libsql::Value::Text(update.trigger_id.to_string()),
-                        libsql::Value::Text(result_at),
-                        libsql::Value::Text(fire_slot_text),
-                        libsql::Value::Text(last_status.to_string()),
-                        libsql::Value::Text(next_run_at_text),
-                        libsql::Value::Text(active_run_ref),
-                    ]),
-                )
-                .await
-                .map_err(|error| backend_error(update.update_operation, error))?
+                        ),
+                        libsql::params_from_iter([
+                            libsql::Value::Text(update.tenant_id.as_str().to_string()),
+                            libsql::Value::Text(update.trigger_id.to_string()),
+                            libsql::Value::Text(result_at),
+                            libsql::Value::Text(fire_slot_text),
+                            libsql::Value::Text(last_status.to_string()),
+                            libsql::Value::Text(next_run_at_text),
+                            libsql::Value::Text(active_run_ref),
+                        ]),
+                    )
+                    .await
+                    .map_err(|error| backend_error(update.update_operation, error))?
             }
             None => {
                 // Once trigger (or exhausted schedule): omit next_run_at from the SET
                 // clause entirely so the column keeps its current value.
-                conn.query(
-                    &format!(
-                        "UPDATE {TRIGGER_TABLE}
+                transaction
+                    .query(
+                        &format!(
+                            "UPDATE {TRIGGER_TABLE}
                          SET last_run_at = ?3,
                              last_fired_slot = ?4,
                              last_status = ?5,
@@ -1659,18 +1605,18 @@ async fn mark_successful_fire_result(
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
                          RETURNING {TRIGGER_COLUMNS}"
-                    ),
-                    libsql::params_from_iter([
-                        libsql::Value::Text(update.tenant_id.as_str().to_string()),
-                        libsql::Value::Text(update.trigger_id.to_string()),
-                        libsql::Value::Text(result_at),
-                        libsql::Value::Text(fire_slot_text),
-                        libsql::Value::Text(last_status.to_string()),
-                        libsql::Value::Text(active_run_ref),
-                    ]),
-                )
-                .await
-                .map_err(|error| backend_error(update.update_operation, error))?
+                        ),
+                        libsql::params_from_iter([
+                            libsql::Value::Text(update.tenant_id.as_str().to_string()),
+                            libsql::Value::Text(update.trigger_id.to_string()),
+                            libsql::Value::Text(result_at),
+                            libsql::Value::Text(fire_slot_text),
+                            libsql::Value::Text(last_status.to_string()),
+                            libsql::Value::Text(active_run_ref),
+                        ]),
+                    )
+                    .await
+                    .map_err(|error| backend_error(update.update_operation, error))?
             }
         };
         let Some(record) = returned_record(&mut rows, update.read_operation).await? else {
@@ -1684,20 +1630,23 @@ async fn mark_successful_fire_result(
             record.last_run_at.unwrap_or(update.result_at),
         );
         run_record.thread_id = update.thread_id.clone();
-        upsert_run_history(conn, &run_record).await?;
+        upsert_run_history(&transaction, &run_record).await?;
         Ok(Some(record))
     }
     .await;
     match update_result {
         Ok(Some(record)) => {
-            commit(conn, "commit successful trigger fire result").await?;
+            commit(transaction, "commit successful trigger fire result").await?;
             return Ok(Some(record));
         }
-        Ok(None) => rollback(conn, "rollback missed successful trigger fire result").await?,
-        Err(error) => {
-            rollback(conn, "rollback failed successful trigger fire result").await?;
-            return Err(error);
+        Ok(None) => {
+            rollback(
+                transaction,
+                "roll back missed successful trigger fire result",
+            )
+            .await?
         }
+        Err(error) => return Err(error),
     }
     resolve_missed_fire_result_update(
         conn,
@@ -1708,8 +1657,6 @@ async fn mark_successful_fire_result(
     )
     .await
 }
-
-#[cfg(feature = "libsql")]
 struct SuccessfulFireResultUpdate<'a> {
     tenant_id: &'a TenantId,
     trigger_id: TriggerId,
@@ -1724,8 +1671,6 @@ struct SuccessfulFireResultUpdate<'a> {
     update_operation: &'static str,
     read_operation: &'static str,
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError> {
     let tenant_id = TenantId::new(required_text(row, RUN_TENANT_ID_COL, "tenant_id")?)
         .map_err(|error| invalid_record("tenant_id", error.to_string()))?;
@@ -1762,8 +1707,6 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         completed_at,
     })
 }
-
-#[cfg(feature = "libsql")]
 async fn upsert_run_history(
     conn: &libsql::Connection,
     run: &TriggerRunRecord,
@@ -1796,8 +1739,6 @@ async fn upsert_run_history(
     prune_run_history(conn, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     let mut value = String::from("[");
     for (index, trigger_id) in trigger_ids.iter().enumerate() {
@@ -1811,8 +1752,6 @@ fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     value.push(']');
     value
 }
-
-#[cfg(feature = "libsql")]
 async fn complete_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1848,8 +1787,6 @@ async fn complete_run_history(
     prune_run_history(conn, tenant_id, trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn prune_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1878,14 +1815,10 @@ async fn prune_run_history(
     .map_err(|error| backend_error("prune trigger run history", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn required_text(row: &libsql::Row, index: usize, field: &str) -> Result<String, TriggerError> {
     row.get(index as i32)
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn optional_text(
     row: &libsql::Row,
     index: usize,
@@ -1894,54 +1827,38 @@ fn optional_text(
     row.get(index as i32)
         .map_err(|error| backend_error(&format!("read optional trigger field {field}"), error))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_timestamp(value: &str, field: &str) -> Result<Timestamp, TriggerError> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id(value: &str) -> Result<TurnRunId, TriggerError> {
     parse_turn_run_id_with_field(value, "active_run_ref")
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id_with_field(value: &str, field: &str) -> Result<TurnRunId, TriggerError> {
     TurnRunId::parse(value).map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn fmt_ts(value: &Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
-
-#[cfg(feature = "libsql")]
 fn opt_ts(value: Option<&Timestamp>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(fmt_ts(value)),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(value.to_string()),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
         kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }
-
-#[cfg(feature = "libsql")]
 fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: format!("{operation}: {error}"),

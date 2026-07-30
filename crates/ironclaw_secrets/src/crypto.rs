@@ -40,11 +40,11 @@ pub struct SecretsCrypto {
 /// Validate raw master-key bytes against the same rules [`SecretsCrypto::new`]
 /// enforces, without constructing a crypto instance.
 ///
-/// Callers that resolve key material from a *named* source (a local-dev key
+/// Callers that resolve key material from a *named* source (a standalone key
 /// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
 /// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
 /// that surfaces when an already-wrapped key reaches `new` several layers
-/// deep. See `ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key`.
+/// deep. See `ironclaw_reborn_composition::factory::resolve_standalone_secret_master_key`.
 pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
     if bytes.len() < KEY_SIZE {
         return Err(SecretError::InvalidMasterKey);
@@ -68,6 +68,13 @@ impl SecretsCrypto {
         Self {
             master_key: SecretString::from(master_key),
         }
+    }
+
+    /// Crypto with a random single-process master key, for volatile stores
+    /// whose contents are not meant to survive the process (§4.3 replacement
+    /// for the deleted `InMemorySecretStore`'s key sourcing).
+    pub fn ephemeral() -> Self {
+        Self::from_valid_master_key(uuid::Uuid::new_v4().simple().to_string())
     }
 
     pub fn generate_salt() -> Vec<u8> {
@@ -198,7 +205,7 @@ pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_rec
 /// `(user_id, name)`.
 ///
 /// Production storage code reaches this through the higher-level
-/// `SecretStore` / `SecretsStore` API and never needs to call it directly.
+/// `SecretStorePort` / `SecretsStore` API and never needs to call it directly.
 /// It is `pub` so contract tests and integration fixtures that bypass the
 /// store and write directly to `reborn_secret_records` can construct
 /// ciphertext the production code will accept.
@@ -333,7 +340,7 @@ pub fn credential_session_aad(scope: &ResourceScope, session_id: CredentialSessi
 pub fn filesystem_secret_aad(scope: &ResourceScope, handle: &SecretHandle) -> Vec<u8> {
     // The filesystem secret store keys by *owner scope*
     // (`tenant/user/agent/project`) — see `secret_path` and
-    // `same_scope_owner` in `filesystem_store.rs`. The AAD must match the
+    // `same_scope_owner` in `secret_store.rs`. The AAD must match the
     // storage scope: previously this bound `mission_id`/`thread_id`/
     // `invocation_id` too, so a secret written by one invocation could be
     // *read* by another invocation under the same owner (the path layer

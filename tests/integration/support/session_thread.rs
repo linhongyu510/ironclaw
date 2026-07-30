@@ -25,7 +25,7 @@ pub enum RebornThreadHarnessError {
 /// Thin harness over `FilesystemSessionThreadService<F>` for asserting thread history.
 ///
 /// Defaults to `InMemoryBackend` (CAS-capable, models the production DB-backed filesystem)
-/// rather than the byte-only `LocalFilesystem` (see e3e155803). The integration tier uses
+/// rather than the byte-only `DiskFilesystem` (see e3e155803). The integration tier uses
 /// `RebornThreadHarness<CompositeRootFilesystem>` via `filesystem_shared_composite`, mounted
 /// on the per-`build()` production-path composite.
 pub struct RebornThreadHarness<F = InMemoryBackend>
@@ -132,7 +132,7 @@ impl RebornThreadHarness<InMemoryBackend> {
 /// `CompositeRootFilesystem`-specific constructor (integration tier).
 impl RebornThreadHarness<CompositeRootFilesystem> {
     /// Harness backed by a shared production-path composite; threads land at
-    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_local_dev_database_roots`).
+    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_standalone_database_roots`).
     /// `root` (also held by `GroupSharedStorage::turn_root`) keeps the `TempDir` alive so
     /// on-disk libsql data persists across `reopened()` calls.
     pub fn filesystem_shared_composite(

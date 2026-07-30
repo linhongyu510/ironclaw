@@ -1,4 +1,5 @@
 //! LLM integration for the agent.
+// arch-exempt: large_file, provider service remains centralized pending crate split, plan #6175
 //!
 //! Supports multiple backends:
 //! - **NEAR AI** (default): Session token or API key auth via Chat Completions API
@@ -18,7 +19,6 @@ pub mod circuit_breaker;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
-pub mod costs;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub mod trace_binding;
 // arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
 // Remove the allow once any production call site references these items.
 #[allow(dead_code)]
@@ -50,7 +51,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]
@@ -80,15 +81,15 @@ pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, ImageUrl, LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
-    generate_tool_call_id, normalized_model_override,
+    FinishReason, ImageUrl, LlmProvider, ModelFallbackRoute, ModelMetadata, ReasoningDetail,
+    ReasoningDetails, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
-    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
-    user_signals_execution_intent,
+    ActionPlan, CommunicationPresentationPolicy, Reasoning, ReasoningContext, RespondOutput,
+    RespondResult, ResponseAnomaly, ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE,
+    TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
+    llm_signals_tool_intent, user_signals_execution_intent,
 };
 pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,
@@ -449,6 +450,7 @@ fn create_openai_compat_from_registry(
         extra_headers,
     };
     let adapter = RigAdapter::new(model, &config.model)
+        .with_provider_id(config.provider_id.clone())
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
@@ -552,6 +554,7 @@ fn create_anthropic_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_cache_retention(cache_retention)
             .with_unsupported_params(config.unsupported_params.clone())
             .with_model_listing(models_endpoint),
@@ -603,6 +606,7 @@ fn create_ollama_from_registry(
     };
 
     let mut adapter = RigAdapter::new(model, &config.model)
+        .with_provider_id(config.provider_id.clone())
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     // Ollama's /api/chat enables extended reasoning via `think: true`, but
@@ -666,6 +670,7 @@ fn create_deepseek_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -757,6 +762,7 @@ fn create_openrouter_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -821,6 +827,7 @@ fn create_gemini_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_id(config.provider_id.clone())
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -1010,6 +1017,16 @@ pub(crate) async fn apply_decorator_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    apply_decorator_chain_with_fallback(raw, None, config, session).await
+}
+
+async fn apply_decorator_chain_with_fallback(
+    raw: Arc<dyn LlmProvider>,
+    fallback_override: Option<Arc<dyn LlmProvider>>,
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let mut single_attempt_llm = Arc::clone(&raw);
     let llm = raw;
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
@@ -1037,6 +1054,7 @@ pub(crate) async fn apply_decorator_chain(
                     config.backend
                 ),
             })?;
+        let single_attempt_cheap = Arc::clone(&cheap);
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -1047,14 +1065,23 @@ pub(crate) async fn apply_decorator_chain(
             cheap = %cheap.model_name(),
             "Smart routing enabled"
         );
-        Arc::new(SmartRoutingProvider::new(
+        let routed: Arc<dyn LlmProvider> = Arc::new(SmartRoutingProvider::new(
             llm,
             cheap,
             SmartRoutingConfig {
                 cascade_enabled: config.smart_routing_cascade,
                 ..SmartRoutingConfig::default()
             },
-        ))
+        ));
+        single_attempt_llm = Arc::new(SmartRoutingProvider::new(
+            single_attempt_llm,
+            single_attempt_cheap,
+            SmartRoutingConfig {
+                cascade_enabled: config.smart_routing_cascade,
+                ..SmartRoutingConfig::default()
+            },
+        ));
+        routed
     } else {
         llm
     };
@@ -1068,16 +1095,20 @@ pub(crate) async fn apply_decorator_chain(
         }
         let mut fallback_config = config.nearai.clone();
         fallback_config.model = fallback_model.clone();
-        let fallback = create_llm_provider_with_config(
-            &fallback_config,
-            session.clone(),
-            config.request_timeout_secs,
-        )?;
+        let fallback = match fallback_override {
+            Some(fallback) => fallback,
+            None => create_llm_provider_with_config(
+                &fallback_config,
+                session.clone(),
+                config.request_timeout_secs,
+            )?,
+        };
         tracing::debug!(
             primary = %llm.model_name(),
             fallback = %fallback.model_name(),
             "LLM failover enabled"
         );
+        let single_attempt_fallback = Arc::clone(&fallback);
         let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(fallback, retry_config.clone()))
         } else {
@@ -1087,8 +1118,9 @@ pub(crate) async fn apply_decorator_chain(
             cooldown_duration: std::time::Duration::from_secs(config.nearai.failover_cooldown_secs),
             failure_threshold: config.nearai.failover_cooldown_threshold,
         };
-        Arc::new(FailoverProvider::with_cooldown(
+        Arc::new(FailoverProvider::with_cooldown_and_explicit_routes(
             vec![llm, fallback],
+            Some(vec![single_attempt_llm, single_attempt_fallback]),
             cooldown_config,
         )?)
     } else {

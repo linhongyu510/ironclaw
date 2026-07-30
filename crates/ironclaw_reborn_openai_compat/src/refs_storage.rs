@@ -1,7 +1,7 @@
 //! Durable storage adapters for Reborn OpenAI-compatible refs.
 //!
 //! This module keeps persistence behind the
-//! [`OpenAiCompatRefStore`](crate::OpenAiCompatRefStore)
+//! [`OpenAiCompatRefStorePort`](crate::OpenAiCompatRefStorePort)
 //! port. Contract-only consumers keep the default feature set; Reborn
 //! composition enables `storage` when it needs the filesystem-backed adapter for
 //! concrete route behavior.
@@ -12,10 +12,12 @@ use crate::{
     OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatPublicId,
     OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError, OpenAiCompatRefLookup,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort,
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use async_trait::async_trait;
+use ironclaw_filesystem::LibSqlRootFilesystem;
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
 };
@@ -23,24 +25,19 @@ use ironclaw_host_api::VirtualPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "libsql")]
-use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
-use ironclaw_filesystem::PostgresRootFilesystem;
-
 const DEFAULT_REF_ROOT: &str = "/engine/openai_compat/refs";
 const MAPPING_RECORD_KIND: &str = "openai_compat_ref_mapping";
 const IDEMPOTENCY_INDEX_RECORD_KIND: &str = "openai_compat_idempotency_index";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
 #[derive(Clone)]
-pub struct FilesystemOpenAiCompatRefStore {
+pub struct OpenAiCompatRefStore {
     filesystem: Arc<dyn RootFilesystem>,
     root: VirtualPath,
     cas_retries: usize,
 }
 
-impl FilesystemOpenAiCompatRefStore {
+impl OpenAiCompatRefStore {
     pub fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
         Self::with_root(filesystem, default_ref_root())
     }
@@ -313,30 +310,24 @@ impl FilesystemOpenAiCompatRefStore {
         Err(OpenAiCompatRefError::StoreUnavailable)
     }
 }
-
-#[cfg(feature = "libsql")]
 pub struct RebornLibSqlOpenAiCompatRefStore {
-    inner: FilesystemOpenAiCompatRefStore,
+    inner: OpenAiCompatRefStore,
 }
-
-#[cfg(feature = "libsql")]
 impl RebornLibSqlOpenAiCompatRefStore {
     pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
         Self {
-            inner: FilesystemOpenAiCompatRefStore::new(filesystem),
+            inner: OpenAiCompatRefStore::new(filesystem),
         }
     }
 
     pub fn with_root(filesystem: Arc<LibSqlRootFilesystem>, root: VirtualPath) -> Self {
         Self {
-            inner: FilesystemOpenAiCompatRefStore::with_root(filesystem, root),
+            inner: OpenAiCompatRefStore::with_root(filesystem, root),
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
-impl OpenAiCompatRefStore for RebornLibSqlOpenAiCompatRefStore {
+impl OpenAiCompatRefStorePort for RebornLibSqlOpenAiCompatRefStore {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,
@@ -374,30 +365,24 @@ impl OpenAiCompatRefStore for RebornLibSqlOpenAiCompatRefStore {
         self.inner.lookup_authorized(request).await
     }
 }
-
-#[cfg(feature = "postgres")]
 pub struct RebornPostgresOpenAiCompatRefStore {
-    inner: FilesystemOpenAiCompatRefStore,
+    inner: OpenAiCompatRefStore,
 }
-
-#[cfg(feature = "postgres")]
 impl RebornPostgresOpenAiCompatRefStore {
     pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
         Self {
-            inner: FilesystemOpenAiCompatRefStore::new(filesystem),
+            inner: OpenAiCompatRefStore::new(filesystem),
         }
     }
 
     pub fn with_root(filesystem: Arc<PostgresRootFilesystem>, root: VirtualPath) -> Self {
         Self {
-            inner: FilesystemOpenAiCompatRefStore::with_root(filesystem, root),
+            inner: OpenAiCompatRefStore::with_root(filesystem, root),
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
-impl OpenAiCompatRefStore for RebornPostgresOpenAiCompatRefStore {
+impl OpenAiCompatRefStorePort for RebornPostgresOpenAiCompatRefStore {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,
@@ -437,7 +422,7 @@ impl OpenAiCompatRefStore for RebornPostgresOpenAiCompatRefStore {
 }
 
 #[async_trait]
-impl OpenAiCompatRefStore for FilesystemOpenAiCompatRefStore {
+impl OpenAiCompatRefStorePort for OpenAiCompatRefStore {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,
