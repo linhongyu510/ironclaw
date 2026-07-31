@@ -139,9 +139,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
 
-    def test_reborn_workflow_change_fails_open(self) -> None:
+    def test_reborn_workflow_change_is_deferred_to_required_queue(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "deferred")
+        self.assertEqual(plan["crate_buckets"], [])
 
     def test_generated_integration_suites_are_assigned_to_flat_lanes(self) -> None:
         lanes = planner._integration_test_lanes()
@@ -155,13 +156,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
-    def test_unmapped_crate_path_fails_open(self) -> None:
+    def test_unmapped_crate_path_defers_to_merge_queue(self) -> None:
         plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "deferred")
 
-    def test_unclassified_build_input_fails_open(self) -> None:
+    def test_unclassified_build_input_defers_to_merge_queue(self) -> None:
         plan = self.plan("pull_request", ["Dockerfile"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "deferred")
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))

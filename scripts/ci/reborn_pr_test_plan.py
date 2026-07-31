@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
-FULL_PATHS = {
+DEFERRED_PATHS = {
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain",
@@ -159,6 +159,22 @@ def _full_plan(
     }
 
 
+def _deferred_plan(reason: str) -> dict[str, Any]:
+    return {
+        "mode": "deferred",
+        "reasons": [reason],
+        "changed_packages": [],
+        "affected_packages": [],
+        "crate_buckets": [],
+        "root_partitions": [],
+        "integration_lanes": [],
+        "run_group_tests": False,
+        "run_frontend": False,
+        "run_qa_replay": False,
+        "coverage_mode": "none",
+    }
+
+
 def build_plan(
     *,
     event: str,
@@ -174,11 +190,11 @@ def build_plan(
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
-        return _full_plan("empty pull-request diff", canonical_packages)
-    if any(path in FULL_PATHS for path in paths):
-        return _full_plan(
-            "Reborn test infrastructure or workspace topology changed",
-            canonical_packages,
+        return _deferred_plan("empty pull-request diff requires merge-queue coverage")
+    if any(path in DEFERRED_PATHS for path in paths):
+        return _deferred_plan(
+            "Reborn test infrastructure or workspace topology changed; "
+            "exhaustive runtime tests deferred to merge queue"
         )
 
     package_directories, reverse = _workspace_packages(metadata)
@@ -239,22 +255,30 @@ def build_plan(
                 None,
             )
             if package is None:
-                return _full_plan(f"unmapped crate path: {path}", canonical_packages)
+                return _deferred_plan(
+                    f"unmapped crate path {path}; exhaustive tests deferred to merge queue"
+                )
             changed_packages.add(package)
             reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            return _full_plan(f"unmapped Reborn test path: {path}", canonical_packages)
+            return _deferred_plan(
+                f"unmapped Reborn test path {path}; exhaustive tests deferred to merge queue"
+            )
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            return _full_plan(f"unmapped test or CI path: {path}", canonical_packages)
-        return _full_plan(f"unclassified pull-request path: {path}", canonical_packages)
+            return _deferred_plan(
+                f"unmapped test or CI path {path}; exhaustive tests deferred to merge queue"
+            )
+        return _deferred_plan(
+            f"unclassified pull-request path {path}; exhaustive tests deferred to merge queue"
+        )
 
     canonical_set = set(canonical_packages)
     affected = _affected_packages(changed_packages, reverse) & canonical_set
     if changed_packages and not affected:
-        return _full_plan(
-            "changed packages are outside the canonical Reborn set",
-            canonical_packages,
+        return _deferred_plan(
+            "changed packages are outside the canonical Reborn set; "
+            "exhaustive tests deferred to merge queue"
         )
 
     buckets = _bucket_packages(sorted(affected)) if affected else []

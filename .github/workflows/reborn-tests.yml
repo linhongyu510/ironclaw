@@ -1005,7 +1005,7 @@ jobs:
 
           plan_mode="${{ needs.changes.outputs.plan_mode }}"
           case "${plan_mode}" in
-            none|selected|full) ;;
+            none|selected|deferred|full) ;;
             *)
               echo "Missing or invalid Reborn test plan mode: '${plan_mode}'"
               exit 1
@@ -1077,4 +1077,6 @@ jobs:
 
           if [[ "${plan_mode}" == "none" ]]; then
             echo "No affected Reborn test surface — all lanes skipped as planned"
+          elif [[ "${plan_mode}" == "deferred" ]]; then
+            echo "Exhaustive Reborn runtime evidence deferred to required merge queue"
           fi

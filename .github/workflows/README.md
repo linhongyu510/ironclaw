@@ -41,9 +41,10 @@ consumer buckets, together with transitive consumers, to the merge queue. The
 merge queue and pushes to `main` still run every crate bucket, root
 partition, group suite, integration lane, frontend test, recorded replay, and
 coverage gate. Unknown paths or recognized test-topology changes select that
-full plan; a planner execution or schema failure fails the required check
-loudly rather than guessing at a matrix. The queue therefore preserves
-exhaustive deterministic evidence while
+full plan in the required merge queue; their PR plan runs the planner and
+workflow contracts, then reports the runtime suite as explicitly deferred.
+A planner execution or schema failure still fails the required check loudly.
+The queue therefore preserves exhaustive deterministic evidence while
 ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
 parallelism is capped at three crate buckets, one root partition, and one
 integration lane; merge queue and main retain full matrix parallelism so this
