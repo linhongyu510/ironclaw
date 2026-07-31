@@ -4,7 +4,8 @@ set -euo pipefail
 # Run the deterministic Rust-side Reborn E2E gate.
 # Usage:
 #   scripts/reborn-e2e-rust.sh              # all groups
-#   scripts/reborn-e2e-rust.sh architecture # boundary + host runtime spine
+#   scripts/reborn-e2e-rust.sh architecture-boundaries # dependency and protocol boundaries
+#   scripts/reborn-e2e-rust.sh architecture-runtime    # host runtime and capability spine
 #   scripts/reborn-e2e-rust.sh runtimes     # dispatcher/runtime/process lanes
 #   scripts/reborn-e2e-rust.sh substrates   # event/network/secret substrates
 #
@@ -63,7 +64,7 @@ run_lib_test_exact() {
   echo "::endgroup::"
 }
 
-run_architecture() {
+run_architecture_boundaries() {
   run_test ironclaw_architecture reborn_dependency_boundaries
   # Pins docs/reborn/contracts/turns-agent-loop.md: terminal model
   # provider authentication and transcript persistence failures remain durable,
@@ -84,6 +85,9 @@ run_architecture() {
   # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
   # payloads remain readable but the retired field is never written again.
   run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
+}
+
+run_architecture_runtime() {
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -112,6 +116,11 @@ run_architecture() {
   # cannot create a retry process.
   run_lib_test_exact ironclaw_turns \
     process_projection::runtime::tests::retry_rejects_checkpoint_rejection_without_creating_a_process
+}
+
+run_architecture() {
+  run_architecture_boundaries
+  run_architecture_runtime
 }
 
 run_runtimes() {
@@ -163,6 +172,12 @@ case "${group}" in
   architecture)
     run_architecture
     ;;
+  architecture-boundaries)
+    run_architecture_boundaries
+    ;;
+  architecture-runtime)
+    run_architecture_runtime
+    ;;
   runtimes)
     run_runtimes
     ;;
@@ -176,7 +191,7 @@ case "${group}" in
     ;;
   *)
     echo "unknown Reborn E2E group: ${group}" >&2
-    echo "expected one of: architecture, runtimes, substrates, all" >&2
+    echo "expected one of: architecture, architecture-boundaries, architecture-runtime, runtimes, substrates, all" >&2
     exit 2
     ;;
 esac

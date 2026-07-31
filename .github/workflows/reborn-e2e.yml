@@ -121,7 +121,8 @@ jobs:
       fail-fast: false
       matrix:
         group:
-          - architecture
+          - architecture-boundaries
+          - architecture-runtime
           - runtimes
           - substrates
     steps:
@@ -305,10 +306,34 @@ jobs:
           --timeout=120
 
       - name: Run harvested QA replay and provider contracts with Emulate
+        id: live_canary_binary
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: |
           set -euo pipefail
+          product_ref="$(git rev-parse HEAD)"
+          artifact_dir="artifacts/reborn-webui-v2-binary"
+          mkdir -p "${artifact_dir}"
+          (
+            set -euo pipefail
+            # Package the already-built binary while the independent provider
+            # replay runs. The artifact contents and downstream name are unchanged.
+            # Temporary compatibility member for downstream QA consumers; remove
+            # after every consumer invokes the canonical ironclaw binary.
+            cp target/debug/ironclaw target/debug/ironclaw-reborn
+            tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
+            (
+              cd "${artifact_dir}"
+              sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
+            )
+            jq -n \
+              --arg product_ref "${product_ref}" \
+              --argjson features '[]' \
+              '{format_version: 1, product_ref: $product_ref, features: $features}' \
+              > "${artifact_dir}/manifest.json"
+          ) &
+          package_pid=$!
+
           common=(
             -m "not shared_world"
             -v
@@ -339,8 +364,10 @@ jobs:
           secondary_pid=$!
 
           status=0
-          wait "${primary_pid}" || status=$?
-          wait "${secondary_pid}" || status=$?
+          wait "${primary_pid}" || status=1
+          wait "${secondary_pid}" || status=1
+          wait "${package_pid}" || status=1
+          echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"
           exit "${status}"
 
       - name: Replay provider journeys in reverse order
@@ -394,28 +421,6 @@ jobs:
           fi
           scripts/ci/run-hermetic-deterministic-suite.sh command \
             pytest "${responses_tests[@]}" -v --timeout=120
-
-      - name: Package live-canary binary
-        id: live_canary_binary
-        run: |
-          set -euo pipefail
-          product_ref="$(git rev-parse HEAD)"
-          artifact_dir="artifacts/reborn-webui-v2-binary"
-          mkdir -p "${artifact_dir}"
-          # Temporary compatibility member for downstream QA consumers; remove
-          # after every consumer invokes the canonical ironclaw binary.
-          cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
-          (
-            cd "${artifact_dir}"
-            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
-          )
-          jq -n \
-            --arg product_ref "${product_ref}" \
-            --argjson features '[]' \
-            '{format_version: 1, product_ref: $product_ref, features: $features}' \
-            > "${artifact_dir}/manifest.json"
-          echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload live-canary binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
