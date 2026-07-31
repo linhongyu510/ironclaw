@@ -2,7 +2,7 @@
   "_promotion": {
     "schema_version": 1,
     "provenance": {
-      "source_url": "https://github.com/nearai/ironclaw/pull/PR_NUMBER",
+      "source_url": "https://github.com/nearai/ironclaw/pull/6953",
       "artifact_schema": "ironclaw.run_artifact.v1",
       "artifact_sha256": "bc24cd6bceccd1527f890d4787e29f6cd8b708461124bfc365b2b6b162a0a8b2"
     },
@@ -18,7 +18,7 @@
     },
     "last_successful_replay": {
       "date": "2026-07-31",
-      "commit": "670c16a9572657806d803c439eddc171bc73fb92",
+      "commit": "f634412e8f06813912502802cfcc11b70e8da3a5",
       "command": "cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior contract_github_open_pr_priority_uses_scoped_search -- --exact"
     }
   },
