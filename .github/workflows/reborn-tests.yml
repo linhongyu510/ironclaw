@@ -24,6 +24,7 @@ on:
   pull_request:
     branches:
       - main
+      - codex/ci-selected-benchmark-base
   merge_group:
     branches:
       - main

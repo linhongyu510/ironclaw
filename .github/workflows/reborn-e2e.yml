@@ -34,6 +34,7 @@ on:
   pull_request:
     branches:
       - main
+      - codex/ci-selected-benchmark-base
   # The merge queue is the production gate: the deterministic Reborn contract
   # and smoke coverage must pass on the merged state before it reaches main.
   # merge_group does not support `paths:` filters, so scope is resolved by the
