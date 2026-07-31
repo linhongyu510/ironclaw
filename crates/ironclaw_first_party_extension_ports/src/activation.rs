@@ -99,6 +99,12 @@ pub struct SkillActivationSelectorConfig {
     pub selection_mode: SkillActivationSelectionMode,
     pub regex_activation_enabled: bool,
     pub injection_mode: SkillInjectionMode,
+    /// Minimum criteria score a skill must reach to be auto-activated.
+    ///
+    /// Threaded through the config rather than read from a constant so a deployment profile
+    /// chooses it deliberately, and so the routing corpus can sweep it. Defaults to
+    /// `ironclaw_skills::DEFAULT_MIN_ACTIVATION_SCORE`.
+    pub min_activation_score: u32,
 }
 
 /// How recorded user messages are allowed to activate skills.
@@ -120,6 +126,7 @@ impl Default for SkillActivationSelectorConfig {
             // `ironclaw_reborn_composition::runtime::skill_activation_selector_config`
             // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
             injection_mode: SkillInjectionMode::Full,
+            min_activation_score: ironclaw_skills::DEFAULT_MIN_ACTIVATION_SCORE,
         }
     }
 }
@@ -1353,6 +1360,7 @@ fn select_skill_activations(
             satisfied_setup_markers,
             SkillSelectionOptions {
                 regex_activation_enabled: config.regex_activation_enabled,
+                min_activation_score: config.min_activation_score,
             },
         );
         feedback.extend(outcome.notes);
@@ -3285,7 +3293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_activates_skills_from_tags_and_patterns() {
+    async fn selector_activates_from_patterns_but_not_from_a_lone_tag() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![
             (
                 SkillSourceKind::System,
@@ -3332,9 +3340,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(selected.len(), 2);
-        assert!(combined.contains("TAG_HELPER_SENTINEL"));
+        // A pattern hit is 20 points and activates. A skill whose only signal is ONE tag is
+        // 3 points and no longer does: tags are a ranking signal, not an activation signal,
+        // which is what stops a broadly-tagged skill firing on any prompt containing a common
+        // word. This test previously asserted tag-only activation.
+        assert_eq!(
+            selected.len(),
+            1,
+            "tag-only activation is no longer sufficient"
+        );
         assert!(combined.contains("PATTERN_HELPER_SENTINEL"));
+        assert!(
+            !combined.contains("TAG_HELPER_SENTINEL"),
+            "one tag is 3 points, below the minimum activation score"
+        );
         assert!(!combined.contains("QUIET_HELPER_SENTINEL"));
     }
 

@@ -80,8 +80,8 @@ pub use scoped_management::{
     build_existing_standalone_skill_management_port, build_scoped_skill_management_port,
 };
 pub use selector::{
-    MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
-    prefilter_skills_with_options, skill_token_cost,
+    DEFAULT_MIN_ACTIVATION_SCORE, MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome,
+    SkillSelectionOptions, extract_skill_mentions, prefilter_skills_with_options, skill_token_cost,
 };
 pub use validation::{
     SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,

@@ -4,11 +4,18 @@
 //! no skill content in context. This prevents circular manipulation where a loaded
 //! skill could influence which skills get loaded.
 //!
-//! Scoring:
-//! - Keyword exact match: 10 points (capped at 30 total)
-//! - Keyword substring match: 5 points (capped at 30 total)
+//! Scoring, all matched on word boundaries:
+//! - Keyword match: 10 points (capped at 30 total)
 //! - Tag match: 3 points (capped at 15 total)
 //! - Regex pattern match: 20 points (capped at 40 total)
+//!
+//! Terms match as contiguous token runs, so a multi-word keyword matches as a phrase and a
+//! keyword buried inside a longer word does not match at all. There is no substring tier:
+//! it scored 5 points for a hit anywhere in the message, which is what let
+//! `tech-debt-tracker`'s `hack` keyword activate on "search Hacker News" (#5417).
+//!
+//! A skill is selected only at or above `min_activation_score`, which requires two
+//! independent signals rather than any non-zero score.
 #![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use crate::types::LoadedSkill;
@@ -53,16 +60,49 @@ pub struct SelectionOutcome<'a> {
     pub notes: Vec<String>,
 }
 
+/// Minimum score a skill must reach to be selected.
+///
+/// Chosen from a measured sweep over the real-skill routing corpus rather than assumed, as
+/// epic #6565 requires. Only a few values are distinguishable because the score distribution
+/// is quantised: one tag is 3, one keyword 10, one pattern 20.
+///
+/// | threshold | recall | top-1 | forbidden hits | false activations | skills selected |
+/// |---|---|---|---|---|---|
+/// | 1 (no threshold) | 15/17 | 14/16 | 5/16 | 1/2 | 44 |
+/// | 5 | 15/17 | 14/16 | 2/16 | 0/2 | 30 |
+/// | **10** | **15/17** | **14/16** | **2/16** | **0/2** | **30** |
+/// | 13 | 14/17 | 13/16 | 1/16 | 0/2 | 21 |
+/// | 21 | 12/17 | 11/16 | 1/16 | 0/2 | 15 |
+///
+/// 10 dominates: it holds recall and top-1 at their no-threshold values while removing both
+/// false activations and cutting total selections by a third. 13 was tried first, on the
+/// theory that requiring two independent signals is principled; the corpus disagrees -- it
+/// buys one fewer forbidden hit and costs a relevant skill and a top-1.
+///
+/// 10 means one whole-word keyword hit is sufficient and a lone tag hit is not, which matches
+/// the weights. Reproduce with `threshold_sweep_reports_the_quality_trade`.
+///
+/// Two things this does NOT fix, both catalog metadata rather than scoring:
+/// - Four declared tags reach 12 and so can still activate without a keyword. No bundled
+///   skill declares five tags, so nothing hits it today, but nothing prevents it either.
+/// - The broadest skills survive: `coding` reaches 20 from two generic whole-word keywords
+///   (`file`, `change`), so it still fires widely. That needs a descriptor lint.
+pub const DEFAULT_MIN_ACTIVATION_SCORE: u32 = 10;
+
 /// Selection policy for deterministic skill prefiltering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillSelectionOptions {
     pub regex_activation_enabled: bool,
+    /// Scores below this are not selected. Carried in options rather than as a bare constant
+    /// so a deployment profile can tune it and the routing corpus can A/B it.
+    pub min_activation_score: u32,
 }
 
 impl Default for SkillSelectionOptions {
     fn default() -> Self {
         Self {
             regex_activation_enabled: true,
+            min_activation_score: DEFAULT_MIN_ACTIVATION_SCORE,
         }
     }
 }
@@ -206,7 +246,7 @@ pub fn prefilter_skills_with_options<'a>(
                 return None;
             }
             let score = score_skill(skill, &message_lower, message, options);
-            if score > 0 {
+            if score >= options.min_activation_score.max(1) {
                 Some(ScoredSkill { skill, score })
             } else {
                 None
@@ -214,8 +254,23 @@ pub fn prefilter_skills_with_options<'a>(
         })
         .collect();
 
-    // Sort by score descending
-    scored.sort_by_key(|b| std::cmp::Reverse(b.score));
+    // Sort by score descending, then break ties deterministically.
+    //
+    // `sort_by_key` is stable, so a bare score sort left every tie resolved by the order the
+    // caller happened to enumerate the skill directory in -- i.e. by filesystem order, which
+    // is neither meaningful nor reproducible across machines. Ties are common: with a 4-skill
+    // budget, which 4 of a tied group got selected was effectively arbitrary.
+    //
+    // Specificity breaks the tie first: a skill declaring three precise keywords should beat
+    // one declaring twenty broad ones when both scored the same, because the same score
+    // earned from a narrower declaration is stronger evidence. Name is the final tiebreak so
+    // the result is total and stable.
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| declared_term_count(a.skill).cmp(&declared_term_count(b.skill)))
+            .then_with(|| a.skill.name().cmp(b.skill.name()))
+    });
 
     // Apply candidate limit and context budget.
     let mut result: Vec<&'a LoadedSkill> = Vec::new();
@@ -308,6 +363,61 @@ pub fn prefilter_skills_with_options<'a>(
     }
 }
 
+/// How many activation terms a skill declares, as a specificity proxy for tie-breaking.
+///
+/// Fewer declared terms means each hit is stronger evidence, so on an equal score the
+/// narrower skill wins. Counts keywords, tags and patterns together because all three can
+/// contribute to the score.
+fn declared_term_count(skill: &LoadedSkill) -> usize {
+    skill.lowercased_keywords.len() + skill.lowercased_tags.len() + skill.compiled_patterns.len()
+}
+
+/// Split a lowercased message into alphanumeric tokens.
+///
+/// Done once per message and shared across every skill, so matching 325 keywords over a
+/// 32-skill catalog walks the message once rather than 325 times.
+fn tokenize_message(message_lower: &str) -> Vec<&str> {
+    message_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// Whether `term` occurs in `tokens` on word boundaries, as a contiguous run of tokens.
+///
+/// This replaces the old two-tier scheme, where a keyword scored 10 for a whole-word hit and
+/// **5 for a bare substring hit anywhere in the message**. The substring tier is what caused
+/// #5417: `tech-debt-tracker` declares the keyword `hack`, "search Hacker News for..."
+/// contains it, and 5 > 0 was enough to activate.
+///
+/// Boundary matching has to be phrase-aware rather than token-equality, because **236 of the
+/// catalog's 325 keywords are multi-word** (`tech debt`, `refactor later`, `pull request`).
+/// A token can never equal a phrase, so the old whole-word tier could not match any of them
+/// -- they matched *only* via the substring tier. Deleting that tier without phrase support
+/// would therefore have silently discarded ~73% of the keyword signal, which is why the
+/// terms are split on the same character class as the message and compared as a window.
+///
+/// Splitting the term on non-alphanumerics also normalises separator style for free, so a
+/// single declaration of `code review` matches "code review", "code-review" and
+/// "code_review". The catalog is inconsistent about this today.
+///
+/// Deliberately strict about suffixes: `github repo` does not match "a github repository".
+/// A blanket `[a-z]*` tail was measured and costs +110 false firings to recover 6 real hits,
+/// so the two catalog entries that want a prefix match should be authored to say so rather
+/// than every term paying for it.
+fn phrase_matches(tokens: &[&str], term: &str) -> bool {
+    let needle: Vec<&str> = term
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if needle.is_empty() || needle.len() > tokens.len() {
+        return false;
+    }
+    tokens
+        .windows(needle.len())
+        .any(|window| window == &needle[..])
+}
+
 /// Score a skill against a user message.
 fn score_skill(
     skill: &LoadedSkill,
@@ -325,19 +435,13 @@ fn score_skill(
     }
 
     let mut score: u32 = 0;
+    let message_tokens = tokenize_message(message_lower);
 
     // Keyword scoring with cap to prevent gaming via keyword stuffing
     let mut keyword_score: u32 = 0;
     for kw_lower in &skill.lowercased_keywords {
-        // Exact word match (surrounded by word boundaries)
-        if message_lower
-            .split_whitespace()
-            .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == kw_lower.as_str())
-        {
+        if phrase_matches(&message_tokens, kw_lower) {
             keyword_score += 10;
-        } else if message_lower.contains(kw_lower.as_str()) {
-            // Substring match
-            keyword_score += 5;
         }
     }
     score += keyword_score.min(MAX_KEYWORD_SCORE);
@@ -345,7 +449,7 @@ fn score_skill(
     // Tag scoring from activation.tags
     let mut tag_score: u32 = 0;
     for tag_lower in &skill.lowercased_tags {
-        if message_lower.contains(tag_lower.as_str()) {
+        if phrase_matches(&message_tokens, tag_lower) {
             tag_score += 3;
         }
     }
@@ -490,7 +594,12 @@ mod tests {
             max_candidates,
             max_context_tokens,
             &HashSet::new(),
-            super::SkillSelectionOptions::default(),
+            // See `prefilter_skills`: threshold 1 keeps these mechanism tests on their own
+            // subject rather than on the production threshold.
+            super::SkillSelectionOptions {
+                min_activation_score: 1,
+                ..Default::default()
+            },
         )
         .selected
     }
@@ -513,7 +622,17 @@ mod tests {
             max_candidates,
             max_context_tokens,
             satisfied_setup_markers,
-            super::SkillSelectionOptions::default(),
+            // `min_activation_score: 1` deliberately restores the pre-threshold rule for
+            // this shim. The tests using it are about *mechanism* -- chain loading, setup
+            // markers, budget exhaustion, candidate limits -- and their fixtures declare one
+            // or two terms, so under the production threshold they would all be testing the
+            // threshold instead of their own subject. Scoring semantics are asserted at the
+            // real default in `min_activation_score_tests`, and the routing corpus exercises
+            // the default end to end over the real catalog.
+            super::SkillSelectionOptions {
+                min_activation_score: 1,
+                ..Default::default()
+            },
         )
     }
 
@@ -600,6 +719,7 @@ mod tests {
             &HashSet::new(),
             super::SkillSelectionOptions {
                 regex_activation_enabled: false,
+                ..Default::default()
             },
         );
 
@@ -609,9 +729,13 @@ mod tests {
 
     #[test]
     fn test_regex_activation_disabled_keeps_keyword_selection() {
+        // Two keywords, not one: with `min_activation_score` a lone keyword hit (10) is
+        // deliberately below threshold, so a one-keyword fixture would now be testing the
+        // threshold rather than this test's actual subject -- that disabling regex does not
+        // suppress keyword-driven selection.
         let skills = vec![make_skill(
             "writing",
-            &["write"],
+            &["write", "email"],
             &[],
             &[r"(?i)\bwrite\b.*\bemail\b"],
         )];
@@ -623,6 +747,7 @@ mod tests {
             &HashSet::new(),
             super::SkillSelectionOptions {
                 regex_activation_enabled: false,
+                ..Default::default()
             },
         );
 
@@ -630,8 +755,14 @@ mod tests {
         assert_eq!(result.selected[0].name(), "writing");
     }
 
+    /// A keyword buried inside a longer word no longer matches.
+    ///
+    /// This test previously asserted the opposite -- that `writing` matched "rewriting" for
+    /// 5 points -- which is the defect behind #5417: `tech-debt-tracker` declares `hack`, and
+    /// "search Hacker News for..." contains it. Selection on any non-zero score turned that
+    /// incidental substring into an activation.
     #[test]
-    fn test_keyword_substring_match() {
+    fn a_keyword_inside_a_longer_word_does_not_match() {
         let skills = vec![make_skill("writing", &["writing"], &[], &[])];
         let result = prefilter_no_markers(
             "I need help with rewriting this text",
@@ -639,7 +770,186 @@ mod tests {
             3,
             MAX_SKILL_CONTEXT_TOKENS,
         );
-        assert_eq!(result.len(), 1);
+        assert!(
+            result.is_empty(),
+            "'writing' must not match inside 'rewriting'"
+        );
+
+        // ...while the same keyword as its own word still does.
+        let result = prefilter_no_markers(
+            "I need help writing this text",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1, "a whole-word hit must still match");
+    }
+
+    /// The #5417 reproduction at the scoring layer: the exact prompt and the exact keyword.
+    #[test]
+    fn hacker_news_does_not_activate_a_skill_declaring_hack() {
+        let skills = vec![make_skill(
+            "tech-debt-tracker",
+            &["hack", "tech debt"],
+            &[],
+            &[],
+        )];
+        let result = prefilter_no_markers(
+            "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(
+            result.is_empty(),
+            "issue #5417: 'hack' must not match inside 'Hacker'"
+        );
+    }
+
+    /// Multi-word keywords are 236 of the catalog's 325, and token equality can never match
+    /// them -- they only ever matched through the substring tier this change removes. Without
+    /// phrase support, removing that tier would silently discard ~73% of the keyword signal.
+    #[test]
+    fn multi_word_keywords_still_match_as_phrases() {
+        let skills = vec![make_skill("tech-debt-tracker", &["tech debt"], &[], &[])];
+        for message in [
+            "we should track our tech debt",
+            "we should track our tech-debt",
+            "we should track our tech_debt",
+        ] {
+            let result = prefilter_no_markers(message, &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+            assert_eq!(result.len(), 1, "phrase must match in {message:?}");
+        }
+        // But not out of order, and not across a sentence boundary in the wrong sequence.
+        let result = prefilter_no_markers(
+            "the debt is tech related",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(result.is_empty(), "tokens must be contiguous and in order");
+    }
+
+    /// Strictness about suffixes is deliberate: a blanket suffix wildcard was measured at
+    /// +110 false firings to recover 6 real hits.
+    #[test]
+    fn a_keyword_does_not_match_a_longer_inflection() {
+        let skills = vec![make_skill("gh", &["pull request"], &[], &[])];
+        let result = prefilter_no_markers(
+            "triage the open issues and pull requests",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(
+            result.is_empty(),
+            "'pull request' does not match 'pull requests'; a prefix match must be authored \
+             deliberately rather than applied to every term"
+        );
+    }
+
+    mod min_activation_score_tests {
+        use super::*;
+
+        fn select<'a>(message: &str, skills: &'a [LoadedSkill]) -> Vec<&'a LoadedSkill> {
+            super::super::prefilter_skills_with_options(
+                message,
+                skills,
+                4,
+                MAX_SKILL_CONTEXT_TOKENS,
+                &HashSet::new(),
+                super::super::SkillSelectionOptions::default(),
+            )
+            .selected
+        }
+
+        /// One whole-word keyword is 10, exactly the threshold: sufficient by design. The
+        /// sweep showed that requiring two signals (13) costs a relevant skill and a top-1
+        /// for one fewer forbidden hit, so a lone keyword deliberately still selects.
+        #[test]
+        fn a_lone_keyword_hit_reaches_the_threshold() {
+            let skills = vec![make_skill("writing", &["write"], &[], &[])];
+            assert_eq!(select("Please write an email", &skills).len(), 1);
+        }
+
+        /// A keyword that only appears inside a longer word scores nothing, so it stays below
+        /// the threshold no matter how many such keywords are declared. This is the pairing
+        /// that fixes #5417: boundary matching zeroes the score, the threshold is not even
+        /// reached.
+        #[test]
+        fn keywords_matching_only_as_substrings_stay_below_the_threshold() {
+            let skills = vec![make_skill("debt", &["hack", "hacky", "shortcut"], &[], &[])];
+            assert!(select("search Hacker News for shortcuts", &skills).is_empty());
+        }
+
+        /// Tags alone cannot activate. Two tags are 6, well under 10; this kills the
+        /// `llm-council`-on-"analysis"+"research" class of false activation, which accounted
+        /// for 91 firings over the broad prompt sample.
+        #[test]
+        fn tags_alone_do_not_activate() {
+            let skills = vec![make_skill("council", &[], &["analysis", "research"], &[])];
+            assert!(
+                select("do some analysis and research on this", &skills).is_empty(),
+                "two tags are 6 points; tags are a ranking signal, not an activation signal"
+            );
+        }
+
+        /// Honest limit: four declared tags reach 12 and so DO clear a threshold of 10. No
+        /// bundled skill declares four matching tags today, but nothing prevents it, which is
+        /// why the descriptor lint rather than the threshold owns metadata discipline.
+        #[test]
+        fn four_tags_can_still_activate_which_the_lint_must_own() {
+            let skills = vec![make_skill(
+                "broad",
+                &[],
+                &["analysis", "research", "report", "data"],
+                &[],
+            )];
+            assert_eq!(
+                select("analysis research report data", &skills).len(),
+                1,
+                "documents a known gap the threshold cannot close"
+            );
+        }
+
+        /// A single pattern is 20, so regex-driven activation is unaffected. This is why the
+        /// threshold cannot make a bundled skill unreachable: all 32 declare a pattern.
+        #[test]
+        fn one_pattern_still_clears_the_threshold() {
+            let skills = vec![make_skill("debt", &[], &[], &[r"(?i)this is a hack"])];
+            assert_eq!(select("honestly this is a hack", &skills).len(), 1);
+        }
+    }
+
+    /// Ties must not be resolved by the order the caller enumerated the skills, which is
+    /// filesystem order in production -- neither meaningful nor reproducible.
+    #[test]
+    fn tied_scores_break_deterministically_regardless_of_input_order() {
+        let broad = make_skill(
+            "broad",
+            &["report", "data", "file", "value", "number", "table"],
+            &[],
+            &[],
+        );
+        let narrow = make_skill("narrow", &["report", "data"], &[], &[]);
+        let message = "produce a report from the data";
+
+        let forward = vec![broad.clone(), narrow.clone()];
+        let reverse = vec![narrow, broad];
+        let a: Vec<String> = prefilter_no_markers(message, &forward, 4, MAX_SKILL_CONTEXT_TOKENS)
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        let b: Vec<String> = prefilter_no_markers(message, &reverse, 4, MAX_SKILL_CONTEXT_TOKENS)
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        assert_eq!(a, b, "selection order must not depend on enumeration order");
+        assert_eq!(
+            a.first().map(String::as_str),
+            Some("narrow"),
+            "on an equal score the skill declaring fewer terms is stronger evidence"
+        );
     }
 
     #[test]

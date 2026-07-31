@@ -78,6 +78,10 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     validate_corpus(&corpus, &skills_by_name);
 
     let mut metrics = BaselineMetrics::default();
+    // Collect every drifted case before failing. Asserting inside the loop reported only the
+    // first, which turns a deliberate scoring change into a one-case-at-a-time slog and hides
+    // how broad the change actually is -- the thing a reviewer most needs to see.
+    let mut drift: Vec<String> = Vec::new();
     for case in &corpus.cases {
         let selected = prefilter_skills_with_options(
             &case.prompt,
@@ -92,11 +96,12 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
         .map(|skill| skill.name().to_string())
         .collect::<Vec<_>>();
 
-        assert_eq!(
-            selected, case.baseline_selected,
-            "routing baseline changed for case {}; review whether this is an intentional quality change, then update the fixture",
-            case.id
-        );
+        if selected != case.baseline_selected {
+            drift.push(format!(
+                "  {}\n    baseline: {:?}\n    actual:   {:?}",
+                case.id, case.baseline_selected, selected
+            ));
+        }
 
         metrics.relevant_total += case.relevant.len();
         metrics.relevant_retrieved += case
@@ -132,9 +137,102 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
         );
     }
 
+    assert!(
+        drift.is_empty(),
+        "routing baseline changed for {} of {} cases; review whether this is an intentional \
+         quality change, then update the fixture:\n{}",
+        drift.len(),
+        corpus.cases.len(),
+        drift.join("\n")
+    );
+
     // Slice 0 records these quality measurements without enforcing the epic's
     // promotion thresholds. Slice 6 owns turning reviewed targets into gates.
     eprintln!("skill-routing-baseline metrics={metrics:?}");
+}
+
+/// Sweep the activation threshold over the corpus and print the quality trade at each value.
+///
+/// The epic requires thresholds be set *from* a measured baseline rather than assumed. Only a
+/// few values are distinguishable, because the score distribution is quantised: one tag is 3,
+/// one keyword 10, one pattern 20. This prints recall, top-1 and false-activation at each so
+/// the chosen default is a reviewable decision instead of a guess.
+#[test]
+fn threshold_sweep_reports_the_quality_trade() {
+    let corpus: RoutingCorpus = serde_json::from_str(include_str!("fixtures/routing_corpus.json"))
+        .expect("routing corpus must parse");
+    let skills = load_bundled_skills();
+
+    println!(
+        "\n{:>9}  {:>6}  {:>6}  {:>7}  {:>9}  {:>9}",
+        "threshold", "recall", "top1", "forbid", "false-act", "selected"
+    );
+    for threshold in [1u32, 3, 5, 10, 13, 20, 21] {
+        let mut m = BaselineMetrics::default();
+        let mut total_selected = 0usize;
+        for case in &corpus.cases {
+            let selected = prefilter_skills_with_options(
+                &case.prompt,
+                &skills,
+                corpus.top_k,
+                EVALUATION_TOKEN_BUDGET,
+                &HashSet::new(),
+                SkillSelectionOptions {
+                    min_activation_score: threshold,
+                    ..Default::default()
+                },
+            )
+            .selected
+            .into_iter()
+            .map(|skill| skill.name().to_string())
+            .collect::<Vec<_>>();
+            total_selected += selected.len();
+
+            m.relevant_total += case.relevant.len();
+            m.relevant_retrieved += case
+                .relevant
+                .iter()
+                .filter(|name| selected.contains(name))
+                .count();
+            if !case.relevant.is_empty() {
+                m.positive_cases += 1;
+                if selected
+                    .first()
+                    .is_some_and(|name| case.relevant.contains(name))
+                {
+                    m.relevant_top_one += 1;
+                }
+            }
+            if !case.forbidden.is_empty() {
+                m.forbidden_cases += 1;
+                if case.forbidden.iter().any(|name| selected.contains(name)) {
+                    m.forbidden_hits += 1;
+                }
+            }
+            if case.expect_no_match {
+                m.no_match_cases += 1;
+                if !selected.is_empty() {
+                    m.false_activations += 1;
+                }
+            }
+        }
+        println!(
+            "{threshold:>9}  {:>3}/{:<2}  {:>3}/{:<2}  {:>3}/{:<3}  {:>4}/{:<4}  {total_selected:>9}",
+            m.relevant_retrieved,
+            m.relevant_total,
+            m.relevant_top_one,
+            m.positive_cases,
+            m.forbidden_hits,
+            m.forbidden_cases,
+            m.false_activations,
+            m.no_match_cases,
+        );
+    }
+    println!(
+        "\nrecall = relevant skills retrieved; top1 = a relevant skill ranked first; \
+         forbid = cases where a forbidden skill was selected; false-act = expect-no-match \
+         cases that selected something\n"
+    );
 }
 
 fn load_bundled_skills() -> Vec<LoadedSkill> {
