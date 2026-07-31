@@ -18,8 +18,11 @@ use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_host_api::{
-    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceInvokeRequest, ThreadId, UserId,
+    ids::{ActivityId, CapabilityId, ThreadId, UserId},
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceInvokeRequest,
+    },
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
@@ -51,8 +54,9 @@ use crate::command_dispatch::{
     RejectingProductCommandAdmissionService,
 };
 use crate::commands::{
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand,
-    ProductLifecycleCommandInput, ProductModelCommandInput,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductLifecycleCommandInput,
+    ProductModelCommandInput, ProductStatusCommandInput,
 };
 use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
@@ -1039,7 +1043,7 @@ fn is_stale_auth_error(error: &ProductSurfaceFailure) -> bool {
 fn projection_thread_id_from_binding(
     binding: &ResolvedBinding,
     thread_id_hint: Option<&str>,
-) -> Result<ironclaw_host_api::ThreadId, ProductAdapterError> {
+) -> Result<ironclaw_host_api::ids::ThreadId, ProductAdapterError> {
     validate_projection_thread_hint(&binding.thread_id, thread_id_hint)?;
     Ok(binding.thread_id.clone())
 }
@@ -1642,17 +1646,16 @@ async fn dispatch_product_command(
     command_surface: Option<&dyn ProductSurface>,
     command: ProductCommand,
 ) -> Result<ProductInboundAck, ProductSurfaceFailure> {
-    if matches!(
-        command,
-        ProductCommand::Status | ProductCommand::Unknown { .. }
-    ) {
-        return Ok(command_rejected_ack(&command));
+    if let ProductCommand::Unknown { name, .. } = &command {
+        return Ok(unknown_command_ack(name));
     }
     let Some(command_surface) = command_surface else {
         return Ok(command_rejected_ack(&command));
     };
-    let (operation_id, input, command_name) = product_command_operation(command)?;
-    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let binding = binding_service
+        .resolve_binding(resolve_binding_request(envelope))
+        .await?;
+    let (operation_id, input, command_name) = product_command_operation(command, &binding)?;
     let caller = ProductSurfaceCaller::new(
         binding.tenant_id,
         binding.actor_user_id,
@@ -1678,6 +1681,7 @@ async fn dispatch_product_command(
 
 fn product_command_operation(
     command: ProductCommand,
+    binding: &ResolvedBinding,
 ) -> Result<(CapabilityId, serde_json::Value, String), ProductSurfaceFailure> {
     match command {
         ProductCommand::Lifecycle { action } => {
@@ -1695,10 +1699,25 @@ fn product_command_operation(
                 .map_err(product_command_internal_error)?,
             "model".to_string(),
         )),
-        ProductCommand::Status | ProductCommand::Unknown { .. } => {
-            unreachable!("unsupported product commands are rejected before operation mapping")
-        }
+        ProductCommand::Status => Ok((
+            command_operation_id(PRODUCT_STATUS_COMMAND_OPERATION_ID)?,
+            serde_json::to_value(ProductStatusCommandInput {
+                thread_id: binding.thread_id.to_string(),
+            })
+            .map_err(product_command_internal_error)?,
+            "status".to_string(),
+        )),
+        ProductCommand::Unknown { name, .. } => Err(ProductSurfaceFailure::UnsupportedActionKind {
+            kind: format!("unknown_product_command:{name}"),
+        }),
     }
+}
+
+fn unknown_command_ack(name: &str) -> ProductInboundAck {
+    ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        format!("unknown product command: {name}"),
+    ))
 }
 
 fn command_operation_id(id: &str) -> Result<CapabilityId, ProductSurfaceFailure> {

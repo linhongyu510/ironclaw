@@ -41,12 +41,20 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
-    OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
+    capability_profile::CapabilityProfileSchemaRef,
+    error::HostApiError,
+    host_port::{HostPortCatalog, HostPortId},
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+    resource::ResourceProfile,
+    runtime::{RuntimeKind, TrustClass},
+    surface::CapabilitySurfaceKind,
+    trust::RequestedTrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -1054,15 +1062,23 @@ impl CapabilityDeclV2 {
         raw: RawCapabilityV2,
         extension_id: &ExtensionId,
         host_port_catalog: &HostPortCatalog,
+        extra_id_namespace: Option<&str>,
     ) -> Result<Self, ManifestV2Error> {
         let id = CapabilityId::new(raw.id)?;
         // Provider-prefix check without an intermediate `format!` allocation:
         // capability id must be `<extension_id>.<...>` (the dot is required so
-        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`).
-        let prefixed = id
-            .as_str()
-            .strip_prefix(extension_id.as_str())
-            .is_some_and(|rest| rest.starts_with('.'));
+        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`). A caller
+        // may open exactly one extra reserved namespace — the v3 parser passes
+        // the stable memory-tool namespace for `[memory]`-declaring manifests
+        // (host-bundled only), so a swapped memory backend keeps the stable
+        // `ironclaw.memory.*` tool ids.
+        let in_namespace = |namespace: &str| {
+            id.as_str()
+                .strip_prefix(namespace)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        let prefixed =
+            in_namespace(extension_id.as_str()) || extra_id_namespace.is_some_and(in_namespace);
         if !prefixed {
             return Err(ManifestV2Error::CapabilityIdNotPrefixed {
                 id,
@@ -1853,8 +1869,8 @@ mod tests {
 
     fn product_auth_source() -> RuntimeCredentialRequirementSource {
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: ironclaw_host_api::VendorId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+            provider: ironclaw_host_api::ids::VendorId::new("google").unwrap(),
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         }
     }
 

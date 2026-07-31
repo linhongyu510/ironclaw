@@ -1,10 +1,16 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    CapabilityVisibility, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
-    canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    approval::{canonical_json_v1, sha256_digest_token},
+    capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, EffectKind},
+    decision::Decision,
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
@@ -13,8 +19,8 @@ use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
     capability_catalog::read_json_ref,
     first_party_tools::{
-        BUILTIN_FIRST_PARTY_PROVIDER, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-        resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+        BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref,
+        resolve_native_memory_input_schema_ref,
     },
 };
 use ironclaw_runtime_policy::plan_capability;
@@ -23,6 +29,7 @@ const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
     RuntimeKind::Mcp,
     RuntimeKind::Script,
+    RuntimeKind::Sandbox,
     RuntimeKind::FirstParty,
     RuntimeKind::System,
 ];
@@ -114,6 +121,10 @@ pub enum VisibleCapabilityAccess {
 pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
+    /// Provenance-backed trust for the model-visible description. Unknown
+    /// sources remain untrusted; only registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary.
+    pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
     /// Host-selected estimate used for the visibility authorization check.
@@ -274,9 +285,23 @@ impl<'a> CapabilityCatalog<'a> {
 
         Ok(Some(VisibleCapability {
             descriptor: self.surface_descriptor(descriptor).await?,
+            description_trust: self.description_trust(descriptor),
             access,
             estimated_resources: estimate,
         }))
+    }
+
+    fn description_trust(&self, descriptor: &CapabilityDescriptor) -> CapabilityDescriptionTrust {
+        match self
+            .registry
+            .get_extension(&descriptor.provider)
+            .map(|package| package.manifest.source)
+        {
+            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
+            Some(ManifestSource::HostBundled | ManifestSource::InstalledLocal) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
+        }
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
@@ -314,20 +339,25 @@ impl<'a> CapabilityCatalog<'a> {
             return Ok(descriptor);
         }
 
-        // Native memory rides the same always-on inline-schema lane as builtin,
-        // under its own provider id, so its model-facing tools resolve without
-        // any asset materialization.
-        if descriptor.provider.as_str() == NATIVE_MEMORY_FIRST_PARTY_PROVIDER {
+        // The bound memory provider's package rides the same always-on
+        // inline-schema lane as builtin, under its own provider id, so its
+        // model-facing tools resolve without any asset materialization. Every
+        // bundled memory provider (native, mem0) declares the shared
+        // `schemas/memory/*` refs, served from one compiled-in source of
+        // truth.
+        if crate::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS
+            .contains(&descriptor.provider.as_str())
+        {
             let Some(reference) = reference else {
                 return Err(HostRuntimeError::invalid_request(format!(
-                    "native memory capability {} must publish from an input schema ref",
+                    "memory capability {} must publish from an input schema ref",
                     descriptor.id
                 )));
             };
             descriptor.parameters_schema = resolve_native_memory_input_schema_ref(&reference)
                 .ok_or_else(|| {
                     HostRuntimeError::invalid_request(format!(
-                        "native memory capability {} references unknown input schema {}",
+                        "memory capability {} references unknown input schema {}",
                         descriptor.id, reference
                     ))
                 })?;
@@ -353,7 +383,7 @@ impl<'a> CapabilityCatalog<'a> {
 async fn resolve_package_input_schema_ref(
     filesystem: &dyn RootFilesystem,
     package: &ExtensionPackage,
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     reference: &str,
 ) -> Result<Value, HostRuntimeError> {
     let Some(declaration) = package
@@ -400,6 +430,7 @@ fn surface_version(
                 capability_version_key(capability),
                 json!({
                     "descriptor": descriptor,
+                    "description_trust": capability.description_trust,
                     "estimated_resources": &capability.estimated_resources,
                     "access": access_token(capability.access),
                     "provider_trust": trust,
@@ -525,6 +556,7 @@ fn runtime_kind_token(runtime: RuntimeKind) -> &'static str {
         RuntimeKind::Wasm => "wasm",
         RuntimeKind::Mcp => "mcp",
         RuntimeKind::Script => "script",
+        RuntimeKind::Sandbox => "sandbox",
         RuntimeKind::FirstParty => "first_party",
         RuntimeKind::System => "system",
     }
@@ -560,7 +592,7 @@ fn stable_json_string(value: &Value) -> Result<String, HostRuntimeError> {
         .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))
 }
 
-fn host_api_error(error: ironclaw_host_api::HostApiError) -> HostRuntimeError {
+fn host_api_error(error: ironclaw_host_api::error::HostApiError) -> HostRuntimeError {
     HostRuntimeError::invalid_request(error.to_string())
 }
 
@@ -569,7 +601,9 @@ mod tests {
     use super::*;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, PermissionMode, TrustClass,
+        capability::PermissionMode,
+        ids::{CapabilityId, ExtensionId},
+        runtime::TrustClass,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -588,6 +622,18 @@ mod tests {
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::LocalMinimal,
         }
+    }
+
+    /// Pins the wire token for the sandboxed-shell lane. `runtime_kind_token`
+    /// is duplicated in `ironclaw_loop_host::capability_info::runtime_kind_label`
+    /// (see the mirrored test there) — the two copies can drift.
+    #[test]
+    fn runtime_kind_token_maps_sandbox_to_stable_wire_string() {
+        assert_eq!(runtime_kind_token(RuntimeKind::Sandbox), "sandbox");
+        assert_eq!(
+            canonical_runtime_kinds(&[RuntimeKind::Sandbox]),
+            vec!["sandbox"]
+        );
     }
 
     #[tokio::test]
@@ -633,7 +679,10 @@ mod tests {
     async fn native_memory_surface_descriptor_requires_input_schema_ref() {
         let descriptor = CapabilityDescriptor {
             id: CapabilityId::new("ironclaw.memory.bad").unwrap(),
-            provider: ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            provider: ExtensionId::new(
+                crate::first_party_tools::NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+            )
+            .unwrap(),
             runtime: RuntimeKind::FirstParty,
             trust_ceiling: TrustClass::UserTrusted,
             description: "bad native memory descriptor".to_string(),

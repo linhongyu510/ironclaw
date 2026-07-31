@@ -25,12 +25,19 @@ eula = false
 
 [features]
 # Compile in the (off-by-default) mem0 third-party memory provider so an
-# `ironclaw-reborn` binary can bind `memory.document_store.v1` to a self-hosted
-# mem0 OSS server. Mirrors the same feature on `ironclaw_reborn_composition`;
+# `ironclaw-reborn` binary can point the compose-time [memory] binding at a
+# self-hosted mem0 OSS server. Mirrors the same feature on `ironclaw_reborn_composition`;
 # without it a default binary carries no mem0 code or its reqwest/rustls
 # transport and a mem0 binding fails closed.
 memory-mem0 = [
     "ironclaw_reborn_composition/memory-mem0",
+]
+# Feature bar 4 (dev-only seam): compile the loopback-only OAuth provider
+# endpoint constructor used by hermetic standalone E2E tests. Activation also
+# requires a debug build plus paired endpoint env vars; release builds fail
+# closed if the vars are present.
+test-support = [
+    "ironclaw_webui/test-support",
 ]
 [dependencies]
 anyhow = "1"

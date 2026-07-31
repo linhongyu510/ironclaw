@@ -9,10 +9,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityId, DispatchError,
-    DispatchFailureDetail, Extension, ExtensionId, ReservationStatus, ResourceReceipt,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind, ToolAdapter, ToolCall, ToolCallResources,
-    ToolError, ToolPorts,
+    capability::CapabilityDescriptor,
+    dispatch::{
+        CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
+    },
+    extension::Extension,
+    ids::{CapabilityId, ExtensionId},
+    resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
+    tool_adapter::{ToolAdapter, ToolCall, ToolCallResources, ToolError, ToolPorts},
 };
 
 use crate::dispatch::{
@@ -188,20 +193,20 @@ fn runtime_dispatch_error(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    match runtime {
-        RuntimeKind::Mcp => DispatchError::Mcp {
+    match runtime.dispatch_error_lane() {
+        DispatchErrorLane::Mcp => DispatchError::Mcp {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::Wasm => DispatchError::Wasm {
+        DispatchErrorLane::Wasm => DispatchError::Wasm {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::Script => DispatchError::Script {
+        DispatchErrorLane::Script => DispatchError::Script {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
             kind,
             safe_summary,
             detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
@@ -235,10 +240,13 @@ pub enum CapabilityRegistrationError {
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        CapabilityDescriptor, CapabilityDispatchRequest, DispatchError, EffectKind, Extension,
-        ExtensionContract, ExtensionId, ExtensionInstanceId, ExtensionRuntimeIdentity,
-        PermissionMode, ResourceEstimate, ResourceProfile, RuntimeKind, ToolAdapter, ToolCall,
-        ToolError, ToolPorts, ToolResult, TrustClass,
+        capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+        dispatch::{CapabilityDispatchRequest, DispatchError},
+        extension::{Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity},
+        ids::ExtensionId,
+        resource::{ResourceEstimate, ResourceProfile},
+        runtime::{RuntimeKind, TrustClass},
+        tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
     };
     use serde_json::json;
 

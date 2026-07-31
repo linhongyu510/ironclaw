@@ -3,7 +3,7 @@ use crate::{ProductOutboundEnvelope, ProjectionCursor};
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
-use ironclaw_host_api::{InstallationState, ThreadId};
+use ironclaw_host_api::{ids::ThreadId, state::LifecyclePublicState};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
@@ -1405,26 +1405,30 @@ pub struct RebornExtensionInfo {
     /// Implementation detail — product taxonomy lives in `surfaces`.
     pub runtime: String,
     pub description: String,
-    pub authenticated: bool,
-    pub active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    pub needs_setup: bool,
-    pub has_auth: bool,
-    /// The installation lifecycle state (§6.1), projected honestly and exposed
-    /// exactly: one of `installed` / `configured` / `active` / `disabled` /
-    /// `failed` / `unsupported`. `failed` is a terminal non-auth activation
-    /// failure and carries its redacted reason in `activation_error`;
-    /// auth-rejection failures surface on the `auth_accounts` axis instead.
-    pub installation_state: InstallationState,
-    /// Redacted reason for a `failed` installation state (the durable
-    /// installation record's `last_error`); absent otherwise.
+    /// The **only** caller-visible lifecycle field (§6.1): exactly
+    /// `setup_needed` or `active`; absence from this response means
+    /// uninstalled.
+    ///
+    /// This is the caller-scoped verdict, not the host checkpoint — it folds
+    /// the installation phase together with *this* caller's readiness
+    /// (required credentials, personal auth, channel pairing/connection) and
+    /// any activation failure. An extension whose host record is `Active` is
+    /// still `setup_needed` for a caller who has not connected it.
+    ///
+    /// Internal setup/publication failures stay attached to `setup_needed`
+    /// through `activation_error`; they never become a third state. Do not
+    /// re-add parallel `needs_setup` / `active` / `authenticated` /
+    /// `onboarding_state` booleans — the browser reads this field alone
+    /// (`extension-actions.ts::extensionLifecycleState`), and a second source
+    /// of truth is what regressed the unpaired-channel card in #6616.
+    pub installation_state: LifecyclePublicState,
+    /// Redacted internal setup/publication failure; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
     /// Per-vendor connected accounts (§6.4, ADR 0001). Length ≤ 1 today; the
@@ -1488,7 +1492,10 @@ pub struct RebornExtensionOnboardingPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
-    pub phase: InstallationState,
+    /// The caller-visible setup phase (§6.1) -- the host checkpoint folded
+    /// together with this caller's credential readiness, never the raw
+    /// internal checkpoint.
+    pub phase: LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1800,6 +1807,58 @@ pub enum RebornOperatorConfigDiagnosticSeverity {
     Info,
     Warning,
     Error,
+}
+
+/// One command entry in the caller's audience-filtered `product.commands.list`
+/// response. Presentation metadata only (Task 1's descriptor fields) — the
+/// caller's audience has already been applied by the service, so no
+/// `audience` field is carried here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornProductCommandInfo {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub usage: String,
+}
+
+/// Response for `product.commands.list`: the registry, filtered to the
+/// commands the caller's audience may see, in registry order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornProductCommandListResponse {
+    pub commands: Vec<RebornProductCommandInfo>,
+}
+
+/// Request for `product.commands.execute`: a raw slash-command line plus the
+/// bound thread it should be attributed to (needed by `/status`, harmless for
+/// commands that ignore it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExecuteProductCommandRequest {
+    pub thread_id: String,
+    pub text: String,
+}
+
+/// Sanitized, role-filtered rejection for a `product.commands.execute` call.
+/// `message` is always safe to render — it is either a fixed copy string or
+/// audience-filtered help text; the underlying `ProductRejection`'s internal
+/// `reason` never crosses this boundary (leak rule, matching the channel
+/// observer's `InvalidRequest` -> help-text behavior).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornCommandRejection {
+    pub kind: crate::ProductRejectionKind,
+    pub message: String,
+}
+
+/// Response for `product.commands.execute`. Exactly one of `result` /
+/// `rejection` is present; `command` names the resolved command token when
+/// one could be extracted from `text` (empty when parsing failed before a
+/// command name was ever identified).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExecuteProductCommandResponse {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::commands::CommandResultView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<RebornCommandRejection>,
 }
 
 #[cfg(test)]

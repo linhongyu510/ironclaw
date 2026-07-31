@@ -2,7 +2,7 @@
 
 Use this guide when adding a native host surface or an external protocol
 integration. Reborn has two entry shapes, but both converge on
-`ironclaw_host_api::ProductSurface` for product-facing reads and effects.
+`ironclaw_host_api::product_surface::ProductSurface` for product-facing reads and effects.
 
 ## Choose the boundary
 
@@ -53,6 +53,8 @@ verification, installation scope, deduplication, persistence, and admission.
 ```text
 external payload
   -> host verifies protocol auth and installation scope
+  -> host drops verification secrets and resolves manifest-declared
+     non-secret configuration for the verified installation
   -> ChannelAdapter::inbound
   -> normalized inbound message
   -> host admission and ProductSurface

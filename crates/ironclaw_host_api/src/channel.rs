@@ -8,9 +8,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HostApiError, IngressVerificationRecipe, NetworkScheme, RecipeValidationError, SecretHandle,
-    VendorId,
+    action::NetworkScheme,
+    error::HostApiError,
+    ids::{SecretHandle, VendorId},
+    recipe::{IngressVerificationRecipe, RecipeValidationError},
 };
+
+const MAX_CHANNEL_COMMANDS: usize = 32;
+const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
+const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
 /// How external conversations map to IronClaw conversations
 /// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
@@ -99,6 +105,10 @@ pub struct ChannelDescriptor {
     pub outbound: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
+    /// Exact product command tokens exposed by this channel, without a leading
+    /// slash. Missing and empty declarations expose no product commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<ChannelIngressDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -120,6 +130,30 @@ impl ChannelDescriptor {
         }
         if self.display_name.trim().is_empty() {
             return Err(ChannelDescriptorError::EmptyDisplayName);
+        }
+        if self.commands.len() > MAX_CHANNEL_COMMANDS {
+            return Err(ChannelDescriptorError::InvalidCommands);
+        }
+        let mut seen_commands: Vec<&str> = Vec::with_capacity(self.commands.len());
+        for command in &self.commands {
+            if command.is_empty()
+                || command.len() > MAX_CHANNEL_COMMAND_NAME_BYTES
+                || !command
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                || seen_commands.contains(&command.as_str())
+            {
+                return Err(ChannelDescriptorError::InvalidCommands);
+            }
+            seen_commands.push(command);
+        }
+        if let Some(prefix) = &self.presentation.command_prefix
+            && (prefix.is_empty()
+                || !prefix.starts_with('/')
+                || prefix.len() > MAX_CHANNEL_COMMAND_PREFIX_BYTES
+                || prefix.chars().any(char::is_control))
+        {
+            return Err(ChannelDescriptorError::InvalidCommandPrefix);
         }
         if self.inbound && self.ingress.is_none() {
             return Err(ChannelDescriptorError::InboundWithoutIngress);
@@ -149,19 +183,19 @@ impl ChannelDescriptor {
                     });
                 }
                 let well_formed = match injection {
-                    crate::RuntimeCredentialTarget::Header { name, .. } => {
-                        crate::valid_http_field_name(name)
+                    crate::http::RuntimeCredentialTarget::Header { name, .. } => {
+                        crate::http::valid_http_field_name(name)
                     }
-                    crate::RuntimeCredentialTarget::QueryParam { name } => {
+                    crate::http::RuntimeCredentialTarget::QueryParam { name } => {
                         !name.trim().is_empty() && !name.contains(char::is_whitespace)
                     }
-                    crate::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                    crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
                         !placeholder.is_empty()
                             && placeholder
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                    crate::http::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
                         pointer.starts_with('/')
                     }
                 };
@@ -333,7 +367,7 @@ pub struct ChannelEgressDescriptor {
     #[serde(default = "default_https")]
     pub scheme: NetworkScheme,
     pub host: String,
-    pub methods: Vec<crate::NetworkMethod>,
+    pub methods: Vec<crate::action::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
     /// How the host injects the declared credential into vendor requests.
@@ -342,7 +376,7 @@ pub struct ChannelEgressDescriptor {
     /// path (the adapter writes `{placeholder}` into the path; the host
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection: Option<crate::RuntimeCredentialTarget>,
+    pub injection: Option<crate::http::RuntimeCredentialTarget>,
     /// Body credentials the host may inject for this target: each entry binds
     /// a secret handle to the RFC 6901 JSON pointer where its resolved value
     /// is inserted in the request's JSON body (e.g. a vendor
@@ -379,6 +413,13 @@ pub struct ChannelPresentation {
     pub supports_threads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
+    /// Optional per-command display prefix a channel adapter renders before
+    /// each declared command name in user-visible help text (e.g. a channel
+    /// whose native command namespace requires an app-scoped dispatcher
+    /// prefix: `"/ironclaw "` + `model` -> `/ironclaw model`). `None`
+    /// renders the bare `/{name}` form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<String>,
 }
 
 /// Structural channel-descriptor failures (path context added by the
@@ -389,6 +430,14 @@ pub enum ChannelDescriptorError {
     EmptyId,
     #[error("channel display_name must not be empty")]
     EmptyDisplayName,
+    #[error(
+        "channel commands must contain at most 32 unique tokens of at most 64 bytes using lowercase ASCII letters, digits, '-', or '_'"
+    )]
+    InvalidCommands,
+    #[error(
+        "channel presentation command_prefix must be non-empty, start with '/', contain no control characters, and be at most 32 bytes"
+    )]
+    InvalidCommandPrefix,
     #[error("an inbound channel must declare [channel.ingress]")]
     InboundWithoutIngress,
     #[error("[channel.connection] requires inbound = true")]
@@ -463,6 +512,115 @@ max_message_chars = 40000
             "{}\n\n[connection]\nprovider = \"vendor\"\nstrategy = \"web_generated_code\"\ninstructions = \"Send the displayed code.\"\nsubmit_label = \"Connect\"\nerror_message = \"Pairing failed.\"\nconnection_success_message = \"Connected.\"\ndeep_link_template = \"https://vendor.example/connect?code={{code}}\"\ninbound_code_prefixes = {prefixes}\n\n[connection.notices]\nconnect_required = \"Connect first.\"\npaired = \"Connected.\"\nalready_paired_same_user = \"Already connected.\"\nalready_bound_to_other_user = \"Connected elsewhere.\"\nexpired_or_unknown = \"Invalid code.\"\n",
             documented_channel_toml()
         )
+    }
+
+    fn channel_toml_with_commands(commands: &str) -> String {
+        documented_channel_toml().replace(
+            "conversation_model = \"continuous\"\n",
+            &format!("conversation_model = \"continuous\"\ncommands = {commands}\n"),
+        )
+    }
+
+    #[test]
+    fn channel_commands_are_exact_and_fail_closed_by_default() {
+        let missing: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert!(missing.commands.is_empty());
+        missing.validate().unwrap();
+
+        let explicit_empty: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_commands("[]")).unwrap();
+        assert!(explicit_empty.commands.is_empty());
+        explicit_empty.validate().unwrap();
+
+        let declared: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_commands("[\"status\"]")).unwrap();
+        assert_eq!(declared.commands, ["status"]);
+        declared.validate().unwrap();
+
+        let json = serde_json::to_string(&declared).unwrap();
+        let round_trip: ChannelDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.commands, ["status"]);
+    }
+
+    #[test]
+    fn channel_commands_validate_shape_bounds_and_uniqueness() {
+        let excessive = (0..33)
+            .map(|index| format!("command_{index}"))
+            .collect::<Vec<_>>();
+        let excessive = serde_json::to_string(&excessive).unwrap();
+        let oversized = format!("[\"{}\"]", "a".repeat(65));
+
+        for commands in [
+            "[\"status\", \"status\"]",
+            "[\"\"]",
+            "[\"/status\"]",
+            "[\"has space\"]",
+            "[\"Status\"]",
+            oversized.as_str(),
+            excessive.as_str(),
+        ] {
+            let channel: ChannelDescriptor =
+                toml::from_str(&channel_toml_with_commands(commands)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidCommands,
+                "expected invalid commands: {commands}"
+            );
+        }
+    }
+
+    fn channel_toml_with_command_prefix(prefix_toml_value: &str) -> String {
+        documented_channel_toml().replace(
+            "max_message_chars = 40000\n",
+            &format!("max_message_chars = 40000\ncommand_prefix = {prefix_toml_value}\n"),
+        )
+    }
+
+    #[test]
+    fn command_prefix_is_optional_and_round_trips() {
+        let absent: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert_eq!(absent.presentation.command_prefix, None);
+        absent.validate().unwrap();
+
+        let declared: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_command_prefix("\"/ironclaw \"")).unwrap();
+        assert_eq!(
+            declared.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+        declared.validate().unwrap();
+
+        let json = serde_json::to_string(&declared).unwrap();
+        let round_trip: ChannelDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round_trip.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+
+        // Unset stays unset on the wire too (skip_serializing_if).
+        let absent_json = serde_json::to_string(&absent).unwrap();
+        assert!(
+            !absent_json.contains("command_prefix"),
+            "unset command_prefix must not appear on the wire: {absent_json}"
+        );
+    }
+
+    #[test]
+    fn command_prefix_validation_rejects_malformed_shapes() {
+        for bad in [
+            "\"\"".to_string(),
+            "\"ironclaw \"".to_string(),
+            "\"/control\t\"".to_string(),
+            format!("\"/{}\"", "a".repeat(32)),
+        ] {
+            let channel: ChannelDescriptor =
+                toml::from_str(&channel_toml_with_command_prefix(&bad)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidCommandPrefix,
+                "expected invalid command_prefix: {bad}"
+            );
+        }
     }
 
     #[test]
@@ -557,7 +715,7 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert!(matches!(
             channel.egress[0].injection,
-            Some(crate::RuntimeCredentialTarget::PathPlaceholder { .. })
+            Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { .. })
         ));
 
         // Header injection stays expressible explicitly too.

@@ -1,6 +1,9 @@
 use std::time::SystemTime;
 
-use ironclaw_host_api::{HostApiError, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    error::HostApiError,
+    path::{ScopedPath, VirtualPath},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -487,7 +490,7 @@ impl BackendCapabilities {
     /// implements. Includes Events, FTS, and Vector on top of
     /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical_full()
+        Self::sql_typical_full().with_txn(TxnCapability::MultiKey)
     }
 
     /// Convenience: read + write + append + list + stat + delete only.

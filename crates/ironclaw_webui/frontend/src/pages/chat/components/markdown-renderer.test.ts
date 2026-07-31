@@ -12,6 +12,10 @@ const appCssSource = readFileSync(
   new URL("../../../styles/app.css", import.meta.url),
   "utf8",
 );
+const highlighterSource = readFileSync(
+  new URL("../../../lib/syntax-highlighting.ts", import.meta.url),
+  "utf8",
+);
 
 function rendererEnhancerSourceForTest() {
   const lines = [];
@@ -158,15 +162,79 @@ function translator(prefix) {
     })[key] || key;
 }
 
-test("markdown code blocks are passed through highlight.js when available", () => {
-  assert.ok(
-    rendererSource.includes('import hljs from "highlight.js/lib/common"'),
-    "highlight.js should be bundled through npm rather than loaded from a window global",
+test("markdown and syntax highlighting stay out of the synchronous chat chunk", () => {
+  assert.doesNotMatch(
+    rendererSource,
+    /^import .*["'](?:highlight\.js|\.\.\/\.\.\/\.\.\/lib\/markdown)["'];?$/m,
+    "expensive markdown dependencies should not be statically imported by the chat renderer",
   );
   assert.match(
     rendererSource,
-    /hljs\.highlightElement\(codeEl\)/,
-    "markdown code blocks should be enhanced by highlight.js after rendering",
+    /import\("\.\.\/\.\.\/\.\.\/lib\/markdown"\)/,
+    "the sanitized markdown pipeline should load only for stable non-empty content",
+  );
+  assert.match(
+    rendererSource,
+    /root\?\.querySelector\("pre code"\)[\s\S]*import\("\.\.\/\.\.\/\.\.\/lib\/syntax-highlighting"\)/,
+    "syntax highlighting should load only after rendered code is present",
+  );
+  assert.doesNotMatch(
+    highlighterSource,
+    /highlight\.js\/lib\/common/,
+    "the broad highlight.js common bundle must not return",
+  );
+  assert.match(
+    highlighterSource,
+    /highlight\.js\/lib\/core/,
+    "the lazy highlighter should start from highlight.js core",
+  );
+});
+
+test("streaming markdown delegates accumulated text without a fixed render interval", () => {
+  assert.match(
+    rendererSource,
+    /import\("streamdown"\)/,
+    "streaming replies should use the streaming-optimized Markdown renderer",
+  );
+  assert.match(
+    rendererSource,
+    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
+    "the renderer should animate active streams and hold their final snapshot statically",
+  );
+  assert.doesNotMatch(
+    rendererSource,
+    /STREAMING_RENDER_INTERVAL_MS|scheduleStreamingRenderRef|renderTimerRef/,
+    "a fixed timer must not turn provider-rate text into visible bursts",
+  );
+  assert.match(
+    rendererSource,
+    /<React\.Suspense[\s\S]*\{normalizedContent\}[\s\S]*<\/React\.Suspense>/,
+    "the lazy streaming renderer should retain an escaped-text fallback",
+  );
+  assert.match(
+    rendererSource,
+    /if \(streaming \|\| keepStreamingRendererUntilFinalIsReady\) \{[\s\S]*<StreamingMarkdown[\s\S]*\{normalizedContent\}[\s\S]*if \(renderedHtml === null\)/,
+    "streaming content should bypass the completed-reply innerHTML path",
+  );
+  assert.match(
+    rendererSource,
+    /html: renderMarkdown\(currentContent\)/,
+    "completed replies must still pass through the existing sanitizer",
+  );
+  assert.match(
+    appCssSource,
+    /@source "\.\.\/\.\.\/node_modules\/streamdown\/dist\/\*\.js";/,
+    "Tailwind should include the package's streaming renderer classes",
+  );
+  assert.match(
+    rendererSource,
+    /markdownLoadFailedRef\.current/,
+    "completed Markdown rendering should retain its failure guard",
+  );
+  assert.match(
+    rendererSource,
+    /markdownLoadFailedRef\.current = true/,
+    "a failed completed-reply render should trip the failure guard",
   );
 });
 

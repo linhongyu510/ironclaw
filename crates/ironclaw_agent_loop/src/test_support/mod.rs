@@ -11,16 +11,20 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, FailureKind, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+    ids::{CapabilityId, TenantId, ThreadId},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
-        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView,
+        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
@@ -1078,6 +1082,7 @@ pub fn capability_descriptor(
         runtime: RuntimeKind::FirstParty,
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
+        description_trust: Default::default(),
         concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
@@ -1198,9 +1203,13 @@ fn scripted_capability_outcome(
             byte_len,
             None,
         )),
-        ScriptedCapabilityOutcome::Failed { error_kind } => {
-            Ok(resolution::failed(error_kind, "failed".to_string(), None))
-        }
+        ScriptedCapabilityOutcome::Failed { error_kind } => Ok(resolution::failed(
+            error_kind,
+            "failed".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "failed".to_string(),
+            },
+        )),
     }
 }
 

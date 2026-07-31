@@ -3,10 +3,15 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, FailureKind, HostApiError,
-    ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    error::HostApiError,
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProviderToolName},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::{FailureKind, ModelDiagnostic},
+    runtime::RuntimeKind,
 };
 use serde::{Deserialize, Deserializer, Serialize};
+
+pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
 use crate::run_profile::content_digest::ContentDigest;
 use crate::run_profile::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
@@ -127,6 +132,9 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    /// Unknown and legacy sources default to the fully checked path.
+    #[serde(default)]
+    pub description_trust: CapabilityDescriptionTrust,
     pub concurrency_hint: ConcurrencyHint,
     #[serde(default)]
     pub parameters_schema: serde_json::Value,
@@ -423,9 +431,9 @@ pub enum CapabilityProgress {
 
 /// The agent-loop executor's reconstructed view of a completed capability result.
 ///
-/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::Resolution)
+/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::resolution::Resolution)
 /// directly, §5.3 Stage 2b); the executor rebuilds it from the host_api
-/// [`Outcome`](ironclaw_host_api::Outcome) channel (`capability_result_from_outcome`)
+/// [`Outcome`](ironclaw_host_api::resolution::Outcome) channel (`capability_result_from_outcome`)
 /// to feed its result-admission/strategy pipeline. It is loop-internal working
 /// vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,8 +460,17 @@ pub struct CapabilityResultMessage {
 pub struct CapabilityFailure {
     pub error_kind: FailureKind,
     pub safe_summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<CapabilityFailureDetail>,
+    #[serde(default = "legacy_unavailable_capability_failure_detail")]
+    pub detail: CapabilityFailureDetail,
+}
+
+/// Read compatibility for checkpoint payloads written before capability
+/// failure detail became structurally required. New producers cannot use this
+/// fallback because constructing [`CapabilityFailure`] requires a detail.
+fn legacy_unavailable_capability_failure_detail() -> CapabilityFailureDetail {
+    CapabilityFailureDetail::Diagnostic {
+        text: ModelDiagnostic::unavailable().into_inner(),
+    }
 }
 
 #[non_exhaustive]
@@ -644,5 +661,29 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn legacy_capability_failure_without_detail_rehydrates_explicit_fallback() {
+        let legacy = serde_json::json!({
+            "error_kind": "backend",
+            "safe_summary": "capability invocation failed"
+        });
+        let failure: CapabilityFailure =
+            serde_json::from_value(legacy).expect("legacy capability failure");
+
+        assert_eq!(
+            failure.detail,
+            CapabilityFailureDetail::Diagnostic {
+                text: ModelDiagnostic::unavailable().into_inner(),
+            }
+        );
+        assert!(
+            serde_json::to_value(failure)
+                .expect("serialize upgraded failure")
+                .get("detail")
+                .is_some(),
+            "legacy omissions must become explicit on the next write"
+        );
     }
 }

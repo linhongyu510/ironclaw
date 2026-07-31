@@ -2,22 +2,26 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, FailureKind, ProviderToolName,
+    decision::DenyReason,
+    dispatch::DispatchInputIssueCode,
+    ids::{ApprovalRequestId, CorrelationId, DenyRef, ProviderToolName},
+    resolution::Denial,
+    result_meta::{CapabilityRecoveryHint, FailureKind, SameCallRetryConstraint},
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
-    LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
+    LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInputRepair, CapabilityRecoveryHint, CapabilityResumeToken, LoopCancelReasonKind,
-        LoopCancellationSignal, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView,
-        LoopProcessRef, LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
+        ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus,
         VisibleCapabilityRequest, resolution,
     },
 };
@@ -59,6 +63,12 @@ use support::*;
 
 mod cancellation;
 mod failure_matrix;
+
+fn diagnostic_failure_detail(text: &str) -> CapabilityFailureDetail {
+    CapabilityFailureDetail::Diagnostic {
+        text: text.to_string(),
+    }
+}
 
 fn continuation_observation(
     result_ref: &LoopResultRef,
@@ -153,6 +163,39 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
             kind: CheckpointKind::Final,
             iteration_at_checkpoint: final_state.iteration,
         })
+    );
+}
+
+#[tokio::test]
+async fn recovery_event_append_failure_stops_before_model_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model gateway unavailable",
+        )])
+        .with_failing_progress_port();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("recovery cannot proceed without its durable numerator event");
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary,
+            reason_kind: None,
+            detail: None,
+        } => assert_eq!(safe_summary.as_str(), "progress sink unavailable"),
+        other => panic!("expected checkpoint diagnostics, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "the failed recovery append must gate the retry side effect"
     );
 }
 
@@ -1396,7 +1439,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
 async fn model_context_overflow_retries_through_canonical_compaction_stage() {
     let host = MockHost::new(vec![reply_response()])
         .with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )])
         .with_prompt_compaction_indexes(vec![
@@ -1425,6 +1468,22 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
         "retry must return to PromptStage so compaction can run before the next model call"
     );
     assert!(host.progress_event_names().contains(&"compaction_started"));
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Model,
+                    class: LoopRecoveryClass::ModelContextOverflow,
+                    disposition: LoopRecoveryDisposition::Retried,
+                }
+            ))
+            .count(),
+        1,
+        "one failed model attempt must produce exactly one recovery numerator event"
+    );
 
     let final_state = final_staged_state(&host);
     assert_eq!(
@@ -1438,7 +1497,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
 async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_attempt() {
     let overflow = || {
         AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )
     };
@@ -1571,7 +1630,6 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
             kind: AgentLoopHostErrorKind::BudgetApprovalRequired,
             safe_summary: LoopSafeSummary::new("budget approval required").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -1587,7 +1645,7 @@ async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_r
 async fn model_shrink_context_call_scope_returns_planner_contract() {
     let host =
         MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
+            AgentLoopHostErrorKind::ContextOverflow,
             "model request exceeded its context budget",
         )]);
     let executor = CanonicalAgentLoopExecutor;
@@ -1807,7 +1865,7 @@ async fn assistant_reply_stage_returns_reply_summary() {
 async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
@@ -1906,7 +1964,7 @@ async fn cumulative_usage_counts_capability_call_and_reply_turns() {
         ..reply_response()
     };
     let host = MockHost::new(vec![calls, reply]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref,
                 "done".to_string(),
@@ -1949,7 +2007,7 @@ async fn cumulative_usage_counts_capability_call_and_reply_turns() {
 async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_control_message() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
@@ -2118,17 +2176,126 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Prompt
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            ..
         }
     ));
 }
 
 #[tokio::test]
+async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::PolicyDenied);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("policy denial must stop prompt construction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
+    let host =
+        MockHost::new(Vec::new()).with_prompt_bundle_failure(AgentLoopHostErrorKind::Cancelled);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+}
+
+#[tokio::test]
+async fn prompt_stage_redacts_rejected_prompt_error_summary() {
+    let secret = concat!("ghp_", "012345678901234567890123456789012345");
+    let host = MockHost::new(Vec::new()).with_prompt_bundle_error(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        format!("prompt construction rejected token {secret}"),
+    ));
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("rejected prompt error summary should propagate safely"),
+        Err(error) => error,
+    };
+
+    match error {
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary,
+            detail: Some(detail),
+            ..
+        } => {
+            assert_eq!(
+                safe_summary,
+                ironclaw_turns::run_profile::LoopSafeSummary::tool_failure_details_redacted()
+            );
+            assert!(detail.contains("prompt construction rejected token"));
+            assert!(detail.contains("[redacted]"));
+            assert!(!detail.contains(secret));
+        }
+        other => panic!("expected sanitized prompt diagnostics, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn capability_stage_returns_after_batch_summary() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
-    let host =
-        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
@@ -2139,7 +2306,8 @@ async fn capability_stage_returns_after_batch_summary() {
                 None,
             )],
             stopped_on_suspension: false,
-        }]);
+        },
+    ]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2447,7 +2615,7 @@ async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
         reply_response_with_text("Done — wrote the recommendations to the output file."),
     ])
     .with_driver_nudges_enabled()
-    .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![resolution::completed(
             result_ref.clone(),
             "wrote file".to_string(),
@@ -2654,7 +2822,7 @@ async fn exit_stage_aborted_exits_with_requested_failure_kind() {
 async fn stopped_on_suspension_completed_outcome_still_appends_result() {
     let result_ref = LoopResultRef::new("result:stopped-completed").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "stopped batch completed".to_string(),
@@ -2746,7 +2914,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
 #[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:done").expect("valid"),
                 "done".to_string(),
@@ -2808,7 +2976,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
 #[tokio::test]
 async fn gate_blocks_with_before_block_checkpoint() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new("gate:approval").expect("valid"),
@@ -2878,7 +3046,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     };
     let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new(format!(
@@ -2893,7 +3061,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
             ],
             stopped_on_suspension: true,
         },
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "approval resumed".to_string(),
@@ -2995,7 +3163,7 @@ async fn approval_gate_before_block_checkpoint_disposition_is_none() {
         input_ref: CapabilityInputRef::new("input:disposition-none-test").expect("valid"),
     };
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new(format!(
@@ -3133,7 +3301,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
 async fn parallel_batch_records_completed_results_before_blocking_on_suspension() {
     let completed_ref = LoopResultRef::new("result:parallel-completed").expect("valid"); // safety: test-only fixture
     let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new("gate:approval").expect("valid"),
@@ -3174,7 +3342,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
 #[tokio::test]
 async fn non_empty_capability_batch_rejects_empty_outcomes() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: Vec::new(),
             stopped_on_suspension: true,
         },
@@ -3200,7 +3368,7 @@ async fn non_empty_capability_batch_rejects_empty_outcomes() {
 #[tokio::test]
 async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
@@ -3388,14 +3556,14 @@ async fn model_retry_success_clears_recovery_state() {
 }
 
 #[tokio::test]
-async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-credentials").expect("valid");
+async fn model_unrecoverable_host_error_preserves_inline_sanitized_cause() {
+    let cause = "credential provider refused the configured model identity";
     let host = MockHost::new(Vec::new()).with_model_errors(vec![
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::CredentialUnavailable,
             "model credentials are unavailable",
         )
-        .with_diagnostic_ref(diagnostic_ref),
+        .with_detail(cause),
     ]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -3412,34 +3580,102 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
-            detail: None,
+            detail: Some(cause.to_string()),
         }
     );
 }
 
 #[tokio::test]
-async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
+async fn model_budget_accounting_failure_gets_one_durable_final_model_turn() {
     let accounting_error = || {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::BudgetAccountingFailed,
             "resource accounting storage is unavailable",
         )
     };
-    let host = MockHost::new(Vec::new()).with_model_errors(vec![
-        accounting_error(),
-        accounting_error(),
-        accounting_error(),
-    ]);
+    let host = MockHost::new(vec![reply_response_with_text(
+        "completed after accounting recovery",
+    )])
+    .with_model_errors(vec![accounting_error()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("one recovered accounting failure should reach a final model turn");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["completed after accounting recovery".to_string()]
+    );
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].inline_messages.iter().any(|message| {
+            message
+                .safe_body
+                .as_str()
+                .contains("resource accounting failed")
+        }),
+        "the recovered request must explain why it is the one final model turn"
+    );
+    assert!(
+        !requests[1]
+            .capability_view
+            .as_ref()
+            .expect("warning request has a capability view")
+            .visible_capability_ids
+            .is_empty(),
+        "the warning uses the normal tool-capable model request"
+    );
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ],
+        "the consumed warning budget is durable before the warned request"
+    );
+    let mut final_state = final_staged_state(&host);
+    assert!(
+        !final_state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::budget_accounting_failed())
+    );
+}
+
+#[tokio::test]
+async fn repeated_model_budget_accounting_failure_preserves_typed_terminal_diagnostics() {
+    let accounting_error = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        )
+    };
+    let host =
+        MockHost::new(Vec::new()).with_model_errors(vec![accounting_error(), accounting_error()]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let error = executor
         .execute_family(&crate::families::default(), &host, state)
         .await
-        .expect_err("accounting outages must remain typed host failures");
+        .expect_err("a repeated accounting outage must remain a typed host failure");
 
-    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(host.model_requests().len(), 2);
+    assert!(
+        host.model_requests()[1]
+            .inline_messages
+            .iter()
+            .any(|message| message
+                .safe_body
+                .as_str()
+                .contains("resource accounting failed"))
+    );
     assert_eq!(
         error,
         AgentLoopExecutorError::HostUnavailableWithDiagnostics {
@@ -3448,7 +3684,6 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -3533,7 +3768,8 @@ async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
             "model request surface version does not match the host-built prompt bundle",
         )
     };
-    let host = MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale()]);
+    let host =
+        MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale(), stale()]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -3552,8 +3788,8 @@ async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
     }
     assert_eq!(
         host.model_requests().len(),
-        3,
-        "stale-request retries are bounded by the per-class budget"
+        4,
+        "stale-request retries are bounded by the per-class budget plus one observation turn"
     );
 }
 
@@ -3884,9 +4120,10 @@ async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
 
     assert!(matches!(
         error,
-        AgentLoopExecutorError::CheckpointFailed {
-            stage: CheckpointKind::BeforeModel
-        }
+        AgentLoopExecutorError::CheckpointRejected {
+            stage: CheckpointKind::BeforeModel,
+            safe_summary,
+        } if safe_summary.as_str() == "scripted checkpoint failure"
     ));
     assert_eq!(host.model_requests().len(), 1);
 }
@@ -4024,6 +4261,22 @@ async fn model_content_filter_gives_model_one_rephrase_attempt() {
             .pending_model_error_observation
             .is_none()
     );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Model,
+                    class: LoopRecoveryClass::ModelContentFiltered,
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "one model-visible recovery must emit one durable numerator event"
+    );
 }
 
 #[tokio::test]
@@ -4049,6 +4302,79 @@ async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
         }
         other => panic!("expected HostUnavailableWithDiagnostics, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evidence() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(2),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("fallback retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 2);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 2);
+}
+
+#[tokio::test]
+async fn model_unavailable_retry_rejects_a_non_advancing_fallback_index() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(0),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("a host-selected fallback index must advance the current route");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "fallback model route index did not advance"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn model_unavailable_without_fallback_evidence_retries_the_current_route() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("same-route availability retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 0);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 0);
 }
 
 #[tokio::test]
@@ -4210,7 +4536,7 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
     // before aborting; paused time fast-forwards the backoff sleeps.
     let abort_call_count = crate::strategies::DefaultRecoveryStrategy::default()
         .max_model_availability_attempts as usize
-        + 1;
+        + 2;
     let script = ScenarioScript {
         model_responses: (0..abort_call_count)
             .map(|_| ScriptedModelResponse::Error {
@@ -4250,6 +4576,85 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn exhausted_model_unavailability_gets_one_observation_and_recovers() {
+    let family = crate::families::default_with_overrides(
+        crate::families::FamilyOverrides::default().set_model_availability_attempts(1),
+    );
+    let unavailable = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+    };
+    let host = MockHost::new(vec![reply_response_with_text(
+        "continued after provider recovery",
+    )])
+    .with_model_errors(vec![unavailable(), unavailable()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("availability observation should let the recovered provider continue");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["continued after provider recovery"]
+    );
+}
+
+#[tokio::test]
+async fn exhausted_stale_model_request_gets_one_observation_and_recovers() {
+    let stale = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface is stale",
+        )
+    };
+    let host = MockHost::new(vec![reply_response_with_text(
+        "continued with the refreshed surface",
+    )])
+    .with_model_errors(vec![stale(), stale(), stale()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("stale-request observation should allow one refreshed iteration");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["continued with the refreshed surface"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     // Regression pin: the model stage's retry guard is derived from the
     // composed recovery strategy, not a hard-coded executor constant. A
@@ -4261,16 +4666,17 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     let family = crate::families::default_with_overrides(
         crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
     );
-    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
-    // Exactly attempts+1 scripted failures: the final one is the call where
-    // the strategy's budget is exhausted and it aborts. Any extra call would
+    let cause = "provider connection timed out before a response arrived";
+    // Exactly attempts+2 scripted failures: exhaustion gets one observation
+    // attempt, and the final call proves the bounded strategy then aborts. Any
+    // extra call would
     // hit the mock's script-exhausted Internal fallback and change the
     // observed failure category.
     let host = MockHost::new(Vec::new()).with_model_errors(
-        (0..=attempts)
+        (0..attempts.saturating_add(2))
             .map(|_| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
-                    .with_diagnostic_ref(diagnostic_ref.clone())
+                    .with_detail(cause)
             })
             .collect(),
     );
@@ -4294,17 +4700,20 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
                 "abort must carry the strategy's failure category"
             );
             assert_eq!(
-                failed.diagnostic_ref,
-                Some(diagnostic_ref),
-                "abort must carry the model error's diagnostic ref"
+                failed
+                    .safe_summary
+                    .as_ref()
+                    .and_then(|summary| summary.detail()),
+                Some(cause),
+                "abort must inline the model error's bounded cause"
             );
         }
         other => panic!("expected failed exit, got {other:?}"),
     }
     assert_eq!(
         host.model_requests().len(),
-        (attempts + 1) as usize,
-        "the loop must allow exactly the configured availability budget"
+        (attempts + 2) as usize,
+        "the loop must allow the configured availability budget plus one observation turn"
     );
 }
 
@@ -4453,7 +4862,7 @@ async fn stale_surface_capability_call_is_policy_denied_before_host_invocation()
 #[tokio::test]
 async fn terminate_hint_counts_only_visible_invoked_calls() {
     let host = MockHost::new(vec![mixed_surface_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:visible").expect("valid"),
                 "visible call completed".to_string(),
@@ -4532,11 +4941,11 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
 async fn retry_uses_single_call_invocation() {
     for error_kind in [FailureKind::Transient, FailureKind::Network] {
         let host = MockHost::new(vec![calls_response()])
-            .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![resolution::failed(
                     error_kind,
                     "temporary failure".to_string(),
-                    None,
+                    diagnostic_failure_detail("temporary failure"),
                 )],
                 stopped_on_suspension: false,
             }])
@@ -4562,10 +4971,122 @@ async fn retry_uses_single_call_invocation() {
     }
 }
 
+/// A denial must reach the model with something it can act on.
+///
+/// Denials passed `model_observation: None`, so the model got a summary string
+/// and nothing structured — no recovery, no retry constraint, no repairs. A
+/// denial meaning *authenticate and this works* was indistinguishable from a
+/// permanent block (#6284 item 4). This drives a real denial through the
+/// executor and asserts the appended result carries a recovery observation
+/// naming the next move.
+#[tokio::test]
+async fn a_denial_tells_the_model_what_would_unlock_it() {
+    // `auth_denied` is minted by the capability port for a real authorization
+    // failure; #6781 maps it to `DenyReason::UnknownSecret`. Provider replay
+    // metadata is required for a denial to mint a result ref, so this uses the
+    // two-provider-call shape (one completed, one denied) that
+    // `denied_provider_call_appends_failure_tool_result_for_replay` uses.
+    let result_ref = LoopResultRef::new("result:denial-hint-ok").expect("valid");
+    let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![
+                resolution::completed(
+                    result_ref.clone(),
+                    "provider call completed".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    true,
+                    0,
+                    None,
+                    None,
+                ),
+                resolution::denied(
+                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::unknown("auth_denied")
+                        .expect("valid reason tag"),
+                    // Deliberately avoids the word "credential": the summary
+                    // channel's credential-marker guard would scrub it to a
+                    // placeholder, which is orthogonal to what this pins.
+                    "sign-in required for this provider".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 2, "completed call plus the denial");
+    let denial_result = &appended[1];
+    let observation = denial_result
+        .model_observation
+        .as_ref()
+        .expect("a denial must carry a model observation, not None");
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("a denial observation must carry recovery guidance");
+
+    // The specific action, not a generic "obey the constraint".
+    assert_eq!(
+        recovery.recovery_hint,
+        CapabilityRecoveryHint::AuthenticateThenRetry,
+        "a credential-missing denial must point the model at an auth flow"
+    );
+    assert!(
+        recovery.recovery_hint.names_an_action(),
+        "the denial hint must name a concrete next move"
+    );
+    assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
+}
+
+#[tokio::test]
+async fn denial_without_summary_emits_actionable_detail() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![ironclaw_host_api::resolution::Resolution::Denied(
+                Denial::new(DenyRef::new()).with_reason_kind(DenyReason::PolicyDenied),
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    let observation = appended
+        .first()
+        .and_then(|result| result.model_observation.as_ref())
+        .expect("summary-less denial must append a model-visible observation");
+    let ToolObservationDetail::GenericFailure {
+        failure_kind,
+        detail,
+    } = &observation.detail
+    else {
+        panic!("summary-less denial must carry generic failure detail");
+    };
+    assert_eq!(*failure_kind, FailureKind::PolicyDenied);
+    assert_eq!(
+        detail.as_deref(),
+        Some(
+            "The host denied this capability with reason policy_denied; follow the recovery \
+             guidance before choosing the next action."
+        )
+    );
+}
+
 #[tokio::test]
 async fn policy_denied_capability_error_honors_retry_recovery() {
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::denied(
                     ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
@@ -4595,12 +5116,31 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
     assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
     assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
     assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
+    let recovered = host
+        .progress_events()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Capability,
+                    class: LoopRecoveryClass::Capability(FailureKind::PolicyDenied),
+                    disposition: LoopRecoveryDisposition::Retried,
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        recovered, 1,
+        "one applied capability retry must emit exactly one recovery numerator"
+    );
 }
 
 #[tokio::test]
 async fn spawned_process_fails_closed_until_process_wait_contract_exists() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::spawned_process(
                 LoopProcessRef::new("process:alpha").expect("valid"),
             )],
@@ -4636,7 +5176,7 @@ async fn spawned_process_fails_closed_until_process_wait_contract_exists() {
 async fn spawned_child_run_result_append_failure_propagates_without_completed_result() {
     let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::spawned_child_run(
                 TurnRunId::new(),
                 result_ref,
@@ -4657,8 +5197,12 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
 
     assert_eq!(
         error,
-        AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Capability
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Transcript,
+            kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+            safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+            reason_kind: None,
+            detail: None,
         }
     );
     assert!(host.appended_result_refs().is_empty());
@@ -4676,7 +5220,7 @@ async fn spawned_child_run_redacts_unsafe_safe_summary_to_placeholder() {
     // A second (reply) turn lets the run complete after the SpawnedChildRun
     // result is appended with the redacted summary.
     let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::spawned_child_run(
                 TurnRunId::new(),
                 result_ref,
@@ -4702,7 +5246,7 @@ async fn spawned_child_run_redacts_unsafe_safe_summary_to_placeholder() {
     assert_eq!(appended.len(), 1);
     assert_eq!(
         appended[0].safe_summary,
-        ironclaw_host_api::SafeSummary::placeholder().as_str()
+        ironclaw_host_api::safe_summary::SafeSummary::placeholder().as_str()
     );
     assert_ne!(appended[0].safe_summary, "/Users/alice/.ssh/id_rsa");
 }
@@ -4712,7 +5256,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
     let safe_summary = "a".repeat(300);
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 safe_summary.clone(),
@@ -4792,7 +5336,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
 async fn denied_provider_call_appends_failure_tool_result_for_replay() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
     let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::completed(
                     result_ref.clone(),
@@ -4864,11 +5408,11 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
 #[tokio::test]
 async fn invalid_provider_tool_failure_appends_structured_model_observation() {
     let host = MockHost::new(vec![provider_calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::InputEncode,
                 "provider arguments failed schema validation".to_string(),
-                Some(CapabilityFailureDetail::InvalidInput {
+                CapabilityFailureDetail::InvalidInput {
                     issues: vec![CapabilityInputIssue {
                         path: "file_path".to_string(),
                         code: DispatchInputIssueCode::MissingRequired,
@@ -4876,17 +5420,25 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
                         received: None,
                         schema_path: Some("required".to_string()),
                     }],
-                }),
+                },
             )],
             stopped_on_suspension: false,
         }]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    executor
-        .execute_family(&crate::families::default(), &host, state)
+    let exit = executor
+        .execute_family(
+            &family_requiring_structured_capability_observation(),
+            &host,
+            state,
+        )
         .await
         .expect("execute");
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the real caller must feed the strategy the same structured observation it appends"
+    );
 
     let appended = host.appended_result_refs();
     assert_eq!(appended.len(), 1);
@@ -4937,11 +5489,11 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
     ])
     .with_batch_outcomes(
         (0..3)
-            .map(|_| ironclaw_host_api::ResolutionBatch {
+            .map(|_| ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![resolution::failed(
                     FailureKind::OperationFailed,
                     "filesystem discovery failed".to_string(),
-                    None,
+                    diagnostic_failure_detail("filesystem discovery failed"),
                 )],
                 stopped_on_suspension: false,
             })
@@ -4972,6 +5524,24 @@ async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recove
     );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 3);
+    let recovery_sequences = host
+        .progress_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LoopProgressEvent::FailureRecovered {
+                sequence,
+                stage: LoopRecoveryStage::Capability,
+                class: LoopRecoveryClass::Capability(FailureKind::OperationFailed),
+                disposition: LoopRecoveryDisposition::ModelVisible,
+            } => Some(sequence),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery_sequences,
+        vec![1, 2, 3],
+        "each directly model-visible tool failure must contribute one ordered numerator event"
+    );
     assert_eq!(
         final_staged_state(&host)
             .stop_state
@@ -4993,17 +5563,17 @@ async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recove
     ])
     .with_batch_outcomes(
         (0..3)
-            .map(|_| ironclaw_host_api::ResolutionBatch {
+            .map(|_| ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![
                     resolution::failed(
                         FailureKind::OperationFailed,
                         "first discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("first discovery failed"),
                     ),
                     resolution::failed(
                         FailureKind::OperationFailed,
                         "second discovery failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("second discovery failed"),
                     ),
                 ],
                 stopped_on_suspension: false,
@@ -5057,7 +5627,7 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
     let digest = ironclaw_turns::run_profile::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed with digest".to_string(),
@@ -5095,11 +5665,11 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
     let host = MockHost::new(vec![calls_response(), calls_response(), calls_response()])
         .with_batch_outcomes(
             (0..3)
-                .map(|_| ironclaw_host_api::ResolutionBatch {
+                .map(|_| ironclaw_host_api::resolution::ResolutionBatch {
                     resolutions: vec![resolution::failed(
                         FailureKind::OperationFailed,
                         "non-replayable capability failed".to_string(),
-                        None,
+                        diagnostic_failure_detail("non-replayable capability failed"),
                     )],
                     stopped_on_suspension: false,
                 })
@@ -5170,11 +5740,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
         ),
     ] {
         let host = MockHost::new(vec![provider_calls_response(), reply_response()])
-            .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![resolution::failed(
                     error_kind,
                     safe_summary.to_string(),
-                    None,
+                    diagnostic_failure_detail(safe_summary),
                 )],
                 stopped_on_suspension: false,
             }]);
@@ -5219,11 +5789,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
 
     let long_summary = "a".repeat(512);
     let host = MockHost::new(vec![provider_calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::OutputTooLarge,
                 long_summary,
-                None,
+                diagnostic_failure_detail("capability output exceeded the allowed size"),
             )],
             stopped_on_suspension: false,
         }]);
@@ -5371,7 +5941,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
     // Use terminate_hint so the loop exits immediately after the capability
     // turn, giving us a deterministic Final checkpoint to inspect.
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big").expect("valid"),
                 "big result".to_string(),
@@ -5435,7 +6005,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
 #[tokio::test]
 async fn executor_post_capability_does_not_trip_under_threshold() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:small").expect("valid"),
                 "small result".to_string(),
@@ -5483,7 +6053,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
     // Iteration 2: SkipModel (flags cleared by PromptStage, no model call).
     // Iteration 3: model → reply → GracefulStop.
     let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-no-term").expect("valid"),
                 "big result no terminate".to_string(),
@@ -5595,7 +6165,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     // two_calls_response() emits two calls with capability_id() ("demo.echo").
     // Each result carries 20 000 bytes → sum = 40 000 > 32 000 → trip.
     let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
@@ -5682,7 +6252,7 @@ async fn await_dependent_run_preserves_model_observation_for_replay() {
     let observation = continuation_observation(&result_ref, 4_096);
     let awaited_summary = "awaited child completed".to_string();
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::await_dependent_run(
                     LoopGateRef::new("gate:await-dependent-preserved-observation").expect("valid"),
@@ -5755,7 +6325,7 @@ async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
     // Iteration 2: SkipModel route — no model call.
     // Iteration 3: model → reply → GracefulStop.
     let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::spawned_child_run(
                 TurnRunId::new(),
                 LoopResultRef::new("result:spawned-child-large").expect("valid"),
@@ -5817,7 +6387,7 @@ async fn await_dependent_run_byte_len_accumulates_and_trips_policy() {
     // PostCapabilityStage does not evaluate the policy on this turn — but the
     // bytes ARE accumulated into pending_capability_bytes before the block.
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::await_dependent_run(
                     LoopGateRef::new("gate:await-large").expect("valid"),
@@ -5905,7 +6475,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
     // one on iter 1 (candidate bundle) and one on iter 3 (final reply prompt).
     // Iteration 2 (SkipModel) never calls build_prompt_bundle.
     let host = MockHost::new(vec![calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-f12").expect("valid"),
                 "big result for F12".to_string(),
@@ -6014,7 +6584,7 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
         calls_response(),
         reply_response_with_text("final answer"),
     ])
-    .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![resolution::completed(
             LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
             "large search result".to_string(),
@@ -6071,7 +6641,7 @@ async fn await_dependent_run_gate_skip_and_continue_fails_as_driver_bug() {
         gate: empty_gate_state(),
     });
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::await_dependent_run(
                     LoopGateRef::new("gate:await-skip").expect("valid"),
@@ -6116,7 +6686,7 @@ async fn external_tool_gate_skip_and_continue_fails_as_driver_bug() {
         gate: empty_gate_state(),
     });
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::external_tool_pending(
                     LoopGateRef::new("gate:external-tool-skip").expect("valid"),
@@ -6155,7 +6725,7 @@ async fn auth_gate_block_stores_pending_auth_resume() {
     // canonical path (cancel-check → progress emit → write_before_block).
     let gate_ref = LoopGateRef::new("gate:auth-block").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     gate_ref.clone(),
@@ -6230,7 +6800,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
     // the outer resume handler can still consume it.
     let approval_gate_ref = LoopGateRef::new("gate:approval-during-redispatch").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     approval_gate_ref.clone(),
@@ -6297,7 +6867,7 @@ async fn external_tool_gate_block_stores_pending_external_tool_resume() {
     // re-dispatch the parked client-tool call).
     let gate_ref = LoopGateRef::new("gate:external_tool-block").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::external_tool_pending(
                     gate_ref.clone(),
@@ -6337,7 +6907,7 @@ async fn parallel_batch_records_completed_results_before_external_tool_block() {
     let completed_ref = LoopResultRef::new("result:parallel-external-completed").expect("valid");
     let external_gate_ref = LoopGateRef::new("gate:external-tool-parallel").expect("valid");
     let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::completed(
                     completed_ref.clone(),
@@ -6389,7 +6959,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
     let gate_ref = LoopGateRef::new("gate:external_tool-resume").expect("valid");
     let completed_ref = LoopResultRef::new("result:external-tool-resumed").expect("valid");
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::external_tool_pending(
                     gate_ref.clone(),
@@ -6399,7 +6969,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
             ],
             stopped_on_suspension: true,
         },
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "external tool output".to_string(),
@@ -6464,7 +7034,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
     let gate_ref = LoopGateRef::new("gate:auth-resume-test").expect("valid");
     let completed_ref = LoopResultRef::new("result:auth-resumed").expect("valid");
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     gate_ref.clone(),
@@ -6477,7 +7047,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
             stopped_on_suspension: true,
         },
         // Phase 2 scripted outcome: the auth is now satisfied, call completes.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "auth resumed and completed".to_string(),
@@ -6638,7 +7208,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
     let completed_ref = LoopResultRef::new("result:unused-auth-resume").expect("valid");
     let host = MockHost::new(vec![provider_calls_response()])
         .with_batch_outcomes(vec![
-            ironclaw_host_api::ResolutionBatch {
+            ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![
                     resolution::auth_required(
                         gate_ref.clone(),
@@ -6650,7 +7220,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                 ],
                 stopped_on_suspension: true,
             },
-            ironclaw_host_api::ResolutionBatch {
+            ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![resolution::completed(
                     completed_ref,
                     "should not invoke".to_string(),
@@ -6710,7 +7280,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
     let gate_ref = LoopGateRef::new("gate:auth-resume-activity-remap").expect("valid");
     let completed_ref = LoopResultRef::new("result:unused-auth-resume-remap").expect("valid");
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     gate_ref.clone(),
@@ -6722,7 +7292,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
             ],
             stopped_on_suspension: true,
         },
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref,
                 "should not invoke".to_string(),
@@ -6794,7 +7364,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
     // BeforeBlock checkpoint carrying a pending_auth_resume record.
     let gate_ref = LoopGateRef::new("gate:auth-still-missing").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     gate_ref.clone(),
@@ -6807,7 +7377,7 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
             stopped_on_suspension: true,
         },
         // Phase 2 scripted outcome: credentials are STILL missing — block again.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     LoopGateRef::new("gate:auth-still-missing-2").expect("valid"),
@@ -7071,7 +7641,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         host: &host,
     };
     // Seed a pending_auth_resume for a DIFFERENT capability (not the one being gated).
-    let different_cap_id = ironclaw_host_api::CapabilityId::new("other.cap").expect("valid");
+    let different_cap_id = ironclaw_host_api::ids::CapabilityId::new("other.cap").expect("valid");
     let seeded_gate_ref = LoopGateRef::new("gate:auth-other-cap").expect("valid");
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.pending_auth_resume = Some(PendingAuthResume {
@@ -7184,8 +7754,16 @@ async fn recoverable_batch_port_error_surfaces_as_model_visible_tool_error() {
         .expect("a tool-error observation must be appended for the failed call");
     assert_eq!(observation.status, ToolObservationStatus::Error);
     match &observation.detail {
-        ToolObservationDetail::GenericFailure { failure_kind, .. } => {
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail,
+        } => {
             assert_eq!(*failure_kind, FailureKind::Authorization);
+            assert_eq!(
+                detail.as_deref(),
+                Some("scripted batch failure"),
+                "the caller-shaped host cause must survive the persistence/model observation seam"
+            );
         }
         other => panic!("expected GenericFailure observation detail, got {other:?}"),
     }
@@ -7247,7 +7825,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
 
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         // Phase 1: approval gate blocks with resume metadata
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new(format!("gate:approval-{approval_request_id}"))
@@ -7260,7 +7838,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
             stopped_on_suspension: true,
         },
         // Phase 2: auth gate blocks after approval-resume re-dispatch
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     auth_gate_ref.clone(),
@@ -7273,7 +7851,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
             stopped_on_suspension: true,
         },
         // Phase 3: auth-resume re-dispatch completes
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "completed after auth resume".to_string(),
@@ -7500,7 +8078,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
 
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         // Phase 1: approval gate blocks.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new(format!("gate:approval-{approval_request_id}"))
@@ -7513,7 +8091,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
             stopped_on_suspension: true,
         },
         // Phase 2: auth gate blocks after approval-resume re-dispatch.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     LoopGateRef::new("gate:corr-id-auth").expect("valid"),
@@ -7530,7 +8108,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
             stopped_on_suspension: true,
         },
         // Phase 3: auth-resume re-dispatch completes.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "done".to_string(),
@@ -7652,8 +8230,8 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
     let input_ref = CapabilityInputRef::new("input:batch-dup-guard").expect("valid");
 
     // Two outcomes for the two calls; both complete so no suspension complicates things.
-    let host =
-        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
@@ -7675,7 +8253,8 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                 ),
             ],
             stopped_on_suspension: false,
-        }]);
+        },
+    ]);
 
     let family = crate::families::default();
     let ctx = StageContext {
@@ -7847,7 +8426,7 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     //   [1] Phase 2: cap1 approval-resume → Failed(Backend) — the bug trigger.
     let batch_outcomes = vec![
         // [0] cap1 → ApprovalRequired (gate blocked).
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new(format!("gate:approval-{cap1_request_id}")).expect("valid"),
@@ -7859,11 +8438,11 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
             stopped_on_suspension: true,
         },
         // [1] cap1 approval-resume → Backend failure.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::Backend,
                 "transient backend error during cap1 resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -7947,6 +8526,22 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         "no single invoke_capability call must be made for a resume-origin Backend failure \
          (retry is suppressed to avoid double-exec)"
     );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Capability,
+                    class: LoopRecoveryClass::Capability(FailureKind::Backend),
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "the redirected resume-origin failure must emit one model-visible recovery event"
+    );
 }
 
 /// Regression test for the terminal `scope_mismatch` / `HostUnavailable` failure
@@ -8016,7 +8611,7 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     //   [1] Phase 2: cap1 auth-resume → Failed(Backend) — the bug trigger.
     let batch_outcomes = vec![
         // [0] Phase 1: cap1 → AuthRequired (gate blocked).
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     LoopGateRef::new("gate:auth-sm-test-cap1").expect("valid"),
@@ -8029,11 +8624,11 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
             stopped_on_suspension: true,
         },
         // [1] Phase 2: cap1 auth-resume → Backend failure.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::Backend,
                 "transient backend error during cap1 auth-resume".to_string(),
-                None,
+                diagnostic_failure_detail("transient backend error during cap1 auth-resume"),
             )],
             stopped_on_suspension: false,
         },
@@ -8231,6 +8826,15 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         observation.summary, "Capability declined by user.",
         "observation summary must describe the gate-declined failure"
     );
+    let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+        panic!("gate-declined observation must carry generic failure detail");
+    };
+    assert!(
+        detail
+            .as_deref()
+            .is_some_and(|text| text.contains("user declined its approval request")),
+        "gate-declined observation must tell the model why the capability did not run"
+    );
     let recovery = observation
         .recovery
         .as_ref()
@@ -8243,15 +8847,16 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     // Use a provider call fixture (provider_replay set) so the observation is
     // actually appended to appended_result_refs by
     // append_capability_safe_summary_ref_with_observation.
-    let host =
-        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
-        }]);
+        },
+    ]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -8379,7 +8984,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
     let blocked_activity_id = calls[0].activity_id;
 
     let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     LoopGateRef::new("gate:hook-auth-tokenless").expect("valid"),
@@ -8393,11 +8998,11 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         },
         // Phase 2: the denied resume crosses the port as a typed terminal
         // auth resume; the host terminalizes it as a gate-declined failure.
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::GateDeclined,
                 "auth gate denied by user".to_string(),
-                None,
+                diagnostic_failure_detail("auth gate denied by user"),
             )],
             stopped_on_suspension: false,
         },
@@ -8524,21 +9129,22 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             ironclaw_turns::run_profile::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
-                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             // Order matches invocation order: X's typed denial terminalizes
             // first, then Y's normal dispatch completes.
             resolutions: vec![
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -8753,15 +9359,15 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
 async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_capability_repeats()
 {
     let y_result_ref = LoopResultRef::new("result:same-cap-y-outcome").expect("valid");
-    let host =
-        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             // Order matches invocation order: the denied activity's typed
             // terminalization first, then the surviving call's completion.
             resolutions: vec![
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -8774,7 +9380,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 ),
             ],
             stopped_on_suspension: false,
-        }]);
+        },
+    ]);
 
     let family = crate::families::default();
     let ctx = StageContext {
@@ -8917,7 +9524,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
 async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispatched() {
     let y_result_ref = LoopResultRef::new("result:y-multi").expect("valid");
     let z_result_ref = LoopResultRef::new("result:z-multi").expect("valid");
-    let z_capability_id = ironclaw_host_api::CapabilityId::new("demo.write").expect("valid cap id");
+    let z_capability_id =
+        ironclaw_host_api::ids::CapabilityId::new("demo.write").expect("valid cap id");
 
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
@@ -8925,9 +9533,10 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             ironclaw_turns::run_profile::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
-                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
@@ -8935,21 +9544,22 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             ironclaw_turns::run_profile::CapabilityDescriptorView {
                 capability_id: z_capability_id.clone(),
                 provider: None,
-                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_write".to_string(),
                 safe_description: "demo write capability".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             // Order matches invocation order: X's typed denial terminalizes
             // first, then Y and Z complete.
             resolutions: vec![
                 resolution::failed(
                     FailureKind::GateDeclined,
                     "auth gate denied by user".to_string(),
-                    None,
+                    diagnostic_failure_detail("auth gate denied by user"),
                 ),
                 resolution::completed(
                     y_result_ref.clone(),
@@ -9200,14 +9810,15 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             ironclaw_turns::run_profile::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
-                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done".to_string(),
@@ -9236,7 +9847,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000043")
             .expect("valid"),
         activity_id: denied_activity_id,
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         surface_version: surface_version(),
         input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
@@ -9415,14 +10026,15 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
             ironclaw_turns::run_profile::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
-                runtime: ironclaw_host_api::RuntimeKind::FirstParty,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done no-match".to_string(),
@@ -9451,7 +10063,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000099")
             .expect("valid"),
         activity_id: CapabilityActivityId::new(),
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         surface_version: surface_version(),
         input_ref: CapabilityInputRef::new("input:approval-deny-no-match-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],

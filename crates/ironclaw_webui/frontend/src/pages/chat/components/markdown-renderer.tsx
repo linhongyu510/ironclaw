@@ -1,7 +1,6 @@
 // @ts-nocheck
-import hljs from "highlight.js/lib/common";
 import React from "react";
-import { renderMarkdown } from "../../../lib/markdown";
+import "streamdown/styles.css";
 import { toast } from "../../../lib/toast";
 import { useT } from "../../../lib/i18n";
 
@@ -34,13 +33,6 @@ function enhanceCodeBlocks(root, t) {
     pre.dataset.wrapped = "0";
 
     const codeEl = pre.querySelector("code");
-    if (codeEl) {
-      try {
-        hljs.highlightElement(codeEl);
-      } catch {
-        // highlight failure is non-fatal
-      }
-    }
 
     const wrap = document.createElement("div");
     wrap.className = "markdown-code-frame";
@@ -144,29 +136,146 @@ function syncCodeBlockLabels(pre, labels) {
   }
 }
 
-function MarkdownRendererImpl({ content, className = "" }) {
+function MarkdownRendererImpl({ content, className = "", streaming = false }) {
   const t = useT();
   const ref = React.useRef(null);
+  const normalizedContent = typeof content === "string" ? content : "";
+  const [rendered, setRendered] = React.useState(null);
+  const latestContentRef = React.useRef(normalizedContent);
+  const mountedRef = React.useRef(true);
+  const renderInFlightRef = React.useRef(false);
+  const markdownLoadFailedRef = React.useRef(false);
+  const requestRenderRef = React.useRef(() => false);
+  const wasStreamingRef = React.useRef(streaming);
+  if (streaming) wasStreamingRef.current = true;
 
-  // marked.parse + DOMPurify.sanitize are expensive; only re-run when
-  // the source content actually changes, not on every parent render
-  // (during streaming the message list re-renders on every token).
-  const rendered = React.useMemo(() => renderMarkdown(content), [content]);
+  const renderedHtml =
+    normalizedContent && rendered &&
+    rendered.source === normalizedContent
+      ? rendered.html
+      : null;
+
+  requestRenderRef.current = () => {
+    if (
+      !latestContentRef.current ||
+      renderInFlightRef.current ||
+      markdownLoadFailedRef.current
+    ) {
+      return false;
+    }
+    renderInFlightRef.current = true;
+    import("../../../lib/markdown")
+      .then(({ renderMarkdown }) => {
+        const currentContent = latestContentRef.current;
+        if (!mountedRef.current || !currentContent) return;
+        setRendered({
+          source: currentContent,
+          html: renderMarkdown(currentContent),
+        });
+      })
+      .catch(() => {
+        markdownLoadFailedRef.current = true;
+        if (mountedRef.current) setRendered(null);
+      })
+      .finally(() => {
+        renderInFlightRef.current = false;
+      });
+    return true;
+  };
+
+  // Streaming projections carry the full accumulated reply. The product
+  // boundary limits replaceable text snapshots to browser-paint cadence, so
+  // Streamdown can reconcile incomplete Markdown without a transition being
+  // continually superseded by provider microbursts. Completed replies keep the
+  // existing marked + DOMPurify path and code-block enhancements.
+  React.useEffect(() => {
+    latestContentRef.current = normalizedContent;
+  }, [normalizedContent]);
 
   React.useEffect(() => {
+    if (!normalizedContent) {
+      setRendered(null);
+      return;
+    }
+
+    if (streaming) return;
+    requestRenderRef.current();
+  }, [normalizedContent, streaming]);
+
+  React.useEffect(() => {
+    if (streaming || renderedHtml === null) return undefined;
     enhanceCodeBlocks(ref.current, t);
-  }, [rendered, t]);
+    const root = ref.current;
+    if (!root?.querySelector("pre code")) return undefined;
+
+    let active = true;
+    import("../../../lib/syntax-highlighting")
+      .then(({ highlightCodeBlocks }) => {
+        if (active && ref.current === root) highlightCodeBlocks(root);
+      })
+      .catch(() => {
+        // Syntax highlighting is an optional enhancement.
+      });
+    return () => {
+      active = false;
+    };
+  }, [renderedHtml, streaming, t]);
+
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const keepStreamingRendererUntilFinalIsReady =
+    !streaming && wasStreamingRef.current && renderedHtml === null;
+  if (streaming || keepStreamingRendererUntilFinalIsReady) {
+    return (
+      <div ref={ref} className={["markdown-body", className].join(" ")}>
+        <React.Suspense
+          fallback={(
+            <div className="whitespace-pre-wrap">{normalizedContent}</div>
+          )}
+        >
+          <StreamingMarkdown
+            animated={{ duration: 100, easing: "ease-out", sep: "word", stagger: 15 }}
+            controls={false}
+            isAnimating={streaming}
+            mode={streaming ? "streaming" : "static"}
+          >
+            {normalizedContent}
+          </StreamingMarkdown>
+        </React.Suspense>
+      </div>
+    );
+  }
+
+  if (renderedHtml === null) {
+    return (
+      <div
+        ref={ref}
+        className={["markdown-body", "whitespace-pre-wrap", className].join(" ")}
+      >
+        {normalizedContent}
+      </div>
+    );
+  }
 
   return (
     <div
       ref={ref}
       className={["markdown-body", className].join(" ")}
-      dangerouslySetInnerHTML={{ __html: rendered }}
+      dangerouslySetInnerHTML={{ __html: renderedHtml }}
     />
   );
 }
 
-// Memoized so a bubble whose `content`/`className` are unchanged skips
+const StreamingMarkdown = React.lazy(() =>
+  import("streamdown").then(({ Streamdown }) => ({ default: Streamdown }))
+);
+
+// Memoized so a bubble whose `content`/`className`/`streaming` are unchanged skips
 // re-rendering when sibling messages update (e.g. a new streaming chunk
 // elsewhere in the list).
 export const MarkdownRenderer = React.memo(MarkdownRendererImpl);

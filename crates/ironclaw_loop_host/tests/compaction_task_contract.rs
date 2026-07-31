@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
@@ -458,6 +458,41 @@ async fn compaction_task_persists_escaped_summary_with_anti_injection_prefix() {
     assert_eq!(
         summary.model_context_policy,
         Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+    );
+}
+
+#[tokio::test]
+async fn production_compaction_scanner_allows_dotted_package_names_and_persists_summary() {
+    let fixture = CompactionFixture::new_with_thread("dotted-package").await;
+    let package_name = "org.springframework.integration.transformer";
+    fixture.append_user(package_name).await;
+    let inference = Arc::new(CapturingInference::new("package summary"));
+    let port = HostManagedLoopCompactionPort::new(
+        inference.clone(),
+        Arc::clone(&fixture.threads),
+        fixture.scope.clone(),
+        "system prompt",
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("a package name must not poison compaction as a false-positive JWT");
+
+    assert!(matches!(outcome, LoopCompactionOutcome::Compacted(_)));
+    assert!(inference.last_input().contains(package_name));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.summary_artifacts.len(),
+        1,
+        "successful caller-path compaction must durably persist one summary"
     );
 }
 

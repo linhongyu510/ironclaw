@@ -58,7 +58,8 @@ pub(super) struct GateInput {
     pub(super) call: CapabilityCallCandidate,
     pub(super) kind: GateKind,
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
-    pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    pub(super) credential_requirements:
+        Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
     pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
 }
@@ -232,7 +233,6 @@ impl ExecutorStage<GateInput> for GateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },
@@ -325,7 +325,6 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        diagnostic_ref: None,
                         safe_summary: None,
                         explanation_message_ref,
                     },

@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionFingerprintKey, ProductActionId};
 use crate::commands::ProductCommand;
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_host_api::product_surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 
 /// Authority-bearing command dispatch context built by the workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductCommandContext {
     pub action_id: ProductActionId,
     pub fingerprint: ActionFingerprintKey,
+    /// Exact raw inbound command token, verbatim from the payload.
+    pub requested_command: String,
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
     pub external_actor_ref: ExternalActorRef,
@@ -47,6 +49,7 @@ impl ProductCommandContext {
         Ok(Self {
             action_id,
             fingerprint,
+            requested_command: command.command.clone(),
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),

@@ -33,17 +33,20 @@ use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product::AdapterInstallationId;
-use ironclaw_product::ChannelConnectionNoticePolicy;
+use ironclaw_product::{ChannelConnectionNoticePolicy, ChannelConnectionRequirement};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ironclaw_auth::RebornAuthContinuationDispatcher;
 use ironclaw_extension_host::channel_identity_path_segment as path_segment;
-use ironclaw_host_api::{
+use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, installation_scoped_provider_user_id,
@@ -356,7 +359,7 @@ impl std::fmt::Debug for FilesystemChannelPairingStore {
 }
 
 fn pairing_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
-    let tenant = ironclaw_host_api::resource_scope_path_segment(scope.tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(PAIRING_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-pairing"))?,
@@ -460,6 +463,7 @@ pub struct ChannelPairingService {
     project_id: Option<ProjectId>,
     extension_id: ExtensionId,
     connection_notices: ChannelConnectionNoticePolicy,
+    connection_requirement: ChannelConnectionRequirement,
     deep_link_template: Option<String>,
     inbound_code_prefixes: Vec<String>,
     store: Arc<FilesystemChannelPairingStore>,
@@ -493,6 +497,7 @@ pub struct ChannelPairingServiceParts {
     pub project_id: Option<ProjectId>,
     pub extension_id: ExtensionId,
     pub connection_notices: ChannelConnectionNoticePolicy,
+    pub connection_requirement: ChannelConnectionRequirement,
     pub deep_link_template: Option<String>,
     pub inbound_code_prefixes: Vec<String>,
     pub store: Arc<FilesystemChannelPairingStore>,
@@ -514,6 +519,7 @@ impl ChannelPairingService {
             project_id: parts.project_id,
             extension_id: parts.extension_id,
             connection_notices: parts.connection_notices,
+            connection_requirement: parts.connection_requirement,
             deep_link_template: parts.deep_link_template,
             inbound_code_prefixes: parts.inbound_code_prefixes,
             store: parts.store,
@@ -534,6 +540,10 @@ impl ChannelPairingService {
 
     pub fn connection_notices(&self) -> &ChannelConnectionNoticePolicy {
         &self.connection_notices
+    }
+
+    pub fn connection_requirement(&self) -> &ChannelConnectionRequirement {
+        &self.connection_requirement
     }
 
     async fn resolve_deep_link(
@@ -648,6 +658,23 @@ impl ChannelPairingService {
             _ => None,
         };
         Ok(ChannelPairingStatus { connected, pending })
+    }
+
+    /// Materialize the current pairing challenge without rotating a still-live
+    /// code. Prompt projection and delivery replays therefore observe the same
+    /// durable challenge as the WebUI pairing panel.
+    pub async fn pending_or_issue(
+        &self,
+        caller: &UserId,
+    ) -> Result<Option<ChannelPairingIssue>, ChannelPairingError> {
+        let status = self.status_for(caller).await?;
+        if status.connected {
+            return Ok(None);
+        }
+        match status.pending {
+            Some(issue) => Ok(Some(issue)),
+            None => self.issue_or_rotate(caller).await.map(Some),
+        }
     }
 
     /// Consume a code arriving over the verified webhook from a direct

@@ -17,14 +17,14 @@ use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::path::ScopedPath;
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat,
 };
 use ironclaw_threads::ThreadScope;
 
-use crate::local_dev_mounts::WORKSPACE_ALIAS;
+use crate::runtime_mounts::WORKSPACE_ALIAS;
 
 const DEFAULT_OCTET_STREAM: &str = "application/octet-stream";
 
@@ -252,8 +252,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId,
-        UserId, VirtualPath,
+        ids::{AgentId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use ironclaw_threads::ThreadScope;
 

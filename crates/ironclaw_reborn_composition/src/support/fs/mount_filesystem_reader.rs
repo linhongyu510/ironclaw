@@ -5,7 +5,7 @@
 //! Files" viewer calls to navigate the agent's internal filesystem (persistent
 //! memory + project working files, which include landed attachments). It reads
 //! through a single read-only [`ScopedFilesystem`] whose mount view spans every
-//! browsable alias (see [`scoped_browse_mount_view`](crate::local_dev_mounts)). A
+//! browsable alias (see [`scoped_browse_mount_view`](crate::runtime_mounts)). A
 //! [`FsMount`] selects which alias to confine to; paths in and out are
 //! mount-relative so neither an alias nor a host path crosses the boundary.
 //!
@@ -19,12 +19,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
 };
 
-use crate::local_dev_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
+use crate::runtime_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
 use crate::support::fs::project_filesystem_reader::{
     file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
 };
@@ -248,8 +248,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath, VirtualPath},
+        resource::ResourceScope,
     };
 
     fn browse_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -360,7 +362,7 @@ mod tests {
         let root = Arc::new(InMemoryBackend::new());
         let reader = MountScopedFilesystemReader::new(Arc::new(ScopedFilesystem::new(
             Arc::clone(&root),
-            crate::local_dev_mounts::scoped_browse_mount_view,
+            crate::runtime_mounts::scoped_browse_mount_view,
         )));
         let alice = user_scope("alice");
         let bob = user_scope("bob");
@@ -418,7 +420,7 @@ mod tests {
     #[test]
     fn empty_mount_root_lists_as_empty_not_404() {
         use ironclaw_filesystem::FilesystemOperation;
-        use ironclaw_host_api::VirtualPath;
+        use ironclaw_host_api::path::VirtualPath;
 
         let not_found = || FilesystemError::NotFound {
             path: VirtualPath::new("/memory").unwrap(),

@@ -8,7 +8,7 @@
 //! installation state and the active snapshot ([`lifecycle`]).
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
-//! concrete extensions implement the [`ironclaw_host_api::ToolAdapter`] and
+//! concrete extensions implement the [`ironclaw_host_api::tool_adapter::ToolAdapter`] and
 //! [`ironclaw_product::ChannelAdapter`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
@@ -26,6 +26,8 @@ mod admin_configuration_store;
 pub mod available_extension_import;
 pub mod available_extensions;
 pub mod bundled_skills;
+pub mod capability_surface;
+pub mod channel_command_roles;
 pub mod channel_config;
 pub mod channel_connection;
 pub mod channel_delivery;
@@ -58,6 +60,7 @@ pub mod host_api_contracts;
 mod hosted_mcp_discovery_authority;
 pub mod ingress;
 pub mod install_policy;
+pub mod ironhub;
 pub mod lifecycle;
 pub mod lifecycle_product_service;
 pub mod lifecycle_restore;
@@ -95,7 +98,7 @@ pub async fn filesystem_installation_store_for_test()
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
     ironclaw_extensions::ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
@@ -132,7 +135,7 @@ pub use admin_configuration_store::{
 };
 pub use available_extension_import::{
     extension_asset_path, imported_extension_package, inline_extension_dir_assets,
-    materialize_available_extension,
+    materialize_available_extension, registry_extension_package,
 };
 pub use available_extensions::{
     AdminConfigurationCatalogUse, AvailableExtensionAsset, AvailableExtensionAssetContent,

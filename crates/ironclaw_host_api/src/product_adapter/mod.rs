@@ -15,8 +15,8 @@ pub mod redaction;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use crate::ProtocolAuthFailure;
-pub use crate::ProtocolHttpEgressError;
+pub use crate::product_adapter_error::ProtocolAuthFailure;
+pub use crate::product_adapter_error::ProtocolHttpEgressError;
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
@@ -51,7 +51,8 @@ pub use inbound::{
     ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductSlashCommandParseError, ProductSourceChannel, ProductTriggerReason,
     ProjectionReadPayload, ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload,
-    TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
+    TrustedInboundContext, UserMessagePayload, classify_channel_inbound_text,
+    parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
 pub use outbound::{

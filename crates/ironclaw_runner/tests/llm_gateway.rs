@@ -7,12 +7,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
-    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -58,8 +58,8 @@ fn provider_name(value: &str) -> ProviderToolName {
     ProviderToolName::new(value).expect("provider tool name")
 }
 
-fn local_development_safety_context() -> InstructionSafetyContext {
-    InstructionSafetyContext::local_development_noop()
+fn non_production_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::non_production_noop()
 }
 
 #[tokio::test]
@@ -828,6 +828,51 @@ async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
 }
 
 #[tokio::test]
+async fn gateway_does_not_recover_truncated_textual_tool_syntax_as_a_capability_call() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: Some(
+            "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}".to_string(),
+        ),
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Length,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+        reasoning_details: None,
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "a truncated textual tool call must never reach capability registration"
+    );
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_rejects_unrecovered_textual_tool_syntax() {
     let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
         "Searching now.\nto=hidden.tool weirdjson\n{\"message\":\"hello\"}",
@@ -1041,39 +1086,56 @@ async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway(
         );
     }
 
-    // Control: the same armed registration error with a WELL-FORMED payload
-    // must not reject. Without this, the assertions above would pass on a port
-    // double that rejects unconditionally — proving error routing, not that the
-    // missing `mission` field is what triggers the rejection.
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_1".to_string(),
-        name: "builtin__spawn_subagent".to_string(),
-        arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        Arc::clone(&provider),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
-    let capabilities = Arc::new(
-        GatewayCapabilityPort::with_spawn_subagent_surface()
-            .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
-    );
+    // Control: the same armed errors with a WELL-FORMED payload must not
+    // reject — at BOTH stages. Without this, either double could reject
+    // unconditionally and every assertion above would still pass, proving
+    // error routing rather than malformed-input handling.
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
 
-    gateway
-        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
-        .await
-        .expect("a well-formed spawn payload must register even with the error armed");
+        gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{stage}: a well-formed spawn payload must pass with the error armed: {error:?}"
+                )
+            });
 
-    assert_eq!(
-        capabilities.registered.lock().unwrap().len(),
-        1,
-        "a well-formed spawn payload must reach registration"
-    );
+        assert_eq!(
+            capabilities.registered.lock().unwrap().len(),
+            1,
+            "{stage}: a well-formed spawn payload must reach registration"
+        );
+    }
 }
 
 fn repair_request_messages(
@@ -2292,7 +2354,15 @@ async fn gateway_rejects_truncated_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
+    assert_eq!(
+        error.usage,
+        Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            ..Default::default()
+        })
+    );
 }
 
 #[tokio::test]
@@ -2378,6 +2448,47 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
 }
 
+/// An explicitly-failed provider response must not dispatch its tool calls.
+///
+/// Gemini reports `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL` — both
+/// `FinishReason::Unknown` — on responses that *do* carry function-call parts.
+/// `ironclaw_llm` refuses to refine those into `ToolUse`; this pins the other
+/// half of the contract: when a response reaches the gateway as `Unknown`, the
+/// parsed tool calls are never registered as capability activity, however
+/// well-formed and advertised they look.
+#[tokio::test]
+async fn gateway_does_not_register_capability_calls_for_unknown_finish_reason() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls_with_finish_reason(
+        vec![ToolCall {
+            id: "call_malformed".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }],
+        FinishReason::Unknown,
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "an explicitly-failed provider response must not dispatch its tool calls"
+    );
+}
+
 #[tokio::test]
 async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones() {
     let fixture = ThreadFixture::new().await;
@@ -2393,7 +2504,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2457,7 +2568,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2519,7 +2630,7 @@ async fn production_loop_model_request_includes_runtime_context() {
         context_port,
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     )
-    .with_safety_context(local_development_safety_context())
+    .with_safety_context(non_production_safety_context())
     .with_instruction_materialization_store(store_for_port)
     .with_runtime_context(LoopRuntimeContext {
         loop_started_at_utc,
@@ -2580,7 +2691,7 @@ async fn production_loop_model_gateway_keeps_instruction_stores_isolated_across_
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
 
     let request = production_loop_request(&fixture, None).await;
@@ -2687,7 +2798,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2741,7 +2852,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
             fixture.thread_scope.clone(),
             provider_gateway,
             16,
-            local_development_safety_context(),
+            non_production_safety_context(),
         ));
         let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopModelPort::new(
@@ -2782,7 +2893,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2827,7 +2938,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2846,6 +2957,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             }],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2876,7 +2988,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -2895,6 +3007,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2922,7 +3035,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         fixture.thread_scope.clone(),
         invalid_summary_gateway,
         16,
-        local_development_safety_context(),
+        non_production_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port =
@@ -2958,6 +3071,46 @@ async fn gateway_sanitizes_provider_errors() {
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
     assert!(!error.safe_summary.contains("RAW_PROVIDER_SECRET"));
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
+}
+
+#[tokio::test]
+async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_call() {
+    let provider = Arc::new(RecordingLlmProvider::reply("must not be called"));
+    let failover = Arc::new(
+        FailoverProvider::new(vec![provider.clone() as Arc<dyn LlmProvider>])
+            .expect("single-provider failover chain"),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        failover,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.fallback_index = 1;
+
+    let error = gateway
+        .stream_model(request)
+        .await
+        .expect_err("fallback index one is absent");
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "configured model fallback route is unavailable"
+    );
+    assert!(
+        error
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("host-selected-model")),
+        "the typed route failure must retain its safe model identity"
+    );
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        0,
+        "fallback exhaustion must be decided before provider dispatch"
+    );
 }
 
 #[tokio::test]
@@ -3576,7 +3729,7 @@ async fn production_loop_request(
     production_loop_request_with_safety(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
     )
     .await
 }
@@ -3603,7 +3756,7 @@ async fn production_loop_request_with_inline_messages(
     production_loop_request_with_safety_and_inline_messages(
         fixture,
         model_preference,
-        InstructionSafetyContext::local_development_noop(),
+        InstructionSafetyContext::non_production_noop(),
         inline_messages,
     )
     .await
@@ -3647,6 +3800,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         inline_messages,
         surface_version: None,
         model_preference,
+        fallback_index: 0,
         capability_view: None,
     }
 }
@@ -3770,6 +3924,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
             },
         ],
         surface_version: None,
+        fallback_index: 0,
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
@@ -4177,6 +4332,23 @@ impl ToolAwareProvider {
         })
     }
 
+    fn tool_calls_with_finish_reason(
+        tool_calls: Vec<ToolCall>,
+        finish_reason: FinishReason,
+    ) -> Self {
+        Self::tool_response(ToolCompletionResponse {
+            content: None,
+            tool_calls,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
+        })
+    }
+
     fn tool_stop_reply(content: &str) -> Self {
         Self::tool_response(ToolCompletionResponse {
             content: Some(content.to_string()),
@@ -4427,7 +4599,14 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        if let Some(kind) = self.validation_error {
+        // Payload-sensitive for the same reason as the registration stage
+        // below: an unconditional rejection would prove that an injected error
+        // maps correctly, while saying nothing about the malformed input the
+        // spawn test is named for. A well-formed `mission` must pass.
+        if let Some(kind) = self
+            .validation_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 kind,
                 "provider tool output was structurally invalid",
@@ -4526,16 +4705,20 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     async fn invoke_capability(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::Resolution,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capabilities")
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::ResolutionBatch,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capability batches")
     }
 }

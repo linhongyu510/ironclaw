@@ -1,6 +1,10 @@
 use ironclaw_host_api::{
-    CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, SecretHandle},
+    runtime::RuntimeKind,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
@@ -101,7 +105,7 @@ impl<'a> CredentialSourceStrategy<'a> {
     }
 }
 
-pub(super) fn validate_sources_for_request(
+pub(crate) fn validate_sources_for_request(
     request: &RuntimeHttpEgressRequest,
 ) -> Result<(), RuntimeHttpEgressError> {
     for injection in &request.credential_injections {
@@ -110,7 +114,7 @@ pub(super) fn validate_sources_for_request(
     Ok(())
 }
 
-pub(super) fn apply_credential_injections<S>(
+pub(crate) fn apply_credential_injections<S>(
     secrets: &S,
     secret_injections: Option<&RuntimeSecretInjectionStore>,
     request: &mut RuntimeHttpEgressRequest,
@@ -253,8 +257,14 @@ fn staged_secret_for_injection(
 
 fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
     // Multi-call runtimes borrow invocation-scoped staged credentials until
-    // the capability dispatch completes or aborts.
-    matches!(runtime, RuntimeKind::Mcp | RuntimeKind::Wasm)
+    // the capability dispatch completes or aborts. A sandboxed shell
+    // invocation makes many outbound calls (e.g. `npm install` hitting a
+    // registry repeatedly), so it belongs in this set too — single-use
+    // (`take`) would 403 every call after the first.
+    matches!(
+        runtime,
+        RuntimeKind::Mcp | RuntimeKind::Wasm | RuntimeKind::Sandbox
+    )
 }
 
 fn missing_runtime_credential(
@@ -567,8 +577,11 @@ mod tests {
     use super::*;
     use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
-        Timestamp, UserId,
+        Timestamp,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::{
         SecretLease, SecretLeaseId, SecretMetadata, SecretStore, SecretStoreError,
@@ -618,6 +631,20 @@ mod tests {
             },
             required: true,
         }
+    }
+
+    /// `Mcp`/`Wasm`/`Sandbox` are multi-call runtimes: one invocation makes
+    /// many outbound calls (a sandboxed shell running `npm install` hits the
+    /// registry repeatedly), so the staged credential must survive repeated
+    /// reads (`clone_material`) rather than being consumed after the first
+    /// (`take`). `Script` is asserted `false` alongside so this test would
+    /// fail if the predicate were made unconditionally `true`.
+    #[test]
+    fn runtime_reuses_staged_credentials_covers_multi_call_lanes_only() {
+        assert!(runtime_reuses_staged_credentials(RuntimeKind::Mcp));
+        assert!(runtime_reuses_staged_credentials(RuntimeKind::Wasm));
+        assert!(runtime_reuses_staged_credentials(RuntimeKind::Sandbox));
+        assert!(!runtime_reuses_staged_credentials(RuntimeKind::Script));
     }
 
     /// Exhaustive table of the pure `SecretStoreError -> sanitized reason`
@@ -887,9 +914,11 @@ mod tests {
 mod path_placeholder_tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
-        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
-        TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest},
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::SecretStore;
 

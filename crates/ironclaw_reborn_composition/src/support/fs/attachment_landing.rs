@@ -16,14 +16,15 @@ use ironclaw_attachments::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
-    ScopedPath,
+    path::ScopedPath,
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_product::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
-use crate::local_dev_mounts::WORKSPACE_ALIAS;
+use crate::runtime_mounts::WORKSPACE_ALIAS;
 
 /// Lands inbound attachments through a project-scoped workspace filesystem.
 pub(crate) struct ProjectScopedAttachmentLander<F: RootFilesystem> {
@@ -186,9 +187,11 @@ mod tests {
     use super::*;
 
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::ProductSurfaceErrorCode;
+    use ironclaw_host_api::product_surface::ProductSurfaceErrorCode;
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
+        ids::{AgentId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     fn workspace_fs(permissions: MountPermissions) -> Arc<ScopedFilesystem<InMemoryBackend>> {

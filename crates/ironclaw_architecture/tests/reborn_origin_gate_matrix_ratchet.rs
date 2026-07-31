@@ -77,7 +77,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::{
-    CapabilityId, OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES,
+    capability::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES},
+    ids::CapabilityId,
 };
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).
@@ -91,7 +92,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.trace_commons.status",
     "builtin.trace_commons.credits",
     "builtin.trace_commons.onboard",
-    "builtin.profile_set",
+    "ironclaw.memory.profile_set",
     // Reviewed rename, not an addition: the memory tools moved from the builtin
     // package (`builtin.memory_*`) to the always-on `ironclaw.memory` package
     // (#3537) with the same read-only effect posture; `ironclaw.memory.write`

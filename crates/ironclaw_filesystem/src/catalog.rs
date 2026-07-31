@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
@@ -242,6 +242,18 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?
             .backend
             .query(path, filter, page)
+            .await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .query_ordered(path, filter, page)
             .await
     }
 

@@ -18,9 +18,9 @@ mod validate;
 
 pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
-    CapabilityFailure, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
+    CapabilityDescriptorView, CapabilityFailure, CapabilityProgress, CapabilityResultMessage,
+    ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
@@ -47,7 +47,8 @@ pub use model::{
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,
-    LoopDriverNoteKind, LoopGateKind, LoopProgressEvent, LoopProgressPort,
+    LoopDriverNoteKind, LoopGateKind, LoopProgressEvent, LoopProgressPort, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage,
 };
 pub use refs::{
     CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion, LoopCheckpointStateRef,

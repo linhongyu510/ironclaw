@@ -38,8 +38,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, ExtensionId, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{
+        AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -52,6 +57,10 @@ use ironclaw_product::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProtocolAuthEvidence, TrustedInboundContext,
+};
+use ironclaw_product::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -91,8 +100,8 @@ use super::{
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
 use crate::extension_ingress::{
-    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
-    build_extension_ingress, extension_ingress_route_mount,
+    ExtensionIngressParts, PostAdmissionObserver, build_extension_ingress,
+    extension_ingress_route_mount,
 };
 use crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use ironclaw_extension_host::{
@@ -100,7 +109,7 @@ use ironclaw_extension_host::{
     FilesystemAdminConfigurationStore,
 };
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
-use ironclaw_host_api::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
@@ -135,6 +144,32 @@ fn slack_manifest_from_bundled_inventory() -> String {
         .into_owned()
 }
 
+/// Overwrite the bundled manifest's `key = [...]` array declaration with
+/// `values`, independent of the array's CURRENT contents. A literal-text
+/// `.replace("key = [\"current-value\"]", ...)` would silently no-op the
+/// moment the bundled manifest's declared value changes underneath it (no
+/// match, no replacement, override never applied) — exactly what would have
+/// happened here when Task 5 changed `commands` from `["status"]` to
+/// `["model", "status"]`.
+fn replace_toml_array(manifest: &str, key: &str, values: &[&str]) -> String {
+    let prefix = format!("{key} = [");
+    let start = manifest
+        .find(&prefix)
+        .unwrap_or_else(|| panic!("manifest declares `{key} = [...]`")); // safety: test fixture asserts the bundled manifest's fixed shape.
+    let close = manifest[start..]
+        .find(']')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("`{key}` array is closed")); // safety: test fixture asserts the bundled manifest's fixed shape.
+    let mut patched = String::with_capacity(manifest.len());
+    patched.push_str(&manifest[..start]);
+    patched.push_str(&format!(
+        "{key} = {}",
+        serde_json::to_string(values).expect("serialize test array values") // safety: test-only string slices serialize without failure.
+    ));
+    patched.push_str(&manifest[close + 1..]);
+    patched
+}
+
 /// The canonical generic-ingress path the fixtures post to: the single
 /// `extension_ingress_route_mount` serves
 /// `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
@@ -143,6 +178,7 @@ const SLACK_EVENTS_PATH: &str = "/webhooks/extensions/slack/events";
 
 struct Harness {
     mount: PublicRouteMount,
+    command_executions: Arc<RecordingCommandExecutionSurface>,
     /// The generic ingress registry: `drain()` settles every route-owned
     /// in-flight task (the assembly registered the sink's drain with it).
     ingress: ExtensionIngressParts,
@@ -234,6 +270,45 @@ impl Harness {
             .expect("router should respond") // safety: in-process test router should not fail
     }
 
+    /// Identical to [`Self::post_event_with_signature`], but for the native
+    /// slash-command form transport (PR-3): Slack's slash POSTs (and the
+    /// `ssl_check` probe) carry `Content-Type:
+    /// application/x-www-form-urlencoded`, which the Events API JSON helpers
+    /// above never set (axum defaults to no content-type header when none is
+    /// given). The HMAC recipe signs raw body bytes regardless of shape, so
+    /// this signs `form_body` with the exact same [`slack_signature`] recipe
+    /// and sets the content-type explicitly so the adapter's Content-Type
+    /// branch actually dispatches to the form-decoding path under test.
+    async fn post_slash_command_with_signature(
+        &self,
+        form_body: &str,
+        timestamp: u64,
+        signature: String,
+    ) -> axum::response::Response {
+        self.mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, signature)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form_body.to_string().into_bytes()))
+                    .expect("request should build"), // safety: static test request fixtures are valid.
+            )
+            .await
+            .expect("router should respond") // safety: in-process test router should not fail
+    }
+
+    async fn post_slash_command(&self, form_body: &str) -> axum::response::Response {
+        let timestamp = current_unix_timestamp();
+        let signature = slack_signature(timestamp, form_body);
+        self.post_slash_command_with_signature(form_body, timestamp, signature)
+            .await
+    }
+
     async fn drain(&self) {
         self.ingress.registry.drain().await;
     }
@@ -282,10 +357,16 @@ struct HarnessOptions {
     mode: TurnMode,
     max_wait: Duration,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    manifest_commands: Option<Vec<&'static str>>,
     /// Wrap the recording approval service in [`ForeignScopeApprovalService`]
     /// (empty `list_pending`) so bare gate replies exercise the
     /// delivered-gate-route fallback.
     foreign_scope_approvals: bool,
+    /// Admin-users role seeded for the harness's bound user (`USER`) — see
+    /// `build_harness_with_options`. Defaults to `Member` so admin-audience
+    /// command actions (`/model set`, `set-provider`) deny by default;
+    /// scenarios proving the admin path override this to an admin role.
+    actor_role: AdminUserRole,
 }
 
 impl HarnessOptions {
@@ -294,7 +375,9 @@ impl HarnessOptions {
             mode,
             max_wait: Duration::from_secs(2),
             auth_challenges: None,
+            manifest_commands: None,
             foreign_scope_approvals: false,
+            actor_role: AdminUserRole::Member,
         }
     }
 }
@@ -315,6 +398,15 @@ async fn build_harness_with_auth_challenges(
 ) -> Harness {
     let mut options = HarnessOptions::new(mode);
     options.auth_challenges = auth_challenges;
+    build_harness_with_options(options).await
+}
+
+async fn build_harness_with_manifest_commands(
+    mode: TurnMode,
+    commands: Vec<&'static str>,
+) -> Harness {
+    let mut options = HarnessOptions::new(mode);
+    options.manifest_commands = Some(commands);
     build_harness_with_options(options).await
 }
 
@@ -378,7 +470,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
-    let host = slack_test_extension_host().await;
+    let host =
+        slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
+            .await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -427,9 +521,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
             operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
         },
-        identity_lookup: Some(
-            Arc::clone(&identity_lookup) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>
-        ),
+        identity_lookup: Some(Arc::clone(&identity_lookup)
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
             coordinator: delivery_coordinator,
             outbound_store,
@@ -449,16 +542,19 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             },
         }),
         channel_pairing: None,
+        admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
+    let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
+    let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
+        as Arc<dyn ironclaw_host_api::product_surface::ProductSurface>);
+    assert!(command_surface_set); // safety: this file is included only by cfg(test).
     // Vendor extras exactly as the binary's channel-extension binding feeds
-    // them: the gate-reply classifier and the preference-target codec — no
-    // storage-root override.
+    // them: the preference-target codec — no storage-root override.
     assembly
         .register_extras(
             "slack",
             ChannelExtras {
-                classifier: Some(slack_gate_reply_classifier()),
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
                 storage_roots: None,
@@ -471,6 +567,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 
     Harness {
         mount,
+        command_executions,
         ingress,
         egress,
         coordinator: Arc::new(coordinator),
@@ -485,17 +582,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     }
 }
 
-/// Slack's gate-resolution reclassification for the generic sink — the same
-/// closure the binary-side native registration provides.
-fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
-    Arc::new(|message| {
-        ironclaw_slack_extension::classify_channel_interaction_resolution(
-            &message.text,
-            message.trigger,
-        )
-    })
-}
-
 /// `[channel.config]` configured through the production configure service:
 /// the REAL slack manifest is installed into a durable installation store
 /// and the ingress verification secret is saved under its manifest handle.
@@ -507,6 +593,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
         &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
+        None,
     )
     .expect("bundled channel manifest resolves"); // safety: compile-time bundled manifest is valid.
     let admin_configuration = record.resolved().admin_configuration.clone();
@@ -625,6 +712,12 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// (binding the real `SlackChannelAdapter`) — the snapshot both the ingress
 /// router and the delivery resolver read.
 async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
+    slack_test_extension_host_with_manifest_commands(None).await
+}
+
+async fn slack_test_extension_host_with_manifest_commands(
+    manifest_commands: Option<&[&str]>,
+) -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
         FakeEgressFactory, FakeToolAdapter, RecordingDrain,
     };
@@ -654,12 +747,17 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     let resolved = {
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
+        let mut manifest = slack_manifest_from_bundled_inventory();
+        if let Some(commands) = manifest_commands {
+            manifest = replace_toml_array(&manifest, "commands", commands);
+        }
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
-            slack_manifest_from_bundled_inventory(),
+            manifest,
             ironclaw_extensions::ManifestSource::HostBundled,
             &host_ports,
             None,
             &contracts,
+            None,
         )
         .expect("bundled channel manifest resolves") // safety: compile-time bundled manifest is valid.
         .resolved()
@@ -3198,6 +3296,77 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 /// Records every policy-approved channel egress call and synthesizes Slack
 /// Web API responses — the transport-seam analog of the old protocol-egress
 /// recorder.
+#[derive(Default)]
+struct RecordingCommandExecutionSurface {
+    invokes: Mutex<Vec<(String, String, serde_json::Value)>>,
+}
+
+impl RecordingCommandExecutionSurface {
+    fn invokes(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExecutionSurface {
+    async fn invoke(
+        &self,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        let operation_id = request.operation_id.as_str().to_string();
+        let title = if operation_id == "product.status.command" {
+            "Status"
+        } else {
+            "Model"
+        };
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((
+                operation_id,
+                caller.user_id.as_str().to_string(),
+                request.input,
+            ));
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse {
+                output: serde_json::json!({
+                    "title": title,
+                    "fields": [{"label": "Provider", "value": "stub-provider"}],
+                }),
+            },
+        )
+    }
+
+    async fn query(
+        &self,
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
+    }
+
+    async fn stream_events(
+        &self,
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
+    }
+}
+
 #[derive(Clone, Default)]
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<ApprovedChannelEgress>>>,
@@ -3227,8 +3396,10 @@ impl ChannelEgressTransport for RecordingEgress {
     async fn execute(
         &self,
         approved: ApprovedChannelEgress,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
         let response = slack_response_for_approved(&approved);
         self.requests
             .lock()
@@ -3240,9 +3411,9 @@ impl ChannelEgressTransport for RecordingEgress {
 
 fn slack_response_for_approved(
     approved: &ApprovedChannelEgress,
-) -> ironclaw_host_api::RestrictedEgressResponse {
-    fn response(body: &[u8]) -> ironclaw_host_api::RestrictedEgressResponse {
-        ironclaw_host_api::RestrictedEgressResponse {
+) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+    fn response(body: &[u8]) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
             status: 200,
             body: body.to_vec(),
         }
@@ -3339,6 +3510,145 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
     }
 }
 
+/// Harness admin-users directory (Task 5): seeds exactly the harness's bound
+/// user (`USER`, resolved through `identity_lookup` — see
+/// `build_harness_with_options`) with `HarnessOptions.actor_role`, so the
+/// bundled manifest's admin-audience command actions (`/model set`,
+/// `set-provider`) are admitted or denied by role. `get_user` treats any
+/// other user id as `AdminUserRole::Member` (fail-closed default);
+/// list/create/update/delete are unreachable from these scenarios.
+struct FakeAdminUsers {
+    roles: Mutex<std::collections::HashMap<String, AdminUserRole>>,
+}
+
+impl FakeAdminUsers {
+    /// Seed a single actor -> role mapping. Every other user id resolves to
+    /// `AdminUserRole::Member` via `get_user`'s fail-closed default.
+    fn seeded(user_id: &str, role: AdminUserRole) -> Self {
+        Self {
+            roles: Mutex::new(std::collections::HashMap::from([(
+                user_id.to_string(),
+                role,
+            )])),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for FakeAdminUsers {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        _status: Option<AdminUserStatus>,
+        _after: Option<&UserId>,
+        _limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        let role = self
+            .roles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(user_id.as_str())
+            .copied()
+            .unwrap_or(AdminUserRole::Member);
+        Ok(Some(AdminUserRecord {
+            user_id: user_id.clone(),
+            email: None,
+            display_name: None,
+            status: AdminUserStatus::Active,
+            role,
+            created_at: String::new(),
+            updated_at: String::new(),
+            created_by: None,
+            last_login_at: None,
+            metadata: std::collections::BTreeMap::new(),
+        }))
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        _fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: ironclaw_host_api::ids::SecretHandle,
+        _material: secrecy::SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: ironclaw_host_api::ids::SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Err(AdminUserError::Internal)
+    }
+}
+
 fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
     match (event_id, text) {
         ("Ev-final", "hello") => DM_FINAL,
@@ -3403,6 +3713,54 @@ const DM_FINAL: &str = r#"{
   "event_id":"Ev-final",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000001"}
 	}"#;
+
+const DM_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/status","ts":"1710000000.000021"}
+	}"#;
+
+const DM_MODEL_SET: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-model-set",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set fake-model","ts":"1710000000.000027"}
+	}"#;
+
+const DM_UNKNOWN_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-unknown",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/notacommand","ts":"1710000000.000022"}
+	}"#;
+
+const DM_DISABLED_EXTENSION_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-extension-disabled",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/extension_configure slack","ts":"1710000000.000025"}
+}"#;
+
+const DM_DISABLED_SKILL_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-skill-disabled",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/skill_remove demo","ts":"1710000000.000026"}
+}"#;
+
+const APP_MENTION_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-channel",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> /status","ts":"1710000000.000023"}
+}"#;
 
 const DM_APPROVAL: &str = r#"{
   "type":"event_callback",
@@ -4498,3 +4856,417 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
     );
 }
 // arch-exempt: large_file, channel host end-to-end coverage remains centralized, plan #6175
+
+/// A standardized slash command in a DM must cross the production channel
+/// graph, execute through the canonical product command surface, and deliver
+/// its rendered result to the source conversation without submitting a turn.
+#[tokio::test]
+async fn dm_slash_command_executes_and_delivers_rendered_result() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    // Commands execute with the already-bound user's authority.
+    let seed = harness.post_event(DM_FINAL).await;
+    assert_eq!(seed.status(), StatusCode::OK);
+    harness.drain().await;
+    let submitted_before_command = harness.coordinator.submitted_turn_count();
+
+    let response = harness.post_event(DM_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback =
+        wait_for_post_messages_matching(&harness.egress, "rendered command result", |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Status"))
+        })
+        .await;
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.status.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        submitted_before_command,
+        "product commands are not turns"
+    );
+}
+
+/// `/model` is a declared, User-listing-audience command, but its `set`
+/// action's EXECUTION audience is Admin (`required_audience`). A `Member`
+/// actor clears the "is this command declared" gate and is denied at the
+/// admin-users role gate instead — the fixed admin notice, never the
+/// undeclared-command help text, and never an execution.
+#[tokio::test]
+async fn member_dm_model_set_is_denied_with_admin_notice_and_no_execution() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(DM_MODEL_SET).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "admin-account command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text == "This command requires an admin account.")
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "denied commands are not turns"
+    );
+}
+
+/// The same actor with an `Owner` admin-users role clears the admin-users
+/// role gate and executes `/model set` through the product command surface.
+#[tokio::test]
+async fn admin_dm_model_set_executes_via_command_surface() {
+    let mut options = HarnessOptions::new(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    });
+    options.actor_role = AdminUserRole::Owner;
+    let harness = build_harness_with_options(options).await;
+
+    let response = harness.post_event(DM_MODEL_SET).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.model.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "product commands are not turns"
+    );
+}
+
+#[tokio::test]
+async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(DM_UNKNOWN_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback =
+        wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
+            payload["text"].as_str().is_some_and(|text| {
+                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+            })
+        })
+        .await;
+    let text = feedback[0]["text"].as_str().expect("feedback text");
+    assert!(!text.contains("/extension_configure"));
+    assert!(!text.contains("/skill_remove"));
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// `extension_configure` and `skill_remove` are real, Admin-audience product
+/// commands that remain undeclared for this channel's manifest (unlike
+/// `model`, which Task 5 declared) — both still fall into the generic
+/// undeclared-command help path, not the admin-notice path.
+/// (`/model set-provider`'s equivalent disabled-then-role-gated transition is
+/// covered by `member_dm_model_set_is_denied_with_admin_notice_and_no_execution`
+/// / `admin_dm_model_set_executes_via_command_surface` above; the per-action
+/// Admin-audience mapping for `Set` and `SetProvider` is pinned at the unit
+/// tier by `execution_audience_is_per_action`.)
+#[tokio::test]
+async fn disabled_dm_slash_commands_are_rejected_without_execution() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    for payload in [DM_DISABLED_EXTENSION_COMMAND, DM_DISABLED_SKILL_COMMAND] {
+        let response = harness.post_event(payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        harness.drain().await;
+    }
+
+    let scoped_help = harness
+        .slack_messages()
+        .into_iter()
+        .filter(|payload| {
+            payload["text"] == "Available commands:\n/ironclaw model\n/ironclaw status"
+        })
+        .count();
+    assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn empty_manifest_commands_are_fail_closed() {
+    let harness = build_harness_with_manifest_commands(
+        TurnMode::Complete {
+            assistant_text: "unused".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+
+    let response = harness.post_event(DM_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "empty command inventory help",
+        |payload| payload["text"] == "Commands are not available in this channel.",
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn unknown_manifest_command_fails_generic_graph_assembly() {
+    let harness = build_harness_with_manifest_commands(
+        TurnMode::Complete {
+            assistant_text: "unused".to_string(),
+        },
+        vec!["syntactically_valid_but_unknown"],
+    )
+    .await;
+
+    assert!(
+        harness
+            .assembly
+            .binding_service_for_extension_for_test("slack")
+            .is_none(),
+        "unknown manifest commands must prevent the generic graph from registering"
+    );
+    assert!(harness.command_executions.invokes().is_empty());
+}
+
+#[tokio::test]
+async fn shared_channel_slash_command_is_denied_with_notice() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(APP_MENTION_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "direct-conversation command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("direct conversation"))
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], "C123");
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+// ── native slash-command dispatcher, signed form bodies (PR-3 Task 3) ──────
+//
+// The JSON-based `dm_slash_command_executes_and_delivers_rendered_result` /
+// `unknown_dm_slash_command_returns_inventory_help_without_a_turn` /
+// `shared_channel_slash_command_is_denied_with_notice` scenarios above pin
+// the SAME production behavior driven through Slack's Events API message
+// shape. These scenarios drive the identical behavior through Slack's real
+// slash-command transport: a signed `application/x-www-form-urlencoded` POST
+// to the SAME ingress route, decoded by `normalize_slack_slash_command`
+// (Task 1) and rendered through the manifest's `/ironclaw `-prefixed help
+// text (Task 2).
+
+/// `/ironclaw status` posted as a signed slash-command form in the bound DM
+/// (`U123`/`D123`) must cross the production channel graph exactly like the
+/// Events-API path: one `product.status.command` invoke as the bound user,
+/// rendered Status feedback delivered to the DM, and no turn submitted.
+#[tokio::test]
+async fn slash_dispatcher_dm_status_executes_and_delivers_result() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T-A&trigger_id=111.222.slash-status",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "rendered slash command result",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Status"))
+        },
+    )
+    .await;
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.status.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "product commands are not turns"
+    );
+}
+
+/// A bare `/ironclaw` slash invocation (empty `text`) in the DM must render
+/// the SAME manifest-prefixed help text `dm_slash_command`'s sibling JSON
+/// scenario pins (`unknown_dm_slash_command_returns_inventory_help_without_a_turn`),
+/// proving Task 1's dispatcher mapping (`empty text -> "/help"`) and Task 2's
+/// `/ironclaw `-prefixed rendering compose end-to-end over the real form
+/// transport.
+#[tokio::test]
+async fn slash_dispatcher_bare_returns_prefixed_help() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.slash-bare",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "prefixed command inventory help",
+        |payload| {
+            payload["text"].as_str().is_some_and(|text| {
+                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+            })
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// A slash invocation from OUTSIDE the DM (`channel_name=general`, a
+/// `C`-prefixed `channel_id`) must derive a non-`DirectChat` trigger (Task
+/// 1's DM-detection fix) and hit the SAME direct-conversation-only admission
+/// gate the JSON `shared_channel_slash_command_is_denied_with_notice`
+/// scenario pins — `post_command_feedback` addresses the rejection notice at
+/// `envelope.external_conversation_ref()` directly (verified by reading
+/// `crates/ironclaw_product/src/run_delivery/observer.rs`), independent of
+/// any shared-conversation binding/allowlist resolution, so the notice
+/// targets the invoking channel even though `C777` is never configured on
+/// `slack_allowed_channels` (only `C123` is). No command executes and no
+/// turn is submitted.
+#[tokio::test]
+async fn slash_dispatcher_outside_dm_is_rejected_direct_only() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command(
+            "command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&trigger_id=111.222.slash-outside",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "direct-conversation slash command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("direct conversation"))
+        },
+    )
+    .await;
+    assert_eq!(
+        feedback[0]["channel"], "C777",
+        "the denial notice targets the invoking (non-DM, non-allowlisted) channel"
+    );
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// A syntactically valid slash form with a forged `X-Slack-Signature` must be
+/// rejected at the SAME HMAC verification layer the JSON
+/// `slack_events_rejects_forged_hmac_signature` scenario pins — content-type
+/// branching happens strictly after verification (`ingress/router.rs`'s
+/// verify-then-parse order), so a form body never reaches the adapter at
+/// all: nothing is admitted, no notice is posted, no command executes, no
+/// turn is submitted.
+#[tokio::test]
+async fn slash_form_with_forged_signature_is_rejected() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "must not send".to_string(),
+    })
+    .await;
+
+    let response = harness
+        .post_slash_command_with_signature(
+            "command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.slash-forged",
+            current_unix_timestamp(),
+            "v0=deadbeef".to_string(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    harness.drain().await;
+    assert!(harness.slack_messages().is_empty());
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// Slack's endpoint-verification `ssl_check` probe (form-encoded, distinct
+/// from the Events API's JSON `url_verification` challenge) must get an
+/// immediate empty 200 straight from the adapter (Task 1's
+/// `SlackInboundEvent::SslCheck` arm) WITHOUT ever reaching durable
+/// admission: no `chat.postMessage`, no command-surface invoke, no turn.
+#[tokio::test]
+async fn ssl_check_form_gets_empty_200_without_admission() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_slash_command("ssl_check=1&token=x").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_body(response, "").await;
+    harness.drain().await;
+    assert!(harness.slack_messages().is_empty());
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
