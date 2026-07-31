@@ -375,7 +375,7 @@ pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
     // NO pattern rule. An earlier draft flagged unanchored wildcards and failed 25 of 32
     // catalog skills; narrowing it to "ends in an open wildcard" still mis-flagged 3 of 4,
     // because wildcard POSITION is not what makes a pattern promiscuous -- required literal
-    // specificity is. `(?i)(slack|email|dm|text) message from .+: .+` ends open yet demands
+    // specificity is. `(?i)(incoming|inbound) message from .+: .+` ends open yet demands
     // "message from" and a colon, while `(?i)(tell|ask) .+ to .+` is degenerate precisely
     // because its only literals are "tell"/"ask" and "to".
     //
