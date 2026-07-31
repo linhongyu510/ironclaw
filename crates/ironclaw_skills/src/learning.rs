@@ -77,6 +77,14 @@ pub enum DistillError {
     /// The model returned an empty response.
     #[error("model produced an empty response")]
     EmptyResponse,
+    /// The model produced a parseable skill whose routing metadata would poison the
+    /// catalog: generic keywords, generic tags, or a description past the listing cap.
+    ///
+    /// Refused rather than written. A learned skill declaring `file` or `change` as a
+    /// keyword is not merely low quality -- `coding` does exactly that and fires on ~220 of
+    /// 328 real prompts, so writing one actively degrades routing for every later request.
+    #[error("model produced a skill with unusable routing metadata: {0}")]
+    UnusableRoutingMetadata(String),
 }
 
 /// Distill a skill from a completed run's transcript.
@@ -111,6 +119,13 @@ pub fn parse_distillation(raw: &str) -> Result<DistillOutcome, DistillError> {
         )));
     }
     let parsed = parse_skill_md(cleaned)?;
+    // Epic #6941 criterion 7: the descriptor lint runs at learned-skill WRITE time, and a
+    // skill that fails it is not written. This is the enforcement point for both authoring
+    // paths, because every distillation and refinement funnels through `parse_skill_md`.
+    let problems = crate::lint_skill_routing_metadata(&parsed.manifest);
+    if !problems.is_empty() {
+        return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
     Ok(DistillOutcome::Skill(DistilledSkill {
         name: parsed.manifest.name,
         skill_md: cleaned.to_string(),
@@ -169,6 +184,12 @@ pub fn parse_refinement(raw: &str) -> Result<RefineOutcome, DistillError> {
         return Ok(RefineOutcome::KeepExisting);
     }
     let parsed = parse_skill_md(cleaned)?;
+    // Same gate as distillation: a refinement is a write, so it must not smuggle unusable
+    // routing metadata past the lint.
+    let problems = crate::lint_skill_routing_metadata(&parsed.manifest);
+    if !problems.is_empty() {
+        return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
     Ok(RefineOutcome::Refined(DistilledSkill {
         name: parsed.manifest.name,
         skill_md: cleaned.to_string(),
@@ -196,6 +217,74 @@ fn strip_code_fence(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// Epic #6941 criterion 7: a learned skill that fails the lint is NOT written.
+    ///
+    /// `coding` declares `file`/`change`/`code` and fires on ~220 of 328 real prompts, so a
+    /// learned skill doing the same actively degrades routing for every later request. Refusing
+    /// it is cheaper than shipping it and relying on a human to notice.
+    #[test]
+    fn a_distilled_skill_with_generic_keywords_is_refused() {
+        let raw = concat!(
+            "---\n",
+            "name: helper\n",
+            "description: Does helpful things.\n",
+            "activation:\n",
+            "  keywords:\n",
+            "    - file\n",
+            "    - change\n",
+            "---\n\n",
+            "# helper\n",
+        );
+        let error = super::parse_distillation(raw)
+            .expect_err("a skill with generic keywords must not be written");
+        assert!(
+            matches!(error, DistillError::UnusableRoutingMetadata(_)),
+            "expected a routing-metadata refusal, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("file"),
+            "the refusal must name the offending term: {error}"
+        );
+    }
+
+    /// The same gate applies to refinement, because a refinement is also a write.
+    #[test]
+    fn a_refined_skill_with_generic_keywords_is_refused() {
+        let raw = concat!(
+            "---\n",
+            "name: helper\n",
+            "description: Does helpful things.\n",
+            "activation:\n",
+            "  keywords:\n",
+            "    - update\n",
+            "---\n\n",
+            "# helper\n",
+        );
+        let error = super::parse_refinement(raw)
+            .expect_err("refinement must not smuggle generic keywords past the lint");
+        assert!(matches!(error, DistillError::UnusableRoutingMetadata(_)));
+    }
+
+    /// A clean skill still writes: the gate must not be a blanket refusal.
+    #[test]
+    fn a_distilled_skill_with_specific_metadata_is_still_written() {
+        let raw = concat!(
+            "---\n",
+            "name: citation-management\n",
+            "description: Validate citations and generate BibTeX entries from DOIs.\n",
+            "activation:\n",
+            "  keywords:\n",
+            "    - bibtex\n",
+            "    - citation\n",
+            "---\n\n",
+            "# citation-management\n",
+        );
+        match super::parse_distillation(raw).expect("a clean skill must be written") {
+            DistillOutcome::Skill(skill) => assert_eq!(skill.name, "citation-management"),
+            other => panic!("expected a written skill, got {other:?}"),
+        }
+    }
     use super::*;
 
     const VALID_SKILL: &str = "---\n\
