@@ -1,0 +1,111 @@
+{
+  "_promotion": {
+    "schema_version": 1,
+    "provenance": {
+      "source_url": "https://github.com/nearai/ironclaw/pull/PR_NUMBER",
+      "artifact_schema": "ironclaw.run_artifact.v1",
+      "artifact_sha256": "bc24cd6bceccd1527f890d4787e29f6cd8b708461124bfc365b2b6b162a0a8b2"
+    },
+    "scrub": {
+      "status": "verified",
+      "pipeline": "deterministic-trace-redactor-v1",
+      "independent_scan": "passed"
+    },
+    "owning_journey": "github_open_pr_priority",
+    "deterministic_test": {
+      "command": "cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior contract_github_open_pr_priority_uses_scoped_search -- --exact",
+      "assertion": "The promoted trace uses exactly get_authenticated_user followed by one author-scoped pull request search and never uses list_pull_requests or result_read."
+    },
+    "last_successful_replay": {
+      "date": "2026-07-31",
+      "commit": "PENDING_REPLAY_COMMIT",
+      "command": "cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior contract_github_open_pr_priority_uses_scoped_search -- --exact"
+    }
+  },
+  "model_name": "z-ai/glm-5.2",
+  "turns": [
+    {
+      "user_input": "can you check all my open PRs in nearai/ironclaw and give me a priority list",
+      "expects": {
+        "response_contains": [
+          "priority"
+        ],
+        "tools_used": [
+          "github__get_authenticated_user",
+          "github__search_issues_pull_requests"
+        ],
+        "tools_not_used": [
+          "github__list_pull_requests",
+          "builtin__result_read"
+        ],
+        "all_tools_succeeded": true,
+        "max_tool_calls": 2,
+        "tools_order": [
+          "github__get_authenticated_user",
+          "github__search_issues_pull_requests"
+        ]
+      },
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call-authenticated-user",
+                "name": "github__get_authenticated_user",
+                "arguments": {}
+              }
+            ],
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        {
+          "expected_tool_results": [
+            {
+              "tool_call_id": "call-authenticated-user",
+              "name": "github__get_authenticated_user",
+              "content": "{\"login\":\"fixture-user\"}"
+            }
+          ],
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call-authored-pr-search",
+                "name": "github__search_issues_pull_requests",
+                "arguments": {
+                  "owner": "nearai",
+                  "repo": "ironclaw",
+                  "author": "fixture-user",
+                  "state": "open",
+                  "type": "pr",
+                  "limit": 100,
+                  "sort": "updated",
+                  "order": "desc"
+                }
+              }
+            ],
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        {
+          "expected_tool_results": [
+            {
+              "tool_call_id": "call-authored-pr-search",
+              "name": "github__search_issues_pull_requests",
+              "content": "{\"total_count\":2,\"incomplete_results\":false,\"items\":[{\"number\":102,\"title\":\"Fix continuation references\",\"state\":\"open\",\"draft\":false,\"html_url\":\"https://github.com/nearai/ironclaw/pull/102\",\"user\":{\"login\":\"fixture-user\"},\"labels\":[{\"name\":\"bug\"}],\"comments\":3,\"updated_at\":\"2026-07-30T12:00:00Z\"},{\"number\":101,\"title\":\"Compact provider responses\",\"state\":\"open\",\"draft\":true,\"html_url\":\"https://github.com/nearai/ironclaw/pull/101\",\"user\":{\"login\":\"fixture-user\"},\"labels\":[{\"name\":\"performance\"}],\"comments\":0,\"updated_at\":\"2026-07-29T12:00:00Z\"}]}"
+            }
+          ],
+          "response": {
+            "type": "text",
+            "content": "Priority 1: PR #102, because it is a non-draft bug fix with active discussion. Priority 2: PR #101, because it is still a draft and can follow after the correctness fix.",
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        }
+      ]
+    }
+  ]
+}

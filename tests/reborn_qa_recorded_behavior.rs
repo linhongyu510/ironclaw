@@ -146,6 +146,10 @@ const GITHUB_NOTIFICATIONS: QaPhrase = QaPhrase {
     fixture: "github_notifications",
     phrase: "Check my GitHub notifications and give me a short summary of what needs my attention.",
 };
+const GITHUB_OPEN_PR_PRIORITY: QaPhrase = QaPhrase {
+    fixture: "github_open_pr_priority",
+    phrase: "can you check all my open PRs in nearai/ironclaw and give me a priority list",
+};
 
 // Investigate one specific, already-completed GitHub Actions job. The job URL is
 // pinned to an immutable historical run (conclusion is frozen `failure`) whose
@@ -406,6 +410,44 @@ async fn contract_github_notifications_onboards_the_github_extension() {
     assert_tool_called_with(&trace, "builtin.skill_activate", &["github"]);
     assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
     assert_tool_not_called(&trace, "builtin.extension_activate");
+}
+
+#[tokio::test]
+async fn contract_github_open_pr_priority_uses_scoped_search() {
+    let trace = load_qa_trace(GITHUB_OPEN_PR_PRIORITY.fixture);
+    let calls = recorded_tool_calls(&trace);
+
+    assert_eq!(
+        calls.len(),
+        2,
+        "the promoted priority-list workflow must stay within its two-call budget: {calls:#?}"
+    );
+    assert_tool_sequence(
+        &trace,
+        &[
+            "github.get_authenticated_user",
+            "github.search_issues_pull_requests",
+        ],
+    );
+    assert_tool_called_with(
+        &trace,
+        "github.search_issues_pull_requests",
+        &[
+            r#""owner":"nearai""#,
+            r#""repo":"ironclaw""#,
+            r#""author":"fixture-user""#,
+            r#""state":"open""#,
+            r#""type":"pr""#,
+        ],
+    );
+    assert_tool_not_called(&trace, "github.list_pull_requests");
+    assert_tool_not_called(&trace, "builtin.result_read");
+
+    let reply = final_text_reply(&trace).expect("priority-list phrase should finalize a reply");
+    assert!(
+        reply.to_ascii_lowercase().contains("priority"),
+        "priority-list workflow should end with a priority list"
+    );
 }
 
 #[tokio::test]
