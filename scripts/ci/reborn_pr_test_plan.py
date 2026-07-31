@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
-DEFERRED_PATHS = {
+FULL_PR_PATHS = {
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain",
@@ -28,6 +28,11 @@ DEFERRED_PATHS = {
     ".cargo/config",
     ".cargo/config.toml",
     ".github/workflows/reborn-tests.yml",
+    ".github/workflows/coverage.yml",
+    ".github/workflows/nightly-deep-ci.yml",
+    ".github/workflows/reborn-e2e.yml",
+    ".github/workflows/reborn-playwright.yml",
+    ".github/workflows/reborn-release-compile.yml",
     "scripts/ci/reborn_pr_test_plan.py",
     "scripts/ci/test_reborn_pr_test_plan.py",
     "scripts/ci/discover-reborn-package-crates.sh",
@@ -38,6 +43,24 @@ DEFERRED_PATHS = {
     "scripts/ci/run-reborn-group-tests.sh",
     "scripts/ci/reborn-coverage-int-tier-tests.sh",
     "scripts/ci/reborn-coverage-lane-run.sh",
+    "tests/integration/coverage-exemptions.toml",
+    "tests/integration/coverage-floor.toml",
+}
+BUCKET_WEIGHTS = {
+    "reborn-core": 12,
+    "auth-security": 9,
+    "extension-operator": 8,
+    "product-workflow": 8,
+    "webui-ingress": 8,
+    "composition-core": 8,
+    "wasm-sandbox": 8,
+    "agent-runtime": 7,
+    "llm-mcp": 7,
+    "events-conversations": 7,
+    "host-runtime": 6,
+    "channel-adapters": 6,
+    "architecture-misc": 5,
+    "memory-skills": 5,
 }
 
 
@@ -63,6 +86,36 @@ def _bucket_packages(packages: list[str]) -> list[dict[str, Any]]:
     return json.loads(
         _run("scripts/ci/reborn-crate-test-buckets.sh", json.dumps(packages))
     )
+
+
+def _bound_pr_buckets(
+    buckets: list[dict[str, Any]], max_buckets: int = MAX_PR_CRATE_BUCKETS
+) -> list[dict[str, Any]]:
+    """Pack canonical buckets into bounded PR jobs without splitting them."""
+    if len(buckets) <= max_buckets:
+        return buckets
+
+    bounded = [
+        {"name": f"affected-{index + 1}", "packages": []}
+        for index in range(min(max_buckets, len(buckets)))
+    ]
+    weights = [0] * len(bounded)
+    ordered = sorted(
+        buckets,
+        key=lambda bucket: (
+            -BUCKET_WEIGHTS.get(
+                str(bucket.get("name")), len(bucket.get("packages", []))
+            ),
+            str(bucket.get("name")),
+        ),
+    )
+    for bucket in ordered:
+        target = min(range(len(bounded)), key=lambda index: (weights[index], index))
+        bounded[target]["packages"].extend(bucket["packages"])
+        weights[target] += BUCKET_WEIGHTS.get(
+            str(bucket.get("name")), len(bucket.get("packages", []))
+        )
+    return bounded
 
 
 def _root_test_partitions() -> dict[str, int]:
@@ -131,13 +184,15 @@ def _workspace_packages(metadata: dict[str, Any]) -> tuple[dict[str, str], dict[
 
 
 def _affected_packages(changed: set[str], reverse: dict[str, set[str]]) -> set[str]:
-    # PR feedback covers the changed package and its immediate contract
-    # consumers. Transitive consumers and whole-path suites run exhaustively
-    # in the required merge queue, avoiding a near-workspace-wide PR fanout
-    # for low-level crates.
-    return set(changed).union(
-        *(reverse.get(package, set()) for package in changed)
-    )
+    affected = set(changed)
+    pending = list(changed)
+    while pending:
+        package = pending.pop()
+        for dependent in reverse.get(package, set()):
+            if dependent not in affected:
+                affected.add(dependent)
+                pending.append(dependent)
+    return affected
 
 
 def _full_plan(
@@ -159,22 +214,6 @@ def _full_plan(
     }
 
 
-def _deferred_plan(reason: str) -> dict[str, Any]:
-    return {
-        "mode": "deferred",
-        "reasons": [reason],
-        "changed_packages": [],
-        "affected_packages": [],
-        "crate_buckets": [],
-        "root_partitions": [],
-        "integration_lanes": [],
-        "run_group_tests": False,
-        "run_frontend": False,
-        "run_qa_replay": False,
-        "coverage_mode": "none",
-    }
-
-
 def build_plan(
     *,
     event: str,
@@ -190,11 +229,14 @@ def build_plan(
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
-        return _deferred_plan("empty pull-request diff requires merge-queue coverage")
-    if any(path in DEFERRED_PATHS for path in paths):
-        return _deferred_plan(
-            "Reborn test infrastructure or workspace topology changed; "
-            "exhaustive runtime tests deferred to merge queue"
+        return _full_plan(
+            "empty pull-request diff requires fail-closed exhaustive coverage",
+            canonical_packages,
+        )
+    if any(path in FULL_PR_PATHS for path in paths):
+        return _full_plan(
+            "Reborn test infrastructure or workspace topology changed",
+            canonical_packages,
         )
 
     package_directories, reverse = _workspace_packages(metadata)
@@ -255,42 +297,44 @@ def build_plan(
                 None,
             )
             if package is None:
-                return _deferred_plan(
-                    f"unmapped crate path {path}; exhaustive tests deferred to merge queue"
+                return _full_plan(
+                    f"unmapped crate path {path} requires fail-closed coverage",
+                    canonical_packages,
                 )
             changed_packages.add(package)
             reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            return _deferred_plan(
-                f"unmapped Reborn test path {path}; exhaustive tests deferred to merge queue"
+            return _full_plan(
+                f"unmapped Reborn test path {path} requires fail-closed coverage",
+                canonical_packages,
             )
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            return _deferred_plan(
-                f"unmapped test or CI path {path}; exhaustive tests deferred to merge queue"
+            return _full_plan(
+                f"unmapped test or CI path {path} requires fail-closed coverage",
+                canonical_packages,
             )
-        return _deferred_plan(
-            f"unclassified pull-request path {path}; exhaustive tests deferred to merge queue"
+        return _full_plan(
+            f"unclassified pull-request path {path} requires fail-closed coverage",
+            canonical_packages,
         )
 
     canonical_set = set(canonical_packages)
     affected = _affected_packages(changed_packages, reverse) & canonical_set
     if changed_packages and not affected:
-        return _deferred_plan(
+        return _full_plan(
             "changed packages are outside the canonical Reborn set; "
-            "exhaustive tests deferred to merge queue"
+            "fail-closed exhaustive coverage required",
+            canonical_packages,
         )
 
     buckets = _bucket_packages(sorted(affected)) if affected else []
     if len(buckets) > MAX_PR_CRATE_BUCKETS:
-        # A foundational crate can have direct consumers in nearly every
-        # bucket. Keep the PR on one fast wave by testing changed packages
-        # themselves; all consumer buckets still run in the required queue.
-        affected = changed_packages & canonical_set
-        buckets = _bucket_packages(sorted(affected))
+        original_bucket_count = len(buckets)
+        buckets = _bound_pr_buckets(buckets)
         reasons.append(
-            "direct-dependent fanout exceeded the three-bucket PR budget; "
-            "consumer tests deferred to merge queue"
+            f"coalesced {original_bucket_count} affected crate buckets into "
+            f"{len(buckets)} PR jobs without omitting packages"
         )
     active = bool(
         buckets

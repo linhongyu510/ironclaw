@@ -67,19 +67,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
         self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
 
-    def test_changed_package_includes_reverse_dependents(self) -> None:
+    def test_changed_package_includes_transitive_reverse_dependents(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["changed_packages"], ["alpha"])
-        self.assertEqual(plan["affected_packages"], ["alpha", "beta"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
         self.assertEqual(
             plan["crate_buckets"],
-            [{"name": "selected", "packages": ["alpha", "beta"]}],
+            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
         )
-        self.assertNotIn("gamma", plan["affected_packages"])
         self.assertEqual(plan["coverage_mode"], "none")
 
-    def test_high_fanout_package_defers_consumers_to_merge_queue(self) -> None:
+    def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
         wide = metadata()
         for index in range(5):
             package_id = f"consumer-{index}"
@@ -109,8 +108,33 @@ class RebornPrTestPlanTests(unittest.TestCase):
             canonical_packages=canonical,
         )
 
-        self.assertEqual(plan["affected_packages"], ["alpha"])
-        self.assertIn("three-bucket PR budget", plan["reasons"][-1])
+        self.assertEqual(plan["affected_packages"], canonical)
+        self.assertEqual(len(plan["crate_buckets"]), 3)
+        self.assertEqual(
+            sorted(
+                package
+                for bucket in plan["crate_buckets"]
+                for package in bucket["packages"]
+            ),
+            canonical,
+        )
+        self.assertIn("without omitting packages", plan["reasons"][-1])
+
+    def test_bounded_jobs_do_not_split_canonical_buckets(self) -> None:
+        source = [
+            {"name": "reborn-core", "packages": ["ironclaw", "runner"]},
+            {"name": "composition-core", "packages": ["composition"]},
+            {"name": "webui-ingress", "packages": ["attachments", "webui"]},
+            {"name": "memory-skills", "packages": ["memory", "skills"]},
+        ]
+        bounded = planner._bound_pr_buckets(source, max_buckets=3)
+
+        self.assertEqual(len(bounded), 3)
+        for bucket in source:
+            package_set = set(bucket["packages"])
+            self.assertTrue(
+                any(package_set <= set(candidate["packages"]) for candidate in bounded)
+            )
 
     def test_frontend_only_change_runs_only_frontend(self) -> None:
         plan = self.plan(
@@ -139,10 +163,38 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
 
-    def test_reborn_workflow_change_is_deferred_to_required_queue(self) -> None:
+    def test_reborn_workflow_change_fails_closed_to_full_pr_plan(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
-        self.assertEqual(plan["mode"], "deferred")
-        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertTrue(plan["run_frontend"])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(plan["coverage_mode"], "full")
+
+    def test_empty_diff_fails_closed_to_full_pr_plan(self) -> None:
+        plan = self.plan("pull_request", [])
+        self.assertEqual(plan["mode"], "full")
+
+    def test_reborn_caller_workflow_fails_closed_to_full_pr_plan(self) -> None:
+        plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
+        self.assertEqual(plan["mode"], "full")
+
+    def test_coverage_policy_change_runs_full_coverage_on_pr(self) -> None:
+        plan = self.plan(
+            "pull_request", ["tests/integration/coverage-floor.toml"]
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["coverage_mode"], "full")
+
+    def test_noncanonical_package_fails_closed_to_full_pr_plan(self) -> None:
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=["crates/gamma/src/lib.rs"],
+            metadata=metadata(),
+            canonical_packages=["alpha", "beta"],
+        )
+        self.assertEqual(plan["mode"], "full")
 
     def test_generated_integration_suites_are_assigned_to_flat_lanes(self) -> None:
         lanes = planner._integration_test_lanes()
@@ -156,13 +208,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
-    def test_unmapped_crate_path_defers_to_merge_queue(self) -> None:
+    def test_unmapped_crate_path_fails_closed_to_full_pr_plan(self) -> None:
         plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
-        self.assertEqual(plan["mode"], "deferred")
+        self.assertEqual(plan["mode"], "full")
 
-    def test_unclassified_build_input_defers_to_merge_queue(self) -> None:
+    def test_unclassified_build_input_fails_closed_to_full_pr_plan(self) -> None:
         plan = self.plan("pull_request", ["Dockerfile"])
-        self.assertEqual(plan["mode"], "deferred")
+        self.assertEqual(plan["mode"], "full")
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))
@@ -197,6 +249,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "ran with result '${result}' despite planned=false",
             workflow,
         )
+        self.assertIn("Full Reborn plan is not exhaustive", workflow)
+        self.assertIn("Full Reborn plan omitted a required lane", workflow)
 
 
 if __name__ == "__main__":

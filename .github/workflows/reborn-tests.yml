@@ -123,6 +123,21 @@ jobs:
               "${changed_args[@]}"
           )"
           printf '%s\n' "${plan}" | jq .
+          canonical="$(cat "${RUNNER_TEMP}/reborn-canonical-packages.json")"
+          if ! jq -e --argjson canonical "${canonical}" '
+            .mode != "full" or (
+              ([.crate_buckets[].packages[]] | sort) == ($canonical | sort)
+              and .root_partitions == [0, 1, 2, 3]
+              and .integration_lanes == [0, 1, 2, 3, "groups"]
+              and .run_group_tests == true
+              and .run_frontend == true
+              and .run_qa_replay == true
+              and .coverage_mode == "full"
+            )
+          ' <<< "${plan}" > /dev/null; then
+            echo "Full Reborn plan is not exhaustive"
+            exit 1
+          fi
           {
             echo "### Reborn affected-area plan"
             echo
@@ -181,7 +196,7 @@ jobs:
         run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
       - name: Free disk space
-        if: needs.changes.outputs.run_coverage == 'true'
+        if: needs.changes.outputs.run_coverage == 'true' || startsWith(matrix.bucket.name, 'affected-')
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -1008,7 +1023,7 @@ jobs:
 
           plan_mode="${{ needs.changes.outputs.plan_mode }}"
           case "${plan_mode}" in
-            none|selected|deferred|full) ;;
+            none|selected|full) ;;
             *)
               echo "Missing or invalid Reborn test plan mode: '${plan_mode}'"
               exit 1
@@ -1028,6 +1043,22 @@ jobs:
               exit 1
             fi
           done
+
+          if [[ "${plan_mode}" == "full" ]]; then
+            for flag in \
+              "${{ needs.changes.outputs.run_crate_tests }}" \
+              "${{ needs.changes.outputs.run_root_tests }}" \
+              "${{ needs.changes.outputs.run_group_tests }}" \
+              "${{ needs.changes.outputs.run_integration_tests }}" \
+              "${{ needs.changes.outputs.run_coverage }}" \
+              "${{ needs.changes.outputs.run_frontend }}" \
+              "${{ needs.changes.outputs.run_qa_replay }}"; do
+              if [[ "${flag}" != "true" ]]; then
+                echo "Full Reborn plan omitted a required lane"
+                exit 1
+              fi
+            done
+          fi
 
           check_planned_job() {
             local name="$1"
@@ -1080,6 +1111,4 @@ jobs:
 
           if [[ "${plan_mode}" == "none" ]]; then
             echo "No affected Reborn test surface — all lanes skipped as planned"
-          elif [[ "${plan_mode}" == "deferred" ]]; then
-            echo "Exhaustive Reborn runtime evidence deferred to required merge queue"
           fi
