@@ -18,7 +18,7 @@
     },
     "last_successful_replay": {
       "date": "2026-07-31",
-      "commit": "f634412e8f06813912502802cfcc11b70e8da3a5",
+      "commit": "f634412e88d9fb1ad77bbee78d62ba88640074a4",
       "command": "cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior contract_github_open_pr_priority_uses_scoped_search -- --exact"
     }
   },
