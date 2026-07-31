@@ -123,6 +123,12 @@ fn capability_manifest(
     ) {
         origin_gate_matrix.product = OriginGatePolicy::ConsentSufficient;
     }
+    if id == IRONHUB_UPDATE_CAPABILITY_ID {
+        // Updating executable code or model instructions always needs a fresh
+        // decision. AskAlways also prevents persistent approvals from being
+        // replayed for a later target.
+        origin_gate_matrix.loop_run = OriginGatePolicy::AskAlways;
+    }
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
         description: description.to_string(),
@@ -314,4 +320,26 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
     };
     tracing::debug!(?kind, "IronHub capability dispatch failed");
     FirstPartyCapabilityError::new(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ironhub_update_requires_fresh_loop_run_consent() {
+        let manifests = manifests().expect("IronHub manifests");
+        let update = manifests
+            .iter()
+            .find(|manifest| manifest.id.as_str() == IRONHUB_UPDATE_CAPABILITY_ID)
+            .expect("update manifest");
+        assert_eq!(
+            update
+                .origin_gate_matrix
+                .as_ref()
+                .expect("origin gate matrix")
+                .loop_run,
+            OriginGatePolicy::AskAlways
+        );
+    }
 }

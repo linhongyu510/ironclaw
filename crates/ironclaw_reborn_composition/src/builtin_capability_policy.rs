@@ -447,11 +447,7 @@ fn constraint_terms(
         CapabilityMountProfile::Memory => memory_mounts.clone(),
         CapabilityMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
         CapabilityMountProfile::IronhubLifecycle => {
-            let mut mounts = skill_mounts.clone();
-            mounts
-                .mounts
-                .extend(system_extensions_mounts.mounts.clone());
-            mounts
+            ironhub_lifecycle_mounts(skill_mounts, system_extensions_mounts)
         }
     };
     let network = match source.network() {
@@ -474,6 +470,17 @@ fn constraint_terms(
         expires_at: None,
         max_invocations: None,
     }
+}
+
+pub(crate) fn ironhub_lifecycle_mounts(
+    skill_mounts: &MountView,
+    system_extensions_mounts: &MountView,
+) -> MountView {
+    let mut mounts = skill_mounts.clone();
+    mounts
+        .mounts
+        .extend(system_extensions_mounts.mounts.clone());
+    mounts
 }
 
 pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {

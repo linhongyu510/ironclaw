@@ -231,6 +231,7 @@ impl ScopedSkillManagementPort {
                 content,
                 source_url,
                 provenance,
+                expected_current_artifact_digest: None,
             },
         )
         .await?)
@@ -243,6 +244,7 @@ impl ScopedSkillManagementPort {
         content: &str,
         source_url: &str,
         provenance: &RegistryPackageProvenance,
+        expected_current_artifact_digest: &str,
     ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
         let context = self.context_for_scope(scope)?;
         Ok(replace_registry_skill(
@@ -252,6 +254,7 @@ impl ScopedSkillManagementPort {
                 content,
                 source_url,
                 provenance,
+                expected_current_artifact_digest: Some(expected_current_artifact_digest),
             },
         )
         .await?)

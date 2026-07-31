@@ -68,11 +68,13 @@ pub use management::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
     SkillContentRequest, SkillContentResult, SkillInstallFile, SkillInstallRequest,
     SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRegistryInstallRequest, SkillRemoveRequest, SkillRemoveResult,
-    SkillSearchRequest, SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary,
-    SkillUpdateRequest, SkillUpdateResult, install_registry_skill, install_skill, list_skills,
-    read_skill_content, read_skill_install_metadata, remove_skill, replace_registry_skill,
-    search_skills, skill_summary_json, update_skill,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
+    SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, SkillUpdateRequest,
+    SkillUpdateResult, install_skill, list_skills, read_skill_content, read_skill_install_metadata,
+    remove_skill, search_skills, skill_summary_json, update_skill,
+};
+pub(crate) use management::{
+    SkillRegistryInstallRequest, install_registry_skill, replace_registry_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
 pub use scoped_management::{

@@ -106,6 +106,7 @@ pub struct RegistryPackageProvenance {
     installed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryPackageProvenanceParts {
     pub registry: String,
     pub repository: String,
@@ -865,5 +866,37 @@ mod tests {
         .expect_err("unusable digest must be rejected");
 
         assert!(error.to_string().contains("64 hexadecimal"));
+    }
+
+    #[test]
+    fn registry_package_provenance_deserialization_revalidates_hostile_json() {
+        let valid = serde_json::json!({
+            "registry": "ironhub",
+            "repository": "nearai/ironhub",
+            "package_version": "1.0.0",
+            "release_tag": "v1",
+            "catalog_origin": "https://hub.ironclaw.com/",
+            "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+            "manifest_digest": format!("sha256:{}", "b".repeat(64)),
+            "installed_at": Utc::now(),
+        });
+        for (field, hostile) in [
+            ("registry", String::new()),
+            ("registry", "iron\nHub".to_string()),
+            (
+                "repository",
+                "x".repeat(REGISTRY_RECEIPT_FIELD_MAX_BYTES + 1),
+            ),
+            (
+                "catalog_origin",
+                "https://token@hub.ironclaw.com/".to_string(),
+            ),
+            ("manifest_digest", "sha256:bad".to_string()),
+        ] {
+            let mut candidate = valid.clone();
+            candidate[field] = serde_json::Value::String(hostile);
+            serde_json::from_value::<RegistryPackageProvenance>(candidate)
+                .expect_err("hostile persisted receipt must be rejected on deserialize");
+        }
     }
 }

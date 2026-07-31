@@ -18,8 +18,8 @@ pub(crate) fn authority_changes(
     if installed.requested_trust != candidate.requested_trust {
         changes.push("requested trust changed".to_string());
     }
-    if installed.runtime.kind() != candidate.runtime.kind() {
-        changes.push("runtime kind changed".to_string());
+    if installed.runtime != candidate.runtime {
+        changes.push("runtime configuration changed".to_string());
     }
     let installed_ids = installed
         .tools
@@ -395,6 +395,36 @@ access_token = "/access_token""#
     }
 
     #[test]
+    fn authority_diff_reports_same_kind_runtime_configuration_changes() {
+        let installed = build(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+        );
+        let candidate_manifest =
+            String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+                .expect("manifest UTF-8")
+                .replace(
+                    "module = \"wasm/attio-tool.wasm\"",
+                    "module = \"wasm/attio-updated.wasm\"",
+                );
+        let candidate = build(&entry_named("attio"), candidate_manifest.into_bytes());
+
+        assert_eq!(
+            authority_changes(&installed.resolved_manifest, &candidate.resolved_manifest),
+            vec!["runtime configuration changed"]
+        );
+    }
+
+    #[test]
+    fn tool_target_digest_binds_the_published_manifest() {
+        let mut entry = entry_named("attio");
+        let original = crate::catalog::tool_artifact_digest(&entry);
+        entry.manifest.as_mut().expect("manifest artifact").sha256 = "b".repeat(64);
+
+        assert_ne!(original, crate::catalog::tool_artifact_digest(&entry));
+    }
+
+    #[test]
     fn registry_update_preserves_only_credential_bindings_declared_by_the_target() {
         let installed = build(
             &entry_named("attio"),
@@ -492,6 +522,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             schemas,
             &[],
+            provenance(&entry_named("attio")),
         )
         .expect_err("every manifest schema must be present in the signed catalog");
 

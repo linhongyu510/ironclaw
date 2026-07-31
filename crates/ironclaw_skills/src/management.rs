@@ -33,9 +33,10 @@ pub use install_bundle::{
 pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle};
 
 use install_bundle::{
-    capture_skill_bundle_locked, existing_skill_install_matches, install_metadata_source,
-    installed_skill_source, publish_skill_install, read_install_metadata_bytes,
-    restore_skill_bundle_locked, validate_install_bundle_files,
+    ExistingRegistryInstallMatch, adopt_registry_receipt, capture_skill_bundle_locked,
+    existing_skill_install_matches, install_metadata_source, installed_skill_source,
+    publish_skill_install, read_install_metadata_bytes, restore_skill_bundle_locked,
+    validate_install_bundle_files,
 };
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
@@ -224,12 +225,13 @@ pub struct SkillInstallRequest<'a> {
     pub source_url: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SkillRegistryInstallRequest<'a> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SkillRegistryInstallRequest<'a> {
     pub name: &'a str,
     pub content: &'a str,
     pub source_url: &'a str,
     pub provenance: &'a RegistryPackageProvenance,
+    pub expected_current_artifact_digest: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,7 +360,7 @@ pub async fn install_skill(
     install_skill_with_registry_provenance(context, request, None).await
 }
 
-pub async fn install_registry_skill(
+pub(crate) async fn install_registry_skill(
     context: &SkillManagementContext,
     request: SkillRegistryInstallRequest<'_>,
 ) -> Result<SkillInstallResult, SkillManagementError> {
@@ -372,7 +374,7 @@ pub async fn install_registry_skill(
     install_skill_with_registry_provenance(context, install, Some(request.provenance)).await
 }
 
-pub async fn replace_registry_skill(
+pub(crate) async fn replace_registry_skill(
     context: &SkillManagementContext,
     request: SkillRegistryInstallRequest<'_>,
 ) -> Result<SkillInstallResult, SkillManagementError> {
@@ -390,6 +392,24 @@ pub async fn replace_registry_skill(
     let skill_name = prepared.parsed.manifest.name;
     let mutation_lock = skill_mutation_lock(&skill_name);
     let _mutation_guard = mutation_lock.lock().await;
+    if let Some(expected_digest) = request.expected_current_artifact_digest {
+        let current_metadata = read_skill_install_metadata(context, &skill_name)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+        let current_provenance = current_metadata
+            .registry_provenance
+            .as_ref()
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+        if !current_provenance
+            .artifact_digest()
+            .eq_ignore_ascii_case(expected_digest)
+        {
+            return Err(SkillManagementError::with_reason(
+                SkillManagementErrorKind::Conflict,
+                "skill changed since update status was checked",
+            ));
+        }
+    }
     let previous = capture_skill_bundle_locked(context, &skill_name).await?;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
     context
@@ -397,15 +417,34 @@ pub async fn replace_registry_skill(
         .delete(&context.scope, &skill_dir)
         .await
         .map_err(filesystem_error)?;
-    let replacement = publish_skill_install(
-        context,
-        &skill_name,
-        &prepared.content,
-        &[],
-        SkillInstallSource::InstalledUrl,
-        Some(request.source_url),
-        Some(request.provenance),
-    )
+    let replacement = async {
+        publish_skill_install(
+            context,
+            &skill_name,
+            &prepared.content,
+            &[],
+            SkillInstallSource::InstalledUrl,
+            Some(request.source_url),
+            Some(request.provenance),
+        )
+        .await?;
+        let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
+        let persisted_content = read_skill_file(context, &skill_path)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))?;
+        let persisted_metadata = read_skill_install_metadata(context, &skill_name)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))?;
+        if persisted_content != prepared.content
+            || persisted_metadata.registry_provenance.as_ref() != Some(request.provenance)
+        {
+            return Err(SkillManagementError::with_reason(
+                SkillManagementErrorKind::InvalidSkill,
+                "skill replacement did not pass durable read-back verification",
+            ));
+        }
+        Ok(())
+    }
     .await;
     if let Err(original_error) = replacement {
         if let Err(restore_error) =
@@ -463,7 +502,7 @@ async fn install_skill_with_registry_provenance(
 
     log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
     if stat_optional(context, &skill_dir).await?.is_some() {
-        if existing_skill_install_matches(
+        match existing_skill_install_matches(
             context,
             &skill_name,
             &prepared.content,
@@ -474,16 +513,30 @@ async fn install_skill_with_registry_provenance(
         )
         .await?
         {
-            tracing::debug!(
-                skill_name = %skill_name,
-                scoped_path = %skill_dir,
-                "skill install matched existing skill directory"
-            );
-            return Ok(SkillInstallResult {
-                name: skill_name.clone(),
-                scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
-                source: installed_skill_source(request.source),
-            });
+            ExistingRegistryInstallMatch::Match => {
+                tracing::debug!(
+                    skill_name = %skill_name,
+                    scoped_path = %skill_dir,
+                    "skill install matched existing skill directory"
+                );
+                return Ok(SkillInstallResult {
+                    name: skill_name.clone(),
+                    scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                    source: installed_skill_source(request.source),
+                });
+            }
+            ExistingRegistryInstallMatch::AdoptReceipt => {
+                let provenance = registry_provenance
+                    .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+                adopt_registry_receipt(context, &skill_name, request.source_url, provenance)
+                    .await?;
+                return Ok(SkillInstallResult {
+                    name: skill_name.clone(),
+                    scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                    source: installed_skill_source(request.source),
+                });
+            }
+            ExistingRegistryInstallMatch::Conflict => {}
         }
         tracing::debug!(
             skill_name = %skill_name,

@@ -25,7 +25,7 @@ use ironclaw_turns::run_profile::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
+use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, ironhub_lifecycle_mounts};
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use crate::runtime::capability_host::outbound_delivery::outbound_delivery_capabilities;
@@ -293,10 +293,10 @@ impl RefreshingCapabilityPort {
             );
         }
         for capability_id in self.policy.ironhub_lifecycle_capability_ids() {
-            let mut mounts = self.skill_mounts.clone();
-            mounts
-                .mounts
-                .extend(self.system_extensions_lifecycle_mounts.mounts.clone());
+            let mounts = ironhub_lifecycle_mounts(
+                &self.skill_mounts,
+                &self.system_extensions_lifecycle_mounts,
+            );
             factory = factory.with_capability_execution_mount(capability_id.clone(), mounts);
         }
         // Test-support-only overrides (empty in production, see the config

@@ -202,28 +202,7 @@ pub fn prepare_registry_update(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
 ) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected manifest migration: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected manifest migration: {error}"),
-        }
-    })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
-        &host_ports,
-        Some(manifest_hash.clone()),
-        &contracts,
-        Some(available.package.root.clone()),
-    )
-    .map_err(map_extension_installation_error)?
-    .with_registry_provenance(available.registry_provenance.clone())
-    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),
         existing.extension_id().clone(),
@@ -237,6 +216,34 @@ pub fn prepare_registry_update(
         manifest_record,
         installation,
     })
+}
+
+fn prepare_manifest_record(
+    available: &AvailableExtensionPackage,
+) -> Result<(ExtensionManifestRecord, ManifestHash), ProductSurfaceFailure> {
+    let manifest_hash = available_manifest_hash(available)?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("host port catalog rejected extension manifest: {error}"),
+        }
+    })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected extension manifest: {error}"),
+        }
+    })?;
+    let manifest_record = ExtensionManifestRecord::from_toml(
+        &available.manifest_toml,
+        available.source,
+        &host_ports,
+        Some(manifest_hash.clone()),
+        &contracts,
+        Some(available.package.root.clone()),
+    )
+    .map_err(map_extension_installation_error)?
+    .with_registry_provenance(available.registry_provenance.clone())
+    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    Ok((manifest_record, manifest_hash))
 }
 
 fn compatible_registry_credential_bindings(
@@ -286,19 +293,46 @@ pub fn prepare_registry_receipt_adoption(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
 ) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
-    let update = prepare_registry_update(available, existing)?;
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
     let installation =
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: existing.installation_id().clone(),
             extension_id: existing.extension_id().clone(),
-            manifest_ref: update.installation.manifest_ref().clone(),
+            manifest_ref: ExtensionManifestRef::new(
+                existing.extension_id().clone(),
+                Some(manifest_hash),
+            ),
             credential_bindings: existing.credential_bindings().to_vec(),
             updated_at: existing.updated_at(),
             owner: existing.owner().clone(),
         })
         .map_err(map_extension_installation_error)?;
     Ok(ExtensionInstallPlan {
-        manifest_record: update.manifest_record,
+        manifest_record,
+        installation,
+    })
+}
+
+fn prepare_bundled_manifest_migration(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
+    let installation =
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: existing.installation_id().clone(),
+            extension_id: existing.extension_id().clone(),
+            manifest_ref: ExtensionManifestRef::new(
+                existing.extension_id().clone(),
+                Some(manifest_hash),
+            ),
+            credential_bindings: existing.credential_bindings().to_vec(),
+            updated_at: existing.updated_at(),
+            owner: existing.owner().clone(),
+        })
+        .map_err(map_extension_installation_error)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record,
         installation,
     })
 }
@@ -325,7 +359,7 @@ async fn migrate_host_bundled_manifest_hash(
         extension_id = %installation.extension_id(),
         "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
     );
-    let migration_plan = prepare_registry_update(available, installation)?;
+    let migration_plan = prepare_bundled_manifest_migration(available, installation)?;
     installation_store
         .upsert_manifest_and_installation(
             migration_plan.manifest_record,

@@ -9,7 +9,7 @@ use ironclaw_host_api::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse,
     },
-    ids::{CapabilityId, InvocationId},
+    ids::{CapabilityId, ExtensionId, InvocationId},
     package_lifecycle::{RegistryPackageProvenance, RegistryPackageProvenanceParts},
     resource::ResourceScope,
     runtime::RuntimeKind,
@@ -56,6 +56,7 @@ static MANIFEST_FETCH_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<Async
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static PACKAGE_UPDATE_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const MAX_STATUS_ENTRIES: usize = 50;
 
 pub trait RebornIronHubRuntime {
     fn ironhub_skill_management(&self) -> Arc<ScopedSkillManagementPort>;
@@ -275,20 +276,34 @@ impl IronHubService {
         let manifest = self.fetch_manifest_cached().await?;
         let public_origin = catalog_origin_for_url(&self.manifest_url)?.redacted_source_url();
         let mut entries = Vec::new();
+        let mut total_entries = 0usize;
 
         if kind != Some(IronHubEntryKind::Skill) {
-            for installed in self
-                .extension_management
-                .registry_installation_statuses(&self.scope.user_id)
-                .await?
-            {
+            let installed_tools = if let Some(name) = name {
+                let extension_id = ExtensionId::new(name.to_string())
+                    .map_err(|error| invalid(error.to_string()))?;
+                self.extension_management
+                    .registry_installation_status(&extension_id, &self.scope.user_id)
+                    .await?
+                    .into_iter()
+                    .collect()
+            } else {
+                self.extension_management
+                    .registry_installation_statuses(&self.scope.user_id)
+                    .await?
+            };
+            for installed in installed_tools {
                 if name.is_some_and(|name| name != installed.extension_id.as_str()) {
                     continue;
                 }
-                let Some(provenance) = installed.provenance.as_ref() else {
+                let Some(provenance) = installed.registry_provenance.as_ref() else {
                     continue;
                 };
                 if provenance.registry() != "ironhub" {
+                    continue;
+                }
+                total_entries += 1;
+                if entries.len() >= MAX_STATUS_ENTRIES {
                     continue;
                 }
                 let catalog_entry = manifest.find_tool(installed.extension_id.as_str());
@@ -354,6 +369,10 @@ impl IronHubService {
                 if provenance.registry() != "ironhub" {
                     continue;
                 }
+                total_entries += 1;
+                if entries.len() >= MAX_STATUS_ENTRIES {
+                    continue;
+                }
                 let catalog_entry = manifest.find_skill(&skill.name);
                 let update_available = if provenance.catalog_origin() == public_origin {
                     catalog_entry.map(|entry| {
@@ -390,14 +409,19 @@ impl IronHubService {
                 .cmp(right.kind.as_str())
                 .then_with(|| left.name.cmp(&right.name))
         });
-        let total_entries = entries.len();
+        let returned_entries = entries.len();
+        let truncated = returned_entries < total_entries;
         Ok(IronHubResponse {
             phase: IronHubPhase::Status,
             total_entries,
-            returned_entries: total_entries,
-            truncated: false,
+            returned_entries,
+            truncated,
             catalog_total: Some(manifest.tools.len() + manifest.skills.len()),
-            message: None,
+            message: truncated.then(|| {
+                format!(
+                    "INCOMPLETE IRONHUB STATUS: returned {returned_entries} of {total_entries} installed entries; query an exact package name for complete update details."
+                )
+            }),
             entries,
             lifecycle: None,
         })
@@ -631,11 +655,8 @@ impl IronHubService {
             ));
         }
         let update_key = format!(
-            "{}\u{0}{}\u{0}{}\u{0}{}",
-            self.scope.tenant_id,
-            self.scope.user_id,
-            options.kind.map(IronHubEntryKind::as_str).unwrap_or("auto"),
-            name
+            "{}\u{0}{}\u{0}{}",
+            self.scope.tenant_id, self.scope.user_id, name
         );
         let lock = package_update_lock(&update_key);
         let result = async {
@@ -666,7 +687,12 @@ impl IronHubService {
             let install_options = IronHubInstallOptions {
                 kind: options.kind,
                 force: false,
-                acknowledge_unverified: false,
+                // An update is only reachable for an existing installation
+                // with a durable receipt, an exact status pin, and a fresh
+                // approval. That prior receipt is the operator acknowledgement
+                // for community provenance; this flag is intentionally not
+                // exposed in the model-facing update schema.
+                acknowledge_unverified: true,
                 expected_version: Some(options.expected_version.clone()),
                 expected_artifact_digest: Some(options.expected_artifact_digest.clone()),
                 private_manifest_url: options.private_manifest_url.clone(),
@@ -692,14 +718,15 @@ impl IronHubService {
 
             let (lifecycle, active) = match kind {
                 IronHubEntryKind::Tool => {
+                    let extension_id = ExtensionId::new(name.to_string())
+                        .map_err(|error| invalid(error.to_string()))?;
                     let installed = self
                         .extension_management
-                        .registry_installation_statuses(&self.scope.user_id)
+                        .registry_installation_status(&extension_id, &self.scope.user_id)
                         .await?
-                        .into_iter()
-                        .find(|status| status.extension_id.as_str() == name)
                         .ok_or_else(|| invalid(format!("tool '{name}' is not installed")))?;
-                    let installed_provenance = installed.provenance.as_ref().ok_or_else(|| {
+                    let installed_provenance =
+                        installed.registry_provenance.as_ref().ok_or_else(|| {
                         invalid(format!(
                             "tool '{name}' has no durable IronHub receipt; reinstall it before updating"
                         ))
@@ -741,6 +768,17 @@ impl IronHubService {
                             private_origin.as_ref(),
                         )
                         .await?;
+                    let mut schemas = Vec::with_capacity(entry.schemas.len());
+                    for (path, artifact) in &entry.schemas {
+                        let content = self
+                            .download_verified(
+                                artifact,
+                                MAX_METADATA_BYTES,
+                                private_origin.as_ref(),
+                            )
+                            .await?;
+                        schemas.push((path.clone(), content));
+                    }
                     let reserved = self
                         .extension_management
                         .reserved_bundled_extension_ids()
@@ -750,6 +788,7 @@ impl IronHubService {
                         tool_manifest,
                         wasm,
                         capabilities,
+                        schemas,
                         &reserved,
                         target_provenance.clone(),
                     )?;
@@ -836,6 +875,7 @@ impl IronHubService {
                             &content,
                             &source_url,
                             &target_provenance,
+                            &options.expected_installed_artifact_digest,
                         )
                         .await
                         .map_err(skill_install_error)?;

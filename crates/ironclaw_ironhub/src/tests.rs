@@ -627,6 +627,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         (input_schema_url, published_input_schema()),
         (output_schema_url, published_output_schema()),
         (output_schema_url, published_output_schema()),
+        (skill_url, skill_bytes.clone()),
         (skill_url, skill_bytes),
     ]));
     let service = configure_test_catalog(
@@ -710,6 +711,16 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         .await
         .expect("verified skill installs");
     assert_eq!(skill.phase, IronHubPhase::Installed);
+    service
+        .execute(IronHubCommand::Install {
+            name: "installed-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("an identical verified skill reinstall is idempotent");
     let installed_skill = services
         .skill_management
         .read_content_for_scope(scope.clone(), "installed-skill")
@@ -797,8 +808,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
 
     let requests = egress.requests();
     // Catalog, two verified tool downloads (initial + receipt adoption),
-    // including their schemas, then the skill.
-    assert_eq!(requests.len(), 12);
+    // including their schemas, then the initial and idempotent skill downloads.
+    assert_eq!(requests.len(), 13);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
@@ -1262,8 +1273,7 @@ async fn skill_update_failure_restores_installed_skill_without_exposing_source_u
     );
     let old_manifest_url = "https://hub.ironclaw.com/tests/skill-rollback/old-manifest.json";
     let old_skill_url = "https://hub.ironclaw.com/tests/skill-rollback/old-SKILL.md";
-    let old_skill =
-        b"---\nname: installed-skill\ndescription: Old IronHub skill\n---\n# Old\n".to_vec();
+    let old_skill = b"---\nname: installed-skill\ndescription: Old IronHub skill\nauto_activate: true\n---\n# Old\n".to_vec();
     let old_manifest_json = skill_manifest_json(
         "installed-skill",
         "2026-01-03T00:00:00Z",
@@ -1333,10 +1343,10 @@ async fn skill_update_failure_restores_installed_skill_without_exposing_source_u
     let new_catalog: IronHubManifest =
         serde_json::from_str(&new_manifest_json).expect("new skill catalog");
     let new_artifact_digest = skill_artifact_digest(&new_catalog.skills[0]);
-    let new_manifest = signed_manifest(new_manifest_json, &test_signing_key());
+    let new_manifest = signed_manifest(new_manifest_json.clone(), &test_signing_key());
     let new_egress = Arc::new(RecordingEgress::new([
         (new_manifest_url, new_manifest),
-        (new_skill_url, new_skill),
+        (new_skill_url, new_skill.clone()),
     ]));
     let error = configured_service_for_capability(
         Arc::clone(&skill_management),
@@ -1350,9 +1360,9 @@ async fn skill_update_failure_restores_installed_skill_without_exposing_source_u
         name: "installed-skill".to_string(),
         options: IronHubUpdateOptions {
             kind: Some(IronHubEntryKind::Skill),
-            expected_installed_artifact_digest: old_artifact_digest,
+            expected_installed_artifact_digest: old_artifact_digest.clone(),
             expected_version: "0.2.0".to_string(),
-            expected_artifact_digest: new_artifact_digest,
+            expected_artifact_digest: new_artifact_digest.clone(),
             acknowledge_authority_change: true,
             private_manifest_url: None,
         },
@@ -1394,11 +1404,71 @@ async fn skill_update_failure_restores_installed_skill_without_exposing_source_u
     assert_eq!(restored.source, ManagedSkillSource::Installed);
     assert_eq!(restored.source_url, None);
     let listed = skill_management
-        .list_for_scope(scope)
+        .list_for_scope(scope.clone())
         .await
         .expect("restored skill is listed");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].source, ManagedSkillSource::Installed);
+    assert!(
+        listed[0].auto_activate,
+        "rollback preserves activation policy"
+    );
+
+    let updated = configured_service_for_capability(
+        Arc::clone(&skill_management),
+        Arc::clone(&services.extension_management),
+        Arc::new(RecordingEgress::new([
+            (
+                new_manifest_url,
+                signed_manifest(new_manifest_json, &test_signing_key()),
+            ),
+            (new_skill_url, new_skill),
+        ])),
+        scope.clone(),
+        new_manifest_url,
+        super::IRONHUB_UPDATE_CAPABILITY_ID,
+    )
+    .execute(IronHubCommand::Update {
+        name: "installed-skill".to_string(),
+        options: IronHubUpdateOptions {
+            kind: Some(IronHubEntryKind::Skill),
+            expected_installed_artifact_digest: old_artifact_digest,
+            expected_version: "0.2.0".to_string(),
+            expected_artifact_digest: new_artifact_digest,
+            acknowledge_authority_change: true,
+            private_manifest_url: None,
+        },
+    })
+    .await
+    .expect("skill update succeeds after rollback");
+    assert_eq!(updated.phase, IronHubPhase::Updated);
+    let updated_content = skill_management
+        .read_content_for_scope(scope.clone(), "installed-skill")
+        .await
+        .expect("updated skill content");
+    assert!(updated_content.content.contains("# New"));
+    assert!(updated_content.content.contains("auto_activate: true"));
+    let updated_metadata = skill_management
+        .install_metadata_for_scope(scope.clone(), "installed-skill")
+        .await
+        .expect("updated metadata read")
+        .expect("updated metadata");
+    assert_eq!(
+        updated_metadata
+            .registry_provenance
+            .as_ref()
+            .expect("updated receipt")
+            .package_version(),
+        "0.2.0"
+    );
+    assert!(
+        skill_management
+            .list_for_scope(scope)
+            .await
+            .expect("updated skill listed")[0]
+            .auto_activate,
+        "successful update preserves activation policy"
+    );
 }
 
 #[tokio::test]

@@ -135,7 +135,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryExtensionInstallationStatus {
     pub extension_id: ExtensionId,
-    pub provenance: Option<RegistryPackageProvenance>,
+    pub registry_provenance: Option<RegistryPackageProvenance>,
     pub active: bool,
     pub update_allowed: bool,
     pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
@@ -372,18 +372,21 @@ impl ExtensionLifecycleManager {
             .list_installations()
             .await
             .map_err(map_extension_installation_error)?;
+        let mut manifests = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|manifest| (manifest.extension_id().clone(), manifest))
+            .collect::<BTreeMap<_, _>>();
         let active = self.active_extensions.snapshot();
         let mut statuses = Vec::new();
         for installation in installations {
             if !installation.owner().visible_to(caller) {
                 continue;
             }
-            let Some(manifest) = self
-                .installation_store
-                .get_manifest(installation.extension_id())
-                .await
-                .map_err(map_extension_installation_error)?
-            else {
+            let Some(manifest) = manifests.remove(installation.extension_id()) else {
                 continue;
             };
             if manifest.manifest().source != ironclaw_extensions::ManifestSource::RegistryInstalled
@@ -392,7 +395,7 @@ impl ExtensionLifecycleManager {
             }
             statuses.push(RegistryExtensionInstallationStatus {
                 extension_id: installation.extension_id().clone(),
-                provenance: manifest.registry_provenance().cloned(),
+                registry_provenance: manifest.registry_provenance().cloned(),
                 active: active.get_extension(installation.extension_id()).is_some(),
                 update_allowed: matches!(
                     installation.owner(),
@@ -404,6 +407,52 @@ impl ExtensionLifecycleManager {
         }
         statuses.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
         Ok(statuses)
+    }
+
+    pub async fn registry_installation_status(
+        &self,
+        extension_id: &ExtensionId,
+        caller: &UserId,
+    ) -> Result<Option<RegistryExtensionInstallationStatus>, ProductSurfaceFailure> {
+        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        let Some(installation) = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+        else {
+            return Ok(None);
+        };
+        if !installation.owner().visible_to(caller) {
+            return Ok(None);
+        }
+        let Some(manifest) = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+        else {
+            return Ok(None);
+        };
+        if manifest.manifest().source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Ok(None);
+        }
+        Ok(Some(RegistryExtensionInstallationStatus {
+            extension_id: extension_id.clone(),
+            registry_provenance: manifest.registry_provenance().cloned(),
+            active: self
+                .active_extensions
+                .snapshot()
+                .get_extension(extension_id)
+                .is_some(),
+            update_allowed: matches!(
+                installation.owner(),
+                InstallationOwner::Users { user_ids }
+                    if user_ids.len() == 1 && user_ids.contains(caller)
+            ),
+            resolved_manifest: Arc::new(manifest.resolved().clone()),
+        }))
     }
 
     pub async fn reserved_bundled_extension_ids(&self) -> Vec<String> {
@@ -1326,8 +1375,38 @@ impl ExtensionLifecycleManager {
             .is_some();
         let target_plan = prepare_registry_update(&package, &previous_installation)?;
 
-        self.remove_registry_replacement(&package_ref, caller)
-            .await?;
+        if let Err(original_error) = self.remove_registry_replacement(&package_ref, caller).await {
+            let restore_result = async {
+                if self.search_installation(&extension_id).await?.is_none() {
+                    self.install(package_ref.clone(), caller).await?;
+                }
+                self.persist_install_plan(ExtensionInstallPlan {
+                    manifest_record: previous_manifest.clone(),
+                    installation: previous_installation.clone(),
+                })
+                .await?;
+                if was_active
+                    && self
+                        .active_extensions
+                        .snapshot()
+                        .get_extension(&extension_id)
+                        .is_none()
+                {
+                    self.activate(package_ref.clone(), ExtensionActivationMode::Static, caller)
+                        .await?;
+                }
+                Ok::<(), ProductSurfaceFailure>(())
+            }
+            .await;
+            if let Err(restore_error) = restore_result {
+                return Err(compensation_failure(
+                    "registry replacement removal failed and the previous package could not be restored",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            return Err(original_error);
+        }
         {
             let mut catalog = self.catalog.write().await;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));

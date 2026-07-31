@@ -92,7 +92,7 @@ pub struct AvailableExtensionPackage {
     pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
-    /// `prepare_manifest_migration`) validate with the SAME source the
+    /// lifecycle restore/update preparation) validate with the SAME source the
     /// package entered the catalog with: an uploaded bundle validated as
     /// `InstalledLocal` must never be re-validated (and persisted) as
     /// `HostBundled`, which is the only source eligible for
