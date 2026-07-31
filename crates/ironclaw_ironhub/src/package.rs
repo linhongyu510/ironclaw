@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use ironclaw_extensions::{ExtensionAssetPath, ExtensionRuntimeV2, ManifestSource};
 
 use ironclaw_extension_host::{
@@ -5,9 +7,7 @@ use ironclaw_extension_host::{
 };
 
 use super::catalog::validate_hub_name;
-use super::model::{
-    GENERIC_TOOL_INPUT_SCHEMA, GENERIC_TOOL_OUTPUT_SCHEMA, IronHubCommandError, IronHubToolEntry,
-};
+use super::model::{IronHubCommandError, IronHubToolEntry};
 
 /// Assemble a registry tool package around the manifest the registry published.
 ///
@@ -19,14 +19,16 @@ use super::model::{
 /// API-key distinction — and each loss surfaced as an install that could not
 /// authenticate.
 ///
-/// The manifest also chooses where its own assets live: the wasm and the two
-/// generic tool schemas are placed at the paths it declares, so publisher and
-/// host never have to agree a filename convention across two repositories.
+/// The manifest also chooses where its own assets live: the wasm and
+/// digest-verified tool schemas are placed at the paths it declares, so
+/// publisher and host never have to agree a filename convention across two
+/// repositories.
 pub(crate) fn ironhub_tool_package(
     entry: &IronHubToolEntry,
     manifest: Vec<u8>,
     wasm: Vec<u8>,
     capabilities: Vec<u8>,
+    schemas: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, IronHubCommandError> {
     validate_hub_name(&entry.name)?;
@@ -51,22 +53,43 @@ pub(crate) fn ironhub_tool_package(
         validate_manifest_asset_path(module)?;
         files.push((module.clone(), wasm));
     }
-    // Registry tools expose one generic invoke capability whose input and output
-    // schemas are host-owned constants; the manifest only says where they live.
-    for capability in &record.manifest().capabilities {
-        validate_manifest_asset_path(capability.input_schema_ref.as_str())?;
-        files.push((
-            capability.input_schema_ref.as_str().to_string(),
-            GENERIC_TOOL_INPUT_SCHEMA.to_vec(),
-        ));
-        if let Some(output_schema_ref) = &capability.output_schema_ref {
-            validate_manifest_asset_path(output_schema_ref.as_str())?;
-            files.push((
-                output_schema_ref.as_str().to_string(),
-                GENERIC_TOOL_OUTPUT_SCHEMA.to_vec(),
-            ));
+    let mut schema_assets = BTreeMap::new();
+    for (path, content) in schemas {
+        validate_manifest_asset_path(&path)?;
+        if schema_assets.insert(path.clone(), content).is_some() {
+            return Err(IronHubCommandError::Catalog {
+                reason: format!("published schema path '{path}' appears more than once"),
+            });
         }
     }
+    let mut referenced_schemas = BTreeSet::new();
+    for capability in &record.manifest().capabilities {
+        let input_path = capability.input_schema_ref.as_str();
+        validate_manifest_asset_path(input_path)?;
+        referenced_schemas.insert(input_path.to_string());
+        if let Some(output_schema_ref) = &capability.output_schema_ref {
+            let output_path = output_schema_ref.as_str();
+            validate_manifest_asset_path(output_path)?;
+            referenced_schemas.insert(output_path.to_string());
+        }
+    }
+    let published_schemas: BTreeSet<_> = schema_assets.keys().cloned().collect();
+    if referenced_schemas != published_schemas {
+        let missing: Vec<_> = referenced_schemas
+            .difference(&published_schemas)
+            .cloned()
+            .collect();
+        let unreferenced: Vec<_> = published_schemas
+            .difference(&referenced_schemas)
+            .cloned()
+            .collect();
+        return Err(IronHubCommandError::Catalog {
+            reason: format!(
+                "published schemas do not match manifest references (missing: {missing:?}, unreferenced: {unreferenced:?})"
+            ),
+        });
+    }
+    files.extend(schema_assets);
 
     let package = registry_extension_package(files, reserved_bundled_ids)
         .map_err(IronHubCommandError::Product)?;
@@ -120,6 +143,10 @@ mod tests {
     }
 
     fn entry_named(name: &str) -> IronHubToolEntry {
+        let schemas = BTreeMap::from([
+            (format!("schemas/{name}/invoke.input.v1.json"), artifact()),
+            (format!("schemas/{name}/raw_output.v1.json"), artifact()),
+        ]);
         IronHubToolEntry {
             name: name.to_string(),
             version: "0.1.0".to_string(),
@@ -128,7 +155,21 @@ mod tests {
             wasm: artifact(),
             capabilities: artifact(),
             manifest: Some(artifact()),
+            schemas,
         }
+    }
+
+    fn published_schemas(id: &str) -> Vec<(String, Vec<u8>)> {
+        vec![
+            (
+                format!("schemas/{id}/invoke.input.v1.json"),
+                br#"{"type":"object","required":["action"]}"#.to_vec(),
+            ),
+            (
+                format!("schemas/{id}/raw_output.v1.json"),
+                br#"{"description":"Raw JSON output"}"#.to_vec(),
+            ),
+        ]
     }
 
     /// Shaped like what `scripts/generate-extension-manifest.py` publishes, down
@@ -196,8 +237,15 @@ access_token = "/access_token""#
     }
 
     fn build(entry: &IronHubToolEntry, manifest: Vec<u8>) -> AvailableExtensionPackage {
-        ironhub_tool_package(entry, manifest, component(), b"{}".to_vec(), &[])
-            .expect("package builds")
+        ironhub_tool_package(
+            entry,
+            manifest,
+            component(),
+            b"{}".to_vec(),
+            published_schemas(&entry.name),
+            &[],
+        )
+        .expect("package builds")
     }
 
     /// The published manifest is what installs, byte for byte. Nothing in the
@@ -242,6 +290,64 @@ access_token = "/access_token""#
     }
 
     #[test]
+    fn published_input_schema_reaches_the_installed_package() {
+        let package = build(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+        );
+        let schema = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "schemas/attio/invoke.input.v1.json")
+            .expect("input schema asset");
+
+        assert_eq!(
+            schema.content,
+            ironclaw_extension_host::AvailableExtensionAssetContent::Bytes(
+                br#"{"type":"object","required":["action"]}"#.to_vec(),
+            ),
+            "the model-facing schema must come from the signed package, not a permissive host placeholder",
+        );
+    }
+
+    #[test]
+    fn package_rejects_a_manifest_with_an_unpublished_schema() {
+        let mut schemas = published_schemas("attio");
+        schemas.pop();
+        let error = ironhub_tool_package(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+            component(),
+            b"{}".to_vec(),
+            schemas,
+            &[],
+        )
+        .expect_err("every manifest schema must be present in the signed catalog");
+
+        assert!(
+            error.to_string().contains("missing")
+                && error.to_string().contains("raw_output.v1.json"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn schema_digest_changes_the_pinned_tool_artifact_digest() {
+        let original = entry_named("attio");
+        let mut changed = original.clone();
+        changed
+            .schemas
+            .get_mut("schemas/attio/invoke.input.v1.json")
+            .expect("input schema metadata")
+            .sha256 = "b".repeat(64);
+
+        assert_ne!(
+            crate::catalog::tool_artifact_digest(&original),
+            crate::catalog::tool_artifact_digest(&changed),
+        );
+    }
+
+    #[test]
     fn package_rejects_manifest_asset_paths_outside_the_extension_root() {
         let base = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
             .expect("manifest UTF-8");
@@ -273,6 +379,7 @@ access_token = "/access_token""#
                 manifest.into_bytes(),
                 component(),
                 b"{}".to_vec(),
+                published_schemas("attio"),
                 &[],
             )
             .expect_err(label);
@@ -370,6 +477,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             published_manifest("other-tool", &api_key_auth("other-tool", "")),
             component(),
             b"{}".to_vec(),
+            published_schemas("other-tool"),
             &[],
         )
         .expect_err("mismatched id must not install");
@@ -390,6 +498,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             b"this is not toml".to_vec(),
             component(),
             b"{}".to_vec(),
+            published_schemas("attio"),
             &[],
         )
         .expect_err("malformed manifest must not install");

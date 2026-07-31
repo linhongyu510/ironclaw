@@ -202,7 +202,23 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
 }
 
 pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
-    sha256_digest_token(format!("{}:{}", entry.wasm.sha256, entry.capabilities.sha256).as_bytes())
+    let mut digest_material = format!(
+        "wasm:{}\0capabilities:{}\0",
+        entry.wasm.sha256, entry.capabilities.sha256
+    );
+    if let Some(manifest) = &entry.manifest {
+        digest_material.push_str("manifest:");
+        digest_material.push_str(&manifest.sha256);
+        digest_material.push('\0');
+    }
+    for (path, artifact) in &entry.schemas {
+        digest_material.push_str("schema:");
+        digest_material.push_str(path);
+        digest_material.push('\0');
+        digest_material.push_str(&artifact.sha256);
+        digest_material.push('\0');
+    }
+    sha256_digest_token(digest_material.as_bytes())
 }
 
 fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
@@ -259,6 +275,29 @@ fn validate_manifest_artifacts(
             super::model::MAX_METADATA_BYTES,
             origin,
         )?;
+        if let Some(extension_manifest) = &entry.manifest {
+            validate_artifact_for_origin(
+                extension_manifest,
+                super::model::MAX_METADATA_BYTES,
+                origin,
+            )?;
+        }
+        if entry.schemas.len() > super::model::MAX_TOOL_SCHEMA_ARTIFACTS {
+            return Err(catalog(format!(
+                "tool '{}' publishes more than {} schema artifacts",
+                entry.name,
+                super::model::MAX_TOOL_SCHEMA_ARTIFACTS
+            )));
+        }
+        for (path, schema) in &entry.schemas {
+            ironclaw_extensions::ExtensionAssetPath::new(path.clone()).map_err(|error| {
+                catalog(format!(
+                    "tool '{}' publishes an invalid schema path: {error}",
+                    entry.name
+                ))
+            })?;
+            validate_artifact_for_origin(schema, super::model::MAX_METADATA_BYTES, origin)?;
+        }
     }
     for entry in &manifest.skills {
         validate_hub_name(&entry.name)?;

@@ -360,12 +360,29 @@ impl IronHubService {
                             private_origin.as_ref(),
                         )
                         .await?;
+                    let mut schemas = Vec::with_capacity(entry.schemas.len());
+                    for (path, artifact) in &entry.schemas {
+                        let content = self
+                            .download_verified(
+                                artifact,
+                                MAX_METADATA_BYTES,
+                                private_origin.as_ref(),
+                            )
+                            .await?;
+                        schemas.push((path.clone(), content));
+                    }
                     let reserved = self
                         .extension_management
                         .reserved_bundled_extension_ids()
                         .await;
-                    let package =
-                        ironhub_tool_package(entry, tool_manifest, wasm, capabilities, &reserved)?;
+                    let package = ironhub_tool_package(
+                        entry,
+                        tool_manifest,
+                        wasm,
+                        capabilities,
+                        schemas,
+                        &reserved,
+                    )?;
                     self.extension_management
                         .install_registry_package(
                             package,

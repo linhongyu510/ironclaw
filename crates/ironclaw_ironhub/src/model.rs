@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use ironclaw_product::{LifecycleProductResponse, ProductSurfaceFailure};
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,7 @@ pub(crate) const MAX_WASM_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const MANIFEST_CACHE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const MANIFEST_CACHE_MAX_ENTRIES: usize = 64;
 pub(crate) const MAX_SEARCH_RESPONSE_BYTES: usize = 20 * 1024;
-pub(crate) const GENERIC_TOOL_INPUT_SCHEMA: &[u8] =
-    br#"{"type":"object","additionalProperties":true}"#;
-pub(crate) const GENERIC_TOOL_OUTPUT_SCHEMA: &[u8] =
-    br#"{"description":"Raw JSON output from the installed IronHub tool"}"#;
+pub(crate) const MAX_TOOL_SCHEMA_ARTIFACTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +104,13 @@ pub(crate) struct IronHubToolEntry {
     /// catalog into zero visible tools.
     #[serde(default)]
     pub(crate) manifest: Option<IronHubArtifact>,
+    /// Manifest asset path to digest-pinned schema artifact.
+    ///
+    /// Kept optional at catalog-deserialization time so stale catalogs remain
+    /// searchable. Installation fails closed when the published manifest
+    /// references a schema that is absent here.
+    #[serde(default)]
+    pub(crate) schemas: BTreeMap<String, IronHubArtifact>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
