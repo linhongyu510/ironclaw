@@ -54,8 +54,6 @@ static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static MANIFEST_FETCH_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-static PACKAGE_UPDATE_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 const MAX_STATUS_ENTRIES: usize = 50;
 
 pub trait RebornIronHubRuntime {
@@ -654,13 +652,9 @@ impl IronHubService {
                 "update requires installed digest, target version, and target digest from ironhub_status",
             ));
         }
-        let update_key = format!(
-            "{}\u{0}{}\u{0}{}",
-            self.scope.tenant_id, self.scope.user_id, name
-        );
-        let lock = package_update_lock(&update_key);
-        let result = async {
-            let _guard = lock.lock().await;
+        // The owning managers serialize mutation and re-check the expected
+        // installed digest. Do not hold a service lock across downloads or I/O.
+        async {
             let private_origin = options
                 .private_manifest_url
                 .as_deref()
@@ -941,10 +935,7 @@ impl IronHubService {
                 lifecycle: Some(lifecycle),
             })
         }
-        .await;
-        drop(lock);
-        evict_idle_async_locks(&PACKAGE_UPDATE_LOCKS);
-        result
+        .await
     }
 
     async fn fetch_manifest_cached(&self) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
@@ -1354,16 +1345,6 @@ fn manifest_fetch_lock(url: &str) -> Arc<AsyncMutex<()>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard
         .entry(url.to_string())
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone()
-}
-
-fn package_update_lock(key: &str) -> Arc<AsyncMutex<()>> {
-    let mut guard = PACKAGE_UPDATE_LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard
-        .entry(key.to_string())
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone()
 }
