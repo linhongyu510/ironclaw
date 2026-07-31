@@ -292,6 +292,13 @@ impl RefreshingCapabilityPort {
                 self.system_extensions_lifecycle_mounts.clone(),
             );
         }
+        for capability_id in self.policy.ironhub_lifecycle_capability_ids() {
+            let mut mounts = self.skill_mounts.clone();
+            mounts
+                .mounts
+                .extend(self.system_extensions_lifecycle_mounts.mounts.clone());
+            factory = factory.with_capability_execution_mount(capability_id.clone(), mounts);
+        }
         // Test-support-only overrides (empty in production, see the config
         // field doc-comment): the factory bakes mounts in at construction, so
         // this is the only seam that can reach per-capability test mounts.

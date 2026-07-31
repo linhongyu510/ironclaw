@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::path::ScopedPath;
+use ironclaw_host_api::{package_lifecycle::RegistryPackageProvenance, path::ScopedPath};
 
 use crate::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
@@ -53,6 +53,13 @@ pub(crate) async fn capture_skill_bundle(
     }
     let mutation_lock = skill_mutation_lock(skill_name);
     let _mutation_guard = mutation_lock.lock().await;
+    capture_skill_bundle_locked(context, skill_name).await
+}
+
+pub(super) async fn capture_skill_bundle_locked(
+    context: &SkillManagementContext,
+    skill_name: &str,
+) -> Result<SkillBundleSnapshot, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     let mut files = Vec::new();
     let mut stack = vec![(skill_dir, String::new())];
@@ -167,6 +174,14 @@ pub(crate) async fn restore_skill_bundle(
     }
     let mutation_lock = skill_mutation_lock(skill_name);
     let _mutation_guard = mutation_lock.lock().await;
+    restore_skill_bundle_locked(context, skill_name, snapshot).await
+}
+
+pub(super) async fn restore_skill_bundle_locked(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    snapshot: SkillBundleSnapshot,
+) -> Result<SkillSource, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     if stat_optional(context, &skill_dir).await?.is_some() {
         return Err(SkillManagementError::new(
@@ -215,6 +230,7 @@ pub(super) async fn publish_skill_install(
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
 ) -> Result<(), SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, skill_name, SKILL_FILE_NAME)?;
@@ -240,7 +256,7 @@ pub(super) async fn publish_skill_install(
         if source == SkillInstallSource::InstalledUrl {
             let metadata_path =
                 skill_bundle_file_scoped_path(skill_name, INSTALL_METADATA_FILE_NAME)?;
-            let metadata = install_metadata_bytes(source_url)?;
+            let metadata = install_metadata_bytes(source_url, registry_provenance)?;
             log_skill_filesystem_phase("write_install_metadata", skill_name, &metadata_path);
             context
                 .filesystem
@@ -282,9 +298,16 @@ pub(super) async fn existing_skill_install_matches(
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
 ) -> Result<bool, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
-    let expected_files = expected_install_files(normalized_content, files, source, source_url)?;
+    let expected_files = expected_install_files(
+        normalized_content,
+        files,
+        source,
+        source_url,
+        registry_provenance,
+    )?;
     existing_files_match_expected(context, &skill_dir, expected_files).await
 }
 
@@ -293,6 +316,7 @@ fn expected_install_files<'a>(
     files: &'a [SkillInstallFile<'a>],
     source: SkillInstallSource,
     source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
 ) -> Result<BTreeMap<String, Cow<'a, [u8]>>, SkillManagementError> {
     let mut expected = BTreeMap::from([(
         SKILL_FILE_NAME.to_string(),
@@ -301,7 +325,7 @@ fn expected_install_files<'a>(
     if source == SkillInstallSource::InstalledUrl {
         expected.insert(
             INSTALL_METADATA_FILE_NAME.to_string(),
-            Cow::Owned(install_metadata_bytes(source_url)?),
+            Cow::Owned(install_metadata_bytes(source_url, registry_provenance)?),
         );
     }
     for file in files {
@@ -455,8 +479,15 @@ pub(super) async fn read_install_metadata_bytes(
     }
 }
 
-fn install_metadata_bytes(source_url: Option<&str>) -> Result<Vec<u8>, SkillManagementError> {
-    let bytes = InstalledSkillMetadata::installed_url(source_url)
+fn install_metadata_bytes(
+    source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
+) -> Result<Vec<u8>, SkillManagementError> {
+    let metadata = registry_provenance
+        .cloned()
+        .map(|provenance| InstalledSkillMetadata::installed_registry(source_url, provenance))
+        .unwrap_or_else(|| InstalledSkillMetadata::installed_url(source_url));
+    let bytes = metadata
         .to_pretty_json()
         .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
     if bytes.len() > MAX_INSTALL_METADATA_BYTES {

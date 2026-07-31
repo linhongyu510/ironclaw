@@ -9,7 +9,9 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
             "phase: {}",
             match response.phase {
                 IronHubPhase::Discovered => "discovered",
+                IronHubPhase::Status => "status",
                 IronHubPhase::Installed => "installed",
+                IronHubPhase::Updated => "updated",
             }
         ),
     );
@@ -51,6 +53,26 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
                 &mut output,
                 format_args!("  artifact_digest: {}", terminal_safe(artifact_digest)),
             );
+        }
+        if let Some(installation) = &entry.installation {
+            push_line(
+                &mut output,
+                format_args!(
+                    "  installed: version={} active={} update_available={}",
+                    terminal_safe(&installation.version),
+                    installation.active,
+                    installation
+                        .update_available
+                        .map(|available| available.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+            );
+            for change in &installation.authority_changes {
+                push_line(
+                    &mut output,
+                    format_args!("  authority_change: {}", terminal_safe(change)),
+                );
+            }
         }
     }
     output

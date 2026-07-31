@@ -2,9 +2,9 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
-    ManifestHash, ManifestSource, canonicalize_installation_rows,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStorePort,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
@@ -179,6 +179,7 @@ pub fn prepare_install(
         Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
+    .with_registry_provenance(available.registry_provenance.clone())
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let installation_id = ExtensionInstallationId::new(available.package.id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
@@ -197,7 +198,7 @@ pub fn prepare_install(
     })
 }
 
-fn prepare_manifest_migration(
+pub fn prepare_registry_update(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
 ) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
@@ -221,18 +222,83 @@ fn prepare_manifest_migration(
         Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
+    .with_registry_provenance(available.registry_provenance.clone())
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),
         existing.extension_id().clone(),
         ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
-        existing.credential_bindings().to_vec(),
+        compatible_registry_credential_bindings(available, existing),
         chrono::Utc::now(),
         existing.owner().clone(),
     )
     .map_err(map_extension_installation_error)?;
     Ok(ExtensionInstallPlan {
         manifest_record,
+        installation,
+    })
+}
+
+fn compatible_registry_credential_bindings(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Vec<ironclaw_extensions::ExtensionCredentialBinding> {
+    let mut declared = BTreeSet::new();
+    for tool in &available.resolved_manifest.tools {
+        declared.extend(
+            tool.runtime_credentials
+                .iter()
+                .map(|requirement| requirement.handle.as_str()),
+        );
+    }
+    if let Some(mcp) = &available.resolved_manifest.mcp {
+        declared.extend(mcp.credential_handles.iter().map(|handle| handle.as_str()));
+    }
+    if let Some(channel) = &available.resolved_manifest.channel {
+        for egress in &channel.egress {
+            declared.extend(
+                egress
+                    .credential_handle
+                    .iter()
+                    .map(|handle| handle.as_str()),
+            );
+            declared.extend(
+                egress
+                    .body_credentials
+                    .iter()
+                    .map(|credential| credential.handle.as_str()),
+            );
+        }
+    }
+    existing
+        .credential_bindings()
+        .iter()
+        .filter(|binding| declared.contains(binding.credential_handle().as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Attach a verified registry receipt to an installation created by a release
+/// that predated durable receipts. The package bytes must already have been
+/// matched by the caller; this preserves every existing installation field
+/// except the manifest reference derived from those same bytes.
+pub fn prepare_registry_receipt_adoption(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
+    let update = prepare_registry_update(available, existing)?;
+    let installation =
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: existing.installation_id().clone(),
+            extension_id: existing.extension_id().clone(),
+            manifest_ref: update.installation.manifest_ref().clone(),
+            credential_bindings: existing.credential_bindings().to_vec(),
+            updated_at: existing.updated_at(),
+            owner: existing.owner().clone(),
+        })
+        .map_err(map_extension_installation_error)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record: update.manifest_record,
         installation,
     })
 }
@@ -259,7 +325,7 @@ async fn migrate_host_bundled_manifest_hash(
         extension_id = %installation.extension_id(),
         "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
     );
-    let migration_plan = prepare_manifest_migration(available, installation)?;
+    let migration_plan = prepare_registry_update(available, installation)?;
     installation_store
         .upsert_manifest_and_installation(
             migration_plan.manifest_record,

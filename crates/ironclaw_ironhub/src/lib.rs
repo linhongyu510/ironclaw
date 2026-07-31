@@ -9,13 +9,16 @@
 //!   runtime egress port, verify it against deployment-supplied keys, cache it,
 //!   and classify entries (provenance tiers, unverified-acknowledgement gates,
 //!   pinned private origins).
-//! - **install** ([`service`], [`package`]): download digest-verified
-//!   artifacts, assemble a package around the registry-published extension
-//!   manifest, and drive `ironclaw_extension_host`'s lifecycle manager and the
-//!   scoped skill-management port.
+//! - **lifecycle** ([`service`], [`package`]): download digest-verified
+//!   artifacts, persist a redacted immutable install receipt, report installed
+//!   status, and drive explicit digest-pinned updates through
+//!   `ironclaw_extension_host`'s lifecycle manager or the scoped
+//!   skill-management port. Updates require fresh acknowledgement when tool
+//!   authority or skill instructions change and compensate to the prior
+//!   package on failure; there is no background auto-update path.
 //! - **tool surface** ([`capabilities`], [`render`]): the
-//!   `builtin.ironhub_search` / `_info` / `_install` model-callable
-//!   capabilities.
+//!   `builtin.ironhub_search` / `_info` / `_status` / `_install` / `_update`
+//!   model-callable capabilities.
 //! - **deep-link install** ([`agent_link`], [`link_service`]): the
 //!   HMAC-shared-key register/deliver flow behind
 //!   `ironclaw_product::IronhubLinkService`; link state persists through
@@ -47,13 +50,16 @@ pub use agent_link::{IronhubSharedKey, IronhubSharedKeyError};
 pub use artifact_hosts::artifact_network_policy;
 pub const IRONHUB_SEARCH_CAPABILITY_ID: &str = "builtin.ironhub_search";
 pub const IRONHUB_INFO_CAPABILITY_ID: &str = "builtin.ironhub_info";
+pub const IRONHUB_STATUS_CAPABILITY_ID: &str = "builtin.ironhub_status";
 pub const IRONHUB_INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
+pub const IRONHUB_UPDATE_CAPABILITY_ID: &str = "builtin.ironhub_update";
 pub use link_service::{
     IronhubLinkBuildError, IronhubLinkStateError, IronhubLinkStateStore, RebornIronhubLinkService,
 };
 pub use model::{
     IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
-    IronHubInstallOptions, IronHubPhase, IronHubProvenance, IronHubResponse,
+    IronHubInstallOptions, IronHubInstallationSummary, IronHubPhase, IronHubProvenance,
+    IronHubResponse, IronHubUpdateOptions,
 };
 pub use render::render_reborn_ironhub_response;
 pub use service::{
@@ -69,6 +75,8 @@ mod public_surface_tests {
     fn capability_ids_are_stable_at_the_crate_root() {
         assert_eq!(IRONHUB_SEARCH_CAPABILITY_ID, "builtin.ironhub_search");
         assert_eq!(IRONHUB_INFO_CAPABILITY_ID, "builtin.ironhub_info");
+        assert_eq!(IRONHUB_STATUS_CAPABILITY_ID, "builtin.ironhub_status");
         assert_eq!(IRONHUB_INSTALL_CAPABILITY_ID, "builtin.ironhub_install");
+        assert_eq!(IRONHUB_UPDATE_CAPABILITY_ID, "builtin.ironhub_update");
     }
 }

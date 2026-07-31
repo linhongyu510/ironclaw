@@ -18,20 +18,24 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_product::{IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService};
+use ironclaw_product::{
+    IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService, LifecyclePackageKind,
+    LifecyclePackageRef,
+};
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use super::agent_link::{InstallDelivery, IronhubSharedKey};
 use super::catalog::{
-    IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_private_manifest,
-    validate_private_manifest_origin, verify_signed_manifest_with_keys,
+    IronHubManifestSource, classify_gate_and_digest, sha256_hex, skill_artifact_digest,
+    tool_artifact_digest, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest_with_keys,
 };
 use super::link_service::IronhubLinkStateStore;
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
+    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry, IronHubUpdateOptions,
 };
 use super::service::{
     IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
@@ -217,6 +221,47 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
         IronHubManifestSource::Public,
     )
     .expect("operator acknowledgement permits install");
+}
+
+#[tokio::test]
+async fn force_install_is_rejected_before_catalog_or_artifact_download() {
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        "force-install-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "force-install-owner",
+        );
+    let manifest_url = "https://hub.ironclaw.com/tests/force-install/manifest.json";
+    let egress = Arc::new(RecordingEgress::new([(
+        manifest_url,
+        b"must not be fetched".to_vec(),
+    )]));
+    let service = configured_service(
+        services.skill_management,
+        services.extension_management,
+        egress.clone(),
+        scope,
+        manifest_url,
+    );
+
+    let error = service
+        .execute(install_named_command(
+            "installed-tool",
+            IronHubEntryKind::Tool,
+            true,
+        ))
+        .await
+        .expect_err("force install is not an update path");
+
+    assert!(error.to_string().contains("ironhub_status"));
+    assert!(
+        egress.requests().is_empty(),
+        "force replacement must fail before any untrusted bytes are downloaded"
+    );
 }
 
 #[test]
@@ -572,10 +617,15 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     );
     let egress = Arc::new(RecordingEgress::new([
         (manifest_url, manifest),
+        (tool_url, tool_bytes.clone()),
         (tool_url, tool_bytes),
+        (capabilities_url, capabilities_bytes.clone()),
         (capabilities_url, capabilities_bytes),
         (tool_manifest_url, published_tool_manifest("0.1.0")),
+        (tool_manifest_url, published_tool_manifest("0.1.0")),
         (input_schema_url, published_input_schema()),
+        (input_schema_url, published_input_schema()),
+        (output_schema_url, published_output_schema()),
         (output_schema_url, published_output_schema()),
         (skill_url, skill_bytes),
     ]));
@@ -662,20 +712,139 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     assert_eq!(skill.phase, IronHubPhase::Installed);
     let installed_skill = services
         .skill_management
-        .read_content_for_scope(scope, "installed-skill")
+        .read_content_for_scope(scope.clone(), "installed-skill")
         .await
         .expect("skill manager reads installed skill");
     assert!(installed_skill.content.contains("# Installed"));
+    let tool_manifest_record = services
+        .extension_management
+        .installation_store_handle()
+        .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+        .await
+        .expect("tool manifest read")
+        .expect("tool manifest persisted");
+    assert_eq!(
+        tool_manifest_record
+            .registry_provenance()
+            .expect("tool registry receipt")
+            .package_version(),
+        "0.1.0"
+    );
+    let installation_store = services.extension_management.installation_store_handle();
+    let installation = installation_store
+        .get_installation(
+            &ironclaw_extensions::ExtensionInstallationId::new("installed-tool")
+                .expect("installation id"),
+        )
+        .await
+        .expect("installation read")
+        .expect("tool installation");
+    installation_store
+        .upsert_manifest_and_installation(
+            tool_manifest_record.clone().with_registry_provenance(None),
+            installation,
+        )
+        .await
+        .expect("simulate a pre-receipt install");
+    service
+        .execute(IronHubCommand::Install {
+            name: "installed-tool".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Tool),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("an identical verified reinstall adopts a durable receipt");
+    let adopted = installation_store
+        .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+        .await
+        .expect("adopted manifest read")
+        .expect("adopted manifest");
+    assert!(
+        adopted.registry_provenance().is_some(),
+        "pre-receipt installs become update-manageable without forced replacement"
+    );
+    let skill_metadata = services
+        .skill_management
+        .install_metadata_for_scope(scope.clone(), "installed-skill")
+        .await
+        .expect("skill metadata read")
+        .expect("skill metadata persisted");
+    assert_eq!(
+        skill_metadata
+            .registry_provenance
+            .as_ref()
+            .expect("skill registry receipt")
+            .package_version(),
+        "0.1.0"
+    );
+    let status = service
+        .execute(IronHubCommand::Status {
+            name: None,
+            kind: None,
+        })
+        .await
+        .expect("installed status resolves from durable receipts");
+    assert_eq!(status.phase, IronHubPhase::Status);
+    assert_eq!(status.entries.len(), 2);
+    assert!(status.entries.iter().all(|entry| {
+        entry
+            .installation
+            .as_ref()
+            .is_some_and(|installation| installation.update_available == Some(false))
+    }));
 
     let requests = egress.requests();
-    // Catalog, then the tool's manifest, wasm, capabilities, and two schemas,
-    // then the skill.
-    assert_eq!(requests.len(), 7);
+    // Catalog, two verified tool downloads (initial + receipt adoption),
+    // including their schemas, then the skill.
+    assert_eq!(requests.len(), 12);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
             && request.capability_id.as_str() == super::IRONHUB_INSTALL_CAPABILITY_ID
     }));
+
+    services
+        .extension_management
+        .remove(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "installed-tool")
+                .expect("package ref"),
+            &scope,
+            Some(&scope.user_id),
+        )
+        .await
+        .expect("tool removal");
+    services
+        .skill_management
+        .remove_for_scope(scope.clone(), "installed-skill")
+        .await
+        .expect("skill removal");
+    assert!(
+        installation_store
+            .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+            .await
+            .expect("manifest read")
+            .is_none(),
+        "tool removal deletes its lifecycle receipt"
+    );
+    assert!(
+        services
+            .skill_management
+            .install_metadata_for_scope(scope.clone(), "installed-skill")
+            .await
+            .expect("skill metadata read")
+            .is_none(),
+        "skill removal deletes its lifecycle receipt"
+    );
+    let removed_status = service
+        .execute(IronHubCommand::Status {
+            name: None,
+            kind: None,
+        })
+        .await
+        .expect("status after removal");
+    assert!(removed_status.entries.is_empty());
 }
 
 #[tokio::test]
@@ -882,8 +1051,8 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
 }
 
 #[tokio::test]
-async fn forced_tool_replacement_failure_restores_previous_package() {
-    let (services, _scope, error) = fail_forced_tool_replacement("tool-rollback", false).await;
+async fn tool_update_failure_restores_previous_package() {
+    let (services, _scope, error) = fail_tool_update("tool-rollback", false).await;
 
     assert!(matches!(error, IronHubCommandError::Product(_)));
     let manifest_path =
@@ -911,11 +1080,156 @@ async fn forced_tool_replacement_failure_restores_previous_package() {
 }
 
 #[tokio::test]
-async fn forced_tool_replacement_failure_preserves_tenant_shared_scope() {
-    let (services, _scope, error) =
-        fail_forced_tool_replacement("tenant-scope-rollback", true).await;
+async fn tool_update_succeeds_and_persists_the_target_receipt() {
+    let (services, _scope, result) =
+        run_tool_update("tool-update-success", false, false, None, None, false).await;
+    let response = result.expect("verified target update succeeds");
 
-    assert!(matches!(error, IronHubCommandError::Product(_)));
+    assert_eq!(response.phase, IronHubPhase::Updated);
+    assert_eq!(
+        response.entries[0]
+            .installation
+            .as_ref()
+            .expect("updated installation summary")
+            .version,
+        "0.2.0"
+    );
+    let manifest = services
+        .extension_management
+        .installation_store_handle()
+        .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+        .await
+        .expect("manifest read")
+        .expect("manifest remains installed");
+    assert_eq!(
+        manifest
+            .registry_provenance()
+            .expect("target receipt is durable")
+            .package_version(),
+        "0.2.0"
+    );
+    assert!(
+        services
+            .extension_management
+            .active_extensions_for_test()
+            .snapshot()
+            .get_extension(&ExtensionId::new("installed-tool").expect("extension id"))
+            .is_some(),
+        "the updated package is active"
+    );
+}
+
+#[tokio::test]
+async fn tool_update_rejects_a_stale_installed_digest_without_mutation() {
+    let stale = format!("sha256:{}", "0".repeat(64));
+    let (services, _scope, result) =
+        run_tool_update("tool-update-stale", false, false, Some(stale), None, false).await;
+    let error = result.expect_err("stale status pin must reject the update");
+
+    assert!(
+        error
+            .to_string()
+            .contains("changed since update was checked")
+    );
+    let manifest = services
+        .extension_management
+        .installation_store_handle()
+        .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+        .await
+        .expect("manifest read")
+        .expect("old manifest remains installed");
+    assert_eq!(
+        manifest
+            .registry_provenance()
+            .expect("old receipt remains durable")
+            .package_version(),
+        "0.1.0"
+    );
+}
+
+#[tokio::test]
+async fn tool_update_requires_acknowledgement_for_authority_changes() {
+    let changed_manifest = String::from_utf8(published_tool_manifest("0.2.0"))
+        .expect("manifest UTF-8")
+        .replace(
+            r#"effects = ["network"]"#,
+            r#"effects = ["network", "external_write"]"#,
+        )
+        .into_bytes();
+    let (services, _scope, result) = run_tool_update(
+        "tool-update-authority",
+        false,
+        false,
+        None,
+        Some(changed_manifest),
+        false,
+    )
+    .await;
+    let error = result.expect_err("authority expansion requires acknowledgement");
+
+    assert!(error.to_string().contains("effects changed"));
+    let manifest = services
+        .extension_management
+        .installation_store_handle()
+        .get_manifest(&ExtensionId::new("installed-tool").expect("extension id"))
+        .await
+        .expect("manifest read")
+        .expect("old manifest remains installed");
+    assert_eq!(
+        manifest
+            .registry_provenance()
+            .expect("old receipt remains durable")
+            .package_version(),
+        "0.1.0"
+    );
+}
+
+#[tokio::test]
+async fn tool_update_applies_an_acknowledged_authority_change() {
+    let changed_manifest = String::from_utf8(published_tool_manifest("0.2.0"))
+        .expect("manifest UTF-8")
+        .replace(
+            r#"effects = ["network"]"#,
+            r#"effects = ["network", "external_write"]"#,
+        )
+        .into_bytes();
+    let (services, _scope, result) = run_tool_update(
+        "tool-update-authority-ack",
+        false,
+        false,
+        None,
+        Some(changed_manifest),
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("acknowledged update succeeds").phase,
+        IronHubPhase::Updated
+    );
+    let active = services
+        .extension_management
+        .active_extensions_for_test()
+        .snapshot();
+    let package = active
+        .get_extension(&ExtensionId::new("installed-tool").expect("extension id"))
+        .expect("updated tool is active");
+    assert!(
+        package.manifest.capabilities[0]
+            .effects
+            .contains(&ironclaw_host_api::capability::EffectKind::ExternalWrite)
+    );
+}
+
+#[tokio::test]
+async fn tool_update_rejects_tenant_shared_installation_without_mutation() {
+    let (services, _scope, error) = fail_tool_update("tenant-scope-rollback", true).await;
+
+    assert!(matches!(
+        error,
+        IronHubCommandError::InvalidInput { ref reason }
+            if reason.contains("shared by multiple users")
+    ));
     let installation = services
         .extension_management
         .installation_store_handle()
@@ -930,7 +1244,7 @@ async fn forced_tool_replacement_failure_preserves_tenant_shared_scope() {
 }
 
 #[tokio::test]
-async fn forced_skill_replacement_failure_restores_installed_skill_without_exposing_source_url() {
+async fn skill_update_failure_restores_installed_skill_without_exposing_source_url() {
     let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-skill-rollback-owner",
         None,
@@ -950,17 +1264,18 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     let old_skill_url = "https://hub.ironclaw.com/tests/skill-rollback/old-SKILL.md";
     let old_skill =
         b"---\nname: installed-skill\ndescription: Old IronHub skill\n---\n# Old\n".to_vec();
-    let old_manifest = signed_manifest(
-        skill_manifest_json(
-            "installed-skill",
-            "2026-01-03T00:00:00Z",
-            "0.1.0",
-            old_skill_url,
-            old_skill.len(),
-            &sha256_hex(&old_skill),
-        ),
-        &test_signing_key(),
+    let old_manifest_json = skill_manifest_json(
+        "installed-skill",
+        "2026-01-03T00:00:00Z",
+        "0.1.0",
+        old_skill_url,
+        old_skill.len(),
+        &sha256_hex(&old_skill),
     );
+    let old_catalog: IronHubManifest =
+        serde_json::from_str(&old_manifest_json).expect("old skill catalog");
+    let old_artifact_digest = skill_artifact_digest(&old_catalog.skills[0]);
+    let old_manifest = signed_manifest(old_manifest_json, &test_signing_key());
     let old_egress = Arc::new(RecordingEgress::new([
         (old_manifest_url, old_manifest),
         (old_skill_url, old_skill.clone()),
@@ -992,11 +1307,10 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
         .write_file(&companion_path, companion_bytes)
         .await
         .expect("seed old companion file");
-    let malformed_metadata = br#"{"source":"installed_url","source_url":"unterminated"#;
-    skill_filesystem
-        .write_file(&metadata_path, malformed_metadata)
+    let old_metadata = skill_filesystem
+        .read_file(&metadata_path)
         .await
-        .expect("seed malformed install metadata");
+        .expect("old install metadata");
 
     skill_filesystem.add_fault(
         Fault::on(FilesystemOperation::WriteFile)
@@ -1008,29 +1322,41 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
     let new_skill_url = "https://hub.ironclaw.com/tests/skill-rollback/new-SKILL.md";
     let new_skill =
         b"---\nname: installed-skill\ndescription: New IronHub skill\n---\n# New\n".to_vec();
-    let new_manifest = signed_manifest(
-        skill_manifest_json(
-            "installed-skill",
-            "2026-01-04T00:00:00Z",
-            "0.2.0",
-            new_skill_url,
-            new_skill.len(),
-            &sha256_hex(&new_skill),
-        ),
-        &test_signing_key(),
+    let new_manifest_json = skill_manifest_json(
+        "installed-skill",
+        "2026-01-04T00:00:00Z",
+        "0.2.0",
+        new_skill_url,
+        new_skill.len(),
+        &sha256_hex(&new_skill),
     );
+    let new_catalog: IronHubManifest =
+        serde_json::from_str(&new_manifest_json).expect("new skill catalog");
+    let new_artifact_digest = skill_artifact_digest(&new_catalog.skills[0]);
+    let new_manifest = signed_manifest(new_manifest_json, &test_signing_key());
     let new_egress = Arc::new(RecordingEgress::new([
         (new_manifest_url, new_manifest),
         (new_skill_url, new_skill),
     ]));
-    let error = configured_service(
+    let error = configured_service_for_capability(
         Arc::clone(&skill_management),
         Arc::clone(&services.extension_management),
         new_egress,
         scope.clone(),
         new_manifest_url,
+        super::IRONHUB_UPDATE_CAPABILITY_ID,
     )
-    .execute(install_command(IronHubEntryKind::Skill, true))
+    .execute(IronHubCommand::Update {
+        name: "installed-skill".to_string(),
+        options: IronHubUpdateOptions {
+            kind: Some(IronHubEntryKind::Skill),
+            expected_installed_artifact_digest: old_artifact_digest,
+            expected_version: "0.2.0".to_string(),
+            expected_artifact_digest: new_artifact_digest,
+            acknowledge_authority_change: true,
+            private_manifest_url: None,
+        },
+    })
     .await
     .expect_err("injected replacement failure reaches compensation");
 
@@ -1041,16 +1367,16 @@ async fn forced_skill_replacement_failure_restores_installed_skill_without_expos
         .filter(|path| path.as_str().contains(".ironclaw-install.json"))
         .count();
     assert_eq!(
-        metadata_writes, 4,
-        "old install, malformed fixture, failed replacement, and compensation must write metadata"
+        metadata_writes, 3,
+        "old install, failed update, and compensation must write metadata"
     );
     assert_eq!(
         skill_filesystem
             .read_file(&metadata_path)
             .await
             .expect("restored metadata"),
-        malformed_metadata,
-        "compensation must restore malformed metadata byte-for-byte"
+        old_metadata,
+        "compensation must restore registry metadata byte-for-byte"
     );
     assert_eq!(
         skill_filesystem
@@ -1214,13 +1540,31 @@ async fn execute_rejects_older_generated_at_after_cache_eviction() {
     ));
 }
 
-async fn fail_forced_tool_replacement(
+async fn fail_tool_update(
     fixture: &str,
     tenant_shared: bool,
 ) -> (
     ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
     ResourceScope,
     IronHubCommandError,
+) {
+    let (services, scope, result) =
+        run_tool_update(fixture, tenant_shared, true, None, None, false).await;
+    let error = result.expect_err("injected replacement failure reaches compensation");
+    (services, scope, error)
+}
+
+async fn run_tool_update(
+    fixture: &str,
+    tenant_shared: bool,
+    inject_failure: bool,
+    expected_current_digest: Option<String>,
+    target_manifest: Option<Vec<u8>>,
+    acknowledge_authority_change: bool,
+) -> (
+    ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    ResourceScope,
+    Result<super::model::IronHubResponse, IronHubCommandError>,
 ) {
     let owner = format!("ironhub-{fixture}-owner");
     let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
@@ -1245,22 +1589,25 @@ async fn fail_forced_tool_replacement(
         format!("https://hub.ironclaw.com/tests/{fixture}/old-input-schema.json");
     let old_output_schema_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/old-output-schema.json");
-    let old_manifest = signed_manifest(
-        tool_manifest_json(ToolManifestFixture {
-            generated_at: "2026-01-03T00:00:00Z",
-            version: "0.1.0",
-            tool_url: &old_tool_url,
-            tool_size: tool_bytes.len(),
-            tool_sha: &sha256_hex(&tool_bytes),
-            capabilities_url: &old_capabilities_url,
-            capabilities_size: capabilities_bytes.len(),
-            capabilities_sha: &sha256_hex(&capabilities_bytes),
-            tool_manifest_url: &old_tool_manifest_url,
-            input_schema_url: &old_input_schema_url,
-            output_schema_url: &old_output_schema_url,
-        }),
-        &test_signing_key(),
-    );
+    let old_published_manifest = published_tool_manifest("0.1.0");
+    let old_manifest_json = tool_manifest_json(ToolManifestFixture {
+        generated_at: "2026-01-03T00:00:00Z",
+        version: "0.1.0",
+        tool_url: &old_tool_url,
+        tool_size: tool_bytes.len(),
+        tool_sha: &sha256_hex(&tool_bytes),
+        capabilities_url: &old_capabilities_url,
+        capabilities_size: capabilities_bytes.len(),
+        capabilities_sha: &sha256_hex(&capabilities_bytes),
+        tool_manifest_url: &old_tool_manifest_url,
+        input_schema_url: &old_input_schema_url,
+        output_schema_url: &old_output_schema_url,
+        tool_manifest: &old_published_manifest,
+    });
+    let old_catalog: IronHubManifest =
+        serde_json::from_str(&old_manifest_json).expect("old catalog");
+    let old_artifact_digest = tool_artifact_digest(&old_catalog.tools[0]);
+    let old_manifest = signed_manifest(old_manifest_json, &test_signing_key());
     configured_service(
         Arc::clone(&services.skill_management),
         Arc::clone(&services.extension_management),
@@ -1268,10 +1615,7 @@ async fn fail_forced_tool_replacement(
             (old_manifest_url.as_str(), old_manifest),
             (old_tool_url.as_str(), tool_bytes.clone()),
             (old_capabilities_url.as_str(), capabilities_bytes.clone()),
-            (
-                old_tool_manifest_url.as_str(),
-                published_tool_manifest("0.1.0"),
-            ),
+            (old_tool_manifest_url.as_str(), old_published_manifest),
             (old_input_schema_url.as_str(), published_input_schema()),
             (old_output_schema_url.as_str(), published_output_schema()),
         ])),
@@ -1297,12 +1641,14 @@ async fn fail_forced_tool_replacement(
             .expect("tenant-shared compatibility owner persisted");
     }
 
-    services.add_filesystem_fault(
-        Fault::on(FilesystemOperation::WriteFile)
-            .path("/system/extensions/installed-tool/manifest.toml")
-            .nth(1)
-            .backend("injected replacement materialization failure"),
-    );
+    if inject_failure {
+        services.add_filesystem_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/system/extensions/installed-tool/manifest.toml")
+                .nth(1)
+                .backend("injected replacement materialization failure"),
+        );
+    }
     let new_manifest_url = format!("https://hub.ironclaw.com/tests/{fixture}/new-manifest.json");
     let new_tool_url = format!("https://hub.ironclaw.com/tests/{fixture}/new-tool.wasm");
     let new_capabilities_url =
@@ -1313,44 +1659,56 @@ async fn fail_forced_tool_replacement(
         format!("https://hub.ironclaw.com/tests/{fixture}/new-input-schema.json");
     let new_output_schema_url =
         format!("https://hub.ironclaw.com/tests/{fixture}/new-output-schema.json");
-    let new_manifest = signed_manifest(
-        tool_manifest_json(ToolManifestFixture {
-            generated_at: "2026-01-04T00:00:00Z",
-            version: "0.2.0",
-            tool_url: &new_tool_url,
-            tool_size: tool_bytes.len(),
-            tool_sha: &sha256_hex(&tool_bytes),
-            capabilities_url: &new_capabilities_url,
-            capabilities_size: capabilities_bytes.len(),
-            capabilities_sha: &sha256_hex(&capabilities_bytes),
-            tool_manifest_url: &new_tool_manifest_url,
-            input_schema_url: &new_input_schema_url,
-            output_schema_url: &new_output_schema_url,
-        }),
-        &test_signing_key(),
-    );
-    let error = configured_service(
+    let new_published_manifest =
+        target_manifest.unwrap_or_else(|| published_tool_manifest("0.2.0"));
+    let new_manifest_json = tool_manifest_json(ToolManifestFixture {
+        generated_at: "2026-01-04T00:00:00Z",
+        version: "0.2.0",
+        tool_url: &new_tool_url,
+        tool_size: tool_bytes.len(),
+        tool_sha: &sha256_hex(&tool_bytes),
+        capabilities_url: &new_capabilities_url,
+        capabilities_size: capabilities_bytes.len(),
+        capabilities_sha: &sha256_hex(&capabilities_bytes),
+        tool_manifest_url: &new_tool_manifest_url,
+        input_schema_url: &new_input_schema_url,
+        output_schema_url: &new_output_schema_url,
+        tool_manifest: &new_published_manifest,
+    });
+    let new_catalog: IronHubManifest =
+        serde_json::from_str(&new_manifest_json).expect("new catalog");
+    let new_artifact_digest = tool_artifact_digest(&new_catalog.tools[0]);
+    let new_manifest = signed_manifest(new_manifest_json, &test_signing_key());
+    let result = configured_service_for_capability(
         Arc::clone(&services.skill_management),
         Arc::clone(&services.extension_management),
         Arc::new(RecordingEgress::new([
             (new_manifest_url.as_str(), new_manifest),
             (new_tool_url.as_str(), tool_bytes),
             (new_capabilities_url.as_str(), capabilities_bytes),
-            (
-                new_tool_manifest_url.as_str(),
-                published_tool_manifest("0.2.0"),
-            ),
+            (new_tool_manifest_url.as_str(), new_published_manifest),
             (new_input_schema_url.as_str(), published_input_schema()),
             (new_output_schema_url.as_str(), published_output_schema()),
         ])),
         scope.clone(),
         &new_manifest_url,
+        super::IRONHUB_UPDATE_CAPABILITY_ID,
     )
-    .execute(install_command(IronHubEntryKind::Tool, true))
-    .await
-    .expect_err("injected replacement failure reaches compensation");
+    .execute(IronHubCommand::Update {
+        name: "installed-tool".to_string(),
+        options: IronHubUpdateOptions {
+            kind: Some(IronHubEntryKind::Tool),
+            expected_installed_artifact_digest: expected_current_digest
+                .unwrap_or(old_artifact_digest),
+            expected_version: "0.2.0".to_string(),
+            expected_artifact_digest: new_artifact_digest,
+            acknowledge_authority_change,
+            private_manifest_url: None,
+        },
+    })
+    .await;
 
-    (services, scope, error)
+    (services, scope, result)
 }
 
 fn configured_service(
@@ -1360,13 +1718,31 @@ fn configured_service(
     scope: ResourceScope,
     manifest_url: &str,
 ) -> IronHubService {
+    configured_service_for_capability(
+        skill_management,
+        extension_management,
+        egress,
+        scope,
+        manifest_url,
+        super::IRONHUB_INSTALL_CAPABILITY_ID,
+    )
+}
+
+fn configured_service_for_capability(
+    skill_management: Arc<ironclaw_skills::ScopedSkillManagementPort>,
+    extension_management: Arc<ironclaw_extension_host::ExtensionLifecycleManager>,
+    egress: Arc<RecordingEgress>,
+    scope: ResourceScope,
+    manifest_url: &str,
+    capability_id: &str,
+) -> IronHubService {
     configure_test_catalog(
         IronHubService::new_with_runtime_egress(
             skill_management,
             extension_management,
             egress,
             scope,
-            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            CapabilityId::new(capability_id).expect("capability id"),
         ),
         manifest_url,
         test_manifest_verify_keys(),
@@ -1628,6 +2004,7 @@ struct ToolManifestFixture<'a> {
     tool_manifest_url: &'a str,
     input_schema_url: &'a str,
     output_schema_url: &'a str,
+    tool_manifest: &'a [u8],
 }
 
 /// The extension manifest IronHub publishes for the fixture tool, shaped like
@@ -1661,10 +2038,14 @@ output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
 
 fn published_tool_manifest_artifact(url: &str, version: &str) -> serde_json::Value {
     let bytes = published_tool_manifest(version);
+    published_tool_manifest_artifact_bytes(url, &bytes)
+}
+
+fn published_tool_manifest_artifact_bytes(url: &str, bytes: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "url": url,
         "size_bytes": bytes.len(),
-        "sha256": sha256_hex(&bytes),
+        "sha256": sha256_hex(bytes),
     })
 }
 
@@ -1706,6 +2087,7 @@ fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
         tool_manifest_url,
         input_schema_url,
         output_schema_url,
+        tool_manifest,
     } = fixture;
     serde_json::json!({
         "version": "1",
@@ -1728,7 +2110,7 @@ fn tool_manifest_json(fixture: ToolManifestFixture<'_>) -> String {
                 "size_bytes": capabilities_size,
                 "sha256": capabilities_sha
             },
-            "manifest": published_tool_manifest_artifact(tool_manifest_url, version),
+            "manifest": published_tool_manifest_artifact_bytes(tool_manifest_url, tool_manifest),
             "schemas": published_tool_schema_artifacts(input_schema_url, output_schema_url)
         }],
         "skills": []

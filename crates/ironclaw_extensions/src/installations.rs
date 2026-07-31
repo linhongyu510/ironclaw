@@ -17,6 +17,7 @@ use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{ExtensionId, SecretHandle, UserId},
     mount::{MountGrant, MountPermissions, MountView},
+    package_lifecycle::RegistryPackageProvenance,
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
@@ -166,6 +167,7 @@ pub struct ExtensionManifestRecord {
     manifest: ExtensionManifestV2,
     resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
+    registry_provenance: Option<RegistryPackageProvenance>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
@@ -221,6 +223,7 @@ impl ExtensionManifestRecord {
             manifest,
             resolved,
             manifest_hash,
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
         })
     }
@@ -240,6 +243,7 @@ impl ExtensionManifestRecord {
             manifest,
             resolved,
             manifest_hash,
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
         })
     }
@@ -252,6 +256,14 @@ impl ExtensionManifestRecord {
         requirements: Vec<ExtensionRemovalCleanupRequirement>,
     ) -> Self {
         self.removal_cleanup_requirements = requirements;
+        self
+    }
+
+    pub fn with_registry_provenance(
+        mut self,
+        provenance: Option<RegistryPackageProvenance>,
+    ) -> Self {
+        self.registry_provenance = provenance;
         self
     }
 
@@ -274,6 +286,10 @@ impl ExtensionManifestRecord {
 
     pub fn manifest_hash(&self) -> Option<&ManifestHash> {
         self.manifest_hash.as_ref()
+    }
+
+    pub fn registry_provenance(&self) -> Option<&RegistryPackageProvenance> {
+        self.registry_provenance.as_ref()
     }
 
     pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
@@ -3134,6 +3150,8 @@ struct WireManifestRecord {
     resolved: Option<ResolvedExtensionManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registry_provenance: Option<RegistryPackageProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
@@ -3149,7 +3167,11 @@ impl WireManifestRecord {
             resolved,
             self.manifest_hash,
         )
-        .map(|record| record.with_removal_cleanup_requirements(self.removal_cleanup_requirements))
+        .map(|record| {
+            record
+                .with_registry_provenance(self.registry_provenance)
+                .with_removal_cleanup_requirements(self.removal_cleanup_requirements)
+        })
     }
 }
 
@@ -3160,6 +3182,7 @@ impl From<&ExtensionManifestRecord> for WireManifestRecord {
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             resolved: Some(record.resolved().clone()),
             manifest_hash: record.manifest_hash().cloned(),
+            registry_provenance: record.registry_provenance().cloned(),
             removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
         }
     }
@@ -3522,7 +3545,12 @@ fn map_extension_state_cas_error(
 #[cfg(test)]
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
+    use ironclaw_host_api::{
+        host_port::HostPortCatalog,
+        ids::ExtensionId,
+        package_lifecycle::{RegistryPackageProvenance, RegistryPackageProvenanceParts},
+        path::VirtualPath,
+    };
 
     use super::*;
     use crate::ManifestSource;
@@ -3591,6 +3619,7 @@ mod tests {
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             resolved: None,
             manifest_hash: record.manifest_hash().cloned(),
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
         };
         let payload = serde_json::to_value(wire).expect("legacy wire payload");
@@ -3637,6 +3666,57 @@ mod tests {
             .expect("load migrated row")
             .expect("migrated row exists");
         assert_eq!(loaded.resolved(), record.resolved());
+    }
+
+    #[tokio::test]
+    async fn registry_receipt_survives_store_reconstruction() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root =
+            VirtualPath::new("/system/extensions/.installations/receipt-test").expect("valid root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("initial store");
+        let provenance = RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+            registry: "ironhub".to_string(),
+            repository: "nearai/ironhub".to_string(),
+            package_version: "0.2.0".to_string(),
+            release_tag: "v0.2.0".to_string(),
+            catalog_origin: "https://hub.ironclaw.com".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            manifest_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            installed_at: chrono::Utc::now(),
+        })
+        .expect("valid provenance");
+        let record = manifest_record("registry-receipt", Some("hash-receipt"))
+            .with_registry_provenance(Some(provenance.clone()));
+        store
+            .upsert_manifest_and_installation(
+                record,
+                installation("registry-receipt", Some("hash-receipt")),
+            )
+            .await
+            .expect("receipt persisted with install");
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("reopen store");
+        let loaded = reopened
+            .get_manifest(&ExtensionId::new("registry-receipt").expect("extension id"))
+            .await
+            .expect("manifest read")
+            .expect("manifest exists");
+        assert_eq!(loaded.registry_provenance(), Some(&provenance));
     }
 
     #[tokio::test]

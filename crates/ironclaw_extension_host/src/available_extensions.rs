@@ -9,6 +9,7 @@ use ironclaw_host_api::{
     channel::ChannelConnectionStrategy,
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
+    package_lifecycle::RegistryPackageProvenance,
     path::VirtualPath,
     surface::CapabilitySurfaceKind,
 };
@@ -97,6 +98,9 @@ pub struct AvailableExtensionPackage {
     /// `HostBundled`, which is the only source eligible for
     /// first-party/system trust and runtime claims.
     pub source: ManifestSource,
+    /// Immutable registry identity and digests persisted with registry
+    /// installs. Host-bundled and local-upload packages leave this unset.
+    pub registry_provenance: Option<RegistryPackageProvenance>,
     pub package: ExtensionPackage,
     /// Trusted host-catalog declarations for mandatory external cleanup before
     /// local removal. Never inferred from manifest presentation metadata.
@@ -814,6 +818,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::HostBundled,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -1148,6 +1153,7 @@ where
         // compiled inventory whose ids are skipped above. This prevents both
         // upload -> restart trust laundering and registry provenance loss.
         source: stamp,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -2805,6 +2811,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            registry_provenance: None,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),

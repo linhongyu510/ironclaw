@@ -92,6 +92,13 @@ impl BuiltinCapabilityPolicy {
             .map(|grant| &grant.capability)
     }
 
+    pub(crate) fn ironhub_lifecycle_capability_ids(&self) -> impl Iterator<Item = &CapabilityId> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.mounts == CapabilityMountProfile::IronhubLifecycle)
+            .map(|grant| &grant.capability)
+    }
+
     pub(crate) fn builtin_grants(
         &self,
         grantee: &ExtensionId,
@@ -264,6 +271,7 @@ pub(crate) enum CapabilityMountProfile {
     SkillManagement,
     Memory,
     SystemExtensionsLifecycle,
+    IronhubLifecycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -438,6 +446,13 @@ fn constraint_terms(
         CapabilityMountProfile::SkillManagement => skill_mounts.clone(),
         CapabilityMountProfile::Memory => memory_mounts.clone(),
         CapabilityMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
+        CapabilityMountProfile::IronhubLifecycle => {
+            let mut mounts = skill_mounts.clone();
+            mounts
+                .mounts
+                .extend(system_extensions_mounts.mounts.clone());
+            mounts
+        }
     };
     let network = match source.network() {
         CapabilityNetworkProfile::Default => NetworkPolicy::default(),
@@ -497,6 +512,7 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
                 EffectKind::UseSecret,
+                EffectKind::ModifyExtension,
                 EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite,
             ]
@@ -608,7 +624,9 @@ mod tests {
         for capability in [
             "builtin.ironhub_search",
             "builtin.ironhub_info",
+            "builtin.ironhub_status",
             "builtin.ironhub_install",
+            "builtin.ironhub_update",
         ] {
             let grant = policy
                 .grant(&CapabilityId::new(capability).expect("capability id"))
@@ -617,6 +635,18 @@ mod tests {
                 grant.network,
                 CapabilityNetworkProfile::IronhubArtifacts,
                 "{capability} must not inherit developer wildcard egress"
+            );
+            let expected_mounts = if matches!(
+                capability,
+                "builtin.ironhub_status" | "builtin.ironhub_install" | "builtin.ironhub_update"
+            ) {
+                CapabilityMountProfile::IronhubLifecycle
+            } else {
+                CapabilityMountProfile::Ambient
+            };
+            assert_eq!(
+                grant.mounts, expected_mounts,
+                "{capability} must receive exactly the lifecycle mounts it uses"
             );
         }
         assert_trigger_grant(

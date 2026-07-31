@@ -1,3 +1,4 @@
+use ironclaw_host_api::package_lifecycle::RegistryPackageProvenance;
 use serde::{Deserialize, Serialize};
 
 pub const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
@@ -11,6 +12,8 @@ pub struct InstalledSkillMetadata {
     pub source_url: Option<String>,
     #[serde(default)]
     pub source_subdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_provenance: Option<RegistryPackageProvenance>,
 }
 
 impl InstalledSkillMetadata {
@@ -19,6 +22,19 @@ impl InstalledSkillMetadata {
             source: Some(InstalledSkillMetadataSource::InstalledUrl),
             source_url: source_url.map(str::to_string),
             source_subdir: None,
+            registry_provenance: None,
+        }
+    }
+
+    pub fn installed_registry(
+        source_url: Option<&str>,
+        provenance: RegistryPackageProvenance,
+    ) -> Self {
+        Self {
+            source: Some(InstalledSkillMetadataSource::InstalledUrl),
+            source_url: source_url.map(str::to_string),
+            source_subdir: None,
+            registry_provenance: Some(provenance),
         }
     }
 
@@ -47,5 +63,40 @@ impl InstalledSkillMetadataSource {
         match self {
             Self::InstalledUrl => "installed_url",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ironclaw_host_api::package_lifecycle::{
+        RegistryPackageProvenance, RegistryPackageProvenanceParts,
+    };
+
+    use super::InstalledSkillMetadata;
+
+    #[test]
+    fn registry_receipt_round_trips_in_the_install_sidecar() {
+        let provenance = RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+            registry: "ironhub".to_string(),
+            repository: "nearai/ironhub".to_string(),
+            package_version: "1.2.3".to_string(),
+            release_tag: "v1.2.3".to_string(),
+            catalog_origin: "https://hub.ironclaw.com".to_string(),
+            artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            manifest_digest: None,
+            installed_at: Utc::now(),
+        })
+        .expect("valid provenance");
+        let metadata = InstalledSkillMetadata::installed_registry(
+            Some("https://hub.ironclaw.com"),
+            provenance,
+        );
+        let bytes = metadata.to_pretty_json().expect("serialize sidecar");
+        let restored: InstalledSkillMetadata =
+            serde_json::from_slice(&bytes).expect("deserialize sidecar");
+
+        assert_eq!(restored, metadata);
+        assert!(!String::from_utf8(bytes).expect("UTF-8 JSON").contains('?'));
     }
 }
