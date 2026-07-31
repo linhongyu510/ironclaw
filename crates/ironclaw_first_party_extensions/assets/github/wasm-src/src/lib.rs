@@ -1653,6 +1653,34 @@ mod tests {
     }
 
     #[test]
+    fn search_issues_pull_requests_accepts_self_qualifiers_without_identity_lookup() {
+        for (field, qualifier) in [
+            ("author", "author"),
+            ("assignee", "assignee"),
+            ("involves", "involves"),
+        ] {
+            test_support::set_response(Ok(json!({"items": []}).to_string()));
+
+            execute_inner(
+                &format!(
+                    r#"{{"repo":"nearai/ironclaw","type":"pr","{field}":"@me","limit":5}}"#
+                ),
+                Some(r#"{"capability_id":"github.search_issues_pull_requests"}"#),
+            )
+            .expect("self-scoped search qualifier should be accepted");
+
+            let requests = test_support::requests();
+            assert_eq!(requests.len(), 1, "{field} should require one search request");
+            assert_eq!(
+                requests[0].path,
+                format!(
+                    "/search/issues?q=repo%3Anearai%2Fironclaw%20{qualifier}%3A%40me%20is%3Apr&per_page=5"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn search_issues_pull_requests_compacts_items_and_preserves_envelope_and_errors() {
         let large_body = "x".repeat(32 * 1024);
         let provider_items = (0..100)

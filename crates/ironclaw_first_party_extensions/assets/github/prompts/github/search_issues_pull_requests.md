@@ -2,7 +2,9 @@ Use `github.search_issues_pull_requests` to search GitHub issues and pull reques
 
 The `sort` field accepts GitHub issue-search sorts including `comments`, `created`, `updated`, reaction sorts, and `interactions`.
 
-For requests about "my" issues or pull requests, first call `github.get_authenticated_user`, then pass the returned login in `author`. Prefer the structured `owner`, `repo`, `author`, `state`, and `type` fields over duplicating those qualifiers in `query`.
+For self-scoped requests, use `@me` directly without first calling `github.get_authenticated_user`. Match the relationship the user named: use `author` for items they created, `assignee` for items assigned to them, and `involves` for items they participated in. Use a focused `query` for relationships without a structured field, such as `user-review-requested:@me`. Do not automatically interpret an ambiguous "my issues" or "my pull requests" as authorship; use the surrounding request or ask which relationship they mean when it changes the answer.
+
+Prefer the structured `owner`, `repo`, `author`, `assignee`, `involves`, `state`, and `type` fields over duplicating those qualifiers in `query`.
 
 The result keeps GitHub's `total_count`, `incomplete_results`, and `items` search envelope while returning compact item summaries with the repository URL, number, title, type marker, state/draft status, URL, author, labels, assignees, milestone, comment count, timestamps, and score. Use `page` and `limit` to continue through results. For bodies or other full detail, call `github.get_pull_request` for pull request items or `github.get_issue` for issue items.
 

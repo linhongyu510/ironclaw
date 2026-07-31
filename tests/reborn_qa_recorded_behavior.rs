@@ -421,27 +421,22 @@ async fn contract_github_open_pr_priority_uses_scoped_search() {
 
     assert_eq!(
         calls.len(),
-        2,
-        "the promoted priority-list workflow must stay within its two-call budget: {calls:#?}"
+        1,
+        "the single-page authored-PR fixture should need one self-scoped search: {calls:#?}"
     );
-    assert_tool_sequence(
-        &trace,
-        &[
-            "github.get_authenticated_user",
-            "github.search_issues_pull_requests",
-        ],
-    );
+    assert_tool_sequence(&trace, &["github.search_issues_pull_requests"]);
     assert_tool_called_with(
         &trace,
         "github.search_issues_pull_requests",
         &[
             r#""owner":"nearai""#,
             r#""repo":"ironclaw""#,
-            r#""author":"fixture-user""#,
+            r#""author":"@me""#,
             r#""state":"open""#,
             r#""type":"pr""#,
         ],
     );
+    assert_tool_not_called(&trace, "github.get_authenticated_user");
     assert_tool_not_called(&trace, "github.list_pull_requests");
     assert_tool_not_called(&trace, "builtin.result_read");
 

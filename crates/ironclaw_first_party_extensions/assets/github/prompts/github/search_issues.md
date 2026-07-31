@@ -1,6 +1,6 @@
 Use `github.search_issues` for read-only discovery of GitHub issues and pull requests.
 
-Provide a focused GitHub search query in `query`. Include qualifiers such as `repo:owner/name`, `org:name`, `is:issue`, `is:pr`, `state:open`, labels, authors, assignees, or `involves:@me` when the user asks for a narrow result set.
+Provide a focused GitHub search query in `query`. Include qualifiers such as `repo:owner/name`, `org:name`, `is:issue`, `is:pr`, `state:open`, labels, `author:@me`, `assignee:@me`, `involves:@me`, or `user-review-requested:@me` when the user asks for a narrow result set. Match the relationship the user actually named instead of treating every reference to "my" resources as authorship.
 
 The result uses the same compact `total_count`, `incomplete_results`, and `items` envelope as `github.search_issues_pull_requests`. Use `page` and `limit` for pagination, then use `github.get_pull_request` or `github.get_issue` when full detail is needed for one result.
 

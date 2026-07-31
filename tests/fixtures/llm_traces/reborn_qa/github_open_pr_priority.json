@@ -14,7 +14,7 @@
     "owning_journey": "github_open_pr_priority",
     "deterministic_test": {
       "command": "cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior contract_github_open_pr_priority_uses_scoped_search -- --exact",
-      "assertion": "The promoted trace uses exactly get_authenticated_user followed by one author-scoped pull request search and never uses list_pull_requests or result_read."
+      "assertion": "The promoted single-page trace uses one author:@me pull request search and never uses get_authenticated_user, list_pull_requests, or result_read."
     },
     "last_successful_replay": {
       "date": "2026-07-31",
@@ -25,13 +25,12 @@
   "model_name": "z-ai/glm-5.2",
   "turns": [
     {
-      "user_input": "can you check all my open PRs in nearai/ironclaw and give me a priority list",
+      "user_input": "can you check all open PRs I authored in nearai/ironclaw and give me a priority list",
       "expects": {
         "response_contains": [
           "priority"
         ],
         "tools_used": [
-          "github__get_authenticated_user",
           "github__search_issues_pull_requests"
         ],
         "tools_not_used": [
@@ -39,9 +38,8 @@
           "builtin__result_read"
         ],
         "all_tools_succeeded": true,
-        "max_tool_calls": 2,
+        "max_tool_calls": 1,
         "tools_order": [
-          "github__get_authenticated_user",
           "github__search_issues_pull_requests"
         ]
       },
@@ -51,33 +49,12 @@
             "type": "tool_calls",
             "tool_calls": [
               {
-                "id": "call-authenticated-user",
-                "name": "github__get_authenticated_user",
-                "arguments": {}
-              }
-            ],
-            "input_tokens": 0,
-            "output_tokens": 0
-          }
-        },
-        {
-          "expected_tool_results": [
-            {
-              "tool_call_id": "call-authenticated-user",
-              "name": "github__get_authenticated_user",
-              "content": "{\"login\":\"fixture-user\"}"
-            }
-          ],
-          "response": {
-            "type": "tool_calls",
-            "tool_calls": [
-              {
                 "id": "call-authored-pr-search",
                 "name": "github__search_issues_pull_requests",
                 "arguments": {
                   "owner": "nearai",
                   "repo": "ironclaw",
-                  "author": "fixture-user",
+                  "author": "@me",
                   "state": "open",
                   "type": "pr",
                   "limit": 100,
