@@ -31,6 +31,24 @@ changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
 they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
+`reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
+integration, frontend, or recorded-fixture suites without LLVM
+instrumentation. Direct reverse workspace dependents are included in PR crate
+selection when they fit in one three-bucket wave. Foundational-crate changes
+that exceed that budget run their changed packages on the PR and defer
+consumer buckets, together with transitive consumers, to the merge queue. The
+merge queue and pushes to `main` still run every crate bucket, root
+partition, group suite, integration lane, frontend test, recorded replay, and
+coverage gate. Unknown paths or recognized test-topology changes select that
+full plan; a planner execution or schema failure fails the required check
+loudly rather than guessing at a matrix. The queue therefore preserves
+exhaustive deterministic evidence while
+ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
+parallelism is capped at three crate buckets, one root partition, and one
+integration lane; merge queue and main retain full matrix parallelism so this
+feedback optimization does not serialize the production gate.
+
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
 could pass the queue and turn main red post-merge.
