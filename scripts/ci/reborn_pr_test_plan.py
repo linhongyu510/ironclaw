@@ -324,6 +324,11 @@ def main() -> int:
         type=Path,
         help="newline-delimited changed paths; required for pull_request",
     )
+    parser.add_argument(
+        "--canonical-packages",
+        type=Path,
+        help="JSON package array produced by discover-reborn-package-crates.sh",
+    )
     args = parser.parse_args()
     try:
         changed_paths = (
@@ -331,11 +336,16 @@ def main() -> int:
             if args.changed_files
             else []
         )
+        canonical_packages = (
+            json.loads(args.canonical_packages.read_text(encoding="utf-8"))
+            if args.canonical_packages
+            else _canonical_packages()
+        )
         plan = build_plan(
             event=args.event,
             changed_paths=changed_paths,
             metadata=_metadata(),
-            canonical_packages=_canonical_packages(),
+            canonical_packages=canonical_packages,
         )
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Reborn PR test planner failed: {error}", file=sys.stderr)

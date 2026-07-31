@@ -175,6 +175,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("python3 scripts/ci/reborn_pr_test_plan.py", workflow)
+        self.assertIn("scripts/ci/discover-reborn-package-crates.sh", workflow)
+        self.assertIn("--canonical-packages", workflow)
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
