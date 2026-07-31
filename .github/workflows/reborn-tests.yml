@@ -196,7 +196,7 @@ jobs:
         run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
       - name: Free disk space
-        if: needs.changes.outputs.run_coverage == 'true' || startsWith(matrix.bucket.name, 'affected-')
+        if: needs.changes.outputs.run_coverage == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -323,21 +323,18 @@ jobs:
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
           if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
             mkdir -p coverage
-          fi
+            while IFS= read -r package; do
+              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
 
-          while IFS= read -r package; do
-            feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+              # Scoped to this invocation only (never `export`) so it can't leak
+              # onto later packages in the same bucket iteration if
+              # composition-core ever stops being single-package.
+              incremental_env=()
+              if [ "$package" = "ironclaw_reborn_composition" ]; then
+                echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
+                incremental_env=(env CARGO_INCREMENTAL=0)
+              fi
 
-            # Scoped to this invocation only (never `export`) so it can't leak
-            # onto later packages in the same bucket iteration if
-            # composition-core ever stops being single-package.
-            incremental_env=()
-            if [ "$package" = "ironclaw_reborn_composition" ]; then
-              echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-              incremental_env=(env CARGO_INCREMENTAL=0)
-            fi
-
-            if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
               echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
               # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
               scripts/ci/run-hermetic-deterministic-suite.sh command \
@@ -345,18 +342,34 @@ jobs:
                 "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
                   --lcov --output-path "coverage/${package}.lcov" \
                   test --ignore-rust-version -- --nocapture
-            else
-              echo "::group::cargo test -p ${package} ${feature_flags}"
-              # Pull requests need fast pass/fail feedback for affected
-              # packages. Exhaustive instrumentation still runs before merge.
-              # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo test -p "$package" ${feature_flags} \
-                  --all-targets -- --nocapture
-            fi
-            echo "::endgroup::"
-          done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+              echo "::endgroup::"
+            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+          else
+            package_args=()
+            feature_args=()
+            incremental_env=()
+            while IFS= read -r package; do
+              package_args+=(-p "$package")
+              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+              if [[ -n "${feature_flags}" ]]; then
+                features="${feature_flags#--features }"
+                IFS=, read -ra package_features <<< "${features}"
+                for feature in "${package_features[@]}"; do
+                  feature_args+=(--features "${package}/${feature}")
+                done
+              fi
+              if [[ "$package" == "ironclaw_reborn_composition" ]]; then
+                incremental_env=(env CARGO_INCREMENTAL=0)
+              fi
+            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+
+            echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+               timeout --signal=INT --kill-after=30s 28m \
+               "${incremental_env[@]}" cargo test "${package_args[@]}" \
+                 "${feature_args[@]}" --all-targets -- --nocapture
+             echo "::endgroup::"
+          fi
 
           if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
             # Keep reports separate: llvm-cov does not guarantee a trailing

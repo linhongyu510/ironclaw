@@ -113,6 +113,10 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +133,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -298,22 +307,41 @@ jobs:
       - name: Run harvested QA replay and provider contracts with Emulate
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          pytest
-          tests/e2e/scenarios/test_provider_capability_inventory.py
-          tests/e2e/scenarios/test_journey_coverage.py
-          tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
-          tests/e2e/scenarios/test_provider_fault_proxy.py
-          tests/e2e/scenarios/test_emulate_build_parity.py
-          tests/e2e/scenarios/test_provider_world_isolation.py
-          tests/e2e/scenarios/test_reborn_qa_trace_replay.py
-          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
-          -m
-          "not shared_world"
-          -v
-          --timeout=120
+        run: |
+          set -euo pipefail
+          common=(
+            -m "not shared_world"
+            -v
+            --timeout=120
+          )
+          (
+            set -o pipefail
+            IRONCLAW_PROVIDER_OPERATION_SHARD=0/2 \
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_provider_capability_inventory.py \
+                tests/e2e/scenarios/test_journey_coverage.py \
+                tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
+                tests/e2e/scenarios/test_provider_fault_proxy.py \
+                tests/e2e/scenarios/test_emulate_build_parity.py \
+                tests/e2e/scenarios/test_provider_world_isolation.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+                "${common[@]}" 2>&1 | sed -u 's/^/[provider-0] /'
+          ) &
+          primary_pid=$!
+          (
+            set -o pipefail
+            IRONCLAW_PROVIDER_OPERATION_SHARD=1/2 \
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
+                "${common[@]}" 2>&1 | sed -u 's/^/[provider-1] /'
+          ) &
+          secondary_pid=$!
+
+          status=0
+          wait "${primary_pid}" || status=$?
+          wait "${secondary_pid}" || status=$?
+          exit "${status}"
 
       - name: Replay provider journeys in reverse order
         if: inputs.reversed_journey_order
