@@ -84,9 +84,9 @@ pub use selector::{
     SkillSelectionOptions, extract_skill_mentions, prefilter_skills_with_options, skill_token_cost,
 };
 pub use validation::{
-    SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
-    normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
-    validate_path_pattern, validate_skill_name,
+    SafeRelativePathError, escape_skill_content, escape_xml_attr, lint_skill_routing_metadata,
+    normalize_line_endings, normalize_safe_relative_path, validate_credential_name,
+    validate_credential_spec, validate_path_pattern, validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]
