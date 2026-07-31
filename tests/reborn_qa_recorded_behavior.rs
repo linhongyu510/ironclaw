@@ -11,7 +11,8 @@
 //!    ```bash
 //!    ANTHROPIC_API_KEY=... \
 //!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/reborn/local-dev \
-//!      cargo test --test reborn_qa_recorded_behavior record_ \
+//!      cargo test -p ironclaw_reborn_integration_tests \
+//!        --test reborn_qa_recorded_behavior record_ \
 //!        -- --ignored --test-threads=1 --nocapture
 //!    ```
 //!
@@ -24,7 +25,8 @@
 //!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER=me \
 //!    IRONCLAW_QA_RECORD_MODEL=anthropic/claude-sonnet-4-6 \
 //!    RUST_MIN_STACK=67108864 \
-//!      cargo test --test reborn_qa_recorded_behavior record_investigate_ci_job \
+//!      cargo test -p ironclaw_reborn_integration_tests \
+//!        --test reborn_qa_recorded_behavior record_investigate_ci_job \
 //!        -- --ignored --test-threads=1 --nocapture
 //!    ```
 //!

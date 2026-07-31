@@ -15,6 +15,8 @@ binary is `ironclaw` from the `ironclaw` package in
 - `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.
 - `.claude/skills/ironclaw-reborn-architecture-review/SKILL.md` for boundaries.
 - `.claude/skills/ironclaw-reborn-testing/SKILL.md` for test tiers and seams.
+- `.claude/skills/promote-run-regression/SKILL.md` before converting downloaded
+  run/thread artifacts or QA failures into deterministic regression evidence.
 - `.claude/skills/ironclaw-reborn-skill-maintainer/SKILL.md` before editing guidance.
 
 These are plain Markdown and must be read directly by agents whose harness does
