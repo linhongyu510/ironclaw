@@ -13,6 +13,29 @@
 //! threaded reply route would collapse to its conversation root without a
 //! single error. The compatibility lives here, in the crate that owns the
 //! records, rather than in the contracts crate that owns the type.
+//!
+//! # Rollback boundary
+//!
+//! **The compatibility is one-way, by decision. Downgrading a deployment to a
+//! binary from before this commit is not supported once it has written
+//! conversation-binding or reply-target records.** Compatibility runs
+//! upgrade-only: this build reads either spelling and writes only the canonical
+//! one, so a record written here and read by a pre-rename binary hits the exact
+//! failure this module exists to prevent, in the other direction —
+//! `thread_id`/`message_id` are absent, serde fills the `Option`s with `None`
+//! without an error, and every threaded route silently collapses to its
+//! conversation root. Binding identity is durable, so nothing ages out of it;
+//! the 48-hour `DELIVERED_GATE_ROUTE_TTL` heals the *fingerprint* format change
+//! recorded on the same CHECKLIST row, not this.
+//!
+//! Dual-writing both spellings for a transition window was considered and
+//! refused: it is exactly the compatibility shim the type-placement rule
+//! forbids (see the WS5 CHECKLIST row), it would have to survive in both
+//! adapters plus `ExternalConversationIdentity`, and `#[serde(alias)]` makes it
+//! self-defeating — a reader that accepts both spellings rejects a record
+//! carrying both as a duplicate field. If a downgrade is ever needed, the
+//! recovery is to re-pair the affected routes, not to read the old spelling
+//! back.
 
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

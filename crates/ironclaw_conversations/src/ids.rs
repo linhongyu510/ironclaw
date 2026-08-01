@@ -98,6 +98,11 @@ pub struct ExternalConversationIdentity {
     /// sub-conversation, never a canonical [`ThreadId`](ironclaw_host_api::ids::ThreadId).
     /// Durable records written before the rename spell it `thread_id`, which
     /// `Deserialize` still accepts.
+    ///
+    /// That acceptance is **upgrade-only**: `Serialize` is derived, so this
+    /// build writes `topic_id` and never `thread_id`. See the rollback boundary
+    /// on [`crate::stored_refs`] — it governs this key too, and for the same
+    /// reason.
     pub(crate) topic_id: Option<String>,
 }
 

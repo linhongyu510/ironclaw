@@ -53,10 +53,6 @@ impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
     }
 }
 
-/// Reads landed attachment bytes back through the same project-scoped workspace
-/// filesystem, so the loop model port can build multimodal image parts for a
-/// vision-capable model. The read re-scopes `storage_key` through the
-
 #[async_trait]
 impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLander<F> {
     async fn land(
@@ -461,6 +457,13 @@ mod tests {
         );
     }
 
+    /// All three of `cleanup_stale`'s pre-scan exits, in one fixture, because
+    /// they share one guarantee: a snapshot this pass cannot trust deletes
+    /// nothing. The three differ in how loud they are, and that difference is
+    /// deliberate — an empty or wholly-unowned snapshot is a legitimate state
+    /// and returns an empty report, whereas an in-root reference of the wrong
+    /// depth is a malformed input this reconciler owns and aborts the pass
+    /// loudly rather than reclaiming against a key it cannot parse.
     #[tokio::test]
     async fn stale_cleanup_with_empty_or_unowned_snapshot_deletes_nothing() {
         let fs = workspace_fs(MountPermissions::read_write_list_delete());
@@ -504,6 +507,23 @@ mod tests {
         assert!(
             fs.stat(&scope.to_resource_scope(), &path).await.is_ok(),
             "incomplete cleanup snapshots must not delete the batch"
+        );
+
+        // An in-root reference whose relative depth is not `<date>/<message>/<file>`
+        // aborts the whole pass. One malformed key means the snapshot cannot be
+        // read as authoritative, and reclaiming from a partially-understood
+        // snapshot is how a live batch gets deleted.
+        let error = lander
+            .cleanup_stale(
+                &scope,
+                &["/workspace/attachments/2026-01-01/flat.txt".to_string()],
+            )
+            .await
+            .expect_err("an in-root reference of the wrong depth must fail loudly");
+        assert_eq!(error.code, ProductSurfaceErrorCode::Internal);
+        assert!(
+            fs.stat(&scope.to_resource_scope(), &path).await.is_ok(),
+            "an aborted pass must not delete anything"
         );
     }
 

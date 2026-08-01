@@ -29,7 +29,7 @@ use crate::{
 #[derive(Clone)]
 pub struct InboundTurnService<B, S, C: ?Sized> {
     binding_service: B,
-    session_thread_service: S,
+    conversation_service: S,
     turn_coordinator: Arc<C>,
 }
 
@@ -39,10 +39,10 @@ where
     S: InboundConversationService,
     C: TurnCoordinator + ?Sized,
 {
-    pub fn new(binding_service: B, session_thread_service: S, turn_coordinator: Arc<C>) -> Self {
+    pub fn new(binding_service: B, conversation_service: S, turn_coordinator: Arc<C>) -> Self {
         Self {
             binding_service,
-            session_thread_service,
+            conversation_service,
             turn_coordinator,
         }
     }
@@ -133,7 +133,7 @@ where
             external_event_id: external_event_id.clone(),
         };
         if let Some(replay) = self
-            .session_thread_service
+            .conversation_service
             .replay_accepted_inbound_message(replay_lookup)
             .await?
         {
@@ -186,7 +186,7 @@ where
             }
         };
         let accepted_message = self
-            .session_thread_service
+            .conversation_service
             .accept_inbound_message(AcceptConversationMessageRequest {
                 tenant_id: resolution.tenant_id.clone(),
                 thread_id: resolution.turn_scope.thread_id.clone(),
@@ -227,7 +227,7 @@ where
 
         if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate
             && let Some(turn_submission) = self
-                .session_thread_service
+                .conversation_service
                 .inbound_message_turn_submission(&accepted_message.message_ref)
                 .await?
         {
@@ -240,7 +240,7 @@ where
         }
 
         let idempotency_key = self
-            .session_thread_service
+            .conversation_service
             .inbound_message_turn_submission_key(&accepted_message.message_ref)
             .await?;
         let turn_submission_result = self
@@ -271,14 +271,14 @@ where
             Ok(response) => response,
             Err(error) => {
                 if should_rotate_submit_key(&error) {
-                    self.session_thread_service
+                    self.conversation_service
                         .rotate_inbound_message_turn_submission_key(&accepted_message.message_ref)
                         .await?;
                 }
                 return Err(InboundTurnError::TurnSubmissionFailed { error });
             }
         };
-        self.session_thread_service
+        self.conversation_service
             .mark_inbound_message_turn_submitted(
                 &accepted_message.message_ref,
                 turn_submission.clone(),
@@ -308,13 +308,13 @@ where
 {
     pub(crate) fn new(
         binding_service: B,
-        session_thread_service: S,
+        conversation_service: S,
         turn_coordinator: Arc<C>,
     ) -> Self {
         Self {
             inbound: InboundTurnService::new(
                 binding_service,
-                session_thread_service,
+                conversation_service,
                 turn_coordinator,
             ),
             prompt_safety: Arc::new(Sanitizer::new()),
@@ -330,7 +330,7 @@ where
 /// worker, not in this public function.
 pub fn trusted_trigger_fire_submitter<B, S, C>(
     binding_service: B,
-    session_thread_service: S,
+    conversation_service: S,
     turn_coordinator: Arc<C>,
 ) -> Arc<dyn TrustedTriggerFireSubmitter>
 where
@@ -340,7 +340,7 @@ where
 {
     Arc::new(ConversationTrustedTriggerSubmitter::new(
         binding_service,
-        session_thread_service,
+        conversation_service,
         turn_coordinator,
     ))
 }
