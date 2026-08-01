@@ -49,3 +49,92 @@ pub trait DeliveryReplyContextSource: Send + Sync {
         conversation_fingerprint: &str,
     ) -> Option<Vec<u8>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    // Every consumer holds these as `Arc<dyn _>`, so dyn-safety is part of the
+    // contract, not an implementation detail: a signature change that breaks it
+    // fails here rather than at the far-away wiring site.
+    static_assertions::assert_obj_safe!(ChannelDeliveryResolver, DeliveryReplyContextSource);
+
+    /// Records the coordinates each port is asked about. The point under test
+    /// is the *seam*, not the lookup: both ports key on identifiers the
+    /// coordinator passes through, and both currently carry them as bare
+    /// strings, so a transposed argument is a silent mis-delivery rather than
+    /// a compile error. These pin the order and the pass-through.
+    #[derive(Default)]
+    struct RecordingResolver {
+        resolved: Mutex<Vec<String>>,
+        contexts: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl ChannelDeliveryResolver for RecordingResolver {
+        fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+            self.resolved
+                .lock()
+                .expect("lock")
+                .push(extension_id.to_string());
+            // Absence is expressible without an error on purpose: a channel
+            // that is not in the active snapshot is a normal outcome (it was
+            // just deactivated, or never installed), not a delivery failure.
+            None
+        }
+    }
+
+    #[async_trait]
+    impl DeliveryReplyContextSource for RecordingResolver {
+        async fn reply_context(
+            &self,
+            extension_id: &str,
+            installation_id: &str,
+            conversation_fingerprint: &str,
+        ) -> Option<Vec<u8>> {
+            self.contexts.lock().expect("lock").push((
+                extension_id.to_string(),
+                installation_id.to_string(),
+                conversation_fingerprint.to_string(),
+            ));
+            None
+        }
+    }
+
+    #[test]
+    fn the_resolver_receives_the_extension_id_verbatim_and_may_answer_none() {
+        let recorder = Arc::new(RecordingResolver::default());
+        let resolver: Arc<dyn ChannelDeliveryResolver> = recorder.clone();
+
+        assert!(resolver.resolve_channel_delivery("slack").is_none());
+        assert!(resolver.resolve_channel_delivery("telegram").is_none());
+
+        assert_eq!(
+            *recorder.resolved.lock().expect("lock"),
+            vec!["slack".to_string(), "telegram".to_string()],
+            "the port must hand the implementation the id it was asked about"
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_context_keeps_extension_installation_and_fingerprint_in_order() {
+        // All three are bare strings today, so nothing but this test stops a
+        // transposition. `None` (no stored anchor) is also deliberately
+        // distinct from `Some(vec![])` (a stored but empty anchor).
+        let recorder = Arc::new(RecordingResolver::default());
+        let source: Arc<dyn DeliveryReplyContextSource> = recorder.clone();
+
+        assert_eq!(source.reply_context("slack", "inst-1", "fp-9").await, None);
+
+        assert_eq!(
+            *recorder.contexts.lock().expect("lock"),
+            vec![(
+                "slack".to_string(),
+                "inst-1".to_string(),
+                "fp-9".to_string()
+            )],
+        );
+    }
+}

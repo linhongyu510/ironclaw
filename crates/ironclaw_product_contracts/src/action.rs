@@ -173,6 +173,10 @@ mod tests {
         assert!(SourceBindingKey::new("").is_err());
         assert!(ProductCommandName::new("x".repeat(PRODUCT_COMMAND_NAME_MAX_BYTES + 1)).is_err());
         assert!(AuthRequestRef::new("auth\nrequest").is_err());
+        // NUL is rejected by its own arm of the guard, not by `is_control()`:
+        // a token that reaches a path or a header with an embedded NUL
+        // truncates at the C boundary, so both arms must be live.
+        assert!(SourceBindingKey::new("space:0:;conv\0ersation").is_err());
 
         let linked = LinkedThreadActionId::new("open-thread").expect("valid action id");
         assert_eq!(linked.as_str(), "open-thread");

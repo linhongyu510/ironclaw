@@ -27,6 +27,7 @@ use crate::{
     AvailableExtensionCatalog, ExtensionActivationCredentialGate,
     ExtensionActivationCredentialReadiness, package_runtime_credential_auth_requirements,
 };
+use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
 
 pub struct HostedMcpPreparationService {
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
@@ -80,7 +81,7 @@ impl HostedMcpPreparationService {
                     crate::hosted_mcp_manifest::name_unavailable()
                 })?;
         let package_ref = ironclaw_product_contracts::package_lifecycle::LifecyclePackageRef::new(
-            ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind::Extension,
+            LifecyclePackageKind::Extension,
             extension_id.as_str(),
         )?;
         // Lock order invariant: catalog write guard BEFORE operation_lock,

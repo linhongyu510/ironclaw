@@ -7,6 +7,7 @@ use ironclaw_host_api::{
     ids::{CapabilityGrantId, ExtensionId},
     scope::Principal,
 };
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -326,10 +327,7 @@ impl RebornRuntimeStores {
     /// §6.4): the production surface the WebUI setup service and the
     /// lifecycle configure action route operator channel config through.
     /// `None` without a standalone runtime.
-    pub(crate) fn channel_config_service(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product_contracts::channel_config::ChannelConfigProductService>>
-    {
+    pub(crate) fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         let service = self.channel_config_service.clone();
         Some(Arc::new(
             ironclaw_extension_host::RebornChannelConfigProductService::new(service),

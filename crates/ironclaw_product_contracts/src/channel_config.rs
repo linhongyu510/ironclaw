@@ -41,3 +41,51 @@ pub trait ChannelConfigProductService: Send + Sync {
         values: Vec<(String, String)>,
     ) -> Result<(), ProductSurfaceError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static_assertions::assert_obj_safe!(ChannelConfigProductService);
+
+    struct DeclaresNothing;
+
+    #[async_trait]
+    impl ChannelConfigProductService for DeclaresNothing {
+        async fn field_status(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
+            Ok(Vec::new())
+        }
+
+        async fn save_values(
+            &self,
+            _extension_id: &ExtensionId,
+            _values: Vec<(String, String)>,
+        ) -> Result<(), ProductSurfaceError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_extension_declaring_no_config_reports_an_empty_field_set() {
+        // Empty is the "nothing to configure" answer the setup view renders
+        // from; it must be reachable without an error, or a channel with no
+        // `[channel.config]` cannot complete setup.
+        let service: std::sync::Arc<dyn ChannelConfigProductService> =
+            std::sync::Arc::new(DeclaresNothing);
+        let extension_id = ExtensionId::new("slack").expect("valid extension id");
+        assert!(
+            service
+                .field_status(&extension_id)
+                .await
+                .expect("empty status is not an error")
+                .is_empty()
+        );
+        service
+            .save_values(&extension_id, Vec::new())
+            .await
+            .expect("saving nothing is not an error");
+    }
+}
