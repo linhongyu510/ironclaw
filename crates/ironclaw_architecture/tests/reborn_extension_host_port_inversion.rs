@@ -471,14 +471,19 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 ///
 /// An unreadable file is fatal, not skipped — a silent skip is how this scan
 /// would go quietly vacuous.
-fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BTreeSet<String> {
+fn production_files_naming(
+    root: &Path,
+    crate_name: &str,
+    type_name: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
     let mut files = Vec::new();
     rust_files(&src, &mut files);
     assert!(
-        files.len() >= 10,
-        "expected to walk {crate_name}'s source tree; found {} files — a broken path must \
-         fail loudly rather than report an empty, vacuously passing set",
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than report an empty, vacuously passing set",
         files.len()
     );
     let mut named = BTreeSet::new();
@@ -498,7 +503,7 @@ fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BT
 #[test]
 fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
     let root = workspace_root();
-    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure");
+    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure", 21);
     let frozen: BTreeSet<String> = EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR
         .iter()
         .map(|(file, _)| (*file).to_string())
@@ -535,9 +540,9 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
     // claim exactly: the boundary error is still the vocabulary of the whole
     // lifecycle surface, wherever that surface now lives. Each half is also
     // held above zero so the sum cannot be satisfied by one crate alone.
-    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure");
+    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure", 21);
     let manager_users =
-        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure");
+        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure", 10);
     assert!(
         !host_users.is_empty() && !manager_users.is_empty(),
         "both halves of the lifecycle surface must speak the contract error; \

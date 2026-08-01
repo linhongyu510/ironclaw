@@ -45,6 +45,78 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
     }
 }
 
+/// A `forbidden` entry must name a **package**, never a crate *directory*.
+///
+/// `assert_no_normal_workspace_deps` compares each entry against the dependency
+/// names `cargo metadata` reports, which are package names. A crate whose
+/// directory and package disagree therefore has one spelling that guards and
+/// one that is inert — and the inert one fails *silently*, because a forbidden
+/// entry that matches nothing simply never fires. `crates/ironclaw_reborn_cli/`
+/// declaring `name = "ironclaw"` is the only such crate in the tree today, and
+/// it is exactly the one an author reaches for by directory name.
+///
+/// **Entries naming crates that do not exist are legitimate and must keep
+/// passing.** Around sixty forbidden entries name retired v1 crates
+/// (`ironclaw_legacy`, `ironclaw_engine`, `ironclaw_gateway`, `ironclaw_tui`,
+/// `ironclaw_storage`) as reintroduction pins. Those have no directory, which
+/// is what separates them from a typo: this test flags only an entry that is
+/// *not* a package **and** *is* a directory under `crates/`.
+#[test]
+fn boundary_rule_names_are_package_names_not_crate_directories() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let registered = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str().map(ToString::to_string))
+        .collect::<std::collections::HashSet<_>>();
+    let root = workspace_root();
+
+    let mut violations = Vec::new();
+    let mut checked = 0usize;
+    for rule in boundary_rules() {
+        for forbidden in rule.forbidden {
+            checked += 1;
+            if registered.contains(forbidden) {
+                continue;
+            }
+            let manifest = root.join("crates").join(forbidden).join("Cargo.toml");
+            if !manifest.exists() {
+                // A reintroduction pin for a crate that no longer exists.
+                continue;
+            }
+            let declared = std::fs::read_to_string(&manifest)
+                .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()))
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("name = \"")
+                        .and_then(|rest| rest.strip_suffix('"'))
+                        .map(ToString::to_string)
+                })
+                .unwrap_or_else(|| panic!("{} declares no package name", manifest.display()));
+            violations.push(format!(
+                "{}'s forbidden list names \"{forbidden}\", which is the crate DIRECTORY. \
+                 Its package is \"{declared}\", and forbidden entries are matched against \
+                 package names — so this entry can never fire and the edge is unguarded. \
+                 Use \"{declared}\"",
+                rule.crate_name
+            ));
+        }
+    }
+
+    assert!(
+        checked > 500,
+        "expected to scan every boundary rule's forbidden list; saw only {checked} entries"
+    );
+    assert!(
+        violations.is_empty(),
+        "boundary rules must name packages, not directories:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
     let metadata = cargo_metadata();
@@ -3271,7 +3343,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_host_ingress",
                 "ironclaw_operator",
-                "ironclaw_reborn_cli",
+                // The CLI, by its PACKAGE name. `crates/ironclaw_reborn_cli/`
+                // is only the directory; `forbidden` is matched against
+                // `cargo metadata` package names, so the directory spelling
+                // is an entry that can never fire. Pinned by
+                // `boundary_rule_names_are_package_names_not_crate_directories`.
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_openai_compat",
                 "ironclaw_webui",
