@@ -1,10 +1,20 @@
-//! Conversation binding and session-thread contracts for IronClaw Reborn.
+//! Conversation binding and inbound-message contracts for IronClaw Reborn.
 //!
 //! This crate is the adapter-safe boundary between product/channel adapters and
 //! `ironclaw_turns::TurnCoordinator`. It resolves external actor/conversation
 //! identifiers into canonical tenant/thread/message/binding references without
 //! asking the turn coordinator to parse raw channel payloads or store message
 //! content.
+//!
+//! **It is not the transcript.** `ironclaw_threads` owns canonical threads and
+//! their message content; this crate owns the *binding* from an external
+//! conversation to one of them, plus inbound idempotency. The two used to share
+//! five type names — including a `SessionThreadService` on each side with the
+//! same `accept_inbound_message` signature and a different store behind it —
+//! which is why everything here is spelled `…Conversation…`
+//! ([`InboundConversationService`], [`AcceptedConversationMessage`],
+//! [`ConversationMessageRecord`], …). Keep it that way:
+//! `reborn_conversations_threads_attachments.rs` fails on any new shared name.
 //!
 //! Durable persistence is provided by [`ConversationStateStore`]
 //! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
