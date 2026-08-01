@@ -3,7 +3,6 @@
 pub mod llm_admin;
 pub mod operator_logs;
 pub mod operator_service_lifecycle;
-pub mod route_mounts;
 
 pub use ironclaw_product_contracts::operator_llm::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, RebornModelRoutesState,

@@ -21,7 +21,7 @@ use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{TenantId, UserId};
-use ironclaw_product::{
+use ironclaw_product_contracts::operator_service::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState,
 };

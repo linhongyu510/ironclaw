@@ -31,7 +31,16 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 # `Debug`-prints itself. A value wrapper, not a framework or runtime client —
 # the contracts-purity denylist in `reborn_dependency_boundaries.rs` governs
 # the latter and this is deliberately not one.
-secrecy = "0.10"
+#
+# `serde`: `llm_config`'s `UpsertLlmProviderRequest`/`LlmProbeRequest` are
+# deserialize-only request DTOs carrying `Option<SecretString>`, so the wire
+# form needs `Deserialize` on the wrapper (there is deliberately no
+# `Serialize` — a request that carries a key must not be serializable back
+# out). Declared explicitly rather than inherited: a workspace build unifies
+# features with `ironclaw_product`, which already enables it, so omitting it
+# here compiles in CI's `--all-features` lane and fails a lone
+# `-p ironclaw_product_contracts` build.
+secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

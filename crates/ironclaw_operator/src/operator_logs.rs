@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_product::{
+use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
     RebornLogQueryResponse, normalize_operator_log_context_value,
 };

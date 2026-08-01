@@ -75,6 +75,7 @@ use ironclaw_product::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+use ironclaw_product_contracts::llm_config::ActiveModelReader;
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
@@ -1407,8 +1408,11 @@ impl RebornRuntime {
         let Some(states) = self.webui_nearai_login_states() else {
             return Ok(None);
         };
+        // Called directly: operator now returns the host-owned
+        // `PublicRouteMount`, so the composition-side repackaging shim that
+        // existed only to convert an operator-local carrier is gone.
         Ok(Some(
-            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
+            ironclaw_operator::llm_admin::nearai_login_serve::nearai_login_callback_mount(
                 session, reload, boot, states,
             )?,
         ))
@@ -1436,9 +1440,7 @@ impl RebornRuntime {
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
-    pub(crate) fn webui_active_model_reader(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
+    pub(crate) fn webui_active_model_reader(&self) -> Option<Arc<dyn ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
         Some(Arc::new(ironclaw_operator::ProviderActiveModelReader::new(
             parts.reload_handle.primary_provider(),

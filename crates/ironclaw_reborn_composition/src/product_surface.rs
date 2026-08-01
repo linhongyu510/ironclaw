@@ -10,12 +10,16 @@ use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
-    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ChannelConnectionService, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
+    ProjectScopedFilesystemReader, RebornAutomationProductService,
+    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
+};
+use ironclaw_product_contracts::llm_config::LlmConfigService;
+use ironclaw_product_contracts::operator_service::{
+    OperatorStatusService, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState,
 };
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::{
@@ -284,7 +288,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
 /// `/v1/models` catalog so both read the same configured-model source.
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
-) -> Option<Arc<dyn ironclaw_product::LlmConfigService>> {
+) -> Option<Arc<dyn LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
     let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
