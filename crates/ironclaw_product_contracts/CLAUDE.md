@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is nineteen shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-one shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -36,6 +36,8 @@ Today that is nineteen shipped modules (plus the dev-only `test_support`, gated 
 | `action` | Inbound-action identity (`ProductActionId`), the bounded product tokens, and `ActionFingerprintKey`. The ledger record and saga are product's. |
 | `admin_users` | The `AdminUserService` port, its records, and its error taxonomy. The `Reborn*` HTTP wire DTOs stay with product's frozen surface. |
 | `operator_tools` | `RebornOperatorToolCatalog` + `RebornOperatorToolInfo`. |
+| `llm_config` | The operator LLM-administration port (`LlmConfigService`), the active-model read port (`ActiveModelReader`), their request/response DTOs, `LlmConfigServiceError`, and its projection onto `ProductSurfaceError`. Implemented by `ironclaw_operator`; the `llm_config` view descriptor and the "no service wired" error stay with product. |
+| `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. `ProductView` (the typed declaration wrapper) stays with product's frozen inventory. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
 | `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
@@ -153,6 +155,13 @@ shrink-only by
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
 **do not add a row there** — narrow the signature or move the type instead.
 
+The sibling gate `reborn_operator_port_inversion.rs` does the same job for
+`ironclaw_operator`, and its residue is **empty**: every port that crate
+implements is declared here. It additionally proves, through `cargo metadata`,
+that `ironclaw_operator` names no `ironclaw_product` dependency under any kind.
+Adding a product-declared port for the operator to implement will fail there
+before it fails anywhere else.
+
 **The error a port fails with lives here too** (`error::ProductOperationFailure`,
 WS2.2). It is the boundary vocabulary — six variants whose payloads are a plain
 `String` or nothing — so a crate below product can describe its own failure
@@ -171,6 +180,26 @@ Two rules follow, both pinned by tests:
   repeating the status choices, so the WebUI cannot get one answer through
   product's lifecycle service and a different one through the extension host's.
   Only the logging stays with each caller — this crate may not log.
+
+## Vendor neutrality has one live exception, and it is not a licence
+
+`llm_config` names NEAR AI and OpenAI Codex — three method names
+(`start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`) and
+six DTOs (`NearAi*` ×5, `CodexLoginStart`). PROPOSAL §8.2's vendor rule
+sanctions vendor names in `ironclaw_operator` — that crate *is* the LLM-vendor
+admin layer — but **not** in the contracts family, and a port has to be
+declared where its implementor compiles against it.
+
+This is a recorded open decision on the CHECKLIST WS5 operator row, with two
+ways out: narrow the port to a neutral provider-login shape, or amend §8.2 to
+name this module. Until it resolves:
+
+- **Do not add a seventh vendor name here.** A new provider login belongs
+  behind a neutral shape, not beside these six.
+- The two names the specificity scanner can see —
+  `NearAiAuthProvider::{Github, Google}` — carry allowlist entries that were
+  **repointed** from `ironclaw_product`, not added. The baseline did not move
+  and must not move for this module.
 
 ## Deferred by design (not missing)
 
