@@ -181,6 +181,34 @@ mod tests {
     }
 
     #[test]
+    fn typed_tokens_round_trip_through_serde_as_ref_and_display() {
+        // The bounded-token template generates `TryFrom<String>` (the serde
+        // entry point), `AsRef<str>`, and `Display` for every token; the
+        // validating constructor alone leaves all three unexercised, and a
+        // token that deserializes without validating is the defect the
+        // `try_from` attribute exists to prevent.
+        let key: SourceBindingKey =
+            serde_json::from_value(serde_json::json!("space:0:;conversation:2:C1;topic:0:;"))
+                .expect("valid token deserializes");
+        assert_eq!(key.as_ref(), "space:0:;conversation:2:C1;topic:0:;");
+        assert_eq!(key.to_string(), "space:0:;conversation:2:C1;topic:0:;");
+        assert_eq!(
+            serde_json::to_value(&key).expect("serialize"),
+            serde_json::json!("space:0:;conversation:2:C1;topic:0:;")
+        );
+
+        let rejected = serde_json::from_value::<SourceBindingKey>(serde_json::json!(""));
+        assert!(
+            rejected.is_err(),
+            "deserialization must run the same validation as the constructor"
+        );
+        assert!(
+            serde_json::from_value::<AuthRequestRef>(serde_json::json!("auth\u{7}ref")).is_err(),
+            "control characters are rejected through serde too"
+        );
+    }
+
+    #[test]
     fn product_action_id_round_trips_display_and_uuid() {
         let action_id = ProductActionId::new();
         assert_eq!(action_id.to_string(), action_id.as_uuid().to_string());
