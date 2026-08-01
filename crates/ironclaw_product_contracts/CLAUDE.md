@@ -16,9 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is nineteen always-on modules (plus the `test-support`-gated
-`test_support`). *The count read "sixteen" against a seventeen-row table before
-WS2.2 — a pre-existing off-by-one, corrected here rather than carried.*
+Today that is nineteen shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -121,26 +119,37 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 (`ApprovalPrompt*View`), which only product and WebUI reach, stayed in
 `outbound` here.
 
-**The ten ports WS2 inverted, and the five it could not.** The
+**The twelve ports WS2 relocated, and the five it could not.** The
 `extension_host` port-inversion row moved every product-declared port the
-extension host *implements* whose signature this crate may legally name:
-`ChannelDeliveryResolver`, `DeliveryReplyContextSource`,
-`AccountConnectionStatusSource`, `ChannelConfigProductService`,
-`RebornViewProvider`, `CommandActorRoleResolver`, `ApprovalPromptContextSource`,
-`BlockedAuthPromptSource`, `LifecycleProductService`, and — once WS2.2 gave it a
-contracts-legal error — `ProductConversationSubjectRouteResolver`. Five stayed,
-and each for the same mechanical reason rather than a judgement call — **this
-crate's dependency allowlist is `ironclaw_host_api` +
-`ironclaw_extension_contracts` and nothing else internal**, so a port whose
-signature names a type from `ironclaw_auth`, `ironclaw_threads`,
-`ironclaw_turns`, or `ironclaw_conversations` cannot be declared here until that
-type is narrowed out of it: `AuthChallengeProvider`, `ChannelConnectionService`
-and `ExtensionCredentialSetupService` (auth credential vocabulary),
+extension host reaches whose signature this crate may legally name. **Ten of
+them `extension_host` itself implements** — those are the ones
+`reborn_extension_host_port_inversion.rs::INVERTED_PORTS` enumerates and pins:
+`AccountConnectionStatusSource`, `ApprovalPromptContextSource`,
+`BlockedAuthPromptSource`, `ChannelConfigProductService`,
+`ChannelDeliveryResolver`, `CommandActorRoleResolver`,
+`DeliveryReplyContextSource`, `LifecycleProductService`,
+`ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made
+it declarable), `RebornViewProvider`.
+**Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
+they moved for the same reason — a port whose implementation sits outside
+product does not belong inside it: `AdminUserService`,
+`RebornOperatorToolCatalog`. Quote that test rather than this list when the
+count matters; the list here is prose and the test is the enforced inventory.
+Five stayed, and each for
+the same mechanical reason rather than a judgement call — **this crate's
+dependency allowlist is `ironclaw_host_api` + `ironclaw_extension_contracts`
+and nothing else internal**, so a port whose signature names a type from
+`ironclaw_auth`, `ironclaw_threads`, `ironclaw_turns`, or
+`ironclaw_conversations` cannot be declared here until that type is narrowed
+out of it: `AuthChallengeProvider` and `ChannelConnectionService` and
+`ExtensionCredentialSetupService` (auth credential vocabulary),
 `ConversationBindingService` (its `ResolveBindingRequest`/`ResolvedBinding` sit
 in product beside the route-kind grammar that derives them), and
 `ProductActorUserResolver` (`ResolvedProductActorUser` carries
-`ironclaw_conversations::ExternalActorBindingEpoch`). The residue is enumerated
-with its reasons and held shrink-only by
+`ironclaw_conversations::ExternalActorBindingEpoch`). *WS2.2 corrected the last
+two reasons: they named `ProductSurfaceFailure`, which no longer blocks
+anything.* The residue is enumerated with its reasons and held
+shrink-only by
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
 **do not add a row there** — narrow the signature or move the type instead.
 

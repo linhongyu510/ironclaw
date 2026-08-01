@@ -82,3 +82,83 @@ pub trait CommandActorRoleResolver: Send + Sync {
         context: &ProductCommandContext,
     ) -> Result<Option<AdminUserRole>, ProductSurfaceError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use ironclaw_extension_contracts::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    };
+    use ironclaw_host_api::product_adapter::ProtocolAuthEvidence;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
+
+    use crate::action::{ActionFingerprintKey, ProductActionId, SourceBindingKey};
+    use crate::inbound::{
+        InboundCommandPayload, ParsedProductInbound, TrustedInboundContext, UserMessagePayload,
+    };
+
+    fn envelope(payload: ProductInboundPayload) -> ProductInboundEnvelope {
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Slack-Signature".into(),
+            },
+            "install_alpha",
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            ProductAdapterId::new("slack").expect("valid adapter"),
+            AdapterInstallationId::new("install_alpha").expect("valid installation"),
+            Utc::now(),
+            &evidence,
+        )
+        .expect("verified evidence");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:1").expect("valid event"),
+            ExternalActorRef::new("slack_user", "U1", Option::<String>::None).expect("valid actor"),
+            ExternalConversationRef::new(None, "C1", None, None).expect("valid conversation"),
+            payload,
+        )
+        .expect("parsed");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    fn fingerprint() -> ActionFingerprintKey {
+        ActionFingerprintKey::new(
+            ProductAdapterId::new("slack").expect("valid adapter"),
+            AdapterInstallationId::new("install_alpha").expect("valid installation"),
+            ExternalActorRef::new("slack_user", "U1", Option::<String>::None).expect("valid actor"),
+            SourceBindingKey::new("space:0:;conversation:2:C1;topic:0:;").expect("valid binding"),
+            ExternalEventId::new("evt:1").expect("valid event"),
+        )
+    }
+
+    #[test]
+    fn command_context_is_built_from_a_command_envelope_verbatim() {
+        let envelope = envelope(ProductInboundPayload::Command(
+            InboundCommandPayload::new("status", "--json", ProductTriggerReason::DirectChat)
+                .expect("payload"),
+        ));
+        let action_id = ProductActionId::new();
+        let context = ProductCommandContext::from_envelope(&envelope, action_id, fingerprint())
+            .expect("built");
+
+        assert_eq!(context.requested_command, "status");
+        assert_eq!(context.action_id, action_id);
+        assert_eq!(context.adapter_id.as_str(), "slack");
+        assert_eq!(context.installation_id.as_str(), "install_alpha");
+        assert_eq!(context.trigger, ProductTriggerReason::DirectChat);
+        assert_eq!(context.received_at, envelope.received_at());
+    }
+
+    #[test]
+    fn non_command_envelope_is_rejected_as_an_invalid_request_not_an_internal_error() {
+        let envelope = envelope(ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello", vec![], ProductTriggerReason::DirectChat)
+                .expect("payload"),
+        ));
+        let error =
+            ProductCommandContext::from_envelope(&envelope, ProductActionId::new(), fingerprint())
+                .expect_err("a user message is not a command");
+        assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    }
+}

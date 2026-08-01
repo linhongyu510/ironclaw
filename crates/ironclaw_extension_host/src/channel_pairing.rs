@@ -41,6 +41,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::account_setup::{
+    AccountConnectionStatusError, AccountConnectionStatusSource,
+};
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1179,22 +1182,15 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
 /// entry so activation can gate on the caller's pairing state without
 /// holding the full pairing surface.
 #[async_trait]
-impl ironclaw_product_contracts::account_setup::AccountConnectionStatusSource
-    for ChannelPairingService
-{
-    async fn connected(
-        &self,
-        user_id: &UserId,
-    ) -> Result<bool, ironclaw_product_contracts::account_setup::AccountConnectionStatusError> {
+impl AccountConnectionStatusSource for ChannelPairingService {
+    async fn connected(&self, user_id: &UserId) -> Result<bool, AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
             tracing::debug!(
                 target: "ironclaw::reborn::channel_pairing",
                 error = %error,
                 "channel pairing status lookup failed"
             );
-            ironclaw_product_contracts::account_setup::AccountConnectionStatusError::new(
-                "channel pairing status unavailable",
-            )
+            AccountConnectionStatusError::new("channel pairing status unavailable")
         })?;
         Ok(status.connected)
     }

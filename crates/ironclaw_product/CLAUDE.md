@@ -31,8 +31,15 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 ## Ports that are no longer declared here
 
-WS2's `extension_host` port-inversion row (PROPOSAL §6.1.3) moved every
-product-side port this crate declared that a crate *below* product implements.
+WS2 moved the twelve product-side ports this crate declared whose
+implementation sits outside it (PROPOSAL §6.1.3) — **ten** implemented by
+`ironclaw_extension_host` (the set
+`crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`
+enumerates and pins as `INVERTED_PORTS`; WS2.1 moved nine and WS2.2 added
+`ProductConversationSubjectRouteResolver` once the boundary error made it
+declarable) and two by `ironclaw_reborn_composition` (`AdminUserService`,
+`RebornOperatorToolCatalog`). That test is the enforced inventory; this list is
+prose and defers to it.
 They now live in `ironclaw_product_contracts` and this crate imports them like
 any other consumer — there is deliberately **no re-export** (the port half of
 `reborn_product_contract_location_scan.rs` fails on one):

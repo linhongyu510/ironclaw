@@ -203,3 +203,27 @@ pub trait AdminUserService: Send + Sync {
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_owner_and_admin_clear_the_admin_boundary() {
+        assert!(AdminUserRole::Owner.is_admin());
+        assert!(AdminUserRole::Admin.is_admin());
+        assert!(!AdminUserRole::Member.is_admin());
+    }
+
+    #[test]
+    fn role_and_status_wire_forms_stay_snake_case() {
+        assert_eq!(
+            serde_json::to_value(AdminUserRole::Owner).expect("serialize"),
+            serde_json::json!("owner")
+        );
+        assert_eq!(
+            serde_json::to_value(AdminUserStatus::Suspended).expect("serialize"),
+            serde_json::json!("suspended")
+        );
+    }
+}

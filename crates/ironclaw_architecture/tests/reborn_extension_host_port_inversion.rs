@@ -163,11 +163,17 @@ fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
     found.into_keys().collect()
 }
 
+/// Every production `.rs` file under `dir`. **Every I/O error is fatal**: a
+/// scan that silently shrinks its input passes while enforcing nothing, which
+/// is the failure mode this whole file exists to prevent. A missing directory,
+/// an unreadable entry, or a permission error must red the gate, not thin it.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("cannot read an entry under {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
             if matches!(
@@ -194,6 +200,19 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// layer flip: a test double may implement a product trait through the crate's
 /// dev-dependency without the shipped artifact depending on product. Same
 /// stripping shape as `reborn_registration_pipeline_boundary.rs`.
+///
+/// **Callers must strip comments and string literals first.** This walk finds
+/// the block by counting raw `{`/`}` bytes, so a brace inside a doc comment or
+/// a string literal in a gated block desynchronizes the depth and either leaks
+/// a test-only `impl` into the production set or swallows production code that
+/// follows. `implemented_trait_names` composes them in that order and
+/// `cfg_test_stripping_survives_braces_in_comments_and_strings` pins it.
+///
+/// `#[cfg(feature = "test-support")]` items are deliberately **not** stripped:
+/// that feature compiles into a real build (CI's `--all-features` lanes enable
+/// it), so an `impl` behind it is a genuine normal-dependency edge that would
+/// block the layer flip. Only `#[cfg(test)]` is invisible to a shipped
+/// artifact.
 fn strip_cfg_test_blocks(source: &str) -> String {
     const MARKER: &str = "#[cfg(test)]";
     let mut out = String::with_capacity(source.len());
@@ -243,12 +262,37 @@ fn strip_cfg_test_blocks(source: &str) -> String {
     out
 }
 
+/// Byte index of the `>` that closes the `<` at index 0, counting nesting.
+/// `None` when the brackets never balance (a truncated slice), which the
+/// caller treats as "not an impl header I can read" rather than guessing.
+fn balanced_angle_close(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            // A `->` inside a bound (`impl<F: Fn(&str) -> bool>`) is a return
+            // arrow, not a closing bracket. `-` never opens one, so a `>`
+            // preceded by `-` is skipped.
+            '>' if index > 0 && bytes[index - 1] == b'-' => {}
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Trait names appearing as the *implemented* trait of an `impl … for …` item,
 /// with any leading path qualifier and generic arguments dropped
 /// (`impl ironclaw_product::Foo<T> for Bar` → `Foo`). Inherent impls
 /// (`impl Bar {`) have no `for` and never match.
 fn implemented_trait_names(source: &str) -> BTreeSet<String> {
-    let cleaned = strip_comments_and_strings(&strip_cfg_test_blocks(source));
+    let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(source));
     let mut names = BTreeSet::new();
     for segment in cleaned.split("impl").skip(1) {
         let Some(head) = segment.split_once(" for ") else {
@@ -256,8 +300,12 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
         };
         let mut candidate = head.0.trim();
         // Drop an `<'a, T>` generic-parameter list that binds the impl itself.
+        // The close must be found by *balancing*, not by the first `>`: a bound
+        // may itself be generic (`impl<T: Iterator<Item = X>> Port for Host<T>`),
+        // and taking the first `>` would leave `> Port` — not an identifier, so
+        // the impl would be skipped and the gate would enforce nothing for it.
         if candidate.starts_with('<') {
-            let Some(close) = candidate.find('>') else {
+            let Some(close) = balanced_angle_close(candidate) else {
                 continue;
             };
             candidate = candidate[close + 1..].trim();
@@ -286,9 +334,8 @@ fn traits_implemented_by(root: &Path, crate_name: &str, minimum_files: usize) ->
     );
     let mut names = BTreeSet::new();
     for file in files {
-        let Ok(source) = std::fs::read_to_string(&file) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
         names.extend(implemented_trait_names(&source));
     }
     names
@@ -413,11 +460,17 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 /// Production files in `crate_name` whose *code* names `type_name`, as paths
 /// relative to the crate's `src/`.
 ///
-/// `#[cfg(test)]` blocks are stripped for the same reason the impl scan strips
-/// them (a test double may reach product through a dev-dependency without the
-/// shipped artifact doing so), and comments and string literals are stripped so
-/// prose about the migration — including this file's own vocabulary — never
-/// registers as a dependency.
+/// Comments and string literals are stripped **first**, so prose about the
+/// migration — including this file's own vocabulary — never registers as a
+/// dependency, and so a brace inside a comment or literal cannot desynchronise
+/// the `#[cfg(test)]` brace matching that runs next. (Same ordering as
+/// `implemented_trait_names`; getting it backwards is a silent miscount.)
+/// `#[cfg(test)]` blocks then go for the same reason the impl scan drops them:
+/// a test double may reach product through a dev-dependency without the shipped
+/// artifact doing so.
+///
+/// An unreadable file is fatal, not skipped — a silent skip is how this scan
+/// would go quietly vacuous.
 fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
     let mut files = Vec::new();
@@ -430,13 +483,12 @@ fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BT
     );
     let mut named = BTreeSet::new();
     for file in files {
-        let Ok(source) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        if strip_comments_and_strings(&strip_cfg_test_blocks(&source)).contains(type_name) {
-            let Ok(relative) = file.strip_prefix(&src) else {
-                continue;
-            };
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        if strip_cfg_test_blocks(&strip_comments_and_strings(&source)).contains(type_name) {
+            let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
+                panic!("{} is not under {}: {error}", file.display(), src.display())
+            });
             named.insert(relative.to_string_lossy().replace('\\', "/"));
         }
     }
@@ -531,6 +583,32 @@ fn the_boundary_error_names_no_type_the_contracts_crate_may_not_depend_on() {
 }
 
 #[test]
+fn cfg_test_stripping_survives_braces_in_comments_and_strings() {
+    // A brace inside a comment or a string literal in a gated block would
+    // desynchronize a raw-byte depth count. Composed in the wrong order, the
+    // stray `{` here swallows `Production` (or leaks `TestOnly`); composed as
+    // `implemented_trait_names` does, neither happens.
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            // an unbalanced brace in a comment: {
+            const PATTERN: &str = "unbalanced { in a string";
+            impl TestOnly for Double {}
+        }
+        impl Production for Real {}
+    "#;
+    let found = implemented_trait_names(source);
+    assert!(
+        found.contains("Production"),
+        "production impl after a brace-carrying gated block must survive: {found:?}"
+    );
+    assert!(
+        !found.contains("TestOnly"),
+        "gated impl must still be stripped: {found:?}"
+    );
+}
+
+#[test]
 fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     let source = r#"
         impl Plain for Thing {}
@@ -539,6 +617,8 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
         impl Inherent { fn f() {} }
         // impl Commented for Ignored {}
         impl async_trait::Marker for Fourth {}
+        impl<T: Iterator<Item = X>> NestedBound for Host<T> {}
+        impl<F: Fn(&str) -> bool> ArrowBound for Guard<F> {}
         #[cfg(test)]
         mod tests {
             impl TestOnly for Double {}
@@ -563,5 +643,17 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     assert!(
         !found.contains("TestOnly"),
         "a #[cfg(test)] impl is not a production edge: {found:?}"
+    );
+    // The generic-parameter list must be closed by balancing, not by the first
+    // `>`: a nested bound or an `Fn(..) -> T` return arrow both put a `>`
+    // inside the list, and taking the first one silently drops the impl — a
+    // hole through which a new product-defined port could enter unenforced.
+    assert!(
+        found.contains("NestedBound"),
+        "a nested generic bound must not hide the trait: {found:?}"
+    );
+    assert!(
+        found.contains("ArrowBound"),
+        "an `Fn(..) -> T` bound must not hide the trait: {found:?}"
     );
 }
