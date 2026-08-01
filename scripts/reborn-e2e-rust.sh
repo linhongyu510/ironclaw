@@ -80,7 +80,7 @@ run_architecture() {
   # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
   # an inline model diagnostic, and legacy omissions upgrade explicitly.
   run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
-  run_lib_test_exact ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  run_lib_test_exact ironclaw_loop_contracts host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
   # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
   # payloads remain readable but the retired field is never written again.
   run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
@@ -115,12 +115,13 @@ run_architecture() {
 }
 
 run_runtimes() {
-  run_test ironclaw_dispatcher boundary_contract
-  run_test ironclaw_dispatcher dispatch_contract
-  run_test ironclaw_dispatcher event_dispatch_contract
+  # These two suites pin `RuntimeDispatcher` and live with it in
+  # `ironclaw_capabilities`.
+  run_test ironclaw_capabilities runtime_dispatch_contract
+  run_test ironclaw_capabilities runtime_dispatch_event_contract
   # main's runtime_dispatcher_integration / vertical_slice_contract test the
   # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
-  # pipeline is pinned by the three dispatcher contract suites above.
+  # pipeline is pinned by the two dispatch contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract

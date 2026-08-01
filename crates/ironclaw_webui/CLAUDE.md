@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated OpenAI-compat mounts.
+   OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -30,11 +30,24 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
-stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
-/ DB, and no direct `ironclaw_product` edge (reach it through
-composition's facade). Enforced by `ironclaw_architecture`
-(`tests/reborn_dependency_boundaries.rs`).
+The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+apply: host auth stays host-owned in this crate, and behavior is reached through
+`ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
+direct `ironclaw_product` dependency (see `Cargo.toml`), but as of the WS5
+transport inversion it is limited to **the frozen operation inventory** — the
+`*_VIEW` / `*_COMMAND` / `*_CAPABILITY` descriptor constants a handler names to
+call the surface, which PROPOSAL §6.1.3 keeps in product — plus eleven wire DTOs
+whose fields name a crate `ironclaw_product_contracts` may not depend on. Every
+other DTO, request body, and descriptor *type* now comes from
+`ironclaw_product_contracts`. Never behavior.
+
+That residue is exact, enumerated with per-entry reasons, and shrink-only in
+`ironclaw_architecture` (`tests/reborn_transport_product_boundary.rs`, alongside
+`tests/reborn_dependency_boundaries.rs`). **Adding an import from
+`ironclaw_product` will fail that test** — put the type in
+`ironclaw_product_contracts` instead. Moving the inventory constants there to
+shrink the residue also fails it, deliberately: that is an unresolved §6.1.3 /
+§6.9.4 owner decision, not a cleanup.
 
 ## Surface
 
@@ -80,7 +93,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_host_api::product_surface::ProductSurface`. The bearer
+Handlers consume only `ironclaw_product_contracts::surface::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
 `ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail
@@ -102,7 +115,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
-| `webui.v2.list/install/import/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductSurface` |
@@ -364,7 +377,7 @@ composition):
 
 **Host authentication:**
 
-- `src/{auth, oidc, session}/tests` — unit tests per module
+- `src/auth/` module tests, plus the `mod tests` blocks in `src/oidc.rs` and `src/session.rs` (those two are files, not directories)
   (provider URL building, PKCE math, ID-token decode, pending
   store, redirect sanitization, session lookup).
 - `tests/google_oauth_routes.rs` — caller-level tests on
@@ -388,7 +401,6 @@ composition):
   WebChat v2 route").
 - `tests/oidc_e2e.rs` — pre-existing JWKS-signed ID-token e2e
   for the OIDC authenticator path.
-- `tests/serve_loop.rs` — listener bind + graceful shutdown.
 
 ## Validation
 
