@@ -10,6 +10,7 @@ use ironclaw_auth::{
     SecretCleanupRequest,
 };
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
+use ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef;
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
@@ -23,11 +24,16 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
-    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
+    ChannelConnectionService, ExtensionAccountSetupRegistry, ProductSurfaceFailure,
+    RebornChannelConnectStrategy,
+};
+use ironclaw_product_contracts::account_setup::{
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+};
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -3142,7 +3148,9 @@ mod tests {
         path::VirtualPath,
         resource::ResourceScope,
     };
-    use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
+    use ironclaw_product_contracts::package_lifecycle::{
+        LifecyclePackageKind, LifecyclePackageRef,
+    };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 
     use super::*;

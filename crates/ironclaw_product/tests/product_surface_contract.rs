@@ -26,25 +26,23 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
-    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
-    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
-    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
+    ActionDispatchKind, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionScope,
+    AuthInteractionService, AuthInteractionStatus, BeforeInboundPolicy, BeforeInboundPolicyOutcome,
+    BeforeInboundPolicyRequest, ConversationBindingService, DefaultInboundTurnService,
+    DefaultProductSurface, FakeBeforeInboundPolicy, FakeConversationBindingService,
+    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
+    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductInstallationKey, ProductInstallationScope, ProductSurfaceFailure,
     RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
-    approval_gate_ref,
+    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -57,6 +55,10 @@ use ironclaw_product::{
     ProductTriggerReason, ProjectionCursor, ProjectionReadPayload, ProjectionSubscriptionPayload,
     ProtocolAuthEvidence, ScopedApprovalResolutionPayload, TrustedInboundContext,
     UserMessagePayload,
+};
+use ironclaw_product_contracts::action::{
+    ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
+    SourceBindingKey,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{

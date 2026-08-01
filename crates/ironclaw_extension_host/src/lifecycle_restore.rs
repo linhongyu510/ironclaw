@@ -8,7 +8,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
-use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
+use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use tokio::sync::Mutex;
 
 use crate::{

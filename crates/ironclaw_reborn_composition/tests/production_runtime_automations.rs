@@ -138,7 +138,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     )
     .await
     .expect("production automation service must be reachable (not 503)");
-    let result = ironclaw_product::RebornViewPage {
+    let result = ironclaw_product_contracts::views::RebornViewPage {
         payload: result
             .items
             .into_iter()

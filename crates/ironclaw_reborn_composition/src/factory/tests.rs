@@ -3281,8 +3281,8 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
 
 fn pairing_account_setup_descriptor(
     extension_id: &str,
-) -> ironclaw_product::ExtensionAccountSetupDescriptor {
-    ironclaw_product::ExtensionAccountSetupDescriptor {
+) -> ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor {
+    ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor {
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
         auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
@@ -3299,9 +3299,10 @@ fn pairing_account_setup_descriptor(
             submit_label: "Pair".to_string(),
             error_message: "Pairing failed.".to_string(),
         },
-        connection_notices: ironclaw_product::ChannelConnectionNoticePolicy::generic(
-            "Pairing Fixture",
-        ),
+        connection_notices:
+            ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy::generic(
+                "Pairing Fixture",
+            ),
         activation_success_message: "Pairing fixture connected.".to_string(),
         pairing_deep_link_template: None,
         inbound_code_prefixes: Vec::new(),

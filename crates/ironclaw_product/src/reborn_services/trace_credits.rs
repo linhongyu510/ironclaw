@@ -7,6 +7,8 @@
 //! always derived from the authenticated caller's tenant + user id (see
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
+use ironclaw_product_contracts::views::RebornViewProvider;
+
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
@@ -17,7 +19,7 @@ use ironclaw_reborn_traces::contribution::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ProductCapabilityInvoker, ProductView, RebornServices, RebornViewProvider};
+use super::{ProductCapabilityInvoker, ProductView, RebornServices};
 
 pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
     ProductView::unpaginated("trace_credits");

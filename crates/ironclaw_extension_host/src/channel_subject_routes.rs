@@ -28,7 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_host_api::ids::{ExtensionId, TenantId, UserId};
-use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductSurfaceFailure,

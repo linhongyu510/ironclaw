@@ -773,7 +773,9 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<
+            ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor,
+        >,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self

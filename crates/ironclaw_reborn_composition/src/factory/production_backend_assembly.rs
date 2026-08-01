@@ -978,17 +978,18 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    let lifecycle_continuation_facade: Arc<dyn ironclaw_product::LifecycleProductService> =
-        Arc::new(
-            ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
-                &skill_management,
-            ))
-            .with_extension_management(Arc::clone(&extension_management))
-            .with_channel_config(Arc::clone(&admin_configuration_resolver))
-            .with_runtime_credential_accounts(
-                product_auth_dependencies.runtime_credential_account_selection_service(),
-            ),
-        );
+    let lifecycle_continuation_facade: Arc<
+        dyn ironclaw_product_contracts::lifecycle_service::LifecycleProductService,
+    > = Arc::new(
+        ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+            &skill_management,
+        ))
+        .with_extension_management(Arc::clone(&extension_management))
+        .with_channel_config(Arc::clone(&admin_configuration_resolver))
+        .with_runtime_credential_accounts(
+            product_auth_dependencies.runtime_credential_account_selection_service(),
+        ),
+    );
     let lifecycle_wrapped_product_continuation =
         ironclaw_product::lifecycle_auth_continuation_dispatcher(
             lifecycle_continuation_facade,
@@ -1077,12 +1078,13 @@ pub(super) async fn build_backend_production(
             })?,
         ]
     };
-    let operator_tool_catalog: Arc<dyn ironclaw_product::RebornOperatorToolCatalog> =
-        Arc::new(ActiveRegistryOperatorToolCatalog::new(
-            services.shared_extension_registry(),
-            operator_synthetic_tools,
-            Some(Arc::clone(&extension_management)),
-        ));
+    let operator_tool_catalog: Arc<
+        dyn ironclaw_product_contracts::operator_tools::RebornOperatorToolCatalog,
+    > = Arc::new(ActiveRegistryOperatorToolCatalog::new(
+        services.shared_extension_registry(),
+        operator_synthetic_tools,
+        Some(Arc::clone(&extension_management)),
+    ));
     insert_operator_config_handler(
         &mut first_party_registry,
         operator_auto_approve_settings,

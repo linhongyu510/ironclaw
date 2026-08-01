@@ -550,12 +550,13 @@ use ironclaw_product::{
     ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
     RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
+    SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -5251,7 +5252,7 @@ async fn query_webui_extension_setup(
     let page = query_product_surface_page(
         api,
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::EXTENSION_SETUP_VIEW.id.to_string(),
             params: serde_json::json!({ "package_id": package_id }),
             cursor: None,
@@ -5568,7 +5569,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let cleared_page = query_product_surface_page(
         bundle.as_ref(),
         caller.clone(),
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5583,7 +5584,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let targets_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_DELIVERY_TARGETS_VIEW
                 .id
                 .to_string(),
@@ -5656,7 +5657,7 @@ async fn standalone_webui_bundle_invokes_skill_install_with_scoped_mounts() {
     let skills_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::SKILLS_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5869,7 +5870,7 @@ async fn runtime_product_surface_without_local_runtime_still_lists_automations_f
     let response = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::AUTOMATIONS_VIEW.id.to_string(),
             params: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),
@@ -6256,9 +6257,9 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
 /// candidates carry the same (prompt-stage) surface version and the run completes.
 #[tokio::test]
 async fn multi_tool_call_response_survives_surface_change_mid_register() {
-    use ironclaw_product::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-        LifecycleProductSurfaceContext,
+    use ironclaw_product::LifecycleProductAction;
+    use ironclaw_product_contracts::lifecycle_service::{
+        LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
 

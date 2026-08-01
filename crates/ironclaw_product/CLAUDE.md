@@ -29,6 +29,37 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
 | `ProductSurface` / `RebornServices` | Native WebChat v2 service — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
 
+## Ports that are no longer declared here
+
+WS2's `extension_host` port-inversion row (PROPOSAL §6.1.3) moved every
+product-side port this crate declared that a crate *below* product implements.
+They now live in `ironclaw_product_contracts` and this crate imports them like
+any other consumer — there is deliberately **no re-export** (the port half of
+`reborn_product_contract_location_scan.rs` fails on one):
+
+`delivery::{ChannelDeliveryResolver, ResolvedChannelDelivery, DeliveryReplyContextSource}` ·
+`account_setup::{AccountConnectionStatusSource, ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, AccountConnectionStatusError}` ·
+`channel_config::ChannelConfigProductService` ·
+`views::{RebornViewProvider, RebornViewDescriptor, RebornViewQuery, RebornViewPage}` ·
+`command::{ProductCommandContext, CommandActorRoleResolver}` ·
+`action::{ProductActionId, ActionFingerprintKey, SourceBindingKey, ProductCommandName, AuthRequestRef, LinkedThreadActionId}` ·
+`prompt_source::{ApprovalPromptContextSource, BlockedAuthPromptSource, BlockedAuthPromptRequest}` ·
+`lifecycle_service::{LifecycleProductService, LifecycleProductContext, LifecycleProductSurfaceContext}` ·
+`admin_users::{AdminUserService, AdminUser*, AdminCreate*}` ·
+`operator_tools::{RebornOperatorToolCatalog, RebornOperatorToolInfo}`.
+
+What stayed, and why: the **implementations** (`DeliveryCoordinator`,
+`NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,
+`RejectingAdminUserService`, `UnavailableRebornViewProvider`,
+`DirectConversationCommandAdmission`), the frozen wire DTOs
+(`RebornAdmin*`, `ProductView`), the ledger record and saga (`ProductInboundAction`),
+and six ports whose signatures name `ironclaw_auth`/`ironclaw_turns`/`ironclaw_conversations`
+types that a contracts crate may not depend on — see the residue list in
+`crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`.
+`ProductSurfaceFailure` is the crate's *internal* workflow error and stays here;
+that it is also `ironclaw_extension_host`'s lifecycle error vocabulary is the
+single largest remaining blocker to that crate's layer flip.
+
 ## Dependencies
 
 - `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution, the approval request store contract surfaced through the approval resolution/read-model ports, and scoped lease issue ports used by approval interactions

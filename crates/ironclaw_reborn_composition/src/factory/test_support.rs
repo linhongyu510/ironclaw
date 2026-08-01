@@ -328,7 +328,8 @@ impl RebornRuntimeStores {
     /// `None` without a standalone runtime.
     pub(crate) fn channel_config_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
+    ) -> Option<Arc<dyn ironclaw_product_contracts::channel_config::ChannelConfigProductService>>
+    {
         let service = self.channel_config_service.clone();
         Some(Arc::new(
             ironclaw_extension_host::RebornChannelConfigProductService::new(service),

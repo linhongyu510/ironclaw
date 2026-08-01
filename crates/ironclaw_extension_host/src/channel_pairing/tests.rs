@@ -12,15 +12,21 @@ use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_product::{
-    AuthPromptChallengeKind, BlockedAuthPromptRequest, BlockedAuthPromptSource,
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, ProductAdapterId, ProductTriggerReason,
-    RebornChannelConnectStrategy,
+use ironclaw_product::RebornChannelConnectStrategy;
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use tokio::sync::Notify;
 

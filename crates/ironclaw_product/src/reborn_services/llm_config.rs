@@ -14,6 +14,8 @@
 //! key can't be serialized back out). Response snapshots never carry a key
 //! value — only a boolean `api_key_set`.
 
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
+
 use async_trait::async_trait;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
@@ -22,7 +24,7 @@ use ironclaw_product_contracts::surface::{
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use super::{ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider};
+use super::{ProductCapabilityInvoker, RebornServices};
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "llm_config",

@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is seven modules:
+Today that is sixteen modules:
 
 | Module | Owns |
 | --- | --- |
@@ -27,6 +27,16 @@ Today that is seven modules:
 | `interaction_commands` | The channel-neutral interaction-reply grammar (`parse_interaction_resolution_text`). |
 | `operator_llm` | The operator LLM menu vocabulary. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`) — see the ruling below. |
+| `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_host` — the only crate that may write lifecycle state. |
+| `delivery` | The delivery-resolution ports: `ChannelDeliveryResolver`, `ResolvedChannelDelivery`, `DeliveryReplyContextSource`. The coordinator itself is product's. |
+| `account_setup` | `AccountConnectionStatusSource` + the extension account-setup descriptor/notice/error vocabulary. The declaration registry is product's (it holds mutable state). |
+| `channel_config` | `ChannelConfigProductService` — per-extension `[channel.config]` operator config, implemented over the installation store. |
+| `prompt_source` | Gate-prompt enrichment ports: `ApprovalPromptContextSource`, `BlockedAuthPromptSource`, `BlockedAuthPromptRequest`. Rendering stays in product. |
+| `command` | `ProductCommandContext` (the authority-bearing dispatch context) and the `CommandActorRoleResolver` admission port. |
+| `action` | Inbound-action identity (`ProductActionId`), the bounded product tokens, and `ActionFingerprintKey`. The ledger record and saga are product's. |
+| `admin_users` | The `AdminUserService` port, its records, and its error taxonomy. The `Reborn*` HTTP wire DTOs stay with product's frozen surface. |
+| `operator_tools` | `RebornOperatorToolCatalog` + `RebornOperatorToolInfo`. |
+| `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. `ProductView` (the typed declaration wrapper) stays with product's frozen inventory. |
 
 ## What must never be here
 
@@ -107,16 +117,42 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 (`ApprovalPrompt*View`), which only product and WebUI reach, stayed in
 `outbound` here.
 
+**The nine ports WS2's first row inverted, and the six it could not.** The
+`extension_host` port-inversion row moved every product-declared port the
+extension host *implements* whose signature this crate may legally name:
+`ChannelDeliveryResolver`, `DeliveryReplyContextSource`,
+`AccountConnectionStatusSource`, `ChannelConfigProductService`,
+`RebornViewProvider`, `CommandActorRoleResolver`, `ApprovalPromptContextSource`,
+`BlockedAuthPromptSource`, `LifecycleProductService`. Six stayed, and each for
+the same mechanical reason rather than a judgement call — **this crate's
+dependency allowlist is `ironclaw_host_api` + `ironclaw_extension_contracts`
+and nothing else internal**, so a port whose signature names a type from
+`ironclaw_auth`, `ironclaw_threads`, `ironclaw_turns`, or
+`ironclaw_conversations` cannot be declared here until that type is narrowed
+out of it: `AuthChallengeProvider` and `ChannelConnectionService` and
+`ExtensionCredentialSetupService` (auth credential vocabulary),
+`ConversationBindingService` and `ProductActorUserResolver` and
+`ProductConversationSubjectRouteResolver` (they error with
+`ironclaw_product::ProductSurfaceFailure`, which carries `ironclaw_turns::TurnError`
+on two variants). The residue is enumerated with its reasons and held
+shrink-only by
+`crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
+**do not add a row there** — narrow the signature or move the type instead.
+
 ## Deferred by design (not missing)
 
-§6.1.3's Owns list also names the product-side **ports** whose implementations
-live beside product — delivery resolution, command admission, the operator
-service set, `LifecycleProductService`, `AccountConnectionStatusSource`,
-`ChannelConfigProductService` — and the command/view/capability descriptor
-types. Those are sourced from `ironclaw_product`, not from `ironclaw_host_api`,
-and CHECKLIST WS2 ("flip `extension_host`'s implemented ports to
-`product_contracts`/`extension_contracts` definitions") and WS6 ("`operator`
-implements `product_contracts` ports") own them by name. They land in this
-crate; they land with the PRs that repoint their implementors, because moving a
-port definition without its implementation buys no dependency-edge removal. The
-WS1.4 PR body carries the per-port movability analysis those rows need.
+§6.1.3's Owns list also names the **operator service ports** (`LlmConfigService`,
+`ActiveModelReader`, `OperatorLogsService`, `OperatorServiceLifecycleService`,
+`OperatorStatusService` + their DTOs) and the command/view/capability
+**descriptor types** (`ProductSurfaceCommandDescriptor`,
+`ProductCapabilityDescriptor`, `ProductView`). Those are sourced from
+`ironclaw_product`, and CHECKLIST WS2's `operator`/`webui`/`openai_compat` flips
+own them by name. They land in this crate; they land with the PRs that repoint
+their implementors, because moving a port definition without its implementation
+buys no dependency-edge removal.
+
+`ProductCommandAdmissionService` is a special case worth recording rather than
+deciding: §6.1.3 names its "shape" for this crate, but `admit` takes a
+`&ProductCommand`, and §6.9.1 keeps the command grammar with product's frozen
+inventory. One of the two sections has to give; neither WS1.4 nor WS2's first
+row had standing to choose, so the port stayed in `ironclaw_product`.

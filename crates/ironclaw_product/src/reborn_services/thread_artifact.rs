@@ -9,10 +9,11 @@ use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
 use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest};
 use serde::{Deserialize, Serialize};
 
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
+
 use super::{
-    ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider,
-    RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, map_timeline_probe_error,
-    parse_thread_id_field,
+    ProductCapabilityInvoker, RebornServices, RunArtifactLogs, RunArtifactMessage,
+    RunArtifactRedaction, map_timeline_probe_error, parse_thread_id_field,
     run_artifact::{ARTIFACT_REDACTION_PIPELINE, artifact_messages, context_messages_by_id},
     thread_scope_from_turn_scope,
 };

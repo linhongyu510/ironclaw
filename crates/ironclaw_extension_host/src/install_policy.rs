@@ -16,7 +16,8 @@ use std::collections::BTreeSet;
 
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ids::UserId;
-use ironclaw_product::{LifecycleInstallScope, ProductSurfaceFailure};
+use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
 
 /// Derive who a NEW install belongs to (#6520): every lifecycle install,
 /// including one initiated by the operator, is private to the caller.

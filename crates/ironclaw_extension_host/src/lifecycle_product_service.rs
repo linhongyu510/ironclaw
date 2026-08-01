@@ -1,16 +1,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, UserId},
     resource::ResourceScope,
 };
-use ironclaw_product::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductService, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, ProductSurfaceFailure, lifecycle_product_surface_error,
+use ironclaw_product::{ProductSurfaceFailure, lifecycle_product_surface_error};
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService,
+};
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 #[cfg(test)]
@@ -686,7 +690,7 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{HostPath, MountAlias, VirtualPath},
     };
-    use ironclaw_product::LifecycleProductSurfaceContext;
+    use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 
     #[tokio::test]
     async fn skill_lifecycle_service_installs_lists_and_removes_via_skill_management() {

@@ -8,19 +8,19 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
+use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
 };
-use ironclaw_product::{
+use ironclaw_product::{ProductSurfaceFailure, RebornChannelConnectStrategy};
+use ironclaw_product_contracts::package_lifecycle::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure,
-    RebornChannelConnectStrategy,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
 };
-use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::{collections::BTreeMap, sync::Arc};
 use toml::Value;
 

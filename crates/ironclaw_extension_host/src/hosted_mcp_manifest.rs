@@ -21,9 +21,9 @@ use ironclaw_host_api::{
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, SecretHandle, VendorId},
 };
-use ironclaw_product::{
+use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure,
 };
 
 use crate::{

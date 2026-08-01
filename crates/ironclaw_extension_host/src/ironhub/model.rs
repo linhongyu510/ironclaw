@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use ironclaw_product::{LifecycleProductResponse, ProductSurfaceFailure};
+use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

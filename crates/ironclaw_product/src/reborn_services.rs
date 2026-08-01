@@ -14,7 +14,19 @@ use std::{
     time::Duration,
 };
 
+use ironclaw_product_contracts::admin_users::{
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminCreateUserFields,
+    AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
 use crate::{
     ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
@@ -69,16 +81,15 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
-    CommandResultView, LifecycleProductContext, LifecycleProductService,
-    LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCancelRunRequest, ProductCommand,
-    ProductCommandDescriptor, ProductCreateThreadRequest, ProductGateResolution,
-    ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput, ProductRejectionKind,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure,
-    ProductTriggerReason, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    CommandResultView, ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
+    ProductCancelRunRequest, ProductCommand, ProductCommandDescriptor, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundCommand, ProductLifecycleCommandInput,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductModelCommand,
+    ProductModelCommandInput, ProductRejectionKind, ProductRenameAutomationRequest,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductStatusCommandInput,
+    ProductSubmitTurnRequest, ProductSurfaceFailure, ProductTriggerReason,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
@@ -123,16 +134,12 @@ pub use admin_configuration::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
-use admin_users::{
-    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
-};
+use admin_users::RejectingAdminUserService;
 pub use admin_users::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
@@ -252,10 +259,7 @@ pub use types::{
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornVendorAuthAccounts,
 };
-pub use views::{
-    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
-    UnavailableRebornViewProvider,
-};
+pub use views::{ProductView, UnavailableRebornViewProvider};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -546,29 +550,6 @@ pub const SKILL_SEARCH_VIEW: ProductView<serde_json::Value, RebornSkillSearchRes
 pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentResponse> =
     ProductView::unpaginated("skill_content");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornOperatorToolInfo {
-    pub capability_id: CapabilityId,
-    pub provider: ExtensionId,
-    pub description: Arc<str>,
-    pub default_permission: PermissionMode,
-    pub effects: Arc<[EffectKind]>,
-}
-
-#[async_trait]
-pub trait RebornOperatorToolCatalog: Send + Sync {
-    /// Tools visible to `caller` in the operator/settings surface (#5459 P1).
-    ///
-    /// The settings/tools routes are authenticated-caller routes (not
-    /// operator-gated), so a member reads this catalog. It MUST therefore be
-    /// filtered by installation owner exactly like the model capability
-    /// surface: tenant-shared tools for everyone, user-private tools only for
-    /// their owner. An unfiltered catalog would disclose another user's
-    /// private install (its capability id, description, effects) — the leak
-    /// this parameter closes.
-    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
-}
-
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
     overrides: Arc<dyn ToolPermissionOverrideStorePort>,
@@ -740,34 +721,6 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
         Ok(std::collections::HashMap::new())
     }
-}
-
-pub use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
-
-/// The generic channel-config configure port: per-extension operator config
-/// declared by the extension manifest's channel-config fields. Host
-/// composition implements it over the durable installation store and the
-/// scoped secret store; the setup service routes submitted values through it
-/// and derives config completeness from the field status.
-#[async_trait]
-pub trait ChannelConfigProductService: Send + Sync {
-    /// Per-field presence for the extension's declared channel config.
-    /// Empty when the extension declares none (or is not installed yet).
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<RebornChannelConfigField>, ProductSurfaceError>;
-
-    /// Validate submitted `(handle, value)` pairs against the installed
-    /// manifest's declared fields and persist them (non-secret values
-    /// durably per installation, secret values into the scoped secret
-    /// store). Saving while the extension is active re-runs its activation
-    /// with the new values.
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError>;
 }
 
 #[async_trait]

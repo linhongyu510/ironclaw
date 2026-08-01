@@ -21,9 +21,9 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::{
+use ironclaw_product::{ProductSurfaceFailure, RebornChannelConnectStrategy};
+use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure, RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
@@ -347,15 +347,17 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             connection_preview_source.as_ref().unwrap_or(&response),
         );
         let response = without_model_visible_connection_chrome(response);
-        let output =
-            ironclaw_product::public_lifecycle_response_json(&response).map_err(|error| {
-                tracing::debug!(
-                    target: "ironclaw::reborn::extension_lifecycle",
-                    ?error,
-                    "extension lifecycle output serialization failed"
-                );
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
-            })?;
+        let output = ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json(
+            &response,
+        )
+        .map_err(|error| {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                ?error,
+                "extension lifecycle output serialization failed"
+            );
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+        })?;
         Ok(
             FirstPartyCapabilityResult::new(output, resource_usage(started))
                 .with_display_preview(connection_preview),
@@ -709,10 +711,11 @@ mod tests {
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
     };
     use ironclaw_extension_contracts::state::InstallationState;
-    use ironclaw_product::{
+    use ironclaw_product::RebornChannelConnectStrategy;
+    use ironclaw_product_contracts::package_lifecycle::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
+        LifecycleSearchExtensionSummary,
     };
 
     const TEST_OWNER_ID: &str = "extension-tool-test-user";

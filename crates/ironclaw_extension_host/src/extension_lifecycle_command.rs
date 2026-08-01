@@ -3,11 +3,13 @@ use std::sync::Arc;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_product::{
+use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductService, LifecycleProductSurfaceContext, LifecycleSearchExtensionSummary,
-    ProductSurfaceFailure,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use thiserror::Error;
@@ -257,7 +259,7 @@ mod tests {
         ids::{AgentId, InvocationId, TenantId, UserId},
         resource::ResourceScope,
     };
-    use ironclaw_product::LifecycleExtensionSummary;
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
     use super::*;
@@ -365,7 +367,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "line\rrewrite".to_string(),
                         source: LifecycleExtensionSource::HostBundled,
-                        runtime_kind: ironclaw_product::LifecycleExtensionRuntimeKind::WasmTool,
+                        runtime_kind: ironclaw_product_contracts::package_lifecycle::LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
                         channel_directions: None,
                         channel_connection: None,

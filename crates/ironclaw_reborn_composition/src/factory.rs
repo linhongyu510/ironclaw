@@ -174,10 +174,13 @@ use ironclaw_outbound::{
 use ironclaw_processes::{ProcessConcurrencyLimits, ProcessJournalStore, ProcessServices};
 use ironclaw_product::RebornProjectService;
 use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductService, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ChannelConnectionRequirement, ExtensionAccountSetupRegistry, OutboundPreferencesProductService,
+    ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
+use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
@@ -409,7 +412,7 @@ pub(crate) struct RebornRuntimeStores {
     /// exposed separately for host flows (e.g. DM target provisioning) that
     /// need one stable adapter + egress read outside a delivery.
     pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+        Option<Arc<dyn ironclaw_product_contracts::delivery::ChannelDeliveryResolver>>,
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
@@ -421,7 +424,8 @@ pub(crate) struct RebornRuntimeStores {
 struct ChannelHostWiring {
     extension_ingress: Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
-    channel_delivery_resolver: Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    channel_delivery_resolver:
+        Option<Arc<dyn ironclaw_product_contracts::delivery::ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,

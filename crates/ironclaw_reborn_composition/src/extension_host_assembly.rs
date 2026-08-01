@@ -10,10 +10,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
-    ApprovalInteractionService, ApprovalPromptContextSource, AuthChallengeProvider,
-    AuthInteractionService, BlockedAuthFlowCanceller, BlockedAuthPromptSource,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupRegistry, InboundAttachmentLander,
+    ApprovalInteractionService, AuthChallengeProvider, AuthInteractionService,
+    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, InboundAttachmentLander,
     ProjectFilesystemReader, RunDeliverySettings,
+};
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -46,7 +49,7 @@ pub(crate) struct BackendExtensionHostAssembly {
     pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+        Option<Arc<dyn ironclaw_product_contracts::delivery::ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>,
@@ -144,13 +147,14 @@ pub(crate) async fn build_backend_extension_host(
     );
     let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
         Some(transport) => {
-            let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
-                ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
-                    generic.host.snapshot_watch(),
-                    transport,
-                )
-                .with_deployment_channels(deployment_channels),
-            );
+            let resolver: Arc<dyn ironclaw_product_contracts::delivery::ChannelDeliveryResolver> =
+                Arc::new(
+                    ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
+                        generic.host.snapshot_watch(),
+                        transport,
+                    )
+                    .with_deployment_channels(deployment_channels),
+                );
             let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
                 outbound_state,
                 Arc::clone(&resolver),
@@ -302,7 +306,10 @@ pub(crate) async fn build_backend_channel_pairing(
         }));
         if !account_setups.connect(
             &descriptor.extension_id,
-            Arc::clone(&service) as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
+            Arc::clone(&service)
+                as Arc<
+                    dyn ironclaw_product_contracts::account_setup::AccountConnectionStatusSource,
+                >,
         ) {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
@@ -343,7 +350,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: RunDeliverySettings,
-    pub(crate) admin_users: Arc<dyn ironclaw_product::AdminUserService>,
+    pub(crate) admin_users: Arc<dyn ironclaw_product_contracts::admin_users::AdminUserService>,
 }
 
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
@@ -416,7 +423,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
 pub(crate) fn channel_admin_users(
     services: &RebornRuntimeStores,
     identity: &ironclaw_extension_host::channel_host::ChannelHostIdentity,
-) -> Arc<dyn ironclaw_product::AdminUserService> {
+) -> Arc<dyn ironclaw_product_contracts::admin_users::AdminUserService> {
     let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
         crate::factory::filesystem_reborn_identity_store(
             Arc::clone(&services.scoped_filesystem),

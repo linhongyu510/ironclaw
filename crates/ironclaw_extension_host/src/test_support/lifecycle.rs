@@ -36,7 +36,9 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_processes::ProcessServices;
-use ironclaw_product::{LifecycleProductService, LifecycleProductSurfaceContext};
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
@@ -478,13 +480,15 @@ pub async fn invoke_with_standalone_approval(
 
 pub fn lifecycle_product_context(
     scope: ResourceScope,
-) -> ironclaw_product::LifecycleProductContext {
-    ironclaw_product::LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-        tenant_id: scope.tenant_id,
-        user_id: scope.user_id,
-        agent_id: scope.agent_id,
-        project_id: scope.project_id,
-    })
+) -> ironclaw_product_contracts::lifecycle_service::LifecycleProductContext {
+    ironclaw_product_contracts::lifecycle_service::LifecycleProductContext::Surface(
+        LifecycleProductSurfaceContext {
+            tenant_id: scope.tenant_id,
+            user_id: scope.user_id,
+            agent_id: scope.agent_id,
+            project_id: scope.project_id,
+        },
+    )
 }
 
 pub fn webui_gate_resource_scope_for_owner(owner_id: &str) -> ResourceScope {

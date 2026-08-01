@@ -1,8 +1,12 @@
 //! Generic read conduit for descriptor-declared product views.
 
 use async_trait::async_trait;
+use ironclaw_product_contracts::views::{
+    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+};
+use serde::Deserialize;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 use super::{ProductSurfaceCaller, ProductSurfaceError};
@@ -10,13 +14,6 @@ use super::{ProductSurfaceCaller, ProductSurfaceError};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyViewParams {}
-
-/// Stable metadata for one read-only product view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RebornViewDescriptor {
-    pub id: &'static str,
-    pub paginated: bool,
-}
 
 /// Typed declaration for one ProductSurface read view.
 ///
@@ -124,23 +121,6 @@ where
     }
 }
 
-/// One registered, read-only product view invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornViewQuery {
-    pub view_id: String,
-    pub params: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-/// One page returned by the generic product view conduit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornViewPage {
-    pub payload: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
-
 pub(super) fn parse_empty_view_params(
     params: serde_json::Value,
 ) -> Result<(), ProductSurfaceError> {
@@ -180,22 +160,6 @@ pub(super) fn view_page_with_cursor<T: Serialize>(
         payload: serde_json::to_value(payload).map_err(ProductSurfaceError::internal_from)?,
         next_cursor,
     })
-}
-
-/// One composition-supplied implementation behind the generic view conduit.
-///
-/// Product features register descriptors and providers instead of growing
-/// `ProductSurface` with feature-specific read methods.
-#[async_trait]
-pub trait RebornViewProvider: Send + Sync {
-    fn descriptor(&self) -> RebornViewDescriptor;
-
-    async fn query(
-        &self,
-        caller: ProductSurfaceCaller,
-        params: serde_json::Value,
-        cursor: Option<String>,
-    ) -> Result<RebornViewPage, ProductSurfaceError>;
 }
 
 /// Fail-closed static default for compositions without an additional view.
