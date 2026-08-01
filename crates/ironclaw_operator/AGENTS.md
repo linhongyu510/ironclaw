@@ -66,7 +66,7 @@
   directly. CHECKLIST WS3 removes it behind a `product_contracts` port
   ("port replacements land first", PROPOSAL §12.1b), so the boundary rule
   deliberately does *not* forbid `ironclaw_secrets` yet.
-- **`llm_admin/provider_admin.rs` `include_str!`s CLI source** (`:933`, into
+- **`llm_admin/provider_admin.rs` `include_str!`s CLI source** (into
   `crates/ironclaw_reborn_cli/src/commands/config/init.rs`). Inventoried by
   `reborn_cross_crate_include_scan.rs`, which is still report-only; CHECKLIST
   WS2 flips it to enforcing.

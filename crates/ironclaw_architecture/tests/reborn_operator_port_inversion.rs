@@ -572,6 +572,10 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
         impl<T: Iterator<Item = String>> OperatorStatusService for Nested<T> {}
         impl<F: Fn(&str) -> bool> ReturnArrowInBound for Callback<F> {}
         impl crate::llm_admin::Local<'_> for Thing {}
+        impl<'a> ironclaw_product_contracts::wrapped::WrappedHeaderPort<SomeArgument>
+            for SomeVeryLongConcreteTypeName<'a>
+        {
+        }
         impl OperatorLogBuffer { fn inherent(&self) {} }
         // impl CommentedOut for Thing {}
         #[cfg(test)]
@@ -589,6 +593,13 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
         "OperatorStatusService",
         "ReturnArrowInBound",
         "Local",
+        // rustfmt wraps a long header before `for`, indenting the
+        // continuation. The indent is what keeps `" for "` intact as a
+        // substring, so this shape reads exactly like a one-line header —
+        // pinned here because "the wrap hides the impl" is the plausible
+        // silent-vacuity story for the frozen-empty residue half, and it is
+        // not true.
+        "WrappedHeaderPort",
     ] {
         assert!(
             found.contains(expected),
