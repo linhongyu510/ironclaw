@@ -55,6 +55,7 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductContext;
 use ironclaw_skills::ScopedSkillManagementPort;
 
 pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
@@ -480,17 +481,13 @@ pub async fn invoke_with_standalone_approval(
     }
 }
 
-pub fn lifecycle_product_context(
-    scope: ResourceScope,
-) -> ironclaw_product_contracts::lifecycle_service::LifecycleProductContext {
-    ironclaw_product_contracts::lifecycle_service::LifecycleProductContext::Surface(
-        LifecycleProductSurfaceContext {
-            tenant_id: scope.tenant_id,
-            user_id: scope.user_id,
-            agent_id: scope.agent_id,
-            project_id: scope.project_id,
-        },
-    )
+pub fn lifecycle_product_context(scope: ResourceScope) -> LifecycleProductContext {
+    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+        tenant_id: scope.tenant_id,
+        user_id: scope.user_id,
+        agent_id: scope.agent_id,
+        project_id: scope.project_id,
+    })
 }
 
 pub fn webui_gate_resource_scope_for_owner(owner_id: &str) -> ResourceScope {

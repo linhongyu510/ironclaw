@@ -22,6 +22,7 @@ use ironclaw_product_contracts::prompt_source::{
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
 use crate::channel_pairing::ChannelPairingRegistry;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 /// One recipe-driven challenge materializer for every product surface.
 /// Product auth owns OAuth/manual challenges; the canonical channel-pairing
@@ -169,7 +170,7 @@ impl ProductAuthBlockedAuthPromptSource {
 impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
         &self,
-        request: ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest<'_>,
+        request: BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
         auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }

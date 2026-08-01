@@ -58,3 +58,75 @@ pub trait BlockedAuthPromptSource: Send + Sync {
         request: BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+
+    static_assertions::assert_obj_safe!(ApprovalPromptContextSource, BlockedAuthPromptSource);
+
+    struct NoEnrichment;
+
+    #[async_trait]
+    impl ApprovalPromptContextSource for NoEnrichment {
+        async fn approval_prompt_context(
+            &self,
+            _gate_ref: &TurnGateRef,
+            _owner_user_id: &UserId,
+            _scope: &TurnScope,
+        ) -> Option<ApprovalPromptContextView> {
+            None
+        }
+    }
+
+    fn scope() -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-1").expect("valid tenant"),
+            None,
+            None,
+            ThreadId::new("thread-1").expect("valid thread"),
+        )
+    }
+
+    #[tokio::test]
+    async fn absent_approval_context_degrades_to_none_instead_of_erroring() {
+        // The port returns `Option`, not `Result`, on purpose: a gate whose
+        // context cannot be resolved still has to render a prompt, just a
+        // generic one. An error type here would let an enrichment miss take
+        // down the whole delivery.
+        let source: std::sync::Arc<dyn ApprovalPromptContextSource> =
+            std::sync::Arc::new(NoEnrichment);
+        let gate_ref = TurnGateRef::new("gate-1").expect("valid gate ref");
+        let owner = UserId::new("user-1").expect("valid user");
+        assert!(
+            source
+                .approval_prompt_context(&gate_ref, &owner, &scope())
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_blocked_auth_request_borrows_its_scope_and_requirements() {
+        // The request is a borrow-only view by design — it is built per render
+        // and must not force the caller to clone the scope or the requirement
+        // slice onto the heap for a prompt that may never be sent.
+        let owner = UserId::new("user-1").expect("valid user");
+        let scope = scope();
+        let request = BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner,
+            scope: &scope,
+            run_id: TurnRunId::new(),
+            gate_ref: "gate-1",
+            invocation_id: None,
+            body: "needs auth".to_string(),
+            credential_requirements: &[],
+        };
+        assert_eq!(request.fallback_owner_user_id, &owner);
+        assert_eq!(request.gate_ref, "gate-1");
+        assert!(request.credential_requirements.is_empty());
+        assert!(request.invocation_id.is_none());
+    }
+}

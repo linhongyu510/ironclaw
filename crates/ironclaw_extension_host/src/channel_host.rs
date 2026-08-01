@@ -69,6 +69,7 @@ use crate::extension_ingress::{
     ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
 };
 use ironclaw_extension_host::ChannelConfigService;
+use ironclaw_product_contracts::admin_users::AdminUserService;
 
 const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
@@ -366,7 +367,7 @@ pub struct GenericChannelHostDeps {
     /// for extensions that pair without an OAuth vendor.
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
     /// Admin-users directory backing channel-command role gating.
-    pub admin_users: Arc<dyn ironclaw_product_contracts::admin_users::AdminUserService>,
+    pub admin_users: Arc<dyn AdminUserService>,
 }
 
 /// What the assembly last reconciled for one extension id.
