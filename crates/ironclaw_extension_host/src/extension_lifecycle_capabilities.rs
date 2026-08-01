@@ -30,6 +30,7 @@ use serde::Deserialize;
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -201,6 +202,23 @@ struct ExtensionIdInput {
     extension_id: String,
 }
 
+/// Sanitizes a lifecycle-projection serialization failure into the capability
+/// error the model sees.
+///
+/// Extracted from an inline closure so the mapping is reachable from a test:
+/// the failure itself is a defensive guard (a well-formed
+/// [`LifecycleProductResponse`] does not fail `serde_json`), but *what it maps
+/// to* is a live contract — the model must get `OutputDecode`, and the serde
+/// error, which can quote projection contents, must stay in the debug log.
+fn lifecycle_output_decode_error(error: impl std::fmt::Debug) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        target: "ironclaw::reborn::extension_lifecycle",
+        ?error,
+        "extension lifecycle output serialization failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+}
+
 #[async_trait]
 impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
     async fn dispatch(
@@ -347,17 +365,8 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             connection_preview_source.as_ref().unwrap_or(&response),
         );
         let response = without_model_visible_connection_chrome(response);
-        let output = ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json(
-            &response,
-        )
-        .map_err(|error| {
-            tracing::debug!(
-                target: "ironclaw::reborn::extension_lifecycle",
-                ?error,
-                "extension lifecycle output serialization failed"
-            );
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
-        })?;
+        let output =
+            public_lifecycle_response_json(&response).map_err(lifecycle_output_decode_error)?;
         Ok(
             FirstPartyCapabilityResult::new(output, resource_usage(started))
                 .with_display_preview(connection_preview),
@@ -676,6 +685,17 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
 
 #[cfg(test)]
 mod tests {
+    /// The serialization guard is defensive — a well-formed projection does
+    /// not fail `serde_json` — but the mapping is a live contract: the model
+    /// must see `OutputDecode` and never the serde error, which can quote the
+    /// projection contents it failed on.
+    #[test]
+    fn output_serialization_failure_maps_to_output_decode_without_the_serde_error() {
+        let error = super::lifecycle_output_decode_error("key must be a string");
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::OutputDecode));
+        assert!(!format!("{error:?}").contains("key must be a string"));
+    }
+
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,

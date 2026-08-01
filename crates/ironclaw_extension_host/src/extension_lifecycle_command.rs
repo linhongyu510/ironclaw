@@ -259,6 +259,7 @@ mod tests {
         ids::{AgentId, InvocationId, TenantId, UserId},
         resource::ResourceScope,
     };
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionRuntimeKind;
     use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
@@ -367,7 +368,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "line\rrewrite".to_string(),
                         source: LifecycleExtensionSource::HostBundled,
-                        runtime_kind: ironclaw_product_contracts::package_lifecycle::LifecycleExtensionRuntimeKind::WasmTool,
+                        runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
                         channel_directions: None,
                         channel_connection: None,

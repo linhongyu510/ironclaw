@@ -40,3 +40,30 @@ pub trait RebornOperatorToolCatalog: Send + Sync {
     /// this parameter closes.
     async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static_assertions::assert_obj_safe!(RebornOperatorToolCatalog);
+
+    struct EmptyCatalog;
+
+    #[async_trait]
+    impl RebornOperatorToolCatalog for EmptyCatalog {
+        async fn list_operator_tools(&self, _caller: &UserId) -> Vec<RebornOperatorToolInfo> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catalog_is_caller_scoped_and_may_legitimately_be_empty() {
+        // The `caller` parameter is the disclosure control (#5459 P1): a member
+        // must not see another user's private install. An empty answer is
+        // valid and must not be an error, or a fresh tenant cannot render
+        // settings at all.
+        let catalog: Arc<dyn RebornOperatorToolCatalog> = Arc::new(EmptyCatalog);
+        let caller = UserId::new("user-1").expect("valid user id");
+        assert!(catalog.list_operator_tools(&caller).await.is_empty());
+    }
+}
