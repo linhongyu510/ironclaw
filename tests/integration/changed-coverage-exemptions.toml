@@ -672,3 +672,92 @@ owner = "@nearai/reborn"
 reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_product`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2.1, second tranche: the type-position residue.
+#
+# Deleting `ironclaw_product`'s re-exports forced every signature that named a
+# moved symbol to be rewritten. Where the name appears in a *type position* --
+# a struct field, a function parameter, a struct-literal field's enum path --
+# the rewrite changes the line but LLVM emits no coverage region for it, so the
+# line can never be covered and the file reports "contributed no instrumented
+# lines". This is the same class as the four WS1 entries above, from the same
+# cause, and each entry below names the exact construct.
+#
+# Everything in this PR that *can* be covered is covered by a test, not a
+# waiver: the ten relocated port modules, the two fail-closed error paths in
+# `extension_host`, and the `\0` arm of the bounded-token guard. The one
+# `tracing::debug!` body that read as uncovered is now exercised through a
+# real DEBUG subscriber rather than exempted.
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [370]
+owner = "@nearai/reborn"
+reason = "Type position only: `GenericChannelHostAssembly::admin_users`'s `Arc<dyn AdminUserService>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [1276]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/extension_ingress.rs"
+lines = [70]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [85]
+owner = "@nearai/reborn"
+reason = "Type position only: an `AuthChallengeView` struct-literal field's `AuthPromptChallengeKind::Pairing` path, repointed to `ironclaw_extension_contracts::auth_prompt`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [173]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `BlockedAuthPromptRequest<'_>` type, repointed to `ironclaw_product_contracts::prompt_source`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [472]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalConversationRef` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [473]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalEventId` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/deployment.rs"
+lines = [266]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs"
+lines = [340]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
