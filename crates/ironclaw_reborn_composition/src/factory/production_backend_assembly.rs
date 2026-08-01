@@ -1,5 +1,7 @@
 use super::with_shared_host_runtime_wiring;
 use super::*;
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
+use ironclaw_product_contracts::operator_tools::RebornOperatorToolCatalog;
 
 pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
@@ -978,9 +980,7 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    let lifecycle_continuation_facade: Arc<
-        dyn ironclaw_product_contracts::lifecycle_service::LifecycleProductService,
-    > = Arc::new(
+    let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
         ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
         ))
@@ -1078,13 +1078,12 @@ pub(super) async fn build_backend_production(
             })?,
         ]
     };
-    let operator_tool_catalog: Arc<
-        dyn ironclaw_product_contracts::operator_tools::RebornOperatorToolCatalog,
-    > = Arc::new(ActiveRegistryOperatorToolCatalog::new(
-        services.shared_extension_registry(),
-        operator_synthetic_tools,
-        Some(Arc::clone(&extension_management)),
-    ));
+    let operator_tool_catalog: Arc<dyn RebornOperatorToolCatalog> =
+        Arc::new(ActiveRegistryOperatorToolCatalog::new(
+            services.shared_extension_registry(),
+            operator_synthetic_tools,
+            Some(Arc::clone(&extension_management)),
+        ));
     insert_operator_config_handler(
         &mut first_party_registry,
         operator_auto_approve_settings,

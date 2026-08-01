@@ -639,3 +639,36 @@ owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef` type, repointed when the channel-adapter DTO family left `ironclaw_host_api`. A parameter type carries no LLVM coverage region."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2.1 extension_host port inversion (PR #6998). One entry, for one line.
+#
+# The port move deleted `ironclaw_product`'s re-export of
+# `ChannelConfigProductService`, so every signature naming it had to be
+# repointed. In this file the repoint let the signature fit on one line, which
+# makes the function's coverage region a *changed* line even though its body,
+# its callers, and its behavior are untouched.
+#
+# It is not an uncovered path. The accessor has two live callers, both of which
+# exercise it through the composed runtime:
+#   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
+#   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
+# The service it hands back is itself covered: `RebornChannelConfigProductService`
+# is exercised by the extension_host channel-config suite, and the port contract
+# by `ironclaw_product_contracts::channel_config`'s own tests, both added in this
+# PR. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
+# the caller lives in a lane whose lcov does not attribute hits back to this
+# `#[cfg(any(test, feature = "test-support"))]` accessor in the composition
+# bucket build.
+#
+# Every other changed line in this PR is covered by a test, not exempted --
+# including the five relocated port modules, which each gained a contract test
+# rather than a waiver.
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+lines = [330]
+owner = "@nearai/reborn"
+reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_product`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

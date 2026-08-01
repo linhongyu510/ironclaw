@@ -130,6 +130,7 @@ use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use ironclaw_product_contracts::admin_users::AdminUserSecretMeta;
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
 // initial approval UI state. It is mutable through `/settings/tools`, so do
@@ -311,7 +312,7 @@ async fn read_admin_user_secret(
     caller: ProductSurfaceCaller,
     user_id: UserId,
     handle: String,
-) -> Result<ironclaw_product_contracts::admin_users::AdminUserSecretMeta, WebUiV2HttpError> {
+) -> Result<AdminUserSecretMeta, WebUiV2HttpError> {
     let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,

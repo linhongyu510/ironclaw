@@ -74,3 +74,8 @@ ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+# `tracing` short-circuits on the null dispatcher, so a plain unit test cannot
+# tell "logged the cause" apart from "dropped it" — and the sanitized 503 body
+# makes that distinction the whole point of the lifecycle warning. Installing a
+# scoped subscriber is the only way to assert the diagnostic actually survives.
+tracing-subscriber = "0.3"
