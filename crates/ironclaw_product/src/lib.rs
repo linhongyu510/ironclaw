@@ -145,7 +145,6 @@ pub use fakes::{
     FakeInboundTurnService, NoProjectFilesystem, rejecting_product_surface_error,
 };
 pub use scoped_fs::{
-    ProjectScopedAttachmentLander,
     ProjectScopedAttachmentReader,
     ProjectScopedFilesystemReader,
     // Shared scoped-path helpers: the mount-browse reader in composition
@@ -308,21 +307,20 @@ pub use reborn_services::{
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY_ID,
     AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, ActiveModelReader,
-    AttachmentCleanupReport, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, ChannelAuthAccountState, ChannelConnectionService,
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
-    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
+    AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelAuthAccountState, ChannelConnectionService, ChannelInboundSurfaceAdmission,
+    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
+    ChannelInboundSurfaceRequest, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FilesystemBrowseReader, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander, InboundAttachmentReader,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CODEX_LOGIN_COMMAND,
-    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
+    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_ACTIVE_SET_CAPABILITY_ID,
+    LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
     LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LlmActiveSelection,
@@ -443,7 +441,6 @@ pub use ironclaw_product_contracts::inbound_requests::{
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
 pub use product_surface_inbound::{
-    DecodeInboundAttachments, IntoProductInboundCommand, ProductAttachmentCapabilities,
-    ProductInboundCommand, product_attachment_capabilities,
+    DecodeInboundAttachments, IntoProductInboundCommand, ProductInboundCommand,
 };
 pub use workflow::DefaultProductSurface;

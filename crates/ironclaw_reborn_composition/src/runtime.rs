@@ -1028,8 +1028,8 @@ impl RebornRuntime {
             run_delivery_settings,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
-        let inbound_attachments: Arc<dyn ironclaw_product::InboundAttachmentLander> =
-            Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+        let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
+            Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 Arc::clone(&attachment_filesystem),
             ));
         let project_filesystem: Arc<dyn ironclaw_product::ProjectFilesystemReader> = Arc::new(
@@ -1267,9 +1267,9 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn standalone_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         Some(self.standalone_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_attachments::InboundAttachmentReader>)
     }
 
     #[cfg(feature = "test-support")]
@@ -1281,7 +1281,7 @@ impl RebornRuntime {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(crate::factory::AttachmentTestSupport {
             read_port,
-            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })

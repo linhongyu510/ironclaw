@@ -545,7 +545,7 @@ impl RebornRuntimeStores {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
-            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -603,9 +603,9 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn standalone_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         Some(self.standalone_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_attachments::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
@@ -792,7 +792,7 @@ fn active_extension_network_policy_for_test(
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
     pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-    pub lander: Arc<dyn ironclaw_product::InboundAttachmentLander>,
+    pub lander: Arc<dyn ironclaw_attachments::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]

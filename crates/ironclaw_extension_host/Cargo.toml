@@ -35,6 +35,9 @@ ed25519-dalek = "2.2.0"
 hmac = "0.13"
 hex = "0.4.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+# `InboundAttachmentLander` — the channel host lands inbound attachment bytes
+# before accepting a message.
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
