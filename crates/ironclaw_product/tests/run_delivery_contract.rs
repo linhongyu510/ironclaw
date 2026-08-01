@@ -1349,6 +1349,88 @@ async fn observer_records_gate_route_after_approval_prompt() {
 }
 
 #[tokio::test]
+async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
+    // `vendor_message_ref` is an unvalidated vendor string, so a channel can
+    // hand back a ref that is not a legal route segment (here: a control
+    // character). The two topic-keyed route variants must then be DROPPED
+    // rather than recorded malformed -- and, crucially, the conversation-root
+    // variants must still be recorded, or one bad ref would silently cost the
+    // gate every route and a bare `approve` would resolve nothing.
+    let harness = build_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000001"),
+        )],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some("ts-\u{7}1".to_string()),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("payload"),
+                ),
+                "evt-gate-bad-ref",
+                "conv-1",
+                Some("1700.1"),
+                None,
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let route = harness
+        .route_store
+        .load_delivered_gate_route(
+            &tenant(),
+            &user(),
+            "gate:approval-00000000000000000000000000000001",
+        )
+        .await
+        .expect("route lookup")
+        .expect("gate route recorded");
+    let fingerprint = |space: Option<&str>, topic: Option<&str>| {
+        ExternalConversationRef::new(space, "conv-1", topic, None)
+            .expect("conversation")
+            .conversation_fingerprint()
+    };
+    let mut recorded = route.delivered_conversation_fingerprints.clone();
+    recorded.sort();
+    let mut expected = vec![
+        // Delivered loop, space-qualified conversation root.
+        fingerprint(Some("space-1"), None),
+        // Delivered loop, no-space fallback.
+        fingerprint(None, None),
+        // The prompting (source) conversation, keyed by its own topic.
+        fingerprint(Some("space-1"), Some("1700.1")),
+    ];
+    expected.sort();
+    assert_eq!(
+        recorded, expected,
+        "an unusable vendor message ref drops only the two ref-keyed variants"
+    );
+    assert!(
+        !recorded.iter().any(|entry| entry.contains('\u{7}')),
+        "a vendor ref that is not a legal external id must never reach a route key: {recorded:?}"
+    );
+}
+
+#[tokio::test]
 async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],

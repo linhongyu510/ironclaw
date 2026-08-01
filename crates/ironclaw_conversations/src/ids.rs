@@ -246,5 +246,30 @@ mod tests {
                 ..
             }
         ));
+
+        // The unification widened the input to the whole `ProductAdapterError`
+        // enum, so the mapper needs a total fallback: anything that is not an
+        // `InvalidIdentifier` still has to surface as this crate's
+        // `InvalidExternalRef` rather than escape as a foreign error. The
+        // generic `kind` is what marks it as the non-identifier path, and the
+        // source message must survive into `reason` or the caller loses the
+        // only description of what actually failed.
+        let non_identifier = ProductAdapterError::EgressUndeclaredHost {
+            host: "hooks.example.invalid".to_string(),
+        };
+        let expected_reason = non_identifier.to_string();
+        match map_external_ref_error(non_identifier) {
+            InboundTurnError::InvalidExternalRef { kind, reason } => {
+                assert_eq!(
+                    kind, "external_ref",
+                    "a non-identifier adapter error maps to the generic ref kind"
+                );
+                assert_eq!(
+                    reason, expected_reason,
+                    "the source error's message must be carried through verbatim"
+                );
+            }
+            other => panic!("expected InvalidExternalRef, got {other:?}"),
+        }
     }
 }

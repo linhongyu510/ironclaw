@@ -11,10 +11,14 @@
 
 use std::sync::Arc;
 
+use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome, ConversationBindingService,
+    AcceptConversationMessageRequest, AcceptedConversationMessageLookup,
+    AcceptedConversationMessageReplay, AdapterInstallationId, AdapterKind,
+    ConditionalUnpairOutcome, ConversationBindingService, ConversationMessageRecord,
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalEventId,
-    InboundTurnError, RebornFilesystemConversationServices, ResolveConversationRequest,
+    InboundConversationService, InboundMessageContentRef, InboundTurnError,
+    MessageIdempotencyStatus, RebornFilesystemConversationServices, ResolveConversationRequest,
 };
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -137,6 +141,138 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
         .unwrap();
     assert_eq!(resolution.tenant_id, tenant_id("tenant-a"));
     assert_eq!(resolution.actor.user_id, user_id("alice"));
+
+    // The durable wrapper forwards the inbound-message half of the contract
+    // too, not just binding resolution. `inbound_contract.rs` only ever drives
+    // these two methods through `InMemoryConversationServices`, so without
+    // this the filesystem-backed `accept_inbound_message` /
+    // `replay_accepted_inbound_message` forwarders are never executed —
+    // and a broken delegation here would look exactly like a passing suite.
+    let accepted = reopened
+        .accept_inbound_message(AcceptConversationMessageRequest {
+            tenant_id: tenant_id("tenant-a"),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("telegram-user-1"),
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("chat-1"),
+            external_event_id: ExternalEventId::new("event-2").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:event-2").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap(),
+            requested_run_profile: None,
+        })
+        .await
+        .expect("the durable services accept an inbound message");
+    assert_eq!(accepted.tenant_id, tenant_id("tenant-a"));
+
+    let replay = reopened
+        .replay_accepted_inbound_message(AcceptedConversationMessageLookup {
+            tenant_id: tenant_id("tenant-a"),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("telegram-user-1"),
+            external_conversation_ref: external_conversation("chat-1"),
+            external_event_id: ExternalEventId::new("event-2").unwrap(),
+        })
+        .await
+        .expect("the replay lookup succeeds")
+        .expect("the accepted message replays by its external event id");
+    assert_eq!(
+        replay.accepted_message.message_ref, accepted.message_ref,
+        "the replay must return the message the accept produced"
+    );
+    assert_eq!(replay.accepted_message.thread_id, accepted.thread_id);
+    assert_eq!(
+        accepted.idempotency,
+        MessageIdempotencyStatus::Inserted,
+        "the first accept inserts"
+    );
+    assert_eq!(
+        replay.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate,
+        "replaying an already-accepted event reports it as a duplicate, not a fresh insert"
+    );
+
+    // WS5 renamed this DTO family (`AcceptedInboundMessage*` ->
+    // `AcceptedConversationMessage*`, `ThreadMessageRecord` ->
+    // `ConversationMessageRecord`). Serde keys on FIELD names, not type names,
+    // so the rename must be invisible on the wire — these types are persisted
+    // through the conversation state store, and a rename that silently changed
+    // the encoding would strand every durable record written before it. Nothing
+    // else in the suite serializes this family, so without this the derives are
+    // never even instantiated.
+    let record = reopened
+        .inner()
+        .accepted_messages()
+        .await
+        .into_iter()
+        .find(|record| record.accepted.message_ref == accepted.message_ref)
+        .expect("the accepted message is recorded in conversation state");
+
+    let encoded_record = serde_json::to_value(&record).expect("record serializes");
+    for field in [
+        "accepted",
+        "actor",
+        "external_event_id",
+        "content_ref",
+        "received_at",
+    ] {
+        assert!(
+            encoded_record.get(field).is_some(),
+            "ConversationMessageRecord must keep its `{field}` wire field after the type rename"
+        );
+    }
+    for field in [
+        "tenant_id",
+        "thread_id",
+        "actor",
+        "message_ref",
+        "source_binding_ref",
+        "reply_target_binding_ref",
+        "received_at",
+        "idempotency",
+    ] {
+        assert!(
+            encoded_record["accepted"].get(field).is_some(),
+            "AcceptedConversationMessage must keep its `{field}` wire field after the type rename"
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_value::<ConversationMessageRecord>(encoded_record)
+            .expect("record round-trips"),
+        record,
+        "ConversationMessageRecord must survive a durable round trip unchanged"
+    );
+
+    let encoded_replay = serde_json::to_value(&replay).expect("replay serializes");
+    assert_eq!(
+        serde_json::from_value::<AcceptedConversationMessageReplay>(encoded_replay)
+            .expect("replay round-trips"),
+        replay,
+        "AcceptedConversationMessageReplay must survive a durable round trip unchanged"
+    );
+
+    let lookup = AcceptedConversationMessageLookup {
+        tenant_id: tenant_id("tenant-a"),
+        adapter_kind: telegram(),
+        adapter_installation_id: default_installation(),
+        external_actor_ref: external_actor("telegram-user-1"),
+        external_conversation_ref: external_conversation("chat-1"),
+        external_event_id: ExternalEventId::new("event-2").unwrap(),
+    };
+    assert_eq!(
+        serde_json::from_value::<AcceptedConversationMessageLookup>(
+            serde_json::to_value(&lookup).expect("lookup serializes")
+        )
+        .expect("lookup round-trips"),
+        lookup,
+        "AcceptedConversationMessageLookup must survive a durable round trip unchanged"
+    );
 }
 
 #[tokio::test]

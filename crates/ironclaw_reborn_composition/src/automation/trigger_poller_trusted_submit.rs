@@ -2180,4 +2180,92 @@ mod tests {
             "expected InvalidMaterialization from the real safety validator, got {error:?}"
         );
     }
+
+    /// [`external_ref`] is the `ProductAdapterError` -> `TriggerError` mapping
+    /// the channel-owned external refs take since the
+    /// `conversations`/`extension_contracts` unification. The `Ok` arm is
+    /// exercised by every materialization test above; the `Err` arm was not,
+    /// so this pins the mapping itself: the trigger failure must carry the
+    /// source error's rendered text verbatim, and a `RedactedString`-carrying
+    /// variant must map through the same redacting `Display` so the secret
+    /// detail never reaches the materialization failure.
+    #[test]
+    fn external_ref_maps_product_adapter_error_to_invalid_materialization() {
+        assert_eq!(
+            external_ref::<u8>(Ok(7)).expect("the Ok arm passes the value through unchanged"),
+            7
+        );
+
+        let source = ProductAdapterError::InvalidIdentifier {
+            kind: "external_actor_id",
+            reason: "must not be empty".to_string(),
+        };
+        let rendered_source = source.to_string();
+        let error =
+            external_ref::<()>(Err(source)).expect_err("the Err arm maps to a TriggerError");
+        assert!(
+            matches!(
+                &error,
+                TriggerError::InvalidMaterialization { reason } if *reason == rendered_source
+            ),
+            "expected the source error text verbatim, got {error:?}"
+        );
+
+        let redacted = ProductAdapterError::Internal {
+            detail: ironclaw_host_api::product_adapter_error::RedactedString::new(
+                "super-secret-token",
+            ),
+        };
+        let error =
+            external_ref::<()>(Err(redacted)).expect_err("the Err arm maps to a TriggerError");
+        let TriggerError::InvalidMaterialization { reason } = &error else {
+            panic!("expected InvalidMaterialization, got {error:?}");
+        };
+        assert!(
+            reason.contains(ironclaw_host_api::product_adapter_error::REDACTED_PLACEHOLDER)
+                && !reason.contains("super-secret-token"),
+            "a redacted detail must not leak into the materialization failure: {reason}"
+        );
+    }
+
+    /// Caller-level companion to the mapping test above: `trigger_conversation_fields`
+    /// is the only production caller of [`external_ref`], so drive the rejection
+    /// through it. A binding whose external actor id the `ExternalActorRef`
+    /// contract rejects must surface as a mapped `InvalidMaterialization`
+    /// naming the offending field — never a half-built resolve request.
+    #[test]
+    fn trigger_conversation_fields_rejects_invalid_external_actor_ref() {
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(
+                TenantId::new("external-ref-tenant").expect("tenant id"),
+                TriggerId::new(),
+                Utc::now(),
+            ),
+            // `from_trusted` skips `UserId` validation exactly as a host-minted
+            // sentinel identity does, so the binding reaches
+            // `ExternalActorRef::new` carrying an id the external-ref contract
+            // rejects — the production shape of this failure.
+            creator_user_id: UserId::from_trusted(String::new()),
+            agent_id: None,
+            project_id: None,
+            prompt: "external ref mapping".to_string(),
+            delivery_target: None,
+        };
+        let binding = TriggerTrustedInboundBinding::for_fire(&fire);
+
+        // `TriggerConversationFields` does not implement `Debug`, so destructure
+        // rather than `expect_err`.
+        let Err(error) = trigger_conversation_fields(&fire, &binding) else {
+            panic!("an empty external actor id must not build conversation fields");
+        };
+
+        assert!(
+            matches!(
+                &error,
+                TriggerError::InvalidMaterialization { reason }
+                    if reason.contains("external_actor_id")
+            ),
+            "expected the ExternalActorRef rejection mapped through external_ref, got {error:?}"
+        );
+    }
 }

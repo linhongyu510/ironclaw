@@ -268,6 +268,7 @@ fn workspace_attachment_root() -> Result<ScopedPath, ProductSurfaceError> {
 mod tests {
     use super::*;
 
+    use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         ids::{AgentId, TenantId, UserId},
@@ -383,6 +384,101 @@ mod tests {
             fs.stat(&scope.to_resource_scope(), &first_path).await,
             Err(FilesystemError::NotFound { .. })
         ));
+    }
+
+    /// Rollback deletes a whole batch directory, so it must refuse any
+    /// reference it cannot prove names one — otherwise a malformed
+    /// `storage_key` picks the delete target. Each row is a distinct
+    /// rejection: the first five are the guards in `attachment_batch_parent`
+    /// (no parent separator, outside the attachment root, then the three
+    /// batch-shape conditions), the last is the loop in `rollback` itself
+    /// meeting a later reference that was never landed.
+    ///
+    /// Driven through `rollback` rather than the helper directly, because
+    /// `rollback` is what decides whether a delete happens. `internal_from`
+    /// deliberately collapses every case to a sanitized `Internal` code, so
+    /// the input is what distinguishes them — and the assertion that matters
+    /// is that none of them reaches the delete.
+    #[tokio::test]
+    async fn rollback_refuses_malformed_batch_references() {
+        let fs = workspace_fs(MountPermissions::read_write_list_delete());
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+        let scope = thread_scope();
+
+        // Land a real batch first: if a malformed reference ever fell through
+        // to the delete, this is what it would destroy.
+        let landed = lander
+            .land(
+                &scope,
+                "keep-me",
+                vec![InboundAttachment {
+                    id: "keep".to_string(),
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("keep.txt".to_string()),
+                    bytes: b"keep".to_vec(),
+                }],
+            )
+            .await
+            .expect("batch lands");
+        let landed_path =
+            ScopedPath::new(landed[0].storage_key.clone().expect("storage key")).unwrap();
+
+        let root = workspace_attachment_root()
+            .expect("attachment root")
+            .as_str()
+            .to_string();
+        let cases: Vec<(&str, Vec<Option<String>>)> = vec![
+            (
+                "storage key has no batch parent",
+                vec![Some("no-separator".to_string())],
+            ),
+            (
+                "batch parent is outside the attachment root",
+                vec![Some("/elsewhere/2026-01-01/msg/f.txt".to_string())],
+            ),
+            (
+                "batch shape: empty filename",
+                vec![Some(format!("{root}/2026-01-01/msg/"))],
+            ),
+            (
+                "batch shape: wrong segment count",
+                vec![Some(format!("{root}/only-one/f.txt"))],
+            ),
+            (
+                "batch shape: empty segment",
+                vec![Some(format!("{root}/2026-01-01//f.txt"))],
+            ),
+            (
+                "a later reference carries no storage key",
+                vec![Some(format!("{root}/2026-01-01/msg/first.txt")), None],
+            ),
+        ];
+
+        for (case, keys) in cases {
+            let refs: Vec<AttachmentRef> = keys
+                .into_iter()
+                .enumerate()
+                .map(|(index, storage_key)| AttachmentRef {
+                    id: format!("att-{index}"),
+                    kind: AttachmentKind::Document,
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("f.txt".to_string()),
+                    size_bytes: None,
+                    storage_key,
+                    extracted_text: None,
+                })
+                .collect();
+            let err = lander.rollback(&scope, &refs).await.expect_err(case);
+            assert_eq!(err.code, ProductSurfaceErrorCode::Internal, "{case}");
+        }
+
+        // Nothing was deleted along the way.
+        assert!(
+            fs.stat(&scope.to_resource_scope(), &landed_path)
+                .await
+                .is_ok(),
+            "a refused rollback must not delete an unrelated landed batch"
+        );
     }
 
     #[tokio::test]

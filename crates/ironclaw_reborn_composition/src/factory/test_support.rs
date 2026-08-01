@@ -993,3 +993,83 @@ pub(crate) async fn open_standalone_trigger_repository_for_test(
     let backend = build_default_database_roots(storage_root, &mut composite).await?;
     trigger_repository_for_durable_backend(&backend).await
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod attachment_seam_tests {
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+    use ironclaw_threads::ThreadScope;
+
+    /// Store-level regression for the two C-ATTACH accessors
+    /// (`RebornRuntimeStores::standalone_attachment_test_support_for_test` and
+    /// `RebornRuntimeStores::standalone_inbound_attachment_reader_for_test`).
+    /// The downstream integration harness reaches this seam through the
+    /// `RebornRuntime` wrapper's same-named methods, so nothing ever drove the
+    /// store-level recipe itself: a regression here — a lander built over the
+    /// read-only `workspace_filesystem` handle (which fails closed with
+    /// `PermissionDenied`), or a reader pointed at a different mount view than
+    /// the lander wrote through — would only surface downstream. Landing real
+    /// bytes and reading them back through BOTH returned read views proves the
+    /// two accessors hand out usable, mutually consistent ports.
+    #[tokio::test]
+    async fn standalone_attachment_seams_land_and_read_back_the_same_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "attachment-seam-owner",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+
+        let support = services
+            .standalone_attachment_test_support_for_test()
+            .expect("a standalone composition exposes the C-ATTACH seam");
+        let inbound_reader = services
+            .standalone_inbound_attachment_reader_for_test()
+            .expect("a standalone composition exposes the WebUI-facing inbound reader");
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("attachment-seam-tenant").expect("tenant id"),
+            agent_id: AgentId::new("attachment-seam-agent").expect("agent id"),
+            project_id: None,
+            owner_user_id: Some(UserId::new("attachment-seam-owner").expect("user id")),
+            mission_id: None,
+        };
+
+        let refs = support
+            .lander
+            .land(
+                &thread_scope,
+                "msg-attachment-seam",
+                vec![ironclaw_host_api::attachment::InboundAttachment {
+                    id: "att-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("seam.png".to_string()),
+                    bytes: b"attachment-seam-bytes".to_vec(),
+                }],
+            )
+            .await
+            .expect("the seam's lander writes through a read-write workspace view");
+        let storage_key = refs[0]
+            .storage_key
+            .as_deref()
+            .expect("a landed attachment carries a storage_key");
+
+        assert_eq!(
+            support
+                .read_port
+                .read_attachment_bytes(&thread_scope.to_resource_scope(), storage_key)
+                .await
+                .expect("the seam's model-injection read port reads the landed bytes"),
+            b"attachment-seam-bytes".to_vec(),
+        );
+        assert_eq!(
+            inbound_reader
+                .read(&thread_scope, storage_key)
+                .await
+                .expect("the WebUI-facing inbound reader reads the same landed bytes"),
+            b"attachment-seam-bytes".to_vec(),
+        );
+    }
+}
