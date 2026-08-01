@@ -24,9 +24,9 @@ use ironclaw_skills::{
     SkillManagementErrorKind,
 };
 
-use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 

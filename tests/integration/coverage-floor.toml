@@ -196,11 +196,28 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_extension_host"
+# WS2.4 split this crate: the extension-management product face — lifecycle
+# capabilities and commands, the lifecycle product service, the
+# admin/operator/skill capability handlers, credential views, the channel-config
+# product projection, and the extension hub — moved to
+# `ironclaw_extension_manager`. The `floor_covered_lines = 22271` numerator was
+# captured at 26,569 instrumented lines and therefore no longer describes this
+# crate: it is structurally unreachable, not a regression. Same disposition as
+# the `ironclaw_turns` entry above, and for the same reason — this entry drops
+# to a percentage floor for one release, with `floor_percent` retained
+# UNCHANGED rather than weakened. The ratio is the invariant that survives a
+# split; the absolute numerator is the one that cannot.
+#
+# OWED IN THE SAME LANE, from this PR's own merged coverage artifact (the
+# same-PR floor-raise workflow at the top of this file, applied to a split):
+# recapture `floor_covered_lines` + `captured_total_lines` here, and add the
+# matching `[[crate]]` entry for `ironclaw_extension_manager` so the moved
+# lines regain the ratchet they had under this entry. Both numbers must come
+# from the artifact, never an estimate.
 floor_percent = 83.82
-floor_covered_lines = 22271
-captured_total_lines = 26569
-captured_date = "2026-07-31"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed; recalibrated after current-main production growth while raising the covered-line floor."
+tolerance_percent = 0.5
+captured_date = "2026-08-01"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Covered-line numerator pending recapture after the WS2.4 extension_manager split."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

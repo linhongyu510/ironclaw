@@ -44,6 +44,7 @@ use ratchet_support::{
 const PRODUCT: &str = "ironclaw_product";
 const PRODUCT_CONTRACTS: &str = "ironclaw_product_contracts";
 const EXTENSION_HOST: &str = "ironclaw_extension_host";
+const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
 
 /// Product-declared traits `ironclaw_extension_host` still implements, each
 /// with the reason the WS2 port-inversion row could not move it and the slice
@@ -85,10 +86,6 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
          (WS2.2) — the DTOs do, and they move with the channel_host row",
     ),
     (
-        "ExtensionCredentialSetupService",
-        "request/response types are ironclaw_auth credential-account projections",
-    ),
-    (
         "ProductActorUserResolver",
         "resolves to ResolvedProductActorUser, which carries \
          ironclaw_conversations::ExternalActorBindingEpoch. The error no longer \
@@ -97,27 +94,45 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
     ),
 ];
 
-/// The ports this row inverted: defined in `ironclaw_product_contracts`,
-/// implemented in `ironclaw_extension_host`. Enumerated so a rename or a
-/// relocation has to come through this file.
-const INVERTED_PORTS: &[&str] = &[
-    "AccountConnectionStatusSource",
-    "ApprovalPromptContextSource",
-    "BlockedAuthPromptSource",
-    "ChannelConfigProductService",
-    "ChannelDeliveryResolver",
-    "CommandActorRoleResolver",
-    "DeliveryReplyContextSource",
-    "LifecycleProductService",
+/// The ports this row inverted: defined in `ironclaw_product_contracts` and
+/// implemented **below** product, paired with the crate that implements each.
+/// Enumerated so a rename or a relocation has to come through this file.
+///
+/// **WS2.4 made the implementor explicit.** The list used to assert only that
+/// `ironclaw_extension_host` implements every inverted port, which was true
+/// while the extension host was one crate. The `ironclaw_extension_manager`
+/// split moved four implementations (the lifecycle product service, the admin
+/// configuration view provider, the channel-config product service, and — via
+/// the residue list above — the credential setup service) into the manager.
+/// Asserting "implemented in extension_host" would then have failed for a
+/// *correct* change, and the fix-it message the gate already carried says the
+/// right thing: "if the implementor moved, move this row with it rather than
+/// deleting the pin". That is what this pairing does. Both crates sit below
+/// the contract, which is the property the pin exists to protect.
+const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
+    ("AccountConnectionStatusSource", EXTENSION_HOST),
+    ("ApprovalPromptContextSource", EXTENSION_HOST),
+    ("BlockedAuthPromptSource", EXTENSION_HOST),
+    // WS2.4: `RebornChannelConfigProductService` is the product projection over
+    // the host's `ChannelConfigService`; the service core stayed (§6.8.2), the
+    // projection moved (§6.8.3).
+    ("ChannelConfigProductService", EXTENSION_MANAGER),
+    ("ChannelDeliveryResolver", EXTENSION_HOST),
+    ("CommandActorRoleResolver", EXTENSION_HOST),
+    ("DeliveryReplyContextSource", EXTENSION_HOST),
+    // WS2.4: the lifecycle product service is the manager's headline surface.
+    ("LifecycleProductService", EXTENSION_MANAGER),
     // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
     // error. Its request type and route key moved with it.
-    "ProductConversationSubjectRouteResolver",
-    "RebornViewProvider",
+    ("ProductConversationSubjectRouteResolver", EXTENSION_HOST),
+    // WS2.4: the admin-configuration view provider is a credential/admin view.
+    ("RebornViewProvider", EXTENSION_MANAGER),
 ];
 
 /// Ceiling on the residue. Only ever moves down. (WS2.1 froze it at 6; WS2.2
-/// inverted `ProductConversationSubjectRouteResolver`.)
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 5;
+/// inverted `ProductConversationSubjectRouteResolver`; WS2.4 moved
+/// `ExtensionCredentialSetupService`'s implementation out of the crate.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 4;
 
 fn crate_src(root: &Path, name: &str) -> PathBuf {
     root.join("crates").join(name).join("src")
@@ -260,12 +275,13 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
     names
 }
 
-fn traits_implemented_by(root: &Path, crate_name: &str) -> BTreeSet<String> {
+fn traits_implemented_by(root: &Path, crate_name: &str, minimum_files: usize) -> BTreeSet<String> {
     let mut files = Vec::new();
     rust_files(&crate_src(root, crate_name), &mut files);
     assert!(
-        files.len() > 20,
-        "expected to walk {crate_name}'s source tree; found {} files",
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than yield an empty, vacuously passing set",
         files.len()
     );
     let mut names = BTreeSet::new();
@@ -282,7 +298,7 @@ fn traits_implemented_by(root: &Path, crate_name: &str) -> BTreeSet<String> {
 fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits() {
     let root = workspace_root();
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, EXTENSION_HOST);
+    let implemented = traits_implemented_by(&root, EXTENSION_HOST, 21);
 
     let found: BTreeSet<String> = implemented.intersection(&product_traits).cloned().collect();
     let frozen: BTreeSet<String> = PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS
@@ -323,10 +339,11 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
     let root = workspace_root();
     let contract_traits = traits_defined_in(&root, PRODUCT_CONTRACTS);
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, EXTENSION_HOST);
+    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, 21);
+    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, 10);
 
     let mut violations = Vec::new();
-    for port in INVERTED_PORTS {
+    for (port, implementor) in INVERTED_PORT_IMPLEMENTORS {
         if !contract_traits.contains(*port) {
             violations.push(format!(
                 "{port} must be declared in {PRODUCT_CONTRACTS}; the WS2 inversion moved it there"
@@ -337,10 +354,29 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
                 "{port} is declared again in {PRODUCT} — the inversion gives it exactly one home"
             ));
         }
+        let implemented = match *implementor {
+            EXTENSION_HOST => &host_impls,
+            EXTENSION_MANAGER => &manager_impls,
+            other => panic!("{port} names an unknown implementor crate {other}"),
+        };
         if !implemented.contains(*port) {
             violations.push(format!(
-                "{port} has no implementation in {EXTENSION_HOST}; if the implementor moved, \
-                 move this row with it rather than deleting the pin"
+                "{port} has no implementation in {implementor}; if the implementor moved, \
+                 repoint this row rather than deleting the pin"
+            ));
+        }
+        // The pin is only meaningful if the port has exactly one home below the
+        // contract: a second implementation in the other crate would mean the
+        // WS2.4 split duplicated a surface rather than moving it.
+        let other = match *implementor {
+            EXTENSION_HOST => (&manager_impls, EXTENSION_MANAGER),
+            _ => (&host_impls, EXTENSION_HOST),
+        };
+        if other.0.contains(*port) {
+            violations.push(format!(
+                "{port} is implemented in both {implementor} and {}; the split moves a \
+                 surface, it does not fork it",
+                other.1
             ));
         }
     }
@@ -387,8 +423,9 @@ fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BT
     let mut files = Vec::new();
     rust_files(&src, &mut files);
     assert!(
-        files.len() > 20,
-        "expected to walk {crate_name}'s source tree; found {} files",
+        files.len() >= 10,
+        "expected to walk {crate_name}'s source tree; found {} files — a broken path must \
+         fail loudly rather than report an empty, vacuously passing set",
         files.len()
     );
     let mut named = BTreeSet::new();
@@ -437,12 +474,29 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
 
     // The other half of the claim: the contract error is actually the one in
     // use, so the scan above cannot pass by the crate simply not having errors.
-    let contract_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure");
+    //
+    // **Counted across both halves of the split (WS2.4).** The lifecycle
+    // surface that spoke `ProductOperationFailure` in 17 files was cut in two;
+    // holding `extension_host` alone to the old floor would have made a
+    // correct move look like a regression, and lowering the floor to fit
+    // would have relaxed the guard. Summing the halves keeps the original
+    // claim exactly: the boundary error is still the vocabulary of the whole
+    // lifecycle surface, wherever that surface now lives. Each half is also
+    // held above zero so the sum cannot be satisfied by one crate alone.
+    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure");
+    let manager_users =
+        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure");
     assert!(
-        contract_users.len() >= 15,
-        "expected the contract error across the extension host's lifecycle surface; \
-         found only {} files: {contract_users:?}",
-        contract_users.len()
+        !host_users.is_empty() && !manager_users.is_empty(),
+        "both halves of the lifecycle surface must speak the contract error; \
+         host={host_users:?} manager={manager_users:?}"
+    );
+    assert!(
+        host_users.len() + manager_users.len() >= 15,
+        "expected the contract error across the extension lifecycle surface; found only \
+         {} host + {} manager files: {host_users:?} {manager_users:?}",
+        host_users.len(),
+        manager_users.len()
     );
 }
 

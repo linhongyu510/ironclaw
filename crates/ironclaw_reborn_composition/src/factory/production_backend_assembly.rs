@@ -981,7 +981,7 @@ pub(super) async fn build_backend_production(
     let lifecycle_continuation_facade: Arc<
         dyn ironclaw_product_contracts::lifecycle_service::LifecycleProductService,
     > = Arc::new(
-        ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+        ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
         ))
         .with_extension_management(Arc::clone(&extension_management))

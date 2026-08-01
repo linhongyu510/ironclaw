@@ -6265,7 +6265,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
-        service: ironclaw_extension_host::ExtensionHostLifecycleProductService,
+        service: ironclaw_extension_manager::ExtensionHostLifecycleProductService,
     }
 
     impl std::fmt::Debug for LifecycleServiceHandle {
@@ -6431,9 +6431,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let service = ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
-        &runtime.skill_management,
-    ))
+    let service = ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(
+        Arc::clone(&runtime.skill_management),
+    )
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     service_slot
