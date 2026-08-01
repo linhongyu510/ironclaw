@@ -63,10 +63,15 @@ mod tests {
 
     static_assertions::assert_obj_safe!(RebornViewProvider);
 
-    struct OneRowView;
+    /// Echoes all three conduit arguments back into the page so the test can
+    /// assert each one arrived. A provider that silently dropped the caller
+    /// could not scope its read, and one that dropped the params could not
+    /// answer the question that was asked — both are invisible to a double
+    /// that only echoes the cursor.
+    struct EchoingView;
 
     #[async_trait]
-    impl RebornViewProvider for OneRowView {
+    impl RebornViewProvider for EchoingView {
         fn descriptor(&self) -> RebornViewDescriptor {
             RebornViewDescriptor {
                 id: "test_view",
@@ -76,12 +81,17 @@ mod tests {
 
         async fn query(
             &self,
-            _caller: ProductSurfaceCaller,
-            _params: serde_json::Value,
+            caller: ProductSurfaceCaller,
+            params: serde_json::Value,
             cursor: Option<String>,
         ) -> Result<RebornViewPage, ProductSurfaceError> {
             Ok(RebornViewPage {
-                payload: serde_json::json!({ "echoed_cursor": cursor }),
+                payload: serde_json::json!({
+                    "tenant": caller.tenant_id.as_str(),
+                    "user": caller.user_id.as_str(),
+                    "params": params,
+                    "echoed_cursor": cursor,
+                }),
                 next_cursor: None,
             })
         }
@@ -89,7 +99,7 @@ mod tests {
 
     #[test]
     fn a_provider_declares_its_own_id_and_pagination_shape() {
-        let provider: std::sync::Arc<dyn RebornViewProvider> = std::sync::Arc::new(OneRowView);
+        let provider: std::sync::Arc<dyn RebornViewProvider> = std::sync::Arc::new(EchoingView);
         let descriptor = provider.descriptor();
         assert_eq!(descriptor.id, "test_view");
         assert!(!descriptor.paginated);
@@ -113,10 +123,11 @@ mod tests {
     #[tokio::test]
     async fn the_conduit_hands_the_provider_its_caller_params_and_cursor() {
         // The three arguments are the whole conduit: the caller is the
-        // authorization subject, the params are the view's typed request, and
-        // the cursor is the pagination position. A provider that cannot see
-        // them cannot scope or page, so the port must pass all three through.
-        let provider: std::sync::Arc<dyn RebornViewProvider> = std::sync::Arc::new(OneRowView);
+        // authorization subject a provider scopes its read by, the params are
+        // the view's typed request, and the cursor is the pagination position.
+        // Asserting all three is what makes this test fail if a future
+        // signature change drops one on the floor.
+        let provider: std::sync::Arc<dyn RebornViewProvider> = std::sync::Arc::new(EchoingView);
         let caller = ProductSurfaceCaller::new(
             ironclaw_host_api::ids::TenantId::new("tenant-alpha").expect("tenant"),
             ironclaw_host_api::ids::UserId::new("user-alpha").expect("user"),
@@ -124,10 +135,22 @@ mod tests {
             None,
         );
         let page = provider
-            .query(caller, serde_json::json!({}), Some("c1".to_string()))
+            .query(
+                caller,
+                serde_json::json!({"limit": 10}),
+                Some("c1".to_string()),
+            )
             .await
             .expect("provider answers");
-        assert_eq!(page.payload, serde_json::json!({"echoed_cursor": "c1"}));
+        assert_eq!(
+            page.payload,
+            serde_json::json!({
+                "tenant": "tenant-alpha",
+                "user": "user-alpha",
+                "params": {"limit": 10},
+                "echoed_cursor": "c1",
+            })
+        );
         assert!(page.next_cursor.is_none());
     }
 
