@@ -60,8 +60,10 @@ any other consumer — there is deliberately **no re-export** (the port half of
 What stayed, and why: the **implementations** (`DeliveryCoordinator`,
 `NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,
 `RejectingAdminUserService`, `UnavailableRebornViewProvider`,
-`DirectConversationCommandAdmission`), the frozen wire DTOs
-(`RebornAdmin*`, `ProductView`), the ledger record and saga (`ProductInboundAction`),
+`DirectConversationCommandAdmission`), the frozen **operation inventory** — the
+concrete `*_COMMAND`/`*_VIEW`/`*_CAPABILITY` constants §6.1.3 keeps here, which
+is why `webui` and `openai_compat` still name this crate at all — the ledger
+record and saga (`ProductInboundAction`),
 and five ports whose signatures name `ironclaw_auth`/`ironclaw_conversations`
 types that a contracts crate may not depend on, or product-declared binding DTOs
 — see the residue list in
