@@ -52,8 +52,17 @@ pub trait LifecycleProductService: Send + Sync {
     ) -> Result<LifecycleProductResponse, ProductSurfaceError>;
 
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
-    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
-    /// service implements it.
+    /// WebUI "Install Tool" path. Only the local runtime service implements it.
+    ///
+    /// The default refuses with `InvalidRequest`/400. ✎ **Known mismatch,
+    /// carried verbatim by the WS2.1 move and deliberately not changed in a
+    /// move-shaped PR**: the wording that used to sit here said "unavailable",
+    /// which is a different code (503) and a different meaning — 400 says the
+    /// caller's request was malformed, and an unwired capability is not the
+    /// caller's fault. Changing it changes an HTTP status on a live route, so
+    /// it belongs in its own change with the WebUI path re-checked;
+    /// `bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding`
+    /// pins today's behavior so the flip cannot happen silently.
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
@@ -158,6 +167,9 @@ mod tests {
         assert_eq!(projected.package_ref, Some(package_ref()));
     }
 
+    /// Pins today's behavior, not the desired one — see the mismatch note on
+    /// `import_extension_bundle`. The point that matters either way: a service
+    /// without bundle support must *refuse*, never return success.
     #[tokio::test]
     async fn bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding() {
         let error = MinimalLifecycleService

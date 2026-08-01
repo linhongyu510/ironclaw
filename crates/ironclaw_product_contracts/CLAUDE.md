@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is sixteen modules:
+Today that is seventeen modules (`src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -117,13 +117,21 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 (`ApprovalPrompt*View`), which only product and WebUI reach, stayed in
 `outbound` here.
 
-**The nine ports WS2's first row inverted, and the six it could not.** The
+**The eleven ports WS2's first row relocated, and the six it could not.** The
 `extension_host` port-inversion row moved every product-declared port the
-extension host *implements* whose signature this crate may legally name:
-`ChannelDeliveryResolver`, `DeliveryReplyContextSource`,
-`AccountConnectionStatusSource`, `ChannelConfigProductService`,
-`RebornViewProvider`, `CommandActorRoleResolver`, `ApprovalPromptContextSource`,
-`BlockedAuthPromptSource`, `LifecycleProductService`. Six stayed, and each for
+extension host reaches whose signature this crate may legally name. **Nine of
+them `extension_host` itself implements** — those are the ones
+`reborn_extension_host_port_inversion.rs::INVERTED_PORTS` enumerates and pins:
+`AccountConnectionStatusSource`, `ApprovalPromptContextSource`,
+`BlockedAuthPromptSource`, `ChannelConfigProductService`,
+`ChannelDeliveryResolver`, `CommandActorRoleResolver`,
+`DeliveryReplyContextSource`, `LifecycleProductService`, `RebornViewProvider`.
+**Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
+they moved for the same reason — a port whose implementation sits outside
+product does not belong inside it: `AdminUserService`,
+`RebornOperatorToolCatalog`. Quote that test rather than this list when the
+count matters; the list here is prose and the test is the enforced inventory.
+Six stayed, and each for
 the same mechanical reason rather than a judgement call — **this crate's
 dependency allowlist is `ironclaw_host_api` + `ironclaw_extension_contracts`
 and nothing else internal**, so a port whose signature names a type from

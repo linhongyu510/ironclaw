@@ -129,11 +129,17 @@ fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
     found.into_keys().collect()
 }
 
+/// Every production `.rs` file under `dir`. **Every I/O error is fatal**: a
+/// scan that silently shrinks its input passes while enforcing nothing, which
+/// is the failure mode this whole file exists to prevent. A missing directory,
+/// an unreadable entry, or a permission error must red the gate, not thin it.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("cannot read an entry under {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
             if matches!(
@@ -160,6 +166,19 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// layer flip: a test double may implement a product trait through the crate's
 /// dev-dependency without the shipped artifact depending on product. Same
 /// stripping shape as `reborn_registration_pipeline_boundary.rs`.
+///
+/// **Callers must strip comments and string literals first.** This walk finds
+/// the block by counting raw `{`/`}` bytes, so a brace inside a doc comment or
+/// a string literal in a gated block desynchronizes the depth and either leaks
+/// a test-only `impl` into the production set or swallows production code that
+/// follows. `implemented_trait_names` composes them in that order and
+/// `cfg_test_stripping_survives_braces_in_comments_and_strings` pins it.
+///
+/// `#[cfg(feature = "test-support")]` items are deliberately **not** stripped:
+/// that feature compiles into a real build (CI's `--all-features` lanes enable
+/// it), so an `impl` behind it is a genuine normal-dependency edge that would
+/// block the layer flip. Only `#[cfg(test)]` is invisible to a shipped
+/// artifact.
 fn strip_cfg_test_blocks(source: &str) -> String {
     const MARKER: &str = "#[cfg(test)]";
     let mut out = String::with_capacity(source.len());
@@ -239,7 +258,7 @@ fn balanced_angle_close(text: &str) -> Option<usize> {
 /// (`impl ironclaw_product::Foo<T> for Bar` → `Foo`). Inherent impls
 /// (`impl Bar {`) have no `for` and never match.
 fn implemented_trait_names(source: &str) -> BTreeSet<String> {
-    let cleaned = strip_comments_and_strings(&strip_cfg_test_blocks(source));
+    let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(source));
     let mut names = BTreeSet::new();
     for segment in cleaned.split("impl").skip(1) {
         let Some(head) = segment.split_once(" for ") else {
@@ -280,9 +299,8 @@ fn traits_implemented_by(root: &Path, crate_name: &str) -> BTreeSet<String> {
     );
     let mut names = BTreeSet::new();
     for file in files {
-        let Ok(source) = std::fs::read_to_string(&file) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
         names.extend(implemented_trait_names(&source));
     }
     names
@@ -359,6 +377,32 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
         violations.is_empty(),
         "WS2 inverted-port placement violated (PROPOSAL §6.1.3):\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn cfg_test_stripping_survives_braces_in_comments_and_strings() {
+    // A brace inside a comment or a string literal in a gated block would
+    // desynchronize a raw-byte depth count. Composed in the wrong order, the
+    // stray `{` here swallows `Production` (or leaks `TestOnly`); composed as
+    // `implemented_trait_names` does, neither happens.
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            // an unbalanced brace in a comment: {
+            const PATTERN: &str = "unbalanced { in a string";
+            impl TestOnly for Double {}
+        }
+        impl Production for Real {}
+    "#;
+    let found = implemented_trait_names(source);
+    assert!(
+        found.contains("Production"),
+        "production impl after a brace-carrying gated block must survive: {found:?}"
+    );
+    assert!(
+        !found.contains("TestOnly"),
+        "gated impl must still be stripped: {found:?}"
     );
 }
 
