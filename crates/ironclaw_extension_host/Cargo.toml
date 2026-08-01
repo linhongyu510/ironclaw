@@ -105,6 +105,11 @@ http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
+# `tracing` short-circuits on the null dispatcher, so a plain unit test cannot
+# tell "logged the cause" apart from "dropped it" — and the sanitized 503 body
+# makes that distinction the whole point of the lifecycle warning. Installing a
+# scoped subscriber is the only way to assert the diagnostic actually survives.
+tracing-subscriber = "0.3"
 
 [[test]]
 name = "lifecycle_contract"

@@ -746,6 +746,129 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    /// The transient warning is the *whole* reason this crate kept a local
+    /// projection wrapper instead of calling the contract's `From` directly,
+    /// so both halves of its contract are asserted together:
+    ///
+    /// - the caller's 503 is **sanitized** — the store's cause never crosses
+    ///   the membrane, because the wire contract has no free-text field; and
+    /// - the cause is **not discarded** — it reaches the warning where an
+    ///   operator can diagnose it.
+    ///
+    /// A subscriber has to be installed for this to mean anything: `tracing`
+    /// short-circuits on the null dispatcher, so without one the macro body
+    /// never runs and the test could not tell "logged it" from "dropped it" —
+    /// which is exactly the assertion that matters here. Scoped with
+    /// `with_default` rather than set globally, so parallel tests are
+    /// unaffected.
+    #[test]
+    fn a_transient_failure_is_sanitized_for_the_caller_and_still_diagnosable_in_the_log() {
+        let cause = "channel config backend refused the read";
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+
+        let projected = tracing::subscriber::with_default(subscriber, || {
+            lifecycle_surface_error(ProductOperationFailure::Transient {
+                reason: cause.to_string(),
+            })
+        });
+
+        // Half one: nothing about the cause reaches the caller.
+        assert_eq!(projected.status_code, 503);
+        assert!(projected.retryable);
+        assert_eq!(projected.field, None);
+        assert_eq!(projected.validation_code, None);
+        let on_the_wire = serde_json::to_string(&projected).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains(cause),
+            "the transient cause must not cross the membrane: {on_the_wire}"
+        );
+
+        // Half two: the cause is not merely dropped — it is diagnosable.
+        let logged = logs.contents();
+        assert!(
+            logged.contains(cause),
+            "the transient cause must survive in the log, got {logged:?}"
+        );
+        assert!(
+            logged.contains("lifecycle action failed with a transient error"),
+            "the warning keeps its stable message, got {logged:?}"
+        );
+    }
+
+    /// The counterpart to the test above: a *rejection* carries no operational
+    /// cause, so it must not spend a warning. Without this, "log everything"
+    /// would pass the test above while turning every invalid request into
+    /// operator noise.
+    #[test]
+    fn a_rejected_request_does_not_emit_the_transient_warning() {
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+
+        let projected = tracing::subscriber::with_default(subscriber, || {
+            lifecycle_surface_error(ProductOperationFailure::InvalidBindingRequest {
+                reason: "bad package ref".to_string(),
+            })
+        });
+
+        assert_eq!(projected.status_code, 400);
+        assert!(!projected.retryable);
+        assert!(
+            logs.contents().is_empty(),
+            "a rejection must not emit the transient warning, got {:?}",
+            logs.contents()
+        );
+    }
+
     /// The two statuses a caller acts on differently: a transient failure is
     /// retryable and a rejected request is not. Pinned separately from the
     /// table above so a change that made everything retryable would fail here
