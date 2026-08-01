@@ -36,7 +36,7 @@ use ironclaw_product_contracts::package_lifecycle::{
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{AcquireError, Mutex, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
@@ -920,11 +920,11 @@ impl ExtensionLifecycleManager {
         // materialization, and catalog insertion. This bounds the number of
         // fully expanded packages retained by an import in addition to the
         // decode work itself.
-        let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
-            ProductOperationFailure::Transient {
-                reason: "import decode limiter is closed".to_string(),
-            }
-        })?;
+        let _decode_permit = self
+            .import_decode_semaphore
+            .acquire()
+            .await
+            .map_err(map_import_decode_acquire_error)?;
         let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
             let files = unzip_extension_bundle_for_product(&bundle)?;
@@ -2810,6 +2810,25 @@ fn generic_host_error(error: crate::LifecycleError) -> ProductOperationFailure {
     }
 }
 
+/// A closed import-decode limiter becomes a retryable boundary failure.
+///
+/// Named rather than inlined at the `map_err` so the mapping is reachable from
+/// a test. Nothing in the workspace calls [`Semaphore::close`], so the acquire
+/// error is unreachable through `import_bundle` itself; an inline closure would
+/// therefore be a permanently uncovered branch, which the changed-line coverage
+/// gate can only accept as a standing exemption. Extracting it is the tactic
+/// CHECKLIST's WS2 coverage note prescribes for exactly this shape.
+///
+/// The `AcquireError` is logged rather than discarded: it is the only signal
+/// distinguishing "limiter shut down" from any other transient failure, and the
+/// `reason` that crosses the boundary is deliberately fixed text.
+fn map_import_decode_acquire_error(error: AcquireError) -> ProductOperationFailure {
+    tracing::debug!(%error, "import decode limiter is closed");
+    ProductOperationFailure::Transient {
+        reason: "import decode limiter is closed".to_string(),
+    }
+}
+
 fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperationFailure {
     tracing::warn!(error = %error, "effective extension configuration resolution failed");
     ProductOperationFailure::Transient {
@@ -3153,6 +3172,27 @@ mod tests {
 
     use super::*;
     use crate::{AvailableExtensionAsset, AvailableExtensionAssetContent};
+
+    /// The import limiter's acquire failure is retryable, and the mapping runs
+    /// against a real `AcquireError` rather than a stand-in — a closed
+    /// semaphore is the only thing that produces one.
+    #[tokio::test]
+    async fn a_closed_import_decode_limiter_maps_to_a_retryable_transient_failure() {
+        let semaphore = Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES);
+        semaphore.close();
+        let error = semaphore
+            .acquire()
+            .await
+            .expect_err("a closed semaphore hands out no permits");
+
+        assert_eq!(
+            map_import_decode_acquire_error(error),
+            ProductOperationFailure::Transient {
+                reason: "import decode limiter is closed".to_string(),
+            },
+            "a shut-down limiter must read as retryable, not as a client mistake"
+        );
+    }
 
     #[tokio::test]
     async fn lifecycle_manager_installs_activates_and_removes_catalog_package() {
