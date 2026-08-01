@@ -687,14 +687,70 @@ fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError 
 #[cfg(test)]
 mod tests {
     /// The serialization guard is defensive — a well-formed projection does
-    /// not fail `serde_json` — but the mapping is a live contract: the model
-    /// must see `OutputDecode` and never the serde error, which can quote the
-    /// projection contents it failed on.
+    /// not fail `serde_json` — but the mapping is a live contract with two
+    /// halves, and this asserts both: the model sees `OutputDecode` and never
+    /// the serde error (which can quote the projection contents it failed on),
+    /// *and* the detail is not simply discarded — it reaches the debug log,
+    /// which is where an operator diagnoses it from.
+    ///
+    /// The DEBUG subscriber is load-bearing, not decoration: with no
+    /// subscriber installed `tracing` short-circuits on the null dispatcher
+    /// and the macro body never runs, so a test without one cannot tell
+    /// "logged the detail" from "dropped it".
     #[test]
-    fn output_serialization_failure_maps_to_output_decode_without_the_serde_error() {
-        let error = super::lifecycle_output_decode_error("key must be a string");
+    fn output_serialization_failure_maps_to_output_decode_and_logs_the_detail() {
+        use std::io::Write as _;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct SharedLog(Arc<Mutex<Vec<u8>>>);
+        struct SharedLogGuard(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedLogGuard {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log lock").extend(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLog {
+            type Writer = SharedLogGuard;
+            fn make_writer(&'a self) -> Self::Writer {
+                SharedLogGuard(Arc::clone(&self.0))
+            }
+        }
+
+        let logs = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let error = tracing::subscriber::with_default(subscriber, || {
+            super::lifecycle_output_decode_error("key must be a string")
+        });
+
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::OutputDecode));
-        assert!(!format!("{error:?}").contains("key must be a string"));
+        assert!(
+            !format!("{error:?}").contains("key must be a string"),
+            "the serde detail must not ride out on the capability error"
+        );
+
+        let rendered = String::from_utf8(logs.0.lock().expect("log lock").clone())
+            .expect("tracing output is UTF-8");
+        assert!(
+            rendered.contains("extension lifecycle output serialization failed"),
+            "the guard must leave a diagnosable trace: {rendered}"
+        );
+        assert!(
+            rendered.contains("key must be a string"),
+            "the detail belongs in the debug log, not nowhere: {rendered}"
+        );
+        let _ = std::io::sink().flush();
     }
 
     use ironclaw_auth::{
