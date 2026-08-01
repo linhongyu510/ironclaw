@@ -2,21 +2,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_conversations::{
-    AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
-    ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundTurnError, ResolveConversationRequest,
+    AcceptedConversationMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
+    ConversationBindingService, ConversationRouteKind, ExternalEventId, InboundTurnError,
+    ResolveConversationRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ProjectId, TenantId, UserId},
+    product_adapter_error::ProductAdapterError,
 };
 use ironclaw_product::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest as ThreadAcceptInboundMessageRequest, EnsureThreadRequest,
-    MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, EnsureThreadRequest, MessageContent,
+    SessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
@@ -133,7 +135,7 @@ impl TriggerFireAuthorizer for TenantScopedTrustedTriggerFireAuthorizer {
 
 pub(crate) struct ConversationContentRefMaterializer<B> {
     binding_service: B,
-    thread_service: Arc<dyn CanonicalSessionThreadService>,
+    thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
     prompt_safety: Arc<dyn InjectionScanner>,
     authorizer: Arc<dyn TriggerFireAuthorizer>,
@@ -145,7 +147,7 @@ where
 {
     pub(crate) fn new(
         binding_service: B,
-        thread_service: Arc<dyn CanonicalSessionThreadService>,
+        thread_service: Arc<dyn SessionThreadService>,
         default_agent_id: AgentId,
         authorizer: Arc<dyn TriggerFireAuthorizer>,
     ) -> Self {
@@ -238,11 +240,13 @@ fn trigger_conversation_fields(
         adapter_installation_id: conversation_id(AdapterInstallationId::new(
             trusted_inbound_binding.adapter_installation_id(),
         ))?,
-        external_actor_ref: conversation_id(ExternalActorRef::new(
+        external_actor_ref: external_ref(ExternalActorRef::new(
             trusted_inbound_binding.external_actor_namespace(),
             trusted_inbound_binding.external_actor_id(),
+            // A trigger fire has no human display name to carry.
+            None::<String>,
         ))?,
-        external_conversation_ref: conversation_id(ExternalConversationRef::new(
+        external_conversation_ref: external_ref(ExternalConversationRef::new(
             None,
             trusted_inbound_binding.external_conversation_id(),
             Some(trusted_inbound_binding.route_thread_id()),
@@ -274,14 +278,14 @@ fn trigger_resolve_request(
 }
 
 async fn record_trigger_prompt(
-    thread_service: Arc<dyn CanonicalSessionThreadService>,
+    thread_service: Arc<dyn SessionThreadService>,
     resolution: &ConversationBindingResolution,
     trigger_id: TriggerId,
     prompt: &str,
     external_event_id: &str,
     default_agent_id: &AgentId,
-    accepted_message: Option<&AcceptedInboundMessage>,
-) -> Result<ironclaw_threads::AcceptedInboundMessage, InboundTurnError> {
+    accepted_message: Option<&AcceptedConversationMessage>,
+) -> Result<AcceptedInboundMessage, InboundTurnError> {
     let agent_id = resolution
         .turn_scope
         .agent_id
@@ -307,7 +311,7 @@ async fn record_trigger_prompt(
             reason: format!("trigger prompt thread ensure failed: {error}"),
         })?;
     thread_service
-        .accept_inbound_message(ThreadAcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptInboundMessageRequest {
             scope,
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor_id: resolution.actor.user_id.as_str().to_string(),
@@ -429,6 +433,17 @@ fn conversation_id<T>(result: Result<T, InboundTurnError>) -> Result<T, TriggerE
     })
 }
 
+/// The [`conversation_id`] mapping for the channel-owned external refs.
+///
+/// Since the `conversations`/`extension_contracts` unification those construct
+/// with [`ProductAdapterError`] rather than [`InboundTurnError`]; the
+/// materialization failure the caller sees is unchanged.
+fn external_ref<T>(result: Result<T, ProductAdapterError>) -> Result<T, TriggerError> {
+    result.map_err(|error| TriggerError::InvalidMaterialization {
+        reason: error.to_string(),
+    })
+}
+
 /// Test-support materializer: runs the REAL trusted-trigger materialization
 /// pipeline (`ConversationContentRefMaterializer::materialize_prompt` —
 /// authorize, validate, resolve-or-create binding, record the prompt as a
@@ -452,7 +467,7 @@ fn conversation_id<T>(result: Result<T, InboundTurnError>) -> Result<T, TriggerE
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn materialize_trigger_prompt_for_test<B>(
     binding_service: B,
-    thread_service: Arc<dyn CanonicalSessionThreadService>,
+    thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
     fire: TriggerFire,
 ) -> Result<(TriggerMaterializedPrompt, TurnScope), TriggerError>
@@ -485,16 +500,15 @@ mod tests {
     use ironclaw_product::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
-        AcceptedInboundMessage as CanonicalAcceptedInboundMessage,
-        AcceptedInboundMessageReplay as CanonicalAcceptedInboundMessageReplay,
-        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-        AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-        CreateSummaryArtifactRequest, InMemorySessionThreadService, LatestThreadMessageRequest,
-        ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-        LoadContextWindowRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-        SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistoryRequest,
-        ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-        UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
+        AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
+        AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
+        ContextWindow, CreateSummaryArtifactRequest, InMemorySessionThreadService,
+        LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+        LoadContextMessagesRequest, LoadContextWindowRequest, RedactMessageRequest,
+        ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+        SummaryArtifact, ThreadGoal, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+        ThreadMessageRangeRequest, ThreadMessageRecord, UpdateAssistantDraftRequest,
+        UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
     };
     use ironclaw_triggers::{
         InMemoryTriggerRepository, NoopTriggerFireSettlementObserver,
@@ -1066,7 +1080,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl CanonicalSessionThreadService for InterceptingPromptThreadService {
+    impl SessionThreadService for InterceptingPromptThreadService {
         async fn ensure_thread(
             &self,
             request: EnsureThreadRequest,
@@ -1076,8 +1090,8 @@ mod tests {
 
         async fn accept_inbound_message(
             &self,
-            _request: ThreadAcceptInboundMessageRequest,
-        ) -> Result<CanonicalAcceptedInboundMessage, SessionThreadError> {
+            _request: AcceptInboundMessageRequest,
+        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
             Err(SessionThreadError::Backend(
                 "prompt thread write failed".to_string(),
             ))
@@ -1086,7 +1100,7 @@ mod tests {
         async fn replay_accepted_inbound_message(
             &self,
             _request: ReplayAcceptedInboundMessageRequest,
-        ) -> Result<Option<CanonicalAcceptedInboundMessageReplay>, SessionThreadError> {
+        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
             unimplemented!("trigger prompt recorder tests do not replay canonical inbound messages")
         }
 
@@ -1389,6 +1403,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -1523,6 +1538,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -1600,7 +1616,7 @@ mod tests {
             reply_target_binding_ref: reply_target_binding_ref.clone(),
             access: ThreadAccessDecision::Allowed,
         };
-        let accepted_message = AcceptedInboundMessage {
+        let accepted_message = AcceptedConversationMessage {
             tenant_id,
             thread_id: thread_id.clone(),
             actor: TurnActor::new(actor_user_id),
@@ -1677,6 +1693,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -1800,6 +1817,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -1954,6 +1972,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -2058,6 +2077,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),
@@ -2134,6 +2154,7 @@ mod tests {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     creator_user_id.as_str(),
+                    None::<String>,
                 )
                 .expect("actor ref"),
                 creator_user_id.clone(),

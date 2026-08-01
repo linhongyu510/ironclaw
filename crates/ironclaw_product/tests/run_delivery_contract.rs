@@ -1284,10 +1284,9 @@ async fn observer_records_gate_route_after_approval_prompt() {
         "fingerprints recorded"
     );
     // The source conversation (bare replies next to the prompt) routes too.
-    let source_fingerprint =
-        ironclaw_conversations::ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
-            .expect("conversation")
-            .conversation_fingerprint();
+    let source_fingerprint = ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+        .expect("conversation")
+        .conversation_fingerprint();
     assert!(
         route
             .delivered_conversation_fingerprints

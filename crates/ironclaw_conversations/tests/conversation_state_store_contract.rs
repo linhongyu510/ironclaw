@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome, ConversationBindingService,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, InboundTurnError,
-    RebornFilesystemConversationServices, ResolveConversationRequest,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalEventId,
+    InboundTurnError, RebornFilesystemConversationServices, ResolveConversationRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, UserId},
@@ -59,7 +59,7 @@ fn default_installation() -> AdapterInstallationId {
 }
 
 fn external_actor(id: &str) -> ExternalActorRef {
-    ExternalActorRef::new("user", id).unwrap()
+    ExternalActorRef::new("user", id, None::<String>).unwrap()
 }
 
 fn external_conversation(id: &str) -> ExternalConversationRef {

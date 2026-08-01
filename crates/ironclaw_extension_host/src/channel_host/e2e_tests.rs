@@ -890,7 +890,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 ///
 /// `length_prefixed_fingerprint(["T-A", "D123", ""])` = `"3:T-A|4:D123|0:|"`.
 fn dm_conversation_fingerprint() -> String {
-    ironclaw_conversations::ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
+    ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
         .expect("DM conversation ref") // safety: static test DM ref is valid.
         .conversation_fingerprint()
 }
