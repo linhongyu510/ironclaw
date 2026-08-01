@@ -692,6 +692,42 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(codex.user_code, "CODE");
+
+        // The remaining two methods, so the double carries no unexercised arm —
+        // an unexercised double method is a contract the suite silently stopped
+        // covering. `delete_provider` is also the port's only fallible-by-design
+        // path here, and it must carry the caller's argument into the error.
+        let deleted = service
+            .delete_provider(caller("alice"), "gone".to_string())
+            .await
+            .expect_err("the double rejects deletes");
+        assert!(matches!(
+            deleted,
+            LlmConfigServiceError::InvalidRequest { ref reason, .. } if reason == "gone"
+        ));
+
+        let wallet_ok = service
+            .complete_nearai_wallet_login(caller("alice"), wallet_login("alice.near"))
+            .await
+            .expect("ok");
+        let wallet_empty = service
+            .complete_nearai_wallet_login(caller("alice"), wallet_login(""))
+            .await
+            .expect("ok");
+        assert!(wallet_ok.active);
+        assert!(!wallet_empty.active);
+    }
+
+    fn wallet_login(account_id: &str) -> NearAiWalletLoginRequest {
+        NearAiWalletLoginRequest {
+            account_id: account_id.to_string(),
+            public_key: "ed25519:key".to_string(),
+            signature: "c2ln".to_string(),
+            message: "login".to_string(),
+            recipient: "recipient".to_string(),
+            nonce: vec![0; 32],
+            callback_url: None,
+        }
     }
 
     /// The single status table. Every discriminant maps to exactly one status,

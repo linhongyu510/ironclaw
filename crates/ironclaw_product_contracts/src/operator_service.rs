@@ -435,11 +435,71 @@ mod tests {
 
         // A multi-byte value is cut on a character boundary, not mid-codepoint
         // (the cut is byte-counted, so this is the failure mode to pin).
-        let multibyte = "é".repeat(OPERATOR_LOGS_CONTEXT_MAX_BYTES);
-        let bounded = normalize_operator_log_context_value(&multibyte);
+        //
+        // Both widths, deliberately — but note what neither of them proves.
+        // The cut offset is 256 - 16 = 240, and 2, 3, and 4 all divide 240, so
+        // **any** homogeneous repeat lands exactly on a boundary and the
+        // back-up loop never executes. A test built only from `glyph.repeat(n)`
+        // looks like it covers the multi-byte case and does not; the shifted
+        // input below is what actually drives the loop.
+        for glyph in ["é", "€"] {
+            let multibyte = glyph.repeat(OPERATOR_LOGS_CONTEXT_MAX_BYTES);
+            let bounded = normalize_operator_log_context_value(&multibyte);
+            assert!(bounded.len() <= OPERATOR_LOGS_CONTEXT_MAX_BYTES);
+            assert!(bounded.ends_with(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX));
+            // The prefix is whole characters: re-parsing is what proves the cut
+            // did not land inside a codepoint. (`String` cannot hold invalid
+            // UTF-8, so slicing mid-codepoint would have panicked above — this
+            // asserts the *content*, that no replacement char crept in.)
+            let kept = bounded
+                .strip_suffix(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX)
+                .expect("the cut is marked");
+            assert!(!kept.is_empty());
+            assert!(kept.chars().all(|ch| ch.to_string() == glyph));
+        }
+
+        // Force the back-up: one ASCII byte then 3-byte characters puts the
+        // boundaries at 1, 4, 7 … (≡ 1 mod 3). The cut offset 240 ≡ 0, so the
+        // loop must walk back to 238 before it can slice. Without this input
+        // the loop body is never executed by any test in this file.
+        let shifted = format!("x{}", "€".repeat(OPERATOR_LOGS_CONTEXT_MAX_BYTES));
+        let bounded = normalize_operator_log_context_value(&shifted);
         assert!(bounded.len() <= OPERATOR_LOGS_CONTEXT_MAX_BYTES);
         assert!(bounded.ends_with(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX));
-        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        let kept = bounded
+            .strip_suffix(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX)
+            .expect("the cut is marked");
+        // Backed up strictly below the naive offset — the proof the loop ran.
+        assert!(
+            kept.len()
+                < OPERATOR_LOGS_CONTEXT_MAX_BYTES - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len()
+        );
+        assert!(kept.starts_with('x'));
+        assert!(kept.chars().skip(1).all(|ch| ch == '€'));
+    }
+
+    /// The degenerate bound: a limit shorter than the truncation marker itself.
+    ///
+    /// Unreachable through `normalize_operator_log_context_value`, whose bound
+    /// is a 256-byte constant — so it is reached here directly, through the
+    /// private helper. It is a fail-safe, not dead code: it is what stops the
+    /// `max_bytes - SUFFIX.len()` subtraction below it from underflowing if the
+    /// constant is ever lowered, and an untested fail-safe is how an arithmetic
+    /// panic reaches a log-query path.
+    #[test]
+    fn log_context_bound_shorter_than_the_marker_does_not_underflow() {
+        let marker = OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
+
+        for max_bytes in [0, 1, marker - 1, marker] {
+            let bounded = truncate_utf8_with_suffix(&"x".repeat(marker * 4), max_bytes);
+            assert_eq!(bounded.len(), max_bytes);
+            assert_eq!(bounded, OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes]);
+        }
+
+        // One byte above the marker takes the normal path and still fits.
+        let bounded = truncate_utf8_with_suffix(&"x".repeat(marker * 4), marker + 1);
+        assert!(bounded.len() <= marker + 1);
+        assert!(bounded.ends_with(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX));
     }
 
     struct EchoingLifecycle;
