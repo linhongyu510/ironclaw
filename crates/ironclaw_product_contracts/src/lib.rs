@@ -38,6 +38,7 @@ pub mod admin_users;
 pub mod channel_config;
 pub mod command;
 pub mod delivery;
+pub mod error;
 pub mod inbound;
 pub mod interaction_commands;
 pub mod lifecycle_service;
@@ -47,6 +48,7 @@ pub mod outbound;
 pub mod package_lifecycle;
 pub mod projection;
 pub mod prompt_source;
+pub mod subject_route;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
