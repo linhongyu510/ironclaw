@@ -182,3 +182,100 @@ fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
         reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog};
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_product::projection::build_reborn_projection_services;
+    use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
+    use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnActor};
+
+    const SKILL_NAME: &str = "csv-column-sum";
+    const FEEDBACK: &str = "picked this up summing a report column";
+
+    /// The adapter is four lines of forwarding, which is exactly the shape that
+    /// fails silently: a swapped `skill_name`/`feedback` pair still compiles
+    /// (both are `&str`), and dropping the `Some(owner)` wrapper still compiles
+    /// (the publisher takes `Option<&UserId>`) while quietly re-keying every
+    /// learned-skill bubble onto the runtime operator's stream instead of the
+    /// user's. Neither is reachable from `skill_learning.rs`'s `StubNotifier`
+    /// tests, which stop at the port.
+    ///
+    /// So this drives the production trait object over the *real*
+    /// `LiveProjectionPublisher` — no double anywhere — with the runtime actor
+    /// deliberately different from the run owner, and reads the result back off
+    /// the product event stream the WebUI actually drains.
+    #[tokio::test]
+    async fn live_notifier_forwards_each_argument_and_keys_the_bubble_to_the_run_owner() {
+        let runtime_actor = UserId::new("skill-learned-runtime-actor").expect("valid user");
+        let run_owner = UserId::new("skill-learned-run-owner").expect("valid user");
+        let scope = TurnScope::new(
+            TenantId::new("skill-learned-tenant").expect("valid tenant"),
+            Some(AgentId::new("skill-learned-agent").expect("valid agent")),
+            None,
+            ThreadId::new("skill-learned-thread").expect("valid thread"),
+        );
+
+        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        let services = build_reborn_projection_services(
+            event_log,
+            ReplyTargetBindingRef::new("skill-learned-reply").expect("valid reply ref"),
+        );
+        let notifier: Arc<dyn SkillLearnedNotifier> = Arc::new(LiveSkillLearnedNotifier::new(
+            services.live_projection_publisher(runtime_actor.clone()),
+        ));
+
+        notifier.notify(&run_owner, &scope, TurnRunId::new(), SKILL_NAME, FEEDBACK);
+
+        let owner_items = skill_activations_for(&services, &run_owner, &scope).await;
+        assert_eq!(
+            owner_items,
+            vec![(vec![SKILL_NAME.to_string()], vec![FEEDBACK.to_string()])],
+            "the run owner must see exactly one learned-skill bubble carrying the name in \
+             `skill_names` and the feedback in `feedback` — a swap or a dropped argument \
+             shows up here"
+        );
+
+        let runtime_actor_items = skill_activations_for(&services, &runtime_actor, &scope).await;
+        assert!(
+            runtime_actor_items.is_empty(),
+            "the bubble must be keyed to the run owner the notifier was handed, not to the \
+             runtime actor the publisher was built with; found {runtime_actor_items:?}"
+        );
+    }
+
+    async fn skill_activations_for(
+        services: &ironclaw_product::projection::RebornProjectionServices,
+        actor: &UserId,
+        scope: &TurnScope,
+    ) -> Vec<(Vec<String>, Vec<String>)> {
+        services
+            .product_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: TurnActor::new(actor.clone()),
+                scope: scope.clone(),
+                after_cursor: None,
+            })
+            .await
+            .expect("projection drain succeeds")
+            .iter()
+            .filter_map(|event| match event.payload() {
+                ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|item| match item {
+                ProductProjectionItem::SkillActivation {
+                    skill_names,
+                    feedback,
+                    ..
+                } => Some((skill_names, feedback)),
+                _ => None,
+            })
+            .collect()
+    }
+}

@@ -610,10 +610,13 @@ mod tests {
             Some("super-secret".to_string())
         );
 
-        // `static_assertions::assert_not_impl_any!` would be the direct form;
-        // the crate's dev-dependency set has it, but naming the negative in a
-        // comment plus this compile-time witness is what the suite uses
-        // elsewhere: the request type is constructed, never serialized.
+        // The direction is the point, and both halves are asserted at compile
+        // time rather than described: these request types are *deserialized* on
+        // the way in and must never gain a `Serialize` impl, because that is
+        // what would let a caller-supplied `SecretString` API key be written
+        // back out — to a log line, an echo of the request, or a wire response.
+        // `assert_not_impl_any!` is the enforcement; if a future derive adds
+        // `Serialize`, these two lines fail the build.
         static_assertions::assert_impl_all!(LlmProbeRequest: serde::de::DeserializeOwned);
         static_assertions::assert_not_impl_any!(LlmProbeRequest: serde::Serialize);
         static_assertions::assert_not_impl_any!(UpsertLlmProviderRequest: serde::Serialize);
