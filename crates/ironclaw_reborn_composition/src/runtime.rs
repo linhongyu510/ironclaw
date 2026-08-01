@@ -3432,9 +3432,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let skill_learned_notifier: Arc<
             dyn ironclaw_extension_host::skill_learning::SkillLearnedNotifier,
         > = Arc::new(
-            ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(
-                skill_learning_publisher,
-            ),
+            crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(skill_learning_publisher),
         );
         let extraction_tasks =
             Arc::new(ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks::new());

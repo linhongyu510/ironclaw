@@ -349,3 +349,460 @@ impl From<LlmConfigServiceError> for ProductSurfaceError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use secrecy::ExposeSecret as _;
+    use std::sync::Arc;
+
+    fn caller(user: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::new("tenant").expect("tenant"),
+            UserId::new(user).expect("user"),
+            None,
+            None,
+        )
+    }
+
+    fn probe(provider_id: &str, key: Option<&str>) -> LlmProbeRequest {
+        LlmProbeRequest {
+            adapter: "open_ai_completions".to_string(),
+            base_url: None,
+            provider_id: provider_id.to_string(),
+            model: None,
+            api_key: key.map(|key| SecretString::from(key.to_string())),
+        }
+    }
+
+    /// A config double that **threads every argument it is handed** into the
+    /// snapshot it returns. A double that discarded `caller` would let the
+    /// per-caller assertions below pass against an implementation that served
+    /// one operator's provider list to another.
+    struct EchoingConfig;
+
+    #[async_trait]
+    impl LlmConfigService for EchoingConfig {
+        async fn snapshot(
+            &self,
+            caller: ProductSurfaceCaller,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Ok(LlmConfigSnapshot {
+                providers: Vec::new(),
+                active: Some(LlmActiveSelection {
+                    provider_id: caller.user_id.as_str().to_string(),
+                    model: None,
+                }),
+            })
+        }
+
+        async fn upsert_provider(
+            &self,
+            caller: ProductSurfaceCaller,
+            request: UpsertLlmProviderRequest,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Ok(LlmConfigSnapshot {
+                providers: vec![LlmProviderView {
+                    id: request.id,
+                    description: caller.user_id.as_str().to_string(),
+                    adapter: request.adapter,
+                    default_model: request.default_model.unwrap_or_default(),
+                    base_url: request.base_url,
+                    builtin: false,
+                    active: request.set_active,
+                    active_model: request.model,
+                    api_key_required: false,
+                    accepts_api_key: true,
+                    // The value never crosses back; only whether one arrived.
+                    api_key_set: request.api_key.is_some(),
+                    can_list_models: false,
+                }],
+                active: None,
+            })
+        }
+
+        async fn delete_provider(
+            &self,
+            _caller: ProductSurfaceCaller,
+            provider_id: String,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Err(LlmConfigServiceError::InvalidRequest {
+                field: Some("provider_id".to_string()),
+                reason: provider_id,
+            })
+        }
+
+        async fn set_active(
+            &self,
+            _caller: ProductSurfaceCaller,
+            request: SetActiveLlmRequest,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Ok(LlmConfigSnapshot {
+                providers: Vec::new(),
+                active: Some(LlmActiveSelection {
+                    provider_id: request.provider_id,
+                    model: request.model,
+                }),
+            })
+        }
+
+        async fn test_connection(
+            &self,
+            _caller: ProductSurfaceCaller,
+            request: LlmProbeRequest,
+        ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+            Ok(LlmProbeResult {
+                ok: request.api_key.is_some(),
+                message: request.provider_id,
+            })
+        }
+
+        async fn list_models(
+            &self,
+            _caller: ProductSurfaceCaller,
+            request: LlmProbeRequest,
+        ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+            Ok(LlmModelsResult {
+                ok: true,
+                models: vec![request.adapter],
+                message: request.provider_id,
+            })
+        }
+
+        async fn start_nearai_login(
+            &self,
+            _caller: ProductSurfaceCaller,
+            request: NearAiLoginRequest,
+        ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+            Ok(NearAiLoginStart {
+                auth_url: format!("{}/v1/auth/{}", request.origin, request.provider.as_path()),
+            })
+        }
+
+        async fn complete_nearai_wallet_login(
+            &self,
+            _caller: ProductSurfaceCaller,
+            request: NearAiWalletLoginRequest,
+        ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+            Ok(NearAiWalletLoginResult {
+                active: !request.account_id.is_empty(),
+            })
+        }
+
+        async fn start_codex_login(
+            &self,
+            _caller: ProductSurfaceCaller,
+        ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+            Ok(CodexLoginStart {
+                user_code: "CODE".to_string(),
+                verification_uri: "https://example.invalid/device".to_string(),
+            })
+        }
+    }
+
+    /// The port hands the implementation its caller, and the shape admits a
+    /// different answer per caller. This pins the contract's plumbing — it does
+    /// **not** claim the production service scopes correctly, which is
+    /// `ironclaw_operator`'s own test's job.
+    #[tokio::test]
+    async fn config_port_threads_the_caller_and_can_answer_differently_per_caller() {
+        let service: Arc<dyn LlmConfigService> = Arc::new(EchoingConfig);
+
+        let alice = service.snapshot(caller("alice")).await.expect("ok");
+        let bob = service.snapshot(caller("bob")).await.expect("ok");
+
+        assert_eq!(
+            alice
+                .active
+                .as_ref()
+                .map(|active| active.provider_id.as_str()),
+            Some("alice")
+        );
+        assert_eq!(
+            bob.active
+                .as_ref()
+                .map(|active| active.provider_id.as_str()),
+            Some("bob")
+        );
+        assert_ne!(alice.active, bob.active);
+    }
+
+    /// Every field of an upsert request reaches the implementation, and the
+    /// key's *presence* — never its value — comes back. This is the wire-safety
+    /// property the module doc claims, asserted rather than described.
+    #[tokio::test]
+    async fn upsert_threads_every_field_and_returns_key_presence_not_the_key() {
+        let service: Arc<dyn LlmConfigService> = Arc::new(EchoingConfig);
+
+        let with_key = service
+            .upsert_provider(
+                caller("alice"),
+                UpsertLlmProviderRequest {
+                    id: "custom".to_string(),
+                    client_action_id: None,
+                    name: None,
+                    adapter: "anthropic".to_string(),
+                    base_url: Some("https://example.invalid".to_string()),
+                    default_model: Some("model-a".to_string()),
+                    api_key: Some(SecretString::from("super-secret".to_string())),
+                    set_active: true,
+                    model: Some("model-b".to_string()),
+                },
+            )
+            .await
+            .expect("ok");
+        let without_key = service
+            .upsert_provider(
+                caller("alice"),
+                UpsertLlmProviderRequest {
+                    id: "custom".to_string(),
+                    client_action_id: None,
+                    name: None,
+                    adapter: "anthropic".to_string(),
+                    base_url: None,
+                    default_model: None,
+                    api_key: None,
+                    set_active: false,
+                    model: None,
+                },
+            )
+            .await
+            .expect("ok");
+
+        let view = &with_key.providers[0];
+        assert_eq!(view.id, "custom");
+        assert_eq!(view.adapter, "anthropic");
+        assert_eq!(view.base_url.as_deref(), Some("https://example.invalid"));
+        assert_eq!(view.default_model, "model-a");
+        assert_eq!(view.active_model.as_deref(), Some("model-b"));
+        assert!(view.active);
+        assert!(view.api_key_set);
+
+        // Both directions: absence is reported as absence, not as a default.
+        assert!(!without_key.providers[0].api_key_set);
+        assert!(!without_key.providers[0].active);
+
+        // The response type has no field that could carry a key value at all.
+        let rendered = serde_json::to_string(&with_key).expect("serializes");
+        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("api_key_set"));
+    }
+
+    /// A request carrying a secret deserializes it, and the wrapper is
+    /// deserialize-only — the type has no `Serialize`, so a handler cannot echo
+    /// a submitted key back out even by accident.
+    #[test]
+    fn probe_request_deserializes_its_secret_and_cannot_be_serialized_back() {
+        let request: LlmProbeRequest = serde_json::from_value(serde_json::json!({
+            "adapter": "anthropic",
+            "provider_id": "custom",
+            "api_key": "super-secret",
+        }))
+        .expect("deserializes");
+
+        assert_eq!(request.provider_id, "custom");
+        assert_eq!(
+            request
+                .api_key
+                .as_ref()
+                .map(|key| key.expose_secret().to_string()),
+            Some("super-secret".to_string())
+        );
+
+        // `static_assertions::assert_not_impl_any!` would be the direct form;
+        // the crate's dev-dependency set has it, but naming the negative in a
+        // comment plus this compile-time witness is what the suite uses
+        // elsewhere: the request type is constructed, never serialized.
+        static_assertions::assert_impl_all!(LlmProbeRequest: serde::de::DeserializeOwned);
+        static_assertions::assert_not_impl_any!(LlmProbeRequest: serde::Serialize);
+        static_assertions::assert_not_impl_any!(UpsertLlmProviderRequest: serde::Serialize);
+    }
+
+    /// Each probe/login argument reaches the implementation distinguishably —
+    /// both directions, so a double that returned a constant could not pass.
+    #[tokio::test]
+    async fn probe_and_login_arguments_reach_the_implementation() {
+        let service: Arc<dyn LlmConfigService> = Arc::new(EchoingConfig);
+
+        let keyed = service
+            .test_connection(caller("alice"), probe("with-key", Some("k")))
+            .await
+            .expect("ok");
+        let unkeyed = service
+            .test_connection(caller("alice"), probe("no-key", None))
+            .await
+            .expect("ok");
+        assert!(keyed.ok);
+        assert!(!unkeyed.ok);
+        assert_eq!(keyed.message, "with-key");
+        assert_eq!(unkeyed.message, "no-key");
+
+        let models = service
+            .list_models(caller("alice"), probe("listed", None))
+            .await
+            .expect("ok");
+        assert_eq!(models.models, vec!["open_ai_completions".to_string()]);
+        assert_eq!(models.message, "listed");
+
+        let github = service
+            .start_nearai_login(
+                caller("alice"),
+                NearAiLoginRequest {
+                    provider: NearAiAuthProvider::Github,
+                    origin: "https://app.invalid".to_string(),
+                },
+            )
+            .await
+            .expect("ok");
+        let google = service
+            .start_nearai_login(
+                caller("alice"),
+                NearAiLoginRequest {
+                    provider: NearAiAuthProvider::Google,
+                    origin: "https://other.invalid".to_string(),
+                },
+            )
+            .await
+            .expect("ok");
+        assert_eq!(github.auth_url, "https://app.invalid/v1/auth/github");
+        assert_eq!(google.auth_url, "https://other.invalid/v1/auth/google");
+        assert_ne!(github.auth_url, google.auth_url);
+
+        let active = service
+            .set_active(
+                caller("alice"),
+                SetActiveLlmRequest {
+                    provider_id: "chosen".to_string(),
+                    model: Some("chosen-model".to_string()),
+                },
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            active.active,
+            Some(LlmActiveSelection {
+                provider_id: "chosen".to_string(),
+                model: Some("chosen-model".to_string()),
+            })
+        );
+
+        let codex = service
+            .start_codex_login(caller("alice"))
+            .await
+            .expect("ok");
+        assert_eq!(codex.user_code, "CODE");
+    }
+
+    /// The single status table. Every discriminant maps to exactly one status,
+    /// and only the backend-transient arm is retryable — a caller that retried
+    /// an invalid request would loop forever against a 400.
+    #[test]
+    fn port_error_projects_to_one_status_per_discriminant() {
+        let cases = [
+            (
+                LlmConfigServiceError::InvalidRequest {
+                    field: Some("provider_id".to_string()),
+                    reason: "bad".to_string(),
+                },
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ),
+            (
+                LlmConfigServiceError::NotFound,
+                ProductSurfaceErrorCode::NotFound,
+                404,
+                false,
+            ),
+            (
+                LlmConfigServiceError::Unavailable,
+                ProductSurfaceErrorCode::Unavailable,
+                503,
+                true,
+            ),
+            (
+                LlmConfigServiceError::Internal,
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
+        ];
+
+        for (error, code, status, retryable) in cases {
+            let projected = ProductSurfaceError::from(error);
+            assert_eq!(projected.code, code);
+            assert_eq!(projected.status_code, status);
+            assert_eq!(projected.retryable, retryable);
+        }
+    }
+
+    /// The `reason` on an invalid request is caller-facing, but the projection
+    /// must not carry it onto the wire: a backend path or provider URL in that
+    /// string would become a disclosure. The surface error keeps only the
+    /// taxonomy.
+    #[test]
+    fn port_error_projection_drops_the_free_text_reason() {
+        let projected = ProductSurfaceError::from(LlmConfigServiceError::InvalidRequest {
+            field: Some("base_url".to_string()),
+            reason: "/var/secrets/operator/key.pem".to_string(),
+        });
+
+        let rendered = serde_json::to_string(&projected).expect("serializes");
+        assert!(!rendered.contains("/var/secrets"));
+        assert!(!rendered.contains("key.pem"));
+        assert_eq!(projected.code, ProductSurfaceErrorCode::InvalidRequest);
+    }
+
+    /// Both ports are held as `Arc<dyn _>` by product and composition, so both
+    /// must stay object-safe.
+    #[test]
+    fn llm_config_ports_stay_object_safe() {
+        struct FixedReader;
+        impl ActiveModelReader for FixedReader {
+            fn active_model_id(&self) -> Option<String> {
+                Some("model".to_string())
+            }
+        }
+
+        fn assert_object_safe(_config: &dyn LlmConfigService, reader: &dyn ActiveModelReader) {
+            assert_eq!(reader.active_model_id().as_deref(), Some("model"));
+        }
+        assert_object_safe(&EchoingConfig, &FixedReader);
+    }
+
+    /// `None` means "no concrete model to price against" and must stay
+    /// distinguishable from a model literally named `"none"` — the run's cost
+    /// is omitted in the first case and mispriced in the second.
+    #[test]
+    fn active_model_reader_distinguishes_absent_from_named() {
+        struct Absent;
+        impl ActiveModelReader for Absent {
+            fn active_model_id(&self) -> Option<String> {
+                None
+            }
+        }
+        struct Named;
+        impl ActiveModelReader for Named {
+            fn active_model_id(&self) -> Option<String> {
+                Some("none".to_string())
+            }
+        }
+
+        assert_eq!(Absent.active_model_id(), None);
+        assert_eq!(Named.active_model_id(), Some("none".to_string()));
+        assert_ne!(Absent.active_model_id(), Named.active_model_id());
+    }
+
+    /// The NEAR AI provider's path segment is what gets pasted into the auth
+    /// URL; a rename silently redirects the login.
+    #[test]
+    fn nearai_auth_provider_path_segments_are_stable() {
+        assert_eq!(NearAiAuthProvider::Github.as_path(), "github");
+        assert_eq!(NearAiAuthProvider::Google.as_path(), "google");
+        assert_eq!(
+            serde_json::to_string(&NearAiAuthProvider::Github).expect("serializes"),
+            "\"github\""
+        );
+    }
+}

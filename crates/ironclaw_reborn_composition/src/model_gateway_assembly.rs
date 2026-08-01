@@ -1,6 +1,51 @@
 use std::sync::Arc;
 
+use ironclaw_extension_host::skill_learning::SkillLearnedNotifier;
+use ironclaw_host_api::ids::UserId;
+use ironclaw_product::projection::LiveProjectionPublisher;
+use ironclaw_turns::{TurnRunId, TurnScope};
+
 use crate::runtime::RebornRuntimeError;
+
+/// [`SkillLearnedNotifier`] over the runtime's live projection publisher —
+/// emits a `SkillActivation` projection item rendered as a chat bubble.
+///
+/// The adapter lives here, not beside the port. `LiveProjectionPublisher` is
+/// one of `ironclaw_product`'s *concrete* types, and naming it was the whole
+/// of `ironclaw_extension_host::skill_learning`'s `ironclaw_product`
+/// dependency — the last one that file carried, and the one that would have
+/// blocked the crate's `products` → `loops` re-layer. The port's own doc always
+/// said "composition implements it over the projection publisher"; this makes
+/// that true (PROPOSAL §6.8.2 shed list, CHECKLIST WS2 strays row).
+///
+/// It sits in this module because composition's other skill-learning assembly
+/// piece — `build_skill_learning_provider` below — already does. It is
+/// deliberately *not* a crate-root `skill_learning` module: the whole module is
+/// what #6616/#6691 moved out of composition, and
+/// `reborn_composition_boundaries.rs` holds it out.
+pub(crate) struct LiveSkillLearnedNotifier {
+    publisher: Arc<LiveProjectionPublisher>,
+}
+
+impl LiveSkillLearnedNotifier {
+    pub(crate) fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
+        Self { publisher }
+    }
+}
+
+impl SkillLearnedNotifier for LiveSkillLearnedNotifier {
+    fn notify(
+        &self,
+        owner: &UserId,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        skill_name: &str,
+        feedback: &str,
+    ) {
+        self.publisher
+            .publish_skill_learned(Some(owner), scope, run_id, skill_name, feedback);
+    }
+}
 
 pub(crate) async fn build_production_model_gateway(
     provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
