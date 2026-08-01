@@ -84,3 +84,95 @@ pub trait LifecycleProductService: Send + Sync {
         Ok(std::collections::HashMap::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_extension_contracts::state::InstallationState;
+
+    use crate::package_lifecycle::LifecyclePackageKind;
+
+    /// A service that implements only the two required methods, so the two
+    /// defaults below are exercised as written rather than through an
+    /// override. Fail-closed defaults are the reason they exist.
+    struct MinimalLifecycleService;
+
+    fn surface_context() -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new("tenant-1").expect("valid tenant"),
+            user_id: UserId::new("user-1").expect("valid user"),
+            agent_id: None,
+            project_id: None,
+        })
+    }
+
+    fn package_ref() -> LifecyclePackageRef {
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref")
+    }
+
+    #[async_trait]
+    impl LifecycleProductService for MinimalLifecycleService {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            _action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Ok(LifecycleProductResponse::projection(
+                Some(package_ref()),
+                InstallationState::Active,
+                Vec::new(),
+            ))
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Ok(LifecycleProductResponse::projection(
+                Some(package_ref),
+                InstallationState::Active,
+                Vec::new(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_two_required_methods_have_no_default_and_answer_in_lifecycle_values() {
+        let service: &dyn LifecycleProductService = &MinimalLifecycleService;
+        let executed = service
+            .execute(
+                surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref(),
+                },
+            )
+            .await
+            .expect("execute is required, not defaulted");
+        assert_eq!(executed.phase, InstallationState::Active);
+
+        let projected = service
+            .project_package(surface_context(), package_ref())
+            .await
+            .expect("project_package is required, not defaulted");
+        assert_eq!(projected.package_ref, Some(package_ref()));
+    }
+
+    #[tokio::test]
+    async fn bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding() {
+        let error = MinimalLifecycleService
+            .import_extension_bundle(surface_context(), vec![0x50, 0x4b])
+            .await
+            .expect_err("a service that does not implement bundle import must refuse");
+        assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn activation_errors_default_to_none_so_the_wire_field_stays_absent() {
+        let errors = MinimalLifecycleService
+            .installed_activation_errors(surface_context())
+            .await
+            .expect("default reports no durable errors");
+        assert!(errors.is_empty());
+    }
+}

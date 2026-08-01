@@ -105,3 +105,62 @@ pub enum ExtensionAccountSetupError {
         source: AccountConnectionStatusError,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_error_carries_its_sanitized_reason() {
+        let error = AccountConnectionStatusError::new("backend timed out");
+        assert_eq!(
+            error.to_string(),
+            "account connection status read failed: backend timed out"
+        );
+    }
+
+    #[test]
+    fn generic_notice_policy_interpolates_the_display_name_into_every_notice() {
+        let policy = ChannelConnectionNoticePolicy::generic("Slack");
+        for notice in [
+            &policy.connect_required,
+            &policy.paired,
+            &policy.already_paired_same_user,
+            &policy.already_bound_to_other_user,
+            &policy.expired_or_unknown,
+        ] {
+            assert!(
+                notice.contains("Slack"),
+                "notice must name the channel: {notice}"
+            );
+        }
+        // Each notice is distinct copy, not one string reused for five states.
+        let all = [
+            policy.connect_required.clone(),
+            policy.paired.clone(),
+            policy.already_paired_same_user.clone(),
+            policy.already_bound_to_other_user.clone(),
+            policy.expired_or_unknown.clone(),
+        ];
+        let mut unique = all.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), all.len(), "notices must not collapse");
+    }
+
+    #[test]
+    fn setup_error_sources_the_status_error_it_wraps() {
+        let extension_id = ExtensionId::new("slack").expect("valid extension id");
+        let unavailable = ExtensionAccountSetupError::HostUnavailable {
+            extension_id: extension_id.clone(),
+        };
+        assert!(unavailable.to_string().contains("slack"));
+
+        let status = ExtensionAccountSetupError::StatusUnavailable {
+            extension_id,
+            source: AccountConnectionStatusError::new("no backend"),
+        };
+        assert!(status.to_string().contains("slack"));
+        assert_ne!(unavailable, status);
+    }
+}

@@ -209,6 +209,31 @@ fn strip_cfg_test_blocks(source: &str) -> String {
     out
 }
 
+/// Byte index of the `>` that closes the `<` at index 0, counting nesting.
+/// `None` when the brackets never balance (a truncated slice), which the
+/// caller treats as "not an impl header I can read" rather than guessing.
+fn balanced_angle_close(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            // A `->` inside a bound (`impl<F: Fn(&str) -> bool>`) is a return
+            // arrow, not a closing bracket. `-` never opens one, so a `>`
+            // preceded by `-` is skipped.
+            '>' if index > 0 && bytes[index - 1] == b'-' => {}
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Trait names appearing as the *implemented* trait of an `impl … for …` item,
 /// with any leading path qualifier and generic arguments dropped
 /// (`impl ironclaw_product::Foo<T> for Bar` → `Foo`). Inherent impls
@@ -222,8 +247,12 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
         };
         let mut candidate = head.0.trim();
         // Drop an `<'a, T>` generic-parameter list that binds the impl itself.
+        // The close must be found by *balancing*, not by the first `>`: a bound
+        // may itself be generic (`impl<T: Iterator<Item = X>> Port for Host<T>`),
+        // and taking the first `>` would leave `> Port` — not an identifier, so
+        // the impl would be skipped and the gate would enforce nothing for it.
         if candidate.starts_with('<') {
-            let Some(close) = candidate.find('>') else {
+            let Some(close) = balanced_angle_close(candidate) else {
                 continue;
             };
             candidate = candidate[close + 1..].trim();
@@ -342,6 +371,8 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
         impl Inherent { fn f() {} }
         // impl Commented for Ignored {}
         impl async_trait::Marker for Fourth {}
+        impl<T: Iterator<Item = X>> NestedBound for Host<T> {}
+        impl<F: Fn(&str) -> bool> ArrowBound for Guard<F> {}
         #[cfg(test)]
         mod tests {
             impl TestOnly for Double {}
@@ -366,5 +397,17 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     assert!(
         !found.contains("TestOnly"),
         "a #[cfg(test)] impl is not a production edge: {found:?}"
+    );
+    // The generic-parameter list must be closed by balancing, not by the first
+    // `>`: a nested bound or an `Fn(..) -> T` return arrow both put a `>`
+    // inside the list, and taking the first one silently drops the impl — a
+    // hole through which a new product-defined port could enter unenforced.
+    assert!(
+        found.contains("NestedBound"),
+        "a nested generic bound must not hide the trait: {found:?}"
+    );
+    assert!(
+        found.contains("ArrowBound"),
+        "an `Fn(..) -> T` bound must not hide the trait: {found:?}"
     );
 }
