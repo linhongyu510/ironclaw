@@ -824,9 +824,15 @@ review_after = "2026-10-31"
 #     `ProductOperationFailure` makes pre-image and post-image byte-identical.
 #   * All 122 scored `DA:<line>,0` at their pre-image line in the BASE lcov.
 #     Uncovered before, uncovered after, same code.
-#   * The remaining 15 are rustfmt re-wraps of those same rename-only lines
-#     (e.g. `lifecycle_product_service.rs` 668-670, `product_lifecycle.rs`
-#     783-786), not new logic.
+#   * 13 of the remaining 15 are rustfmt re-wraps of those same rename-only
+#     lines (`lifecycle_product_service.rs` 668-670 and 688-689,
+#     `product_lifecycle.rs` 783-786 and 2832, `channel_subject_routes.rs`
+#     231-233), not new logic.
+#   * Exactly 2 lines in the whole PR are genuinely new code:
+#     `ironclaw_reborn_composition/src/factory/test_support.rs` 633-634, a
+#     `.map_err(..)` conversion at the one seam that keeps the product-side
+#     alias. They sit on a path whose every line already scored 0 hits in the
+#     base lcov; see that entry below.
 #   * Zero of the 137 are "no LLVM region" lines. Every one carries a `DA`
 #     record with 0 hits — the gate intersects the changed set with `DA`
 #     records, so region-less type positions never reach the denominator in
@@ -973,7 +979,7 @@ review_after = "2026-11-30"
 path = "crates/ironclaw_extension_host/src/channel_subject_routes.rs"
 lines = [198, 231, 232, 233]
 owner = "@nearai/reborn"
-reason = "Class D. All four are in `resolve_product_conversation_subject_route`, behind a `ChannelConfigService` handle read. 198: the map_err when a configured subject route is not a valid `UserId`. 231-233: the `map_err` closure on `managed_channel_subject_user_id` for an allowed channel — the three lines are one closure, re-wrapped by rustfmt because the longer type name crossed 100 columns. Reaching either needs durable operator `[channel.config]` values plus a failing id derivation. Rename-only lines, 0 hits at their pre-image in the base lcov."
+reason = "Class D. All four are in `resolve_product_conversation_subject_route`, behind a `ChannelConfigService` handle read. 198: the map_err when a configured subject route is not a valid `UserId`. 231-233: the `map_err` closure on `managed_channel_subject_user_id` for an allowed channel — the three lines are one closure, re-wrapped by rustfmt because the longer type name crossed 100 columns. Reaching either needs durable operator `[channel.config]` values plus a failing id derivation. 198 is rename-only with 0 hits at its pre-image. 231-233 are one base line re-wrapped into three (diff hunk `@@ -217 +231,3 @@`): base line 217 was the whole closure on one line and scored `DA:217,0`, so the same single uncovered closure is now three uncovered lines."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
 
@@ -1027,7 +1033,7 @@ lines = [
   2048, 2095, 2315, 2358, 2369, 2393, 2426, 2462, 2499, 2530,
 ]
 owner = "@nearai/reborn"
-reason = "Class D, all inside `ExtensionLifecycleManager`'s async `&self` methods. 715: `installation_owners`' return-type/function-entry line. 783-786: `installation_activation_errors`' Transient map_err when the generic host's error read fails (four lines because rustfmt re-wrapped one closure). 881: `search_installation`'s not-found arm. 942: `import_bundle`'s rejection arm. 984/1004/1012/1030/1044: `install_registry_package`'s five rejection arms (unknown package, ownership, membership, activation preconditions). 1559/1564/1604/1609/1651: `remove`'s four rejection arms plus its Transient store arm. 1769: `removed_extension_providers_from_requirements`' rejection arm. 1812/1832/1843/1875/1887: `revoke_exclusive_credentials`' credential-cleanup failure arms. 2048: `restore_reserved_membership`'s function-entry line (the rollback runs only when a removal fails after reserving). 2095: `remove_locked`'s Transient arm. 2315: `register_lifecycle_package`'s rejection arm. 2358/2369: `ensure_not_installed`'s two already-installed arms. 2393: `load_installation`'s not-found arm. 2426/2462/2499: the function-entry lines of `disable_lifecycle_package`, `restore_lifecycle_package` and `restore_active_publication`. 2530: `delete_materialized_extension_files`' Transient filesystem arm. Each needs a store, filesystem, credential-cleanup port or generic host that fails on demand, wired through the full manager fixture. All rename-only lines, 0 hits at their pre-image in the base lcov; this PR's own tests cover every pure mapper in this file."
+reason = "Class D, all inside `ExtensionLifecycleManager`'s async `&self` methods. 715: `installation_owners`' return-type/function-entry line. 783-786: `installation_activation_errors`' Transient map_err when the generic host's error read fails, four lines because rustfmt re-wrapped one closure (base lines 785-787; the `.map_err(` call at 785 scored 136 hits while the closure body at 786/787 scored 0 -- the fallible read never failed, then or now). 881: `search_installation`'s not-found arm. 942: `import_bundle`'s rejection arm. 984/1004/1012/1030/1044: `install_registry_package`'s five rejection arms (unknown package, ownership, membership, activation preconditions). 1559/1564/1604/1609/1651: `remove`'s four rejection arms plus its Transient store arm. 1769: `removed_extension_providers_from_requirements`' rejection arm. 1812/1832/1843/1875/1887: `revoke_exclusive_credentials`' credential-cleanup failure arms. 2048: `restore_reserved_membership`'s function-entry line (the rollback runs only when a removal fails after reserving). 2095: `remove_locked`'s Transient arm. 2315: `register_lifecycle_package`'s rejection arm. 2358/2369: `ensure_not_installed`'s two already-installed arms. 2393: `load_installation`'s not-found arm. 2426/2462/2499: the function-entry lines of `disable_lifecycle_package`, `restore_lifecycle_package` and `restore_active_publication`. 2530: `delete_materialized_extension_files`' Transient filesystem arm. Each needs a store, filesystem, credential-cleanup port or generic host that fails on demand, wired through the full manager fixture. All rename-only lines, 0 hits at their pre-image in the base lcov; this PR's own tests cover every pure mapper in this file."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
 
@@ -1043,6 +1049,6 @@ review_after = "2026-11-30"
 path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
 lines = [633, 634]
 owner = "@nearai/reborn"
-reason = "Class D. The `.await` and `.map_err(..)` lines of `publish_bundled_extension_for_test`, a `#[cfg(feature = \"test-support\")]` dev-only seam that only downstream integration harnesses call — no lane that measures this file builds a caller for it. Note line 634 still names `ironclaw_product::ProductSurfaceFailure`: the composition seam keeps the product-side alias, which is why the line entered the changed set at all. Rename-only lines, 0 hits at their pre-image in the base lcov."
+reason = "Class D, and the one entry here that is NOT a pure rename: 634 is a genuinely new `.map_err(ironclaw_product::ProductSurfaceFailure::from)` conversion, added because the inner `publish_bundled_package_for_test` now returns the repointed type while this composition seam keeps the product-side alias in its own signature (line 628). It sits on an already-dead path: `publish_bundled_extension_for_test` is a `#[cfg(feature = \"test-support\")]` dev-only seam that only downstream integration harnesses call, and EVERY line of it scored 0 hits in the base lcov (base 624-635 all `DA:<line>,0`) — no lane that measures this file builds a caller for it, before or after. Covering the conversion would mean standing up a composition-tier harness for a helper this crate's own lanes never invoke."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
