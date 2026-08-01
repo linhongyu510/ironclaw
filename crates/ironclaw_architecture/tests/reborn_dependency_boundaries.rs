@@ -678,6 +678,9 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_first_party_extension_ports/src",
         "crates/ironclaw_first_party_extensions/src",
         "crates/ironclaw_extension_contracts/src",
+        // WS2.4: the manager holds the extension-management capability
+        // handlers, which is exactly the shape this guard covers.
+        "crates/ironclaw_extension_manager/src",
         "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
         "crates/ironclaw_product/src",
@@ -781,6 +784,15 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // `package_lifecycle::public_lifecycle_response_json`.
             "ironclaw_extension_contracts",
             "ironclaw_extension_host",
+            // WS2.4. The `extension` and `ironhub` commands render the
+            // extension-management command surface, which the
+            // `ironclaw_extension_manager` split moved out of
+            // `ironclaw_extension_host`. The edge is not new — the binary has
+            // always linked that code — the split just names it honestly, and
+            // both entries are product-face command rendering, not runtime
+            // assembly (which still enters through
+            // `ironclaw_reborn_composition`).
+            "ironclaw_extension_manager",
             "ironclaw_first_party_extensions",
             "ironclaw_host_api",
             "ironclaw_operator",
@@ -796,7 +808,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -3293,6 +3305,29 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_runner",
                 "ironclaw_threads",
                 "ironclaw_turns",
+            ],
+        },
+        BoundaryRule {
+            // The product face of extensions (PROPOSAL §6.8.3). It calls the
+            // host's authority; it never becomes a second assembly layer and
+            // never serves a route of its own. The edges named here are the
+            // ones whose appearance would mean exactly that: composition and
+            // the CLI (assembly — both depend on the manager, never the
+            // reverse), `ironclaw_webui`/`ironclaw_host_ingress` (a transport
+            // edge would put HTTP inside a product sub-owner), and
+            // `ironclaw_reborn_openai_compat`/`ironclaw_operator` (sibling
+            // product surfaces). `ironclaw_product` is deliberately NOT here:
+            // the manager still names seven product DTO/capability-id symbols,
+            // frozen shrink-only by `reborn_extension_manager_split.rs`, which
+            // is where that edge is tracked to zero.
+            crate_name: "ironclaw_extension_manager",
+            forbidden: vec![
+                "ironclaw_host_ingress",
+                "ironclaw_operator",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_openai_compat",
+                "ironclaw_webui",
             ],
         },
         BoundaryRule {
