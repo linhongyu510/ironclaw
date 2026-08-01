@@ -3194,6 +3194,236 @@ mod tests {
         );
     }
 
+    /// The boundary mappers decide, for every lifecycle failure, whether the
+    /// caller should retry (`Transient`) or fix its request
+    /// (`InvalidBindingRequest`). That classification is the whole contract of
+    /// this layer, so each mapper is pinned on both sides of its own split
+    /// rather than on one representative input.
+    #[test]
+    fn a_corrupt_bundle_is_a_client_mistake_not_a_retryable_failure() {
+        let failure = unzip_extension_bundle_for_product(b"not a zip archive at all")
+            .expect_err("a non-zip payload cannot be unzipped");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a corrupt upload is the caller's to fix, not ours to retry: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn a_generic_host_activation_rejection_is_a_client_mistake() {
+        let failure = generic_host_error(crate::LifecycleError::ActivationHook {
+            reason: "hook refused".to_string(),
+        });
+
+        assert_eq!(
+            failure,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "generic extension host rejected the activation: activation hook failed: \
+                         hook refused"
+                    .to_string(),
+            },
+            "the host's rejection reason must reach the caller verbatim"
+        );
+    }
+
+    /// Every `ChannelConfigError` collapses to one retryable failure with fixed
+    /// text: the underlying error can name storage internals, so it is logged
+    /// rather than forwarded. Two structurally different inputs are asserted to
+    /// prove the collapse is deliberate and not an artifact of one input.
+    #[test]
+    fn effective_configuration_failures_are_retryable_with_no_detail_leak() {
+        let expected = ProductOperationFailure::Transient {
+            reason: "effective extension configuration is unavailable".to_string(),
+        };
+
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::Storage {
+                reason: "postgres connection refused on 10.0.0.7".to_string(),
+            }),
+            expected,
+            "storage detail must never cross the product boundary"
+        );
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::NotInstalled {
+                extension_id: "slack".to_string(),
+            }),
+            expected,
+            "the mapper collapses every configure-surface failure to one class"
+        );
+    }
+
+    /// `LifecyclePackageId` is deliberately looser than `ExtensionId` (it
+    /// accepts uppercase and surrounding whitespace), so a well-formed package
+    /// ref can still carry an id no extension can have. That gap is the only
+    /// way this rejection is reached.
+    #[test]
+    fn a_package_ref_id_that_is_not_a_valid_extension_id_is_rejected() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "Slack")
+            .expect("uppercase is a valid lifecycle package id");
+
+        let failure = extension_ids_from_package_ref(&package_ref)
+            .expect_err("uppercase is not a valid extension id");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "an unusable extension id is a malformed request: {failure:?}"
+        );
+        assert!(
+            extension_ids_from_package_ref(
+                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+                    .expect("lowercase package ref")
+            )
+            .is_ok(),
+            "the same ref in lowercase must still resolve — the rejection is about the id, \
+             not about the call"
+        );
+    }
+
+    /// A deployment that never enabled the account-setup host is a
+    /// configuration mistake the caller must fix; a status read that failed is
+    /// a retryable outage. Mapping either one to the other would make the
+    /// WebUI either retry forever or give up on a transient blip.
+    #[test]
+    fn account_setup_failures_split_configuration_from_outage() {
+        let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::HostUnavailable {
+                    extension_id: extension_id.clone(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a host that is not enabled on this deployment is not retryable"
+        );
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::StatusUnavailable {
+                    extension_id,
+                    source:
+                        ironclaw_product_contracts::account_setup::AccountConnectionStatusError::new(
+                            "backend timed out"
+                        ),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a failed status read is an outage the caller should retry"
+        );
+    }
+
+    #[test]
+    fn extension_errors_split_infrastructure_from_malformed_manifests() {
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::Filesystem(FilesystemError::MountNotFound {
+                    path: VirtualPath::new("/system/extensions/gmail").expect("valid path"),
+                })),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a filesystem failure is infrastructure trouble, so it is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::ManifestParse {
+                    reason: "expected a table".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a manifest the author must fix is not retryable"
+        );
+    }
+
+    /// #4091: a store outage must not read as a malformed request, or callers
+    /// abandon the operation instead of retrying it.
+    #[test]
+    fn installation_store_outages_stay_retryable() {
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::StoreUnavailable {
+                    reason: "backend unreachable".to_string(),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a store outage is retryable backend trouble (#4091)"
+        );
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::InvalidManifest {
+                    reason: "missing id".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a malformed installation record is the caller's to fix"
+        );
+    }
+
+    /// A shared (tenant-owned) extension may only be mutated by the tenant
+    /// admin. This is an authorization boundary, so it is pinned on both the
+    /// denial and the two ways the check must let a caller through.
+    #[test]
+    fn only_the_tenant_admin_may_mutate_a_shared_installation() {
+        let admin = UserId::new("admin").expect("valid user");
+        let member = UserId::new("member").expect("valid user");
+        let tenant_owned = fixture_installation("shared-tool", InstallationOwner::Tenant);
+        let user_owned =
+            fixture_installation("personal-tool", InstallationOwner::user(member.clone()));
+
+        let denial =
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &member, &admin, "remove")
+                .expect_err("a non-admin must not mutate a shared installation");
+        assert!(
+            matches!(
+                denial,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "the denial is a rejected request, not an outage: {denial:?}"
+        );
+
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &admin, &admin, "remove")
+                .is_ok(),
+            "the tenant admin is exactly who may mutate a shared installation"
+        );
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&user_owned, &member, &admin, "remove")
+                .is_ok(),
+            "a user-owned installation is not gated on the tenant admin at all"
+        );
+    }
+
+    #[test]
+    fn a_compensation_failure_carries_both_causes_and_stays_retryable() {
+        assert_eq!(
+            compensation_failure("removal rollback failed", "original boom", "rollback boom"),
+            ProductOperationFailure::Transient {
+                reason: "removal rollback failed; original error: original boom; \
+                         compensation error: rollback boom"
+                    .to_string(),
+            },
+            "losing either cause makes a half-applied removal undiagnosable"
+        );
+    }
+
+    fn fixture_installation(id: &str, owner: InstallationOwner) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(id).expect("valid extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new(id).expect("valid installation id"),
+            extension_id.clone(),
+            ironclaw_extensions::ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            owner,
+        )
+        .expect("installation fixture")
+    }
+
     #[tokio::test]
     async fn lifecycle_manager_installs_activates_and_removes_catalog_package() {
         let package = fixture_extension_package();

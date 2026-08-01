@@ -357,3 +357,137 @@ pub(crate) fn available_package(
         search_aliases: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{discovery_error, oauth_admission_error};
+    use crate::HostedMcpDiscoveryError;
+    use ironclaw_product_contracts::error::ProductOperationFailure;
+
+    /// Hosted-MCP discovery talks to a third-party server, so its three
+    /// outcomes must stay distinct: a blip the caller should retry, a server
+    /// that will never work as configured, and a server asking the user to
+    /// connect an account. `install_activation_error` keys on the exact
+    /// "hosted MCP catalog preparation failed:" prefix to decide whether a
+    /// post-install discovery failure still leaves a usable install, so the
+    /// prefix is asserted, not just the variant.
+    #[test]
+    fn hosted_mcp_discovery_outcomes_stay_distinguishable() {
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::Transient(
+                "upstream 503".to_string()
+            )),
+            ProductOperationFailure::Transient {
+                reason: "hosted MCP catalog preparation failed: upstream 503".to_string(),
+            },
+            "a transport blip is retryable and keeps the prefix install keys on"
+        );
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::Permanent(
+                "not an MCP endpoint".to_string()
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP catalog preparation failed: not an MCP endpoint".to_string(),
+            },
+            "a permanently wrong endpoint is the registrant's to fix"
+        );
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::CredentialsRejected(
+                ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
+                    status: 401,
+                    www_authenticate_metadata: Vec::new(),
+                    protected_resource_metadata: Vec::new(),
+                }
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP account setup is required".to_string(),
+            },
+            "a credential challenge must route the user to setup, not read as a transport failure"
+        );
+    }
+
+    /// OAuth metadata arrives from the remote server, so the rejection text is
+    /// deliberately fixed: the underlying error is logged, never forwarded.
+    #[test]
+    fn inadmissible_oauth_metadata_is_rejected_without_echoing_the_cause() {
+        assert_eq!(
+            oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP OAuth metadata was not admissible".to_string(),
+            },
+        );
+        assert_eq!(
+            oauth_admission_error(ironclaw_auth::AuthProductError::ProviderDenied),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP OAuth metadata was not admissible".to_string(),
+            },
+            "every admission failure collapses to one non-echoing reason"
+        );
+    }
+
+    /// `pending_manifest` builds a manifest by string interpolation, so its two
+    /// input guards are the boundary that keeps caller-supplied text out of the
+    /// generated TOML. Both are pinned against a control that is accepted, so
+    /// the assertions cannot pass because the whole call fails for some other
+    /// reason.
+    #[test]
+    fn hosted_mcp_registration_rejects_unusable_names_and_client_profiles() {
+        let extension_id =
+            ironclaw_host_api::ids::ExtensionId::new("mcp-linear").expect("valid extension id");
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
+            &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
+                "https://mcp.linear.app/rpc".to_string(),
+            )
+            .expect("valid endpoint"),
+        )
+        .expect("canonical endpoint");
+        let no_auth = super::HostedMcpAuthSelection::NoAuth;
+
+        let name_expected = ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP extension name is invalid".to_string(),
+        };
+        for unusable_name in ["", "   ", &"x".repeat(257)] {
+            assert_eq!(
+                super::pending_manifest(&extension_id, unusable_name, &endpoint, &no_auth)
+                    .expect_err("an unusable display name must be rejected"),
+                name_expected,
+                "name {unusable_name:?} must not reach manifest interpolation"
+            );
+        }
+        assert!(
+            super::pending_manifest(&extension_id, "Linear", &endpoint, &no_auth).is_ok(),
+            "a usable name must still register — the guard is about the name, not the call"
+        );
+
+        let profile_expected = ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP OAuth client profile is invalid".to_string(),
+        };
+        for unusable_profile in ["", "   ", "has\u{0}control", &"p".repeat(129)] {
+            assert_eq!(
+                super::pending_manifest(
+                    &extension_id,
+                    "Linear",
+                    &endpoint,
+                    &super::HostedMcpAuthSelection::OAuth {
+                        client_profile_id: Some(unusable_profile.to_string()),
+                    },
+                )
+                .expect_err("an unusable client profile must be rejected"),
+                profile_expected,
+                "client profile {unusable_profile:?} must not reach the manifest"
+            );
+        }
+        assert!(
+            super::pending_manifest(
+                &extension_id,
+                "Linear",
+                &endpoint,
+                &super::HostedMcpAuthSelection::OAuth {
+                    client_profile_id: Some("linear-profile".to_string()),
+                },
+            )
+            .is_ok(),
+            "a usable client profile must still register"
+        );
+    }
+}

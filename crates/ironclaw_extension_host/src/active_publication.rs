@@ -197,7 +197,73 @@ mod tests {
         AdminConfig, HostTrustPolicy, InvalidationBus, TrustPolicy, TrustProvenance,
     };
 
-    use super::{ActiveExtensionPublisher, extension_trust_policy_input};
+    use super::{
+        ActiveExtensionPublisher, compensation_failure, extension_trust_policy_input,
+        map_extension_error, map_trust_policy_error,
+    };
+    use ironclaw_extensions::ExtensionError;
+    use ironclaw_product_contracts::error::ProductOperationFailure;
+    use ironclaw_trust::TrustError;
+
+    /// Publication runs inside the activation transaction, so its boundary
+    /// mappers decide whether a half-published extension is retried or
+    /// abandoned. A trust-policy rejection is always the definition's fault;
+    /// an infrastructure failure never is.
+    #[test]
+    fn publication_failures_classify_trust_rejections_apart_from_infrastructure() {
+        assert_eq!(
+            map_trust_policy_error(TrustError::InvariantViolation {
+                reason: "unknown trust class".to_string(),
+            }),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "extension trust policy update failed: trust policy invariant violation: \
+                         unknown trust class"
+                    .to_string(),
+            },
+            "the policy's own reason must reach the caller"
+        );
+
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::Filesystem(
+                    ironclaw_filesystem::FilesystemError::MountNotFound {
+                        path: ironclaw_host_api::path::VirtualPath::new("/system/extensions")
+                            .expect("valid path"),
+                    }
+                )),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a filesystem failure while publishing is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::DuplicateExtension {
+                    id: ExtensionId::new("gmail").expect("valid extension id"),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a duplicate registration is a request problem, not an outage"
+        );
+    }
+
+    /// When publication fails and its rollback also fails, both causes must
+    /// survive into one retryable failure — dropping either one leaves a
+    /// half-published extension with no way to tell what happened.
+    #[test]
+    fn a_failed_publication_rollback_reports_both_causes() {
+        assert_eq!(
+            compensation_failure(
+                "active publication rollback failed",
+                "publish rejected",
+                "restore rejected",
+            ),
+            ProductOperationFailure::Transient {
+                reason: "active publication rollback failed; original error: publish rejected; \
+                         compensation error: restore rejected"
+                    .to_string(),
+            },
+        );
+    }
 
     #[test]
     fn publishing_user_registered_mcp_elevates_only_the_active_pinned_definition() {

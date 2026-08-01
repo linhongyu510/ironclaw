@@ -746,6 +746,230 @@ mod tests {
         }
     }
 
+    fn installed_response() -> LifecycleProductResponse {
+        LifecycleProductResponse::projection(
+            Some(
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail")
+                    .expect("package ref"),
+            ),
+            InstallationState::Installed,
+            Vec::new(),
+        )
+    }
+
+    /// Install runs activation as a follow-on step, so this classifier decides
+    /// which activation failures are *swallowed* — reported to the caller as a
+    /// successful install — and which abort the whole operation. Swallowing the
+    /// wrong one hides a real failure behind a green install, so every arm is
+    /// pinned, and the discriminating input is the failure itself: the same
+    /// `install_response` goes in every time and only the error varies.
+    #[test]
+    fn post_install_activation_failures_are_swallowed_only_when_the_install_still_stands() {
+        // Provider misconfiguration must reach the caller: the extension is
+        // installed but unusable, and only an operator can fix it.
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "an unconfigured provider must not be hidden behind a successful install"
+        );
+
+        // A transient reconciliation blip leaves the install itself intact.
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::Transient {
+                    reason: "db timeout".to_string(),
+                },
+                installed_response(),
+            )
+            .expect("a transient activation blip keeps the install"),
+            installed_response(),
+            "the caller must still see the state the install actually reached"
+        );
+
+        // Hosted-MCP discovery is best-effort at install time — but only for
+        // the two exact reasons this guard names.
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "hosted MCP catalog preparation failed: upstream 500".to_string(),
+                },
+                installed_response(),
+            )
+            .expect("hosted MCP preparation is best-effort at install time"),
+            installed_response(),
+            "a hosted-MCP preparation failure still leaves a usable install"
+        );
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "some other rejection".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "the guard is reason-specific: any other rejection must still surface"
+        );
+    }
+
+    /// Both unsupported projections must answer `Unsupported` with a runtime
+    /// blocker rather than an error — the WebUI renders the blocker, and an
+    /// error would render as a failed request instead.
+    #[test]
+    fn unwired_lifecycle_surfaces_project_unsupported_with_a_runtime_blocker() {
+        for response in [
+            unsupported_projection(None).expect("projection is infallible for a well-formed ref"),
+            unsupported_extension_auth_configure_projection(None)
+                .expect("projection is infallible for a well-formed ref"),
+        ] {
+            assert_eq!(response.phase, InstallationState::Unsupported);
+            assert!(
+                matches!(
+                    response.blockers.as_slice(),
+                    [LifecycleReadinessBlocker::Runtime { ref_id: Some(_) }]
+                ),
+                "an unwired surface must name why it is unavailable: {:?}",
+                response.blockers
+            );
+        }
+    }
+
+    /// The configure payload unions `fields` and `secrets`; a payload that is
+    /// not that shape is the caller's mistake, not an outage.
+    #[test]
+    fn a_configure_payload_decodes_both_maps_and_rejects_anything_else() {
+        assert_eq!(
+            parse_channel_config_payload(None).expect("an absent payload is empty, not invalid"),
+            Vec::<(String, String)>::new(),
+        );
+        assert_eq!(
+            parse_channel_config_payload(Some(&serde_json::json!({
+                "fields": {"channel": "#general"},
+                "secrets": {"token": "xoxb-1"},
+            })))
+            .expect("a well-formed payload decodes"),
+            vec![
+                ("channel".to_string(), "#general".to_string()),
+                ("token".to_string(), "xoxb-1".to_string()),
+            ],
+            "both maps must reach the service, not just `fields`"
+        );
+
+        let failure = parse_channel_config_payload(Some(&serde_json::json!({"fields": 7})))
+            .expect_err("`fields` must be a string map");
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a malformed payload is a rejected request, not an outage: {failure:?}"
+        );
+    }
+
+    /// Storage trouble is retryable; every other configure-surface failure is
+    /// the caller's to fix. Collapsing the two would either make the WebUI
+    /// retry a permanent rejection or give up on a blip.
+    #[test]
+    fn configure_surface_failures_split_storage_from_caller_error() {
+        assert_eq!(
+            map_channel_config_error(ironclaw_extension_host::ChannelConfigError::Storage {
+                reason: "backend unreachable".to_string(),
+            }),
+            ProductOperationFailure::Transient {
+                reason: "backend unreachable".to_string(),
+            },
+            "storage trouble is retryable and keeps its reason"
+        );
+        for caller_error in [
+            ironclaw_extension_host::ChannelConfigError::NotInstalled {
+                extension_id: "slack".to_string(),
+            },
+            ironclaw_extension_host::ChannelConfigError::UnknownField {
+                handle: "nope".to_string(),
+            },
+            ironclaw_extension_host::ChannelConfigError::Reactivation {
+                reason: "restart refused".to_string(),
+            },
+        ] {
+            assert_eq!(
+                map_channel_config_error(caller_error.clone()),
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: caller_error.to_string(),
+                },
+                "{caller_error:?} is the caller's to fix, not ours to retry"
+            );
+        }
+    }
+
+    /// `FilesystemDenied` is an authorization outcome and must project as
+    /// `BindingAccessDenied` — projecting it as a generic invalid request would
+    /// tell the caller to retry a denial, and projecting it as `Transient`
+    /// would hide the denial entirely.
+    #[test]
+    fn skill_management_failures_keep_denial_separate_from_outage_and_bad_input() {
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::FilesystemDenied
+            )),
+            ProductOperationFailure::BindingAccessDenied,
+            "a filesystem denial is an authorization outcome"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::Resource
+            )),
+            ProductOperationFailure::Transient {
+                reason: "skill management resource unavailable".to_string(),
+            },
+            "a resource shortage is retryable"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::with_reason(
+                SkillManagementErrorKind::NotFound,
+                "no such skill",
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "no such skill".to_string(),
+            },
+            "a caller-fixable failure forwards its reason"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::NotFound
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "skill management request rejected".to_string(),
+            },
+            "a reasonless rejection still gets usable text"
+        );
+    }
+
+    /// The scoped wrapper must not flatten its two cases: a bad scope is the
+    /// caller's, and an inner skill failure keeps the inner classification
+    /// (including the `BindingAccessDenied` denial above).
+    #[test]
+    fn scoped_skill_failures_preserve_the_inner_classification() {
+        assert_eq!(
+            map_local_skill_management_error(ScopedSkillManagementError::InvalidContext {
+                reason: "no skills mount".to_string(),
+            }),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "no skills mount".to_string(),
+            },
+        );
+        assert_eq!(
+            map_local_skill_management_error(ScopedSkillManagementError::Skill(
+                SkillManagementError::new(SkillManagementErrorKind::FilesystemDenied)
+            )),
+            ProductOperationFailure::BindingAccessDenied,
+            "wrapping a denial must not downgrade it to a generic rejection"
+        );
+    }
+
     #[derive(Clone, Default)]
     struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
