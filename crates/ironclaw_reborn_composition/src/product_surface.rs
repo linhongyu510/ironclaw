@@ -37,9 +37,9 @@ use crate::{
     },
     support::fs::MountScopedFilesystemReader,
 };
-use ironclaw_extension_host::ExtensionHostLifecycleProductService;
-use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;
-use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
+use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
+use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
@@ -206,7 +206,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // manifest-declared channel-config fields and routes submitted values
     // through it (extension-runtime §6.4).
     api = api.with_channel_config_product_service(Arc::new(
-        ironclaw_extension_host::RebornChannelConfigProductService::new(
+        ironclaw_extension_manager::RebornChannelConfigProductService::new(
             runtime.channel_config_service.clone(),
         ),
     ));
