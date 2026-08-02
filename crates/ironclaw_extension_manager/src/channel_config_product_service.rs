@@ -39,12 +39,23 @@ impl ChannelConfigProductService for RebornChannelConfigProductService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
-        if let Ok(true) = self
+        match self
             .service
             .declares_admin_configuration(extension_id)
             .await
         {
-            return Ok(Vec::new());
+            // The extension is administrator-configured: its fields are the
+            // admin surface's, not this projection's.
+            Ok(true) => return Ok(Vec::new()),
+            Ok(false) => {}
+            // Neither installed nor in the available catalog — nothing to
+            // configure. `status()` answers the same way for the same reason
+            // below, so fall through rather than deciding it twice.
+            Err(ChannelConfigError::NotInstalled { .. }) => {}
+            // Anything else is a real read failure. Projecting it as "no
+            // fields" would tell the WebUI an extension has nothing to
+            // configure because the host could not read whether it does.
+            Err(error) => return Err(map_channel_config_error(error)),
         }
         match self.service.status(extension_id).await {
             Ok(statuses) => Ok(statuses
@@ -118,7 +129,94 @@ fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigReactivationError};
+    use ironclaw_extensions::ExtensionInstallationStore;
+    use ironclaw_filesystem::{
+        Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
+    };
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
+    };
+    use ironclaw_secrets::SecretStore;
+
     use super::*;
+
+    /// The §6.5 reactivate cycle is not what these cases exercise; the
+    /// service still requires the port, so this is the inert one.
+    struct NeverReactivates;
+
+    #[async_trait]
+    impl ChannelConfigReactivation for NeverReactivates {
+        async fn reactivate_if_active(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ChannelConfigReactivationError> {
+            Ok(())
+        }
+    }
+
+    /// A manifest-read fault reaches the caller instead of reading as
+    /// "nothing to configure".
+    ///
+    /// `field_status` asks the host twice: once for
+    /// `declares_admin_configuration` (the admin-configuration suppression
+    /// check) and once for `status()`. Swallowing the first read's error
+    /// collapses a storage fault into the suppression check's "no" answer, and
+    /// the `status()` call that follows then answers `NotInstalled` for the
+    /// very same extension — so the WebUI renders an empty field list for an
+    /// extension whose fields could not be read at all. The two reads have
+    /// different fallbacks (`resolved_manifest` consults the available
+    /// catalog, `status()`'s completeness path does not), so they do not fail
+    /// together by construction and the swallowed error is observable today,
+    /// not only after some future cache lands.
+    ///
+    /// The fault is injected *below* the real installation store, so the
+    /// production read path and its `FilesystemError` ->
+    /// `ExtensionInstallationError` -> `ChannelConfigError::Storage` mapping
+    /// all run for real rather than being asserted by a whole-trait fake.
+    #[tokio::test]
+    async fn a_manifest_read_fault_is_not_projected_as_an_empty_field_list() {
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let installation_store = ExtensionInstallationStore::load_at(
+            Arc::clone(&backend) as Arc<dyn RootFilesystem>,
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
+            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_host_runtime::default_host_api_contract_registry().expect("host contracts"),
+        )
+        .await
+        .expect("filesystem extension installation store");
+        // Fail only the first record query after load — the one
+        // `declares_admin_configuration` issues. The `status()` query that
+        // follows succeeds and reports "not installed": exactly the shape
+        // that turns a swallowed fault into an empty field list.
+        backend.add_fault(
+            Fault::on(FilesystemOperation::Query)
+                .nth(1)
+                .backend("installation store offline"),
+        );
+
+        let service = RebornChannelConfigProductService::new(Arc::new(ChannelConfigService::new(
+            Arc::new(installation_store),
+            Arc::new(SecretStore::ephemeral()),
+            ResourceScope::local_default(
+                UserId::new("channel-config-owner").expect("user id"),
+                InvocationId::new(),
+            )
+            .expect("resource scope"),
+            Arc::new(NeverReactivates),
+        )));
+
+        let error = service
+            .field_status(&ExtensionId::new("acmechat").expect("extension id"))
+            .await
+            .expect_err("a manifest read fault must not read as 'nothing to configure'");
+        assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable, "a storage fault is worth retrying");
+    }
 
     /// Every arm of the status table, in one table-driven case.
     ///

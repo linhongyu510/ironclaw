@@ -704,6 +704,14 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     );
 }
 
+/// The gate reads `cfg(test)` by walking *backwards* from the `mod` keyword
+/// over the contiguous `#[…]` run, so every token the language allows between
+/// the attribute and `mod` — i.e. the whole visibility grammar — has to be
+/// pinned here. A visibility qualifier the walk cannot step over ends the run
+/// early and the module reads as **ungated**, which is the fail-open direction:
+/// `cfg_test_only_files` then leaves a `#[cfg(test)]`-only file classified as
+/// production, and a test double in a production-named file can satisfy a
+/// residue row or an implementor pin. Raised by @serrrfirat on #7000.
 #[test]
 fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
     let source = r#"
@@ -712,9 +720,22 @@ fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
         #[allow(dead_code)]
         #[cfg(test)]
         mod stacked_attrs;
+        #[cfg(test)]
+        pub mod gated_public;
+        #[cfg(test)]
+        pub(crate) mod gated_crate;
+        #[cfg(test)]
+        pub(super) mod gated_super;
+        #[cfg(test)]
+        pub(in crate::a::b) mod gated_in_path;
+        #[allow(dead_code)]
+        #[cfg(test)]
+        pub(crate) mod gated_public_stacked;
         mod plain;
         pub mod public_plain;
         pub(crate) mod crate_plain;
+        #[allow(dead_code)]
+        pub mod attributed_but_ungated;
         mod inline_module { fn f() {} }
         // mod commented_out;
     "#;
@@ -727,9 +748,32 @@ fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
         Some(&true),
         "cfg(test) anywhere in the contiguous attribute run gates the module: {decls:?}"
     );
+    // Positive: every visibility form the language allows, gated. Reading any
+    // of these as ungated is the fail-open the doc comment above describes.
+    for gated_public in [
+        "gated_public",
+        "gated_crate",
+        "gated_super",
+        "gated_in_path",
+        "gated_public_stacked",
+    ] {
+        assert_eq!(
+            decls.get(gated_public),
+            Some(&true),
+            "a visibility qualifier must not hide the #[cfg(test)] gate \
+             ({gated_public}): {decls:?}"
+        );
+    }
+    // Negative: nothing above may be achieved by treating *any* preceding
+    // attribute — or an unrelated earlier gate — as gating.
     assert_eq!(decls.get("plain"), Some(&false), "{decls:?}");
     assert_eq!(decls.get("public_plain"), Some(&false), "{decls:?}");
     assert_eq!(decls.get("crate_plain"), Some(&false), "{decls:?}");
+    assert_eq!(
+        decls.get("attributed_but_ungated"),
+        Some(&false),
+        "a non-cfg(test) attribute run must leave a pub module production: {decls:?}"
+    );
     assert!(
         !decls.contains_key("inline_module"),
         "inline modules stay with their file: {decls:?}"
@@ -781,21 +825,38 @@ fn files_reachable_only_through_cfg_test_modules_are_not_production() {
 ///    reached through an explicit `#[path = "…"]`, so `resolve`'s ordinary
 ///    `<dir>/<name>.rs` and `<dir>/<name>/mod.rs` lookups are unexercised.
 ///
-/// Both are the shapes that let a test double keep a residue row or an
-/// implementor pin satisfied after the real impl is gone. Raised by
-/// @serrrfirat on #7003.
+/// 3. **A gated module carrying a visibility qualifier**
+///    (`#[cfg(test)] pub(crate) mod …;`) — the shape that actually ships in
+///    `ironclaw_reborn_cli/src/runtime/mod.rs`. The backwards attribute walk
+///    used to stop at `pub`, so the module read as ungated and its file stayed
+///    countable as production. This half is the caller-level half: it asserts
+///    through `production_rust_files`, the function the residue rows and
+///    implementor pins actually consume, not only the classifier.
+///
+/// 4. **Walk scope.** The shared walk prunes the non-source directories
+///    (`target/`, `node_modules/`) rather than only filtering them out of the
+///    production list afterwards, so vendored packages can neither be counted
+///    as production nor pollute the test-only set. `tests/` is deliberately
+///    *not* pruned — it is excluded from counting, while the walk still reads
+///    it so test-only-ness keeps propagating through it.
+///
+/// The first three are the shapes that let a test double keep a residue row or
+/// an implementor pin satisfied after the real impl is gone. Raised by
+/// @serrrfirat on #7003 and #7000.
 #[test]
 fn direct_cfg_test_module_and_default_child_are_test_only() {
     let tree = tempfile::tempdir().expect("temp tree");
     let src = tree.path().join("src");
     std::fs::create_dir_all(src.join("fixture")).expect("fixture dir");
 
-    // Production-named, and reachable only through a cfg(test) gate.
+    // Production-named, and reachable only through a cfg(test) gate. `double`
+    // adds the visibility qualifier between the gate and the `mod` keyword.
     std::fs::write(
         src.join("lib.rs"),
-        "pub mod real;\n#[cfg(test)]\nmod fixture;\n",
+        "pub mod real;\n#[cfg(test)]\nmod fixture;\n#[cfg(test)]\npub(crate) mod double;\n",
     )
     .expect("lib.rs");
+    std::fs::write(src.join("double.rs"), "// a test double\n").expect("double.rs");
     // Declares BOTH default resolution shapes: `<dir>/<name>.rs` and
     // `<dir>/<name>/mod.rs`. No `#[path]` anywhere.
     std::fs::write(src.join("fixture.rs"), "mod child;\nmod nested;\n").expect("fixture.rs");
@@ -809,6 +870,12 @@ fn direct_cfg_test_module_and_default_child_are_test_only() {
     // Ungated sibling: must NOT be swept up, or the function would be
     // classifying the whole tree rather than the cfg(test) reachable set.
     std::fs::write(src.join("real.rs"), "// real production code\n").expect("real.rs");
+    // Vendored package: no first-party Rust lives here, so the walk must prune
+    // it outright — neither list may mention it, gated or not.
+    let vendored = src.join("node_modules").join("pkg");
+    std::fs::create_dir_all(&vendored).expect("node_modules dir");
+    std::fs::write(vendored.join("lib.rs"), "#[cfg(test)]\nmod inner;\n").expect("vendored lib.rs");
+    std::fs::write(vendored.join("inner.rs"), "// vendored\n").expect("vendored inner.rs");
 
     let test_only = cfg_test_only_files(&src);
 
@@ -816,10 +883,11 @@ fn direct_cfg_test_module_and_default_child_are_test_only() {
         src.join("fixture.rs"),
         src.join("fixture").join("child.rs"),
         src.join("fixture").join("nested").join("mod.rs"),
+        src.join("double.rs"),
     ] {
         assert!(
             test_only.contains(&expected),
-            "{} is reachable only through `#[cfg(test)] mod fixture;` and must be \
+            "{} is reachable only through a `#[cfg(test)] mod …;` gate and must be \
              test-only, got {test_only:?}",
             expected.display()
         );
@@ -831,5 +899,27 @@ fn direct_cfg_test_module_and_default_child_are_test_only() {
     assert!(
         !test_only.contains(&src.join("lib.rs")),
         "the declaring file is production; only the gated target is not"
+    );
+    assert!(
+        !test_only.iter().any(|file| file.starts_with(&vendored)),
+        "the walk must prune node_modules/ outright, got {test_only:?}"
+    );
+
+    // Through the caller: `production_rust_files` is what the residue rows and
+    // implementor pins count. A `#[cfg(test)] pub(crate) mod …;` file reaching
+    // this list is the fail-open — a test double satisfying a production pin.
+    let production = production_rust_files(&src);
+    assert!(
+        !production.contains(&src.join("double.rs")),
+        "a `#[cfg(test)] pub(crate) mod …;` target must not count as production, \
+         got {production:?}"
+    );
+    assert!(
+        !production.iter().any(|file| file.starts_with(&vendored)),
+        "vendored packages are never production, got {production:?}"
+    );
+    assert!(
+        production.contains(&src.join("real.rs")) && production.contains(&src.join("lib.rs")),
+        "ungated production files must still be counted, got {production:?}"
     );
 }

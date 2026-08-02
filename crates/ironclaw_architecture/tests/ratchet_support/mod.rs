@@ -241,6 +241,15 @@ pub fn names_crate(code: &str, krate: &str) -> bool {
 /// whether the declaration's immediately preceding attribute run contains
 /// `cfg(test)`. Inline modules (`mod name { … }`) are not returned — their
 /// contents live in the same file and are the brace-stripper's problem.
+///
+/// The gate is read by walking **backwards** from the `mod` keyword, so the
+/// visibility qualifier that may sit between the attribute run and `mod` has to
+/// be stepped over first ([`strip_trailing_visibility`]). Not doing so ended the
+/// run at `pub` and reported `#[cfg(test)] pub mod x;` as **ungated** — the
+/// fail-open direction, since [`cfg_test_only_files`] would then leave a
+/// test-only file classified as production and a test double in a
+/// production-named file could satisfy a residue row or an implementor pin.
+/// Raised by @serrrfirat on #7000.
 #[allow(dead_code)]
 pub fn out_of_line_mod_decls(stripped: &str) -> Vec<(String, bool)> {
     let bytes = stripped.as_bytes();
@@ -266,7 +275,8 @@ pub fn out_of_line_mod_decls(stripped: &str) -> Vec<(String, bool)> {
         if !rest[name.len()..].trim_start().starts_with(';') {
             continue;
         }
-        let gated = trailing_attribute_run_contains(&stripped[..at], "cfg(test)");
+        let before = strip_trailing_visibility(&stripped[..at]);
+        let gated = trailing_attribute_run_contains(before, "cfg(test)");
         decls.push((name, gated));
     }
     decls
@@ -317,6 +327,56 @@ pub fn explicit_mod_paths(raw: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Strip one trailing visibility qualifier — `pub`, `pub(crate)`,
+/// `pub(super)`, `pub(in path)` — from the end of `before`, so a backwards
+/// attribute-run walk starts at the true beginning of the declaration rather
+/// than stopping dead at `pub`. Returns `before` (trimmed) unchanged when the
+/// tail is not a visibility qualifier, so nothing else can be consumed by
+/// accident: the parenthesised form is only stripped when the group balances
+/// *and* is immediately preceded by the whole token `pub`.
+fn strip_trailing_visibility(before: &str) -> &str {
+    let trimmed = before.trim_end();
+    // `pub(crate)` / `pub(super)` / `pub(in a::b)` — step over the group first.
+    let head = match trimmed.strip_suffix(')') {
+        Some(inner) => {
+            let bytes = inner.as_bytes();
+            let mut depth = 1usize;
+            let mut index = inner.len();
+            while index > 0 {
+                index -= 1;
+                match bytes[index] {
+                    b')' => depth += 1,
+                    b'(' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                return trimmed;
+            }
+            inner[..index].trim_end()
+        }
+        None => trimmed,
+    };
+    // `pub` must be a whole token: not the tail of an identifier, and not the
+    // raw form `r#pub`.
+    match head.strip_suffix("pub") {
+        Some(rest)
+            if rest
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_' || ch == '#')) =>
+        {
+            rest
+        }
+        _ => trimmed,
+    }
+}
+
 /// Whether the contiguous run of `#[…]` attributes ending at the end of
 /// `before` contains `needle`. Strings are already stripped, so `#[` inside a
 /// literal cannot mislead the backwards walk.
@@ -334,8 +394,25 @@ fn trailing_attribute_run_contains(before: &str, needle: &str) -> bool {
     false
 }
 
-/// Directories a production scan never descends into.
+/// Directories a production scan never counts.
 const NON_PRODUCTION_DIRS: &[&str] = &["target", "node_modules", "tests"];
+
+/// The one member of [`NON_PRODUCTION_DIRS`] every walk still descends into.
+const WALKED_FOR_DECLARATIONS: &str = "tests";
+
+/// Whether a directory is pruned from **every** walk — build output and
+/// vendored packages, which hold no first-party Rust source at any depth.
+///
+/// Derived from [`NON_PRODUCTION_DIRS`] rather than spelled again, because two
+/// lists that disagree about what a walk covers is the exact failure this module
+/// already carries scars from ([`production_rust_files`]). The single carve-out
+/// is `tests/`, which is excluded from *counting*, not from *walking*:
+/// [`cfg_test_only_files`] has to read files under `src/**/tests/` because
+/// test-only-ness propagates *through* them into production-named children, so
+/// pruning them would drop those `mod` declarations — the fail-open direction.
+fn is_pruned_dir(name: &str) -> bool {
+    NON_PRODUCTION_DIRS.contains(&name) && name != WALKED_FOR_DECLARATIONS
+}
 
 /// Whether `path`'s file name is one of the conventional test-file shapes.
 fn is_test_file_name(path: &Path) -> bool {
@@ -513,8 +590,9 @@ pub fn cfg_test_only_files(src: &Path) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-/// Every `.rs` file under `dir`, with no test-shape exclusions (the caller
-/// decides). Skips only `target/`. I/O errors are fatal.
+/// Every `.rs` file under `dir`, with no test-*shape* exclusions (the caller
+/// decides). Prunes only the directories [`is_pruned_dir`] names — build output
+/// and vendored packages. I/O errors are fatal.
 fn all_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|error| panic!("read_dir {}: {error}", dir.display()));
@@ -524,7 +602,11 @@ fn all_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         });
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_pruned_dir)
+            {
                 continue;
             }
             all_rust_files(&path, out);

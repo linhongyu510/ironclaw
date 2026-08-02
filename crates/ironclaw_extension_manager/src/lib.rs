@@ -27,6 +27,7 @@ pub mod ironhub;
 pub mod lifecycle_product_service;
 pub mod operator_config_capability;
 pub mod skill_auto_activate_capability;
+mod terminal_render;
 pub mod webui_extension_credentials;
 
 // Kept at `test_support/lifecycle.rs` rather than a flat

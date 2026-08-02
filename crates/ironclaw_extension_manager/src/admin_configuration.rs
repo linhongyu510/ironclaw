@@ -153,6 +153,28 @@ pub fn caller_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     }
 }
 
+/// The installed-extension read is what decorates each group with "which
+/// packages use this, and are they installed" — a failure there is an internal
+/// error, never an empty `used_by` list.
+///
+/// `ExtensionInstallationStorePort` is filesystem-backed, so its own text can
+/// name a mount path (`StoreUnavailable { reason }` embeds the backend's
+/// message verbatim). It is therefore kept out of the value handed to
+/// `internal_from` — which logs whatever it is given at `error!` — and recorded
+/// here instead, at `debug!`: `info!`/`warn!` corrupt the REPL/TUI, and this is
+/// an internal diagnostic rather than operator-facing status. The caller's
+/// `ProductSurfaceError` carries no free-text field at all, so the sanitized
+/// constant is the whole of what crosses the membrane.
+fn installed_extension_listing_error(
+    error: ironclaw_extensions::ExtensionInstallationError,
+) -> ProductSurfaceError {
+    tracing::debug!(
+        error = %error,
+        "administrator-configuration view could not list installed extensions"
+    );
+    ProductSurfaceError::internal_from("installed-extension listing is unavailable")
+}
+
 fn map_admin_configuration_error(
     error: ironclaw_extension_host::AdminConfigurationServiceError,
 ) -> ProductSurfaceError {
@@ -222,7 +244,18 @@ fn service_error(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::ids::{TenantId, UserId};
+    use async_trait::async_trait;
+    use ironclaw_extensions::{
+        ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+        ExtensionInstallationStorePort, ExtensionManifestRecord, MembershipDeactivation,
+    };
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        ids::{ExtensionId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
 
@@ -468,6 +501,259 @@ mod tests {
             group.fields[1].value.as_deref(),
             Some("eu-west-1"),
             "a non-secret value must survive — redaction may not blank the whole form"
+        );
+    }
+
+    /// An installation store that cannot serve a read, with the backend text
+    /// carrying the shape the reviewer flagged: a host mount path.
+    struct UnavailableInstallationStore {
+        reason: &'static str,
+    }
+
+    impl UnavailableInstallationStore {
+        fn error(&self) -> ExtensionInstallationError {
+            ExtensionInstallationError::StoreUnavailable {
+                reason: self.reason.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExtensionInstallationStorePort for UnavailableInstallationStore {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn get_manifest(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn persist_removal_tombstone(
+            &self,
+            _manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            _manifest: ExtensionManifestRecord,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn get_installation(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn upsert_installation(
+            &self,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn activate_membership(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+            _user_id: &UserId,
+        ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn deactivate_membership(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+            _user_id: &UserId,
+        ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn delete_installation(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            Err(self.error())
+        }
+
+        async fn delete_manifest(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            Err(self.error())
+        }
+    }
+
+    /// A wired provider whose administrator-configuration service resolves
+    /// (no declared groups, so `list` succeeds trivially) but whose
+    /// installation store cannot answer.
+    ///
+    /// Empty descriptors are deliberate: they isolate this test on the one
+    /// call the reviewer flagged, and they are the harder case — a store read
+    /// that was silently absorbed would still produce a perfectly valid empty
+    /// page here, which is the regression this test has to be able to see.
+    fn provider_with_unavailable_installation_store(
+        reason: &'static str,
+    ) -> AdminConfigurationViewProvider {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let service = ComposedAdminConfigurationService::new(
+            ironclaw_extension_host::FilesystemAdminConfigurationStore::new(Arc::new(
+                ScopedFilesystem::new(filesystem, |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration").expect("mount alias"),
+                        VirtualPath::new("/tenants/test/shared/admin-configuration")
+                            .expect("virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                }),
+            )),
+            secrets,
+            Vec::new(),
+        )
+        .expect("admin configuration service");
+        AdminConfigurationViewProvider::new(
+            Arc::new(service),
+            Vec::new(),
+            Arc::new(UnavailableInstallationStore { reason }),
+        )
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    /// A failing installation store is surfaced, sanitized, and still
+    /// diagnosable — the three halves that have to hold together.
+    ///
+    /// `ExtensionInstallationStorePort` is filesystem-backed, so its `Display`
+    /// can name a host mount path; the sentinel below is that shape. The
+    /// assertions are:
+    ///
+    /// - the failure is **not absorbed** — the caller gets an error, not a
+    ///   page whose `used_by` entries silently all read `installed: false`;
+    /// - the caller's error is **sanitized** — nothing about the backend
+    ///   crosses the membrane, checked on the serialized wire form rather
+    ///   than on the struct, so adding a free-text field later would fail
+    ///   here instead of passing vacuously;
+    /// - the cause is **not discarded**, and lands at `debug!` *only*. This is
+    ///   the half that moved: `ProductSurfaceError::internal_from` logs
+    ///   whatever it is handed at `error!`, so passing the store's own text to
+    ///   it put a mount path on the always-on line. Asserting "the cause is
+    ///   logged somewhere" would pass just as happily against that, so the
+    ///   test reads the emitted level per line and requires every line naming
+    ///   the sentinel to be a `DEBUG` one.
+    ///
+    /// A subscriber has to be installed for the last two to mean anything:
+    /// `tracing` short-circuits on the null dispatcher, so without one the
+    /// macro body never runs and the test could not tell "recorded it" from
+    /// "dropped it". Scoped with `with_default`, so parallel tests are
+    /// unaffected.
+    ///
+    /// Driven on an explicit current-thread runtime rather than `#[tokio::test]`
+    /// because `with_default` scopes the subscriber to a *synchronous* closure;
+    /// the whole query has to complete inside it.
+    #[test]
+    fn a_failing_installation_store_is_sanitized_for_the_caller_and_still_diagnosable() {
+        let sentinel = "/var/lib/ironclaw/mounts/tenant-alpha/extensions.db is unreadable";
+        let provider = provider_with_unavailable_installation_store(sentinel);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let error = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(provider.query(caller(true), serde_json::json!({}), None))
+        })
+        .expect_err("a store that cannot list installations must fail the view, not empty it");
+
+        assert_eq!(error.code, ProductSurfaceErrorCode::Internal);
+        assert_eq!(error.status_code, 500);
+        assert!(!error.retryable);
+        assert_eq!(error.field, None);
+        assert_eq!(error.validation_code, None);
+        let on_the_wire = serde_json::to_string(&error).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains("/var/lib/ironclaw"),
+            "the store's mount path must not cross the membrane: {on_the_wire}"
+        );
+
+        let logged = logs.contents();
+        let carrying_the_cause = logged
+            .lines()
+            .filter(|line| line.contains(sentinel))
+            .collect::<Vec<_>>();
+        assert!(
+            !carrying_the_cause.is_empty(),
+            "the store's cause must survive in the log, got {logged:?}"
+        );
+        assert!(
+            carrying_the_cause
+                .iter()
+                .all(|line| line.trim_start().starts_with("DEBUG")),
+            "the store's own text belongs to the debug diagnostic only — an always-on line \
+             carrying it puts a mount path in every deployment's log: {carrying_the_cause:?}"
+        );
+        assert!(
+            logged.contains("could not list installed extensions"),
+            "the diagnostic keeps its stable message, got {logged:?}"
         );
     }
 
