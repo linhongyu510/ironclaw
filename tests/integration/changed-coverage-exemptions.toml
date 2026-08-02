@@ -806,249 +806,31 @@ owner = "@nearai/reborn"
 reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 214/215/220/221 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
-
 # ===========================================================================
-# WS2.2 `ProductSurfaceFailure` -> `ProductOperationFailure` repoint (#7000).
+# WS2.2 (#7000): no exemption entries, deliberately.
 #
-# This PR renames one error type. `ProductOperationFailure` is two characters
-# longer than `ProductSurfaceFailure`, so every construction site's first line
-# changed, and rustfmt re-wrapped a handful of arms that crossed 100 columns.
-# That put 137 already-existing, already-uncovered error-path lines into the
-# changed-line denominator without changing a single one of their behaviors.
+# An earlier revision of this branch carried a ~250-line tranche of waivers for
+# the `ProductSurfaceFailure` -> `ProductOperationFailure` repoint. That
+# repoint reached `main` ahead of this branch (via #7002), so the comparison
+# those entries were derived from no longer exists: this PR's base already
+# contains the renamed type, and what remains here is a test-and-coverage
+# follow-up.
 #
-# Mechanical proof, reproducible from the two merged lcovs CI itself published
-# (base run 30705915898 on `main` @ 569d8e4895, head run 30706965794):
+# Deleted rather than re-justified, because an exemption is scoped to a
+# `(path, line)` pair and NOT to the PR that added it -- an inert entry today
+# silently waives whichever line lands on that number in someone else's PR
+# tomorrow. Raised by @serrrfirat on #7000; the entries were kept only by the
+# stale rationale, so re-dating them would have been an appeasement edit.
 #
-#   * 122 of the 137 lines are 1:1 replacements whose ONLY textual difference
-#     is the type name. Normalizing `ProductSurfaceFailure` ->
-#     `ProductOperationFailure` makes pre-image and post-image byte-identical.
-#   * All 122 scored `DA:<line>,0` at their pre-image line in the BASE lcov.
-#     Uncovered before, uncovered after, same code.
-#   * 13 of the remaining 15 are rustfmt re-wraps of those same rename-only
-#     lines (`lifecycle_product_service.rs` 668-670 and 688-689,
-#     `product_lifecycle.rs` 783-786 and 2832, `channel_subject_routes.rs`
-#     231-233), not new logic.
-#   * Exactly 2 lines in the whole PR are genuinely new code:
-#     `ironclaw_reborn_composition/src/factory/test_support.rs` 633-634, a
-#     `.map_err(..)` conversion at the one seam that keeps the product-side
-#     alias. They sit on a path whose every line already scored 0 hits in the
-#     base lcov; see that entry below.
-#   * Zero of the 137 are "no LLVM region" lines. Every one carries a `DA`
-#     record with 0 hits — the gate intersects the changed set with `DA`
-#     records, so region-less type positions never reach the denominator in
-#     the first place. This tranche has no type-position class.
+# Verified, not assumed, by replaying this gate against CI's own merged lcov
+# (run 30715247952, head 81bfee448e) both with and WITHOUT the tranche:
 #
-# 60 of those lines got real tests in this PR rather than a waiver (438
-# ironclaw_extension_host tests, up from 419), covering every pure boundary
-# mapper the repoint touched: the retryable-vs-caller-error split in
-# `product_lifecycle`, `lifecycle_restore`, `active_publication`,
-# `lifecycle_product_service`, `extension_activation_credentials` and
-# `hosted_mcp_manifest`; the `BindingAccessDenied` skill-denial projection;
-# both post-install activation fail-open classifiers; the tenant-admin
-# mutation guard; the hosted-MCP registration input guards; and
-# `prepare_install`'s conflicting-definition refusal. Each was verified by
-# mutating the code under test and confirming the assertion — not the
-# compiler — went red (12/12 mutants killed).
+#   with:    100.00% (11/11), 0 uncovered   <- matches CI's published
+#   without: 100.00% (11/11), 0 uncovered      reborn-changed-coverage.json
+#                                              byte for byte
 #
-# The 77 lines below are what remains, in four evidence classes.
-# ---------------------------------------------------------------------------
-# CLASS A -- `map_err` arms on argument-free infrastructure constructors.
-#
-# `ironclaw_host_runtime::default_host_port_catalog()` and
-# `crate::product_extension_host_api_contract_registry()` take NO arguments.
-# The first builds a fixed three-entry catalog from `const` ids
-# (`ironclaw_host_runtime/src/extension_contracts.rs:44`); the second composes
-# fixed registries. Their result is a property of the build, not of any input,
-# and hundreds of tests across this workspace call them with `.expect(..)` and
-# pass — including every test in the bucket that measures these files. There
-# is no input a test can supply that makes them fail, so these `map_err` arms
-# cannot execute without editing those static tables, which would break the
-# whole suite rather than exercise this line.
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
-lines = [192, 197]
-owner = "@nearai/reborn"
-reason = "Class A. 192: `default_host_port_catalog()` map_err arm in `extension_package_from_files`. 197: `product_extension_host_api_contract_registry()` map_err arm in the same function. Both constructors are argument-free and succeed in every build; the arms are unreachable from any input. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extensions.rs"
-lines = [429, 434, 772, 777, 1014, 1019]
-owner = "@nearai/reborn"
-reason = "Class A. 429/434: the `default_host_port_catalog()` and `product_extension_host_api_contract_registry()` map_err arms in `bundled_vendor_recipes`. 772/777: the same pair in `bundled_extension_package`. 1014/1019: the same pair in `load_filesystem_packages`. Argument-free constructors that succeed in every build; unreachable from any input. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/hosted_mcp_manifest.rs"
-lines = [268, 274]
-owner = "@nearai/reborn"
-reason = "Class A. 268: `default_host_port_catalog()` map_err arm inside `pending_manifest`'s `from_toml_with_root_binding` call. 274: the `product_extension_host_api_contract_registry()` map_err arm in the same call. `pending_manifest`'s reachable input guards ARE tested (`hosted_mcp_registration_rejects_unusable_names_and_client_profiles`); these two arms are not reachable from any input. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/lifecycle_restore.rs"
-lines = [251, 256, 332, 337]
-owner = "@nearai/reborn"
-reason = "Class A. 251/256: the `default_host_port_catalog()` and `product_extension_host_api_contract_registry()` map_err arms in `prepare_install`. 332/337: the same pair in `prepare_manifest_migration`. Both functions' input-dependent behavior is now tested by `install_refuses_a_retained_definition_that_disagrees_with_the_catalog`, which drives them to Ok and to the conflicting-definition Err; these four arms depend on no input at all. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-# ---------------------------------------------------------------------------
-# CLASS B -- defensive arms dominated by the guard immediately above them.
-# Unreachable as a matter of control flow, not of fixture cost. A test could
-# only reach them by weakening the guard that makes them dead, which would be
-# testing the mutation rather than the code.
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/install_policy.rs"
-lines = [74, 113]
-owner = "@nearai/reborn"
-reason = "Class B. `InstallationOwner::users(set)` has exactly one failure mode: `EmptyOwnerMembers` (installations.rs:493-497). 74 is its map_err arm in `decide_install_on_existing`, where the line above inserts the caller into the set, so it is never empty. 113 is its map_err arm in `decide_remove`, guarded by an explicit `if remaining.is_empty()` on the line above that takes the other path first. Both are unreachable by construction. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-# ---------------------------------------------------------------------------
-# CLASS C -- gated behind `VerifiedAuthClaim`, which no test outside
-# `ironclaw_host_api` can construct.
-#
-# `VerifiedAuthClaim`'s constructors (`new`, `new_for_tenant`,
-# `new_with_tenant`) are all `pub(crate)` to `ironclaw_host_api`
-# (`product_adapter/auth.rs:202-219`); the only public accessor is
-# `claim(&self) -> Option<&VerifiedAuthClaim>` on a verification outcome. A
-# crate-tier test in `ironclaw_extension_host` or `ironclaw_product` therefore
-# cannot build a `ProductCommandContext` or a `ResolveBindingRequest` at all
-# without running a real host authentication flow.
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/lifecycle_product_service.rs"
-lines = [548, 569]
-owner = "@nearai/reborn"
-reason = "Class C. Both lines sit in the `LifecycleProductContext::Command` arm, which carries a `ProductCommandContext` holding a `VerifiedAuthClaim`. 548: `lifecycle_resource_scope`'s map_err on `ResourceScope::local_default`. 569: `lifecycle_caller`'s map_err when the verified auth subject is not a valid `UserId`. `VerifiedAuthClaim` has no constructor reachable outside `ironclaw_host_api`, so the Command arm is unconstructible at this tier; the Surface arm is covered. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_product/src/conversation_binding.rs"
-branch_lines = [310]
-owner = "@nearai/reborn"
-reason = "Class C, branch arm. Line 310 is `if route_key.space_id().is_none() && !self.conversation_subject_routes.is_empty()`, guarding a `tracing::warn!` with no behavioral effect. The PR's only change here is field access -> accessor (`route_key.space_id` -> `route_key.space_id()`) because `ProductConversationRouteKey` moved to `ironclaw_product_contracts`. The branch profile is byte-identical before and after: base lcov line 358 and head lcov line 310 both read `block 0 branch 0 taken=7`, `branch 1 taken=7`, `block 1 branch 2 taken=0`, `branch 3 taken=7`. Reaching arm 2 needs a `ResolveBindingRequest`, which carries a `VerifiedAuthClaim` that cannot be constructed outside `ironclaw_host_api` — disproportionate machinery for a log line with no observable behavior."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-# ---------------------------------------------------------------------------
-# CLASS D -- pre-existing error paths inside async `&self` service methods,
-# reachable only by injecting a backend/filesystem/runtime fault.
-#
-# Every line here is a rename-only line that scored 0 hits at its pre-image in
-# the base lcov: the path was uncovered before this PR and is uncovered after,
-# and this PR did not touch its behavior. Reaching them needs a store, a
-# filesystem, or an MCP runtime that fails on demand, wired through the full
-# `ExtensionLifecycleManager` fixture — fault-injection scaffolding far larger
-# than the assertion it would enable, for paths this PR did not change.
-# Tracked with the rest of the gate-vs-restructure collisions in #6963.
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/active_publication.rs"
-lines = [92]
-owner = "@nearai/reborn"
-reason = "Class D. `upsert_trust_policy`'s catch-all arm rejecting an unsupported `ManifestSource` trust source. Needs a package whose manifest source is outside the matched set, which the manifest parser does not produce. The function's other boundary mappers are now tested. Rename-only line, 0 hits at its pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
-lines = [118]
-owner = "@nearai/reborn"
-reason = "Class D. `inline_extension_dir_assets`'s map_err on `fs.read_file(..)` — needs a `RootFilesystem` double whose `list_dir` succeeds and whose `read_file` then fails for a listed child. Rename-only line, 0 hits at its pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extensions.rs"
-lines = [457, 796, 925, 1006, 1101]
-owner = "@nearai/reborn"
-reason = "Class D. 457: `bundled_vendor_recipes`'s `unified_vendor_recipes` conflict arm — needs two bundled first-party packages declaring incompatible recipes for one vendor. 796: `bundled_extension_package`'s `record.manifest().try_into()` arm — needs a manifest that parses as a record but fails the later conversion. 925: `channel_directions_from_manifest_record`'s v2 product-adapter projection arm — needs a v2 manifest with a malformed adapter section. 1006: `load_filesystem_packages`'s `list_dir` arm for errors other than NotFound/MountNotFound — needs a failing filesystem double. 1101: `load_filesystem_package`'s non-UTF-8 manifest arm — needs a filesystem serving invalid UTF-8 bytes. All rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/channel_subject_routes.rs"
-lines = [198, 231, 232, 233]
-owner = "@nearai/reborn"
-reason = "Class D. All four are in `resolve_product_conversation_subject_route`, behind a `ChannelConfigService` handle read. 198: the map_err when a configured subject route is not a valid `UserId`. 231-233: the `map_err` closure on `managed_channel_subject_user_id` for an allowed channel — the three lines are one closure, re-wrapped by rustfmt because the longer type name crossed 100 columns. Reaching either needs durable operator `[channel.config]` values plus a failing id derivation. 198 is rename-only with 0 hits at its pre-image. 231-233 are one base line re-wrapped into three (diff hunk `@@ -217 +231,3 @@`): base line 217 was the whole closure on one line and scored `DA:217,0`, so the same single uncovered closure is now three uncovered lines."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/extension_activation_credentials.rs"
-lines = [54]
-owner = "@nearai/reborn"
-reason = "Class D. The function-entry line of `RuntimeExtensionActivationCredentialGate::ensure_credentials`, which requires a live `RuntimeCredentialAccountSelectionService` and a scoped credential store. The stand-in gate on the same trait (`UnavailableExtensionActivationCredentialGate`) and this file's own `map_activation_credential_stage_error` are both tested in this PR. Rename-only line, 0 hits at its pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/hosted_mcp_manifest.rs"
-lines = [305]
-owner = "@nearai/reborn"
-reason = "Class D. `available_package`'s `record.manifest().try_into()` map_err arm — needs an `ExtensionManifestRecord` that parses but whose manifest fails conversion to `ExtensionManifest`. The function's success path is exercised by this PR's `install_refuses_a_retained_definition_that_disagrees_with_the_catalog`. Rename-only line, 0 hits at its pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/hosted_mcp_preparation.rs"
-lines = [240, 254, 283, 574]
-owner = "@nearai/reborn"
-reason = "Class D. 240: `attempt_hosted_mcp_preparation`'s missing-discovery-runtime arm. 254: its invalid-discovery-endpoint arm. 283: its `CredentialStageError::Backend` arm (the sibling `AuthRequired` arm is the covered one). 574: `load_installation`'s installation-identity-mismatch arm, which needs a store returning a row whose `extension_id` disagrees with the requested one. All need a hosted-MCP runtime or a lying store. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/lifecycle_product_service.rs"
-lines = [243, 492]
-owner = "@nearai/reborn"
-reason = "Class D. 243: `execute_action`'s map_err when a `LifecyclePackageRef` id is not a valid `ExtensionId`, reachable only with both `extension_management` and `channel_config` wired (the `else` branch above returns first otherwise). 492: `import_extension_bundle`'s unwired-runtime arm, which needs a service built without extension management. Both are service-assembly states, not input states. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/lifecycle_restore.rs"
-lines = [367, 368]
-owner = "@nearai/reborn"
-reason = "Class D. The `hash_error: ProductOperationFailure` parameter and return-type lines of `migrate_host_bundled_manifest_hash`, whose function-entry region is attributed to them. Reaching it needs a persisted installation whose stored manifest hash disagrees with the catalog's — a boot-time upgrade state that needs a pre-seeded store. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
-lines = [
-  715, 783, 784, 785, 786, 881, 942,
-  984, 1004, 1012, 1030, 1044,
-  1559, 1564, 1604, 1609, 1651, 1769,
-  1812, 1832, 1843, 1875, 1887,
-  2048, 2095, 2315, 2358, 2369, 2393, 2426, 2462, 2499, 2530,
-]
-owner = "@nearai/reborn"
-reason = "Class D, all inside `ExtensionLifecycleManager`'s async `&self` methods. 715: `installation_owners`' return-type/function-entry line. 783-786: `installation_activation_errors`' Transient map_err when the generic host's error read fails, four lines because rustfmt re-wrapped one closure (base lines 785-787; the `.map_err(` call at 785 scored 136 hits while the closure body at 786/787 scored 0 -- the fallible read never failed, then or now). 881: `search_installation`'s not-found arm. 942: `import_bundle`'s rejection arm. 984/1004/1012/1030/1044: `install_registry_package`'s five rejection arms (unknown package, ownership, membership, activation preconditions). 1559/1564/1604/1609/1651: `remove`'s four rejection arms plus its Transient store arm. 1769: `removed_extension_providers_from_requirements`' rejection arm. 1812/1832/1843/1875/1887: `revoke_exclusive_credentials`' credential-cleanup failure arms. 2048: `restore_reserved_membership`'s function-entry line (the rollback runs only when a removal fails after reserving). 2095: `remove_locked`'s Transient arm. 2315: `register_lifecycle_package`'s rejection arm. 2358/2369: `ensure_not_installed`'s two already-installed arms. 2393: `load_installation`'s not-found arm. 2426/2462/2499: the function-entry lines of `disable_lifecycle_package`, `restore_lifecycle_package` and `restore_active_publication`. 2530: `delete_materialized_extension_files`' Transient filesystem arm. Each needs a store, filesystem, credential-cleanup port or generic host that fails on demand, wired through the full manager fixture. All rename-only lines, 0 hits at their pre-image in the base lcov; this PR's own tests cover every pure mapper in this file."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
-lines = [404, 412, 3112]
-owner = "@nearai/reborn"
-reason = "404/412: Class A — the `default_host_port_catalog()` and `product_extension_host_api_contract_registry()` map_err arms in `publish_bundled_package_for_test`; argument-free constructors, unreachable from any input. 3112: Class B — `project_installation_owners`' duplicate-id arm. Its input is the output of `canonicalize_installation_rows`, which groups rows into a `BTreeMap` keyed by `extension_id` and emits exactly one row per id (`ironclaw_extensions/src/canonicalization.rs:19-32`), so `owners.insert(..).is_some()` can never be true. Unreachable by construction. Rename-only lines, 0 hits at their pre-image in the base lcov."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
-
-[[exemption]]
-path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
-lines = [633, 634]
-owner = "@nearai/reborn"
-reason = "Class D, and the one entry here that is NOT a pure rename: 634 is a genuinely new `.map_err(ironclaw_product::ProductSurfaceFailure::from)` conversion, added because the inner `publish_bundled_package_for_test` now returns the repointed type while this composition seam keeps the product-side alias in its own signature (line 628). It sits on an already-dead path: `publish_bundled_extension_for_test` is a `#[cfg(feature = \"test-support\")]` dev-only seam that only downstream integration harnesses call, and EVERY line of it scored 0 hits in the base lcov (base 624-635 all `DA:<line>,0`) — no lane that measures this file builds a caller for it, before or after. Covering the conversion would mean standing up a composition-tier harness for a helper this crate's own lanes never invoke."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-11-30"
+# The changed set is 4 files / 11 lines and every one is covered by a test, so
+# not a single deleted entry was load-bearing. The one edit above this comment
+# -- the `extension_lifecycle_capabilities.rs` 217 -> 218 correction -- is
+# retained: it fixes a PRE-EXISTING entry that pointed at the `?error,` field
+# instead of the message literal, i.e. it was waiving the wrong line.

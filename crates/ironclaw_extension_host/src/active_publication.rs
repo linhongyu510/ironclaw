@@ -1,13 +1,19 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::{
-    ExtensionError, ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
-};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{capability::EffectKind, trust::PackageSource};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,
 };
+
+// One classifier for `ExtensionError`, not one per module. This file and
+// `lifecycle_restore.rs` each carried a byte-identical private copy of the
+// `pub(crate)` helper below, so the same `ExtensionError` could have drifted
+// into different retry classifications on the publication, restore, and
+// lifecycle paths. Raised by CodeRabbit on #7000. `hosted_mcp_manifest.rs`
+// already imported the shared one — these two are simply catching up.
+use crate::product_lifecycle::map_extension_error;
 
 #[derive(Clone)]
 pub struct ActiveExtensionPublisher {
@@ -158,19 +164,6 @@ fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
 fn map_trust_policy_error(error: TrustError) -> ProductOperationFailure {
     ProductOperationFailure::InvalidBindingRequest {
         reason: format!("extension trust policy update failed: {error}"),
-    }
-}
-
-fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
-    match error {
-        ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductOperationFailure::Transient {
-                reason: error.to_string(),
-            }
-        }
-        _ => ProductOperationFailure::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
     }
 }
 

@@ -113,19 +113,67 @@ input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 "#;
 
-    fn package() -> ExtensionPackage {
+    /// Same shape as the fixture above, but one capability declares a
+    /// **required** `product_auth_account` credential. That is the only
+    /// difference between the two packages, and it is what
+    /// `package_runtime_credential_auth_requirements` keys on — so it is the
+    /// discriminating input for every assertion below.
+    const CREDENTIAL_REQUIRED_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "credentialed"
+name = "Credentialed Extension"
+version = "0.1.0"
+description = "Activation gate fixture that requires a product auth account"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "credentialed.search"
+description = "Search with a connected account"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "credentialed_account"
+source = { type = "product_auth_account", provider = "google" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "authorization" }
+required = true
+"#;
+
+    fn package_from(manifest_toml: &str, id: &str) -> ExtensionPackage {
         let contracts =
             crate::product_extension_host_api_contract_registry().expect("host API contracts");
         let manifest = ExtensionManifest::parse(
-            NO_CREDENTIAL_MANIFEST,
+            manifest_toml,
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
             &contracts,
         )
         .expect("fixture manifest");
-        let root = VirtualPath::new("/system/extensions/credentialless").expect("extension root");
-        ExtensionPackage::from_manifest_toml(manifest, root, NO_CREDENTIAL_MANIFEST)
+        let root = VirtualPath::new(format!("/system/extensions/{id}")).expect("extension root");
+        ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
             .expect("fixture package")
+    }
+
+    fn package() -> ExtensionPackage {
+        package_from(NO_CREDENTIAL_MANIFEST, "credentialless")
+    }
+
+    fn credentialed_package() -> ExtensionPackage {
+        package_from(CREDENTIAL_REQUIRED_MANIFEST, "credentialed")
     }
 
     /// `UnavailableExtensionActivationCredentialGate` is the stand-in used when
@@ -134,6 +182,11 @@ output_schema_ref = "schemas/search.output.json"
     /// extension that declares none is not gated at all, which is what makes
     /// the deployment usable — so both halves are asserted, and the
     /// discriminating input is the package's own requirements.
+    ///
+    /// Both halves go through the **trait methods**, not through
+    /// `missing_activation_credentials_error` directly: the fail-closed
+    /// property belongs to the gate, and a gate that admitted everyone would
+    /// still leave a direct call to the error constructor green.
     #[tokio::test]
     async fn the_unavailable_gate_admits_only_credentialless_extensions() {
         let package = package();
@@ -155,6 +208,41 @@ output_schema_ref = "schemas/search.output.json"
                 .await
                 .expect("readiness is not an error for a credentialless package"),
             ExtensionActivationCredentialReadiness::Ready,
+        );
+
+        // The other half of "fail closed", which the assertions above cannot
+        // reach: a package that DOES declare a required product-auth account
+        // must be refused, and its readiness must name what is missing rather
+        // than reporting Ready.
+        let credentialed = credentialed_package();
+        let declared = super::package_runtime_credential_auth_requirements(&credentialed);
+        assert_eq!(
+            declared.len(),
+            1,
+            "fixture must declare exactly one required product-auth credential, got {declared:?}"
+        );
+
+        let refusal = UnavailableExtensionActivationCredentialGate
+            .ensure_credentials(&credentialed)
+            .await
+            .expect_err("a credential-requiring extension cannot activate with no service wired");
+        assert_eq!(
+            refusal,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "extension credentialed requires product auth credentials before \
+                         activation"
+                    .to_string(),
+            },
+            "the refusal must name the extension and be the caller's to fix, not retryable"
+        );
+
+        assert_eq!(
+            UnavailableExtensionActivationCredentialGate
+                .credential_readiness(&credentialed)
+                .await
+                .expect("readiness reports what is missing rather than erroring"),
+            ExtensionActivationCredentialReadiness::Missing(declared),
+            "readiness must hand back the unmet requirements so the UI can offer the connect step"
         );
     }
 

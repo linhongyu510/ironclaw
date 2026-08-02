@@ -522,9 +522,9 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP catalog preparation failed:")
-                || reason
-                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+            if crate::hosted_mcp_manifest::hosted_mcp_discovery_left_the_install_usable(
+                &reason,
+            ) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
@@ -702,7 +702,7 @@ mod tests {
     /// *model* as a successful install. The two must agree on which failures
     /// are swallowed, or the same install reads as success through one caller
     /// and failure through the other. Only the error varies between cases —
-    /// the same `install_response` goes in every time.
+    /// the same `installed_response()` goes in every time.
     #[test]
     fn post_install_activation_failures_are_swallowed_only_when_the_install_still_stands() {
         assert!(

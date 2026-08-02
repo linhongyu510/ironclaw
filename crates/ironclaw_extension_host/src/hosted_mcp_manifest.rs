@@ -54,14 +54,51 @@ pub(crate) fn name_unavailable() -> ProductOperationFailure {
     }
 }
 
+/// Prefix every hosted-MCP discovery failure carries, emitted by
+/// [`discovery_error`] below. The post-install classifiers key on it, so it is
+/// a **cross-module contract**, not an incidental message.
+pub(crate) const HOSTED_MCP_PREPARATION_FAILURE_PREFIX: &str =
+    "hosted MCP catalog preparation failed:";
+
+/// The one discovery outcome that is not a preparation failure at all: the
+/// server answered, but published nothing callable. Produced by
+/// `product_lifecycle::generic_host_error` wrapping
+/// `entrypoint.rs`'s `HostedMcpEntrypointError`.
+pub(crate) const HOSTED_MCP_NO_CALLABLE_TOOLS_REASON: &str = concat!(
+    "generic extension host rejected the activation: ",
+    "hosted MCP discovery published no callable tools"
+);
+
+/// Whether a post-install `InvalidBindingRequest` reason means "hosted-MCP
+/// discovery did not work out" — in which case the extension is still
+/// **installed** and the caller is told so, rather than the whole install being
+/// reported as a failure.
+///
+/// Lives here, beside the producer that emits the prefix, because it is the one
+/// genuinely shared *decision* between the two post-install classifiers
+/// (`lifecycle_product_service::install_activation_error` and
+/// `extension_lifecycle_capabilities::install_activation_error`). Those two
+/// classifiers are deliberately **not** merged — they have different return
+/// types and their `Err` arms encode different policies, one preserving the
+/// remediation text for the product surface and one collapsing it to a safe
+/// summary for a model-facing capability. What they must agree on is exactly
+/// this predicate: *which* failures still leave a usable install. It was
+/// duplicated as two inline string comparisons string-coupled to a producer in
+/// a third module, which is the shape that drifts silently. Raised by
+/// CodeRabbit on #7000.
+pub(crate) fn hosted_mcp_discovery_left_the_install_usable(reason: &str) -> bool {
+    reason.starts_with(HOSTED_MCP_PREPARATION_FAILURE_PREFIX)
+        || reason == HOSTED_MCP_NO_CALLABLE_TOOLS_REASON
+}
+
 pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductOperationFailure {
     match error {
         HostedMcpDiscoveryError::Transient(reason) => ProductOperationFailure::Transient {
-            reason: format!("hosted MCP catalog preparation failed: {reason}"),
+            reason: format!("{HOSTED_MCP_PREPARATION_FAILURE_PREFIX} {reason}"),
         },
         HostedMcpDiscoveryError::Permanent(reason) => {
             ProductOperationFailure::InvalidBindingRequest {
-                reason: format!("hosted MCP catalog preparation failed: {reason}"),
+                reason: format!("{HOSTED_MCP_PREPARATION_FAILURE_PREFIX} {reason}"),
             }
         }
         HostedMcpDiscoveryError::CredentialsRejected(_) => {
@@ -403,6 +440,63 @@ mod tests {
                 reason: "hosted MCP account setup is required".to_string(),
             },
             "a credential challenge must route the user to setup, not read as a transport failure"
+        );
+    }
+
+    /// The producer above and the predicate the post-install classifiers key on
+    /// are joined here rather than each asserting its own copy of the literal.
+    ///
+    /// This is the coupling that drifts silently: `discovery_error` emits the
+    /// prefix in `hosted_mcp_manifest.rs`, and two classifiers in two other
+    /// modules decide "still installed" from it. Asserting the prefix on one
+    /// side and the comparison on the other would let a reworded producer pass
+    /// both. Feeding the producer's *actual output* into the predicate is what
+    /// makes a rewording fail — and the negative cases are what stop the
+    /// predicate from degenerating into "always true".
+    #[test]
+    fn every_discovery_failure_the_producer_emits_still_reads_as_an_installed_extension() {
+        for outcome in [
+            HostedMcpDiscoveryError::Transient("upstream 503".to_string()),
+            HostedMcpDiscoveryError::Permanent("not an MCP endpoint".to_string()),
+        ] {
+            let reason = match discovery_error(outcome) {
+                ProductOperationFailure::Transient { reason }
+                | ProductOperationFailure::InvalidBindingRequest { reason } => reason,
+                other => panic!("discovery failures are transient or invalid, got {other:?}"),
+            };
+            assert!(
+                super::hosted_mcp_discovery_left_the_install_usable(&reason),
+                "the post-install classifiers must recognize what discovery_error emits: {reason:?}"
+            );
+        }
+
+        assert!(
+            super::hosted_mcp_discovery_left_the_install_usable(
+                super::HOSTED_MCP_NO_CALLABLE_TOOLS_REASON
+            ),
+            "a server that published no callable tools still leaves the extension installed"
+        );
+
+        // A credential challenge is NOT a discovery failure — it must reach the
+        // caller so the user is offered the connect step, so the same producer's
+        // third outcome must read the other way.
+        let credentials_rejected = discovery_error(HostedMcpDiscoveryError::CredentialsRejected(
+            ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
+                status: 401,
+                www_authenticate_metadata: Vec::new(),
+                protected_resource_metadata: Vec::new(),
+            },
+        ));
+        let ProductOperationFailure::InvalidBindingRequest { reason } = credentials_rejected else {
+            panic!("a credential challenge is the caller's to fix");
+        };
+        assert!(
+            !super::hosted_mcp_discovery_left_the_install_usable(&reason),
+            "account setup must surface to the caller, not be swallowed as a usable install"
+        );
+        assert!(
+            !super::hosted_mcp_discovery_left_the_install_usable("some unrelated rejection"),
+            "the predicate is reason-specific; any other rejection must still surface"
         );
     }
 

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
+    CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
     ManifestHash, ManifestSource, canonicalize_installation_rows,
@@ -16,6 +16,8 @@ use crate::{
     ActiveExtensionPublisher, AvailableExtensionCatalog, AvailableExtensionPackage,
     materialize_available_extension, product_extension_host_api_contract_registry,
 };
+// One classifier for `ExtensionError` — see the note in `active_publication.rs`.
+use crate::product_lifecycle::map_extension_error;
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
@@ -422,19 +424,6 @@ pub fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String>
         .filter(|capability| capability.visibility == CapabilityVisibility::Model)
         .map(|capability| capability.id.as_str().to_string())
         .collect()
-}
-
-fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
-    match error {
-        ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductOperationFailure::Transient {
-                reason: error.to_string(),
-            }
-        }
-        _ => ProductOperationFailure::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
-    }
 }
 
 fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductOperationFailure {

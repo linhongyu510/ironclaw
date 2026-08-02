@@ -429,9 +429,9 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP catalog preparation failed:")
-                || reason
-                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+            if crate::hosted_mcp_manifest::hosted_mcp_discovery_left_the_install_usable(
+                &reason,
+            ) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
@@ -762,7 +762,7 @@ mod tests {
     /// successful install — and which abort the whole operation. Swallowing the
     /// wrong one hides a real failure behind a green install, so every arm is
     /// pinned, and the discriminating input is the failure itself: the same
-    /// `install_response` goes in every time and only the error varies.
+    /// `installed_response()` goes in every time and only the error varies.
     #[test]
     fn post_install_activation_failures_are_swallowed_only_when_the_install_still_stands() {
         // Provider misconfiguration must reach the caller: the extension is
@@ -1325,6 +1325,155 @@ mod tests {
             Some("project-alpha")
         );
         assert!(scope.thread_id.is_none());
+    }
+
+    /// A `LifecycleProductContext::Command` whose verified auth subject is
+    /// `subject`.
+    ///
+    /// ✎ An earlier revision of this branch waived `lifecycle_caller`'s Command
+    /// arm as untestable, on the reasoning that `VerifiedAuthClaim`'s
+    /// constructors are `pub(crate)` to `ironclaw_host_api`. That is true of
+    /// the constructors and **false of the barrier**: `ProtocolAuthEvidence`
+    /// exposes `test_verified` under `#[cfg(any(test, feature =
+    /// "test-support"))]`, and this crate's `[dev-dependencies]` already enable
+    /// `ironclaw_host_api/test-support`. `channel_command_roles.rs` in this
+    /// same crate has been building command contexts through that seam all
+    /// along. Raised by @serrrfirat on #7000; the waiver is deleted and the
+    /// path is tested instead.
+    fn command_context(subject: &str) -> LifecycleProductContext {
+        use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+        use ironclaw_extension_contracts::external::{
+            ExternalActorRef, ExternalConversationRef, ExternalEventId,
+        };
+        use ironclaw_host_api::product_adapter::{
+            AdapterInstallationId, AuthRequirement, ProductAdapterId, ProtocolAuthEvidence,
+        };
+        use ironclaw_product_contracts::action::{
+            ActionFingerprintKey, ProductActionId, SourceBindingKey,
+        };
+        use ironclaw_product_contracts::command::ProductCommandContext;
+        use ironclaw_product_contracts::inbound::ProductInboundPayload;
+        use ironclaw_product_contracts::inbound::{
+            InboundCommandPayload, ParsedProductInbound, ProductInboundEnvelope,
+            TrustedInboundContext,
+        };
+
+        let adapter_id = ProductAdapterId::new("test_adapter").expect("valid adapter");
+        let installation_id =
+            AdapterInstallationId::new("install_alpha").expect("valid installation");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            subject,
+        );
+        let trusted = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            chrono::Utc::now(),
+            &evidence,
+        )
+        .expect("verified evidence yields a trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:lifecycle-caller").expect("valid event"),
+            ExternalActorRef::new("test", "actor-1", Option::<String>::None).expect("valid actor"),
+            ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
+            ProductInboundPayload::Command(
+                InboundCommandPayload::new("extensions", "", ProductTriggerReason::DirectChat)
+                    .expect("valid command"),
+            ),
+        )
+        .expect("parsed inbound");
+        let envelope = ProductInboundEnvelope::from_trusted_parse(trusted, parsed)
+            .expect("trusted parse yields an envelope");
+        let source_binding_key =
+            SourceBindingKey::new(envelope.source_binding_key()).expect("valid binding key");
+        let fingerprint = ActionFingerprintKey::new(
+            envelope.adapter_id().clone(),
+            envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
+            source_binding_key,
+            envelope.external_event_id().clone(),
+        );
+        let context =
+            ProductCommandContext::from_envelope(&envelope, ProductActionId::new(), fingerprint)
+                .expect("command context");
+        LifecycleProductContext::Command(Box::new(context))
+    }
+
+    /// Commands must stay **owner-attributed**: the caller identity comes from
+    /// the verified auth claim minted by host authentication, and a subject that
+    /// is not a valid `UserId` is refused rather than silently falling back to
+    /// an ownerless scope.
+    ///
+    /// The subject is the discriminating input — the same context shape goes in
+    /// both times and only the claim's subject varies — so a `lifecycle_caller`
+    /// that ignored the claim, or that swallowed the validation error, fails
+    /// here rather than passing against a constant.
+    #[test]
+    fn a_command_caller_comes_from_the_auth_claim_and_an_invalid_subject_is_refused() {
+        let caller = lifecycle_caller(&command_context("user-alpha"))
+            .expect("a valid auth subject is a valid lifecycle caller");
+        assert_eq!(
+            caller.as_str(),
+            "user-alpha",
+            "the command caller must be the verified auth subject, not a default"
+        );
+
+        let failure = lifecycle_caller(&command_context("user/alpha"))
+            .expect_err("a subject with a path separator is not a valid UserId");
+        let ProductOperationFailure::InvalidBindingRequest { reason } = failure else {
+            panic!("an unusable auth subject is the caller's to fix, got {failure:?}");
+        };
+        assert!(
+            reason.contains("command auth subject is not a valid lifecycle caller identity"),
+            "the rejection must say which identity failed, got {reason:?}"
+        );
+    }
+
+    /// The Command arm's scope derives from that same claim: the caller becomes
+    /// the scope's user, and a claim carrying **no tenant** keeps the local
+    /// default scope rather than inventing a tenant — the behavior the function's
+    /// own comment promises ("just like the local command service"). Pinned
+    /// beside the Surface arm above so the two context sources cannot drift into
+    /// different scoping rules.
+    #[test]
+    fn lifecycle_resource_scope_uses_the_command_auth_claim_identity() {
+        use ironclaw_host_api::resource::{
+            LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID,
+        };
+
+        let scope = lifecycle_resource_scope(&command_context("user-beta")).expect("command scope");
+
+        assert_eq!(
+            scope.user_id.as_str(),
+            "user-beta",
+            "the scope's user must be the verified auth subject"
+        );
+        assert_eq!(
+            scope.tenant_id.as_str(),
+            LOCAL_DEFAULT_TENANT_ID,
+            "a claim with no tenant must keep the local default, not invent one"
+        );
+        assert_eq!(
+            scope.agent_id.as_ref().map(|id| id.as_str()),
+            Some(LOCAL_DEFAULT_AGENT_ID)
+        );
+        assert_eq!(
+            scope.project_id.as_ref().map(|id| id.as_str()),
+            Some(LOCAL_DEFAULT_PROJECT_ID)
+        );
+        assert!(scope.thread_id.is_none());
+
+        let refused = lifecycle_resource_scope(&command_context("user/beta"))
+            .expect_err("an unusable auth subject cannot produce a scope");
+        assert!(
+            matches!(
+                refused,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "an unusable auth subject is a rejection, not a retryable failure: {refused:?}"
+        );
     }
 
     #[tokio::test]

@@ -2813,15 +2813,20 @@ fn generic_host_error(error: crate::LifecycleError) -> ProductOperationFailure {
 /// A closed import-decode limiter becomes a retryable boundary failure.
 ///
 /// Named rather than inlined at the `map_err` so the mapping is reachable from
-/// a test. Nothing in the workspace calls [`Semaphore::close`], so the acquire
-/// error is unreachable through `import_bundle` itself; an inline closure would
-/// therefore be a permanently uncovered branch, which the changed-line coverage
-/// gate can only accept as a standing exemption. Extracting it is the tactic
-/// CHECKLIST's WS2 coverage note prescribes for exactly this shape.
+/// a test. No *production* path closes [`Self::import_decode_semaphore`] — it
+/// lives as long as the manager — so the acquire error is unreachable through
+/// `import_bundle` itself; an inline closure would therefore be a permanently
+/// uncovered branch, which the changed-line coverage gate can only accept as a
+/// standing exemption. Extracting it is the tactic CHECKLIST's WS2 coverage
+/// note prescribes for exactly this shape. A test may still close a
+/// *standalone* [`Semaphore`] to mint a real [`AcquireError`], which is how
+/// this mapping is exercised without weakening the production guarantee.
 ///
 /// The `AcquireError` is logged rather than discarded: it is the only signal
 /// distinguishing "limiter shut down" from any other transient failure, and the
-/// `reason` that crosses the boundary is deliberately fixed text.
+/// `reason` that crosses the boundary is deliberately fixed text. Both halves —
+/// the fixed `reason` and the logged cause — are asserted, so deleting the
+/// event or dropping `%error` fails a test rather than passing silently.
 fn map_import_decode_acquire_error(error: AcquireError) -> ProductOperationFailure {
     tracing::debug!(%error, "import decode limiter is closed");
     ProductOperationFailure::Transient {
@@ -3173,24 +3178,102 @@ mod tests {
     use super::*;
     use crate::{AvailableExtensionAsset, AvailableExtensionAssetContent};
 
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
     /// The import limiter's acquire failure is retryable, and the mapping runs
     /// against a real `AcquireError` rather than a stand-in — a closed
     /// semaphore is the only thing that produces one.
+    ///
+    /// Both halves of the mapper's contract are asserted together, because the
+    /// doc comment claims the debug event is the *only* signal distinguishing a
+    /// shut-down limiter from any other transient failure:
+    ///
+    /// - the `reason` crossing the boundary is deliberately **fixed text**, so
+    ///   the `AcquireError` never leaks into a caller-visible string; and
+    /// - the cause is **not discarded** — it reaches the debug event, where an
+    ///   operator can tell the two apart.
+    ///
+    /// A subscriber has to be installed for the second half to mean anything:
+    /// `tracing` short-circuits on the null dispatcher, so without one the macro
+    /// body never runs and the test could not tell "logged it" from "dropped
+    /// it". Scoped with `with_default` rather than set globally, so parallel
+    /// tests are unaffected. Deleting the event, or dropping `%error` from it,
+    /// now fails here rather than passing silently.
     #[tokio::test]
-    async fn a_closed_import_decode_limiter_maps_to_a_retryable_transient_failure() {
+    async fn a_closed_import_decode_limiter_is_retryable_and_logs_the_acquire_error() {
         let semaphore = Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES);
         semaphore.close();
         let error = semaphore
             .acquire()
             .await
             .expect_err("a closed semaphore hands out no permits");
+        let rendered_cause = error.to_string();
+
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let failure = tracing::subscriber::with_default(subscriber, || {
+            map_import_decode_acquire_error(error)
+        });
 
         assert_eq!(
-            map_import_decode_acquire_error(error),
+            failure,
             ProductOperationFailure::Transient {
                 reason: "import decode limiter is closed".to_string(),
             },
             "a shut-down limiter must read as retryable, not as a client mistake"
+        );
+
+        let logged = logs.contents();
+        assert!(
+            logged.contains("import decode limiter is closed"),
+            "the event keeps its stable message, got {logged:?}"
+        );
+        assert!(
+            logged.contains(&rendered_cause),
+            "the acquire cause must survive in the log, expected {rendered_cause:?} in {logged:?}"
         );
     }
 
