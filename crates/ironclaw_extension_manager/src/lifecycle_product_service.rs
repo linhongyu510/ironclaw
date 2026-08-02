@@ -24,9 +24,9 @@ use ironclaw_skills::{
     SkillManagementErrorKind,
 };
 
-use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -429,9 +429,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if crate::hosted_mcp_manifest::hosted_mcp_discovery_left_the_install_usable(
-                &reason,
-            ) =>
+            if ironclaw_extension_host::hosted_mcp_discovery_left_the_install_usable(&reason) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",

@@ -138,13 +138,13 @@ use crate::outbound::{
 use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
-use ironclaw_extension_host::admin_configuration::{
-    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
-};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_manager::admin_configuration::{
+    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
+};
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
 pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 use ironclaw_secrets::SecretStorePort;
@@ -648,7 +648,7 @@ pub struct RebornRuntime {
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
-impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecycleRuntime
+impl ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime
     for RebornRuntime
 {
     fn skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
@@ -673,7 +673,7 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
     }
 }
 
-impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
+impl ironclaw_extension_manager::ironhub::RebornIronHubRuntime for RebornRuntime {
     fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
         Arc::clone(&self.skill_management)
     }
@@ -1202,7 +1202,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         Some(Arc::new(
-            ironclaw_extension_host::RebornChannelConfigProductService::new(Arc::clone(
+            ironclaw_extension_manager::RebornChannelConfigProductService::new(Arc::clone(
                 &self.channel_config_service,
             )),
         ))
@@ -3456,7 +3456,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
             let lifecycle_service =
-                ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+                ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
                     &local_runtime.skill_management,
                 ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))

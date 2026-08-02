@@ -654,9 +654,9 @@ review_after = "2026-10-31"
 #   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
 #   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
 # The service it hands back is itself covered: `RebornChannelConfigProductService`
-# is exercised by the extension_host channel-config suite, and the port contract
-# by `ironclaw_product_contracts::channel_config`'s own tests, both added in this
-# PR. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
+# is exercised by its own unit tests (it moved to `ironclaw_extension_manager`
+# with WS2.4), and the port contract by
+# `ironclaw_product_contracts::channel_config`'s own tests. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
 # the caller lives in a lane whose lcov does not attribute hits back to this
 # `#[cfg(any(test, feature = "test-support"))]` accessor in the composition
 # bucket build.
@@ -798,12 +798,27 @@ review_after = "2026-10-31"
 #
 # Every `tracing::debug!` in this workspace has the same shape; they simply do
 # not enter this gate's denominator because their lines are not in the diff.
+#
+# ⚠ THIS ENTRY MOVES WITH ITS FILE. `extension_lifecycle_capabilities.rs` left
+# `ironclaw_extension_host` for `ironclaw_extension_manager` in this PR (WS2.4),
+# and the entry kept naming the old path. That is not a cosmetic staleness: the
+# manifest validator is fail-closed on it --
+# `reborn_changed_coverage.py:144` raises
+# `exemption #71 names stale path: <path>` BEFORE any coverage is read, so the
+# whole changed-coverage gate aborts with no verdict at all rather than
+# reporting a number. Reproduced locally on this branch before the fix, and the
+# message named exemption #71 exactly. Raised by @serrrfirat on #7003.
+#
+# The line also moved 217 -> 218, for an unrelated reason: 217 was never the
+# message literal, it was the `?error,` field. That off-by-one was corrected on
+# the parent (#7000) and is carried here, so the entry now waives the line the
+# evidence above actually describes.
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/extension_lifecycle_capabilities.rs"
+path = "crates/ironclaw_extension_manager/src/extension_lifecycle_capabilities.rs"
 lines = [218]
 owner = "@nearai/reborn"
-reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 214/215/220/221 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence."
+reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 214/215/220/221 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence. Path repointed with the file when `extension_lifecycle_capabilities.rs` moved to `ironclaw_extension_manager` in WS2.4."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 # ===========================================================================

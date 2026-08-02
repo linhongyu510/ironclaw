@@ -28,9 +28,9 @@ use ironclaw_product_contracts::package_lifecycle::{
 };
 use serde::Deserialize;
 
-use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -522,9 +522,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if crate::hosted_mcp_manifest::hosted_mcp_discovery_left_the_install_usable(
-                &reason,
-            ) =>
+            if ironclaw_extension_host::hosted_mcp_discovery_left_the_install_usable(&reason) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
@@ -1745,7 +1743,7 @@ mod tests {
     #[tokio::test]
     async fn standalone_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
         let discovery_script = std::sync::Arc::new(
-            crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
+            ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
                 // Real hosted MCP providers may return verbose prose. The
                 // fixture stays near the generic MCP boundary while remaining
                 // valid, so verbose accepted prose cannot prevent activation.
@@ -1837,7 +1835,7 @@ mod tests {
     async fn local_dev_extension_activate_hosted_mcp_authority_ceiling_reflects_discovered_effects()
     {
         let discovery_script = std::sync::Arc::new(
-            crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("nearai-destructive-action")
+            ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("nearai-destructive-action")
                 .with_destructive_hint(),
         );
         let services = test_services(
@@ -1890,7 +1888,7 @@ mod tests {
             .get_extension(&extension_id)
             .cloned()
             .expect("nearai package published after activation");
-        let trust_input = crate::extension_trust_policy_input(&published_package)
+        let trust_input = ironclaw_extension_host::extension_trust_policy_input(&published_package)
             .expect("trust policy input derives from the published package");
         let decision = services
             .trust_policy

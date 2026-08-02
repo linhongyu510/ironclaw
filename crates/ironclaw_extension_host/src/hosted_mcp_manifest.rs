@@ -86,7 +86,7 @@ pub(crate) const HOSTED_MCP_NO_CALLABLE_TOOLS_REASON: &str = concat!(
 /// duplicated as two inline string comparisons string-coupled to a producer in
 /// a third module, which is the shape that drifts silently. Raised by
 /// CodeRabbit on #7000.
-pub(crate) fn hosted_mcp_discovery_left_the_install_usable(reason: &str) -> bool {
+pub fn hosted_mcp_discovery_left_the_install_usable(reason: &str) -> bool {
     reason.starts_with(HOSTED_MCP_PREPARATION_FAILURE_PREFIX)
         || reason == HOSTED_MCP_NO_CALLABLE_TOOLS_REASON
 }

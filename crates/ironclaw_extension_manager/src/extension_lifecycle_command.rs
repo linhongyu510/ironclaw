@@ -14,8 +14,8 @@ use ironclaw_product_contracts::package_lifecycle::{
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use thiserror::Error;
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::lifecycle_product_service::ExtensionHostLifecycleProductService;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
