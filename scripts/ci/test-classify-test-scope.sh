@@ -62,8 +62,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn product storage crate" \
@@ -71,8 +70,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn v2 adapter crate" \
@@ -80,8 +78,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn telegram extension crate" \
@@ -89,8 +86,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn telegram v2 protocol adapter crate" \
@@ -98,8 +94,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn support crate" \
@@ -107,8 +102,23 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
+
+assert_scope \
+  "named critical product invariant" \
+  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "named critical extension-host invariant" \
+  "crates/ironclaw_extension_host/src/channel_outbound_targets.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
 
 assert_scope \
   "reborn root test runner script" \
@@ -116,8 +126,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn group test runner script" \
@@ -125,8 +134,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn root tests and support" \
@@ -136,8 +144,7 @@ tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn qa trace fixture" \
@@ -145,8 +152,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn e2e scenario" \
@@ -154,8 +160,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "legacy e2e scenario" \
@@ -163,8 +168,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=false
-has_sandbox_docker_tests=false"
+has_reborn_tests=false"
 
 assert_scope \
   "mixed legacy and reborn root tests" \
@@ -173,8 +177,7 @@ tests/reborn_trace_first_party_tool_coverage.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "shared manifest" \
@@ -182,8 +185,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "shared substrate crate" \
@@ -191,8 +193,15 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
+
+assert_scope \
+  "process lifecycle authority crate" \
+  "crates/ironclaw_processes/src/journal_store.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
 
 assert_scope \
   "shared classifier script" \
@@ -200,8 +209,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
+has_reborn_tests=true"
 
 assert_scope \
   "shared package feature flags script" \
@@ -209,8 +217,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "Reborn crate bucket script" \
@@ -218,8 +225,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "Reborn crate bucket regression suite" \
@@ -227,8 +233,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "Reborn Responses E2E manifest checker" \
@@ -236,8 +241,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "Reborn Responses E2E manifest" \
@@ -245,8 +249,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "Reborn coverage manifest" \
@@ -254,8 +257,28 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn changed coverage, branch export, and critical mutation gates" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/check-reborn-branch-coverage-flags.py
+scripts/ci/test-check-reborn-branch-coverage-flags.sh
+scripts/ci/critical_mutation_gate.py
+scripts/ci/test-critical-mutation-gate.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn QA fixture checker and sabotage suite" \
+  "scripts/ci/check-reborn-qa-fixtures.sh
+scripts/ci/test-check-reborn-qa-fixtures.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
 
 assert_scope \
   "shared reborn tests workflow" \
@@ -263,8 +286,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
+has_reborn_tests=true"
 
 assert_scope \
   "legacy code style workflow" \
@@ -272,8 +294,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=false
-has_sandbox_docker_tests=false"
+has_reborn_tests=false"
 
 assert_scope \
   "docs only" \
@@ -281,15 +302,13 @@ assert_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=false
-has_sandbox_docker_tests=false"
+has_reborn_tests=false"
 
 assert_empty_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=false
-has_sandbox_docker_tests=false"
+has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
@@ -297,8 +316,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn docs only" \
@@ -306,8 +324,7 @@ assert_scope \
   "docs_only=true
 has_core_code=false
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "mixed tests and reborn" \
@@ -316,8 +333,7 @@ crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
@@ -325,8 +341,7 @@ assert_scope_no_trailing_newline \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn coverage lane-run script" \
@@ -334,8 +349,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn coverage merge-lcov script" \
@@ -343,8 +357,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn coverage summary script" \
@@ -352,8 +365,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn coverage regression suite" \
@@ -361,8 +373,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "reborn coverage regression suite, sourced sibling (R-section split)" \
@@ -370,8 +381,21 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
+
+assert_scope \
+  "WS12 generated gates and sabotage tests are reborn-scoped" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/test_reborn_changed_coverage.py
+scripts/ci/ws12-suite-shards.toml
+scripts/ci/ws12_suite_shards.py
+scripts/ci/test_ws12_suite_shards.py
+scripts/ci/ws12_workflow_contracts.py
+scripts/ci/test_ws12_workflow_contracts.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
 
 assert_scope \
   "test suite boundaries checker script" \
@@ -379,8 +403,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "test-classify-test-scope script is itself reborn-scoped" \
@@ -388,62 +411,7 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "sandbox host_runtime crate source narrows in the sandbox docker lane" \
-  "crates/ironclaw_host_runtime/src/sandbox_process/exec.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "sandbox composition crate source narrows in the sandbox docker lane" \
-  "crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "sandbox egress proxy integration test narrows in the sandbox docker lane" \
-  "tests/integration/reborn_sandbox_egress_proxy.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "sandbox worker Dockerfile narrows in the sandbox docker lane" \
-  "Dockerfile.process-sandbox" \
-  "docs_only=false
-has_core_code=false
-has_legacy_tests=false
-has_reborn_tests=false
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "sandbox entrypoint script narrows in the sandbox docker lane" \
-  "docker/process-sandbox-entrypoint.sh" \
-  "docs_only=false
-has_core_code=false
-has_legacy_tests=false
-has_reborn_tests=false
-has_sandbox_docker_tests=true"
-
-assert_scope \
-  "unrelated host_runtime source does not narrow the sandbox docker lane" \
-  "crates/ironclaw_host_runtime/src/lib.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
 
 assert_scope \
   "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
@@ -451,5 +419,157 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
-has_reborn_tests=true
-has_sandbox_docker_tests=false"
+has_reborn_tests=true"
+
+# ---------------------------------------------------------------------------
+# Tree-shape independence (CHECKLIST WS10)
+#
+# The arms above are keyed to crate identity, not to how deep a crate sits
+# under crates/. These cases pin that: the same crate classifies the same way
+# from a family directory, and a crate tree the classifier cannot read is a
+# refusal rather than a silent "nothing in scope".
+# ---------------------------------------------------------------------------
+
+# Fixture repo root with the target-architecture layout: crates live one level
+# down, inside a family directory.
+nested_root="$(mktemp -d)"
+trap 'rm -rf "${nested_root}"' EXIT
+# `ironclaw_mcp` is the "in neither list" probe: it must classify identically
+# nested and flat, which is the whole point — normalization must not invent a
+# bucket for a crate that has none. If a future PR adds it to either arm (as
+# #6889 did for `ironclaw_extension_host`, which used to fill this role), swap
+# in any other crate that appears in neither `is_shared_test_path` nor
+# `is_reborn_test_path`.
+for crate in ironclaw_host_runtime ironclaw_webui ironclaw_mcp; do
+  mkdir -p "${nested_root}/crates/substrates/${crate}/src"
+  printf '[package]\nname = "%s"\n' "${crate}" \
+    > "${nested_root}/crates/substrates/${crate}/Cargo.toml"
+done
+# 20 more so the discovery floor is met by a realistic tree, not one fixture.
+for i in $(seq 1 20); do
+  mkdir -p "${nested_root}/crates/domains/ironclaw_filler_${i}"
+  printf '[package]\nname = "ironclaw_filler_%s"\n' "${i}" \
+    > "${nested_root}/crates/domains/ironclaw_filler_${i}/Cargo.toml"
+done
+
+assert_scope_with_root() {
+  local name="$1" root="$2" files="$3" expected="$4" actual
+  actual="$(printf '%s\n' "$files" | IRONCLAW_REPO_ROOT="$root" "$classifier" | sort)"
+  if [ "$actual" != "$expected" ]; then
+    printf 'FAIL %s\n' "$name" >&2
+    printf 'Expected:\n%s\nActual:\n%s\n' "$expected" "$actual" >&2
+    exit 1
+  fi
+  printf 'PASS %s\n' "$name"
+}
+
+assert_refusal_with_root() {
+  local name="$1" root="$2" files="$3" needle="$4" err rc
+  err="$(printf '%s\n' "$files" | IRONCLAW_REPO_ROOT="$root" "$classifier" 2>&1 >/dev/null)" && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ] || [ "${err#*"$needle"}" = "$err" ]; then
+    printf 'FAIL %s\n' "$name" >&2
+    printf 'Expected exit!=0 and stderr containing: %s\nActual rc=%s stderr:\n%s\n' \
+      "$needle" "$rc" "$err" >&2
+    exit 1
+  fi
+  printf 'PASS %s\n' "$name"
+}
+
+assert_scope_with_root \
+  "nested shared crate still classifies as shared" \
+  "${nested_root}" \
+  "crates/substrates/ironclaw_host_runtime/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope_with_root \
+  "nested reborn crate still classifies as reborn-only" \
+  "${nested_root}" \
+  "crates/substrates/ironclaw_webui/src/handlers.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope_with_root \
+  "nested unlisted crate still classifies as legacy-only (unchanged bucketing)" \
+  "${nested_root}" \
+  "crates/substrates/ironclaw_mcp/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=false"
+
+assert_refusal_with_root \
+  "a crates/ path attributable to no crate is refused, not bucketed" \
+  "${nested_root}" \
+  "crates/extensions/packages/slack/manifest.toml" \
+  "cannot attribute"
+
+assert_refusal_with_root \
+  "an unreadable crate tree is refused, not classified as out-of-scope" \
+  "${nested_root}/does-not-exist" \
+  "crates/ironclaw_webui/src/lib.rs" \
+  "no crates/ directory"
+
+empty_tree_root="$(mktemp -d "${nested_root}/empty.XXXXXX")"
+mkdir -p "${empty_tree_root}/crates"
+assert_refusal_with_root \
+  "a crate tree below the discovery floor is refused" \
+  "${empty_tree_root}" \
+  "crates/ironclaw_webui/src/lib.rs" \
+  "crate director"
+
+# The bash inventory in classify-test-scope.sh and the Python one in
+# scripts/ci/lib/crate_tree.py are two implementations of one rule. Pin them
+# equal so a fix to either cannot leave the other keyed to a stale tree shape.
+#
+# The classifier is *sourced* rather than re-implemented here: reading its own
+# `crate_dirs` and `min_crate_directories` is the only way this file pins the
+# shipping rule instead of a third copy of it, which would keep passing while
+# the classifier's own `find` expression, prune list, or root drifted. stdin is
+# /dev/null so the sourced `while read` loop terminates immediately.
+repo_root_for_inventory="$(cd "${script_dir}/../.." && pwd)"
+classifier_state="$(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  source "${classifier}" </dev/null >/dev/null
+  printf '%s\n---FLOOR---\n%s\n' "${crate_dirs}" "${min_crate_directories}"
+)"
+classifier_inventory="$(printf '%s' "${classifier_state}" | sed -n '1,/---FLOOR---/p' | sed '$d' | grep . | sort)"
+classifier_floor="$(printf '%s' "${classifier_state}" | sed -n '/---FLOOR---/,$p' | tail -1)"
+
+python_inventory="$(
+  python3 "${script_dir}/lib/crate_tree.py" "${repo_root_for_inventory}" | sort
+)"
+python_floor="$(
+  python3 -c "import sys; sys.path.insert(0, '${script_dir}/lib');
+import crate_tree; print(crate_tree.MIN_CRATE_DIRECTORIES)"
+)"
+
+# The classifier keeps nested manifests in its list (resolution walks outward-in
+# and stops at the outermost hit); crate_tree.py prunes them. Compare the
+# outermost sets.
+classifier_outermost="$(
+  printf '%s\n' "${classifier_inventory}" | awk '
+    { keep = 1
+      for (i = 1; i <= n; i++) if (index($0, kept[i] "/") == 1) { keep = 0; break }
+      if (keep) { kept[++n] = $0; print } }'
+)"
+if [ "${classifier_outermost}" != "${python_inventory}" ]; then
+  printf 'FAIL bash and python crate inventories agree\n' >&2
+  diff <(printf '%s\n' "${classifier_outermost}") <(printf '%s\n' "${python_inventory}") >&2 || true
+  exit 1
+fi
+printf 'PASS bash and python crate inventories agree (%s crate directories)\n' \
+  "$(printf '%s\n' "${python_inventory}" | grep -c .)"
+
+if [ "${classifier_floor}" != "${python_floor}" ]; then
+  printf 'FAIL bash and python discovery floors agree\n' >&2
+  printf 'classifier min_crate_directories=%s crate_tree MIN_CRATE_DIRECTORIES=%s\n' \
+    "${classifier_floor}" "${python_floor}" >&2
+  exit 1
+fi
+printf 'PASS bash and python discovery floors agree (%s)\n' "${python_floor}"

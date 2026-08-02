@@ -102,7 +102,10 @@ use std::{
     time::Instant,
 };
 
-use ironclaw_host_api::{NetworkMethod, TenantId, UserId};
+use ironclaw_host_api::{
+    action::NetworkMethod,
+    ids::{TenantId, UserId},
+};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     CREDENTIAL_PLACEHOLDER_PREFIX, CREDENTIAL_PLACEHOLDER_SUFFIX_LEN,
@@ -415,7 +418,7 @@ impl SandboxCredentialSwap {
     fn obligation_covers(
         &self,
         obligation: &StagedCredentialObligation,
-        provider: &ironclaw_host_api::ExtensionId,
+        provider: &ironclaw_host_api::ids::ExtensionId,
         target: &RequestTarget,
     ) -> bool {
         if obligation.source.provider_or_extension_id != *provider {

@@ -27,7 +27,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use ironclaw_common::hashing::sha256_hex;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -1175,8 +1175,8 @@ mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
-        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("user-a").unwrap();
 
         let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
             .await
@@ -1240,8 +1240,8 @@ mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
-        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("user-a").unwrap();
 
         let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
             .await
@@ -1279,8 +1279,8 @@ mod tests {
             "-----BEGIN CERTIFICATE-----\nfake-bundle-content\n-----END CERTIFICATE-----\n";
         let config =
             RebornSandboxConfig::new(temp.path().join("workspaces")).with_ca_bundle_pem(bundle_pem);
-        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("user-a").unwrap();
 
         let launch = user_container_launch_config(&config, &tenant, &user, &workspace)
             .await
@@ -1353,7 +1353,10 @@ mod tests {
     async fn user_container_launch_config_never_leaks_staged_credential_material() {
         use std::sync::Arc;
 
-        use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, ResourceScope};
+        use ironclaw_host_api::{
+            ids::{CapabilityId, ExtensionId, InvocationId},
+            resource::ResourceScope,
+        };
         use ironclaw_secrets::SecretMaterial;
 
         use super::super::credential_firewall::{
@@ -1372,8 +1375,8 @@ mod tests {
         // actually read file bytes, not just enumerate bind path strings.
         std::fs::write(workspace.join("decoy.txt"), "nothing secret in here").unwrap();
         let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
-        let tenant = ironclaw_host_api::TenantId::new("tenant-secret").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-secret").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("tenant-secret").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("user-secret").unwrap();
 
         let scope = ResourceScope {
             tenant_id: tenant.clone(),
@@ -1385,7 +1388,7 @@ mod tests {
             invocation_id: InvocationId::new(),
         };
         let capability_id = CapabilityId::new("sandbox.shell").unwrap();
-        let secret_handle = ironclaw_host_api::SecretHandle::new("github-pat").unwrap();
+        let secret_handle = ironclaw_host_api::ids::SecretHandle::new("github-pat").unwrap();
         let provider = ExtensionId::new("github").unwrap();
 
         // The real secret material, staged exactly where the future W6
@@ -2191,8 +2194,8 @@ mod docker_tests {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let config = docker_tests_config(temp.path());
-        let tenant = ironclaw_host_api::TenantId::new("limits-tenant").unwrap();
-        let user = ironclaw_host_api::UserId::new("limits-user").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("limits-tenant").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("limits-user").unwrap();
         // See `remove_labeled_test_containers`'s doc: a container leaked from
         // a prior local/CI run of this test carries the same fixed labels
         // but a bind-mount source `ensure_container` below cannot know is
@@ -2333,8 +2336,8 @@ mod docker_tests {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let config = docker_tests_config(temp.path());
-        let tenant = ironclaw_host_api::TenantId::new("ssl-cert-file-tenant").unwrap();
-        let user = ironclaw_host_api::UserId::new("ssl-cert-file-user").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("ssl-cert-file-tenant").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("ssl-cert-file-user").unwrap();
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());
         create_writable_workspace(&config, &workspace).await;
@@ -2432,8 +2435,8 @@ mod docker_tests {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let config = docker_tests_config(temp.path());
-        let tenant = ironclaw_host_api::TenantId::new("posture-tenant").unwrap();
-        let user = ironclaw_host_api::UserId::new("posture-user").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("posture-tenant").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("posture-user").unwrap();
         // See `remove_labeled_test_containers`'s doc — this test also
         // creates a container under a deterministic name (`key.container_
         // name()` below), so a leftover from a prior run would additionally
@@ -2576,8 +2579,8 @@ mod docker_tests {
 
         let docker = Docker::connect_with_local_defaults().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let tenant = ironclaw_host_api::TenantId::new("ca-rotate-tenant").unwrap();
-        let user = ironclaw_host_api::UserId::new("ca-rotate-user").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("ca-rotate-tenant").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("ca-rotate-user").unwrap();
         remove_labeled_test_containers(&docker, &tenant, &user).await;
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
         let workspace = key.workspace_path(temp.path());

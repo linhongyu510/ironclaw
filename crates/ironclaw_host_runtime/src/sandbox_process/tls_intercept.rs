@@ -569,8 +569,8 @@ pub(crate) async fn terminate_and_forward(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InterceptedConnection<'a> {
     pub(crate) identity: Option<(
-        &'a ironclaw_host_api::TenantId,
-        &'a ironclaw_host_api::UserId,
+        &'a ironclaw_host_api::ids::TenantId,
+        &'a ironclaw_host_api::ids::UserId,
     )>,
     pub(crate) deadline: std::time::Instant,
 }

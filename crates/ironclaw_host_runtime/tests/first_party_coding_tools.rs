@@ -8,12 +8,21 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, Fault, FaultInjecting, FileStat, FileType, FilesystemError,
     FilesystemOperation, RootFilesystem,
 };
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId, RunId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, CommandExecutionOutput,
     CommandExecutionRequest, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
@@ -22,10 +31,10 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
+use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
 #[tokio::test]

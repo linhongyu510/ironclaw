@@ -43,7 +43,10 @@ pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use fault::{Fault, FaultInjecting, FaultKind, RecordedOp};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
-pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
+pub use index::{
+    Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor,
+    Page, SortDirection,
+};
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
 pub use postgres::PostgresRootFilesystem;
@@ -53,9 +56,9 @@ pub use record::{
 pub use root::RootFilesystem;
 pub use scoped::{MountViewResolver, ScopedFilesystem};
 pub use types::{
-    BackendCapabilities, BackendId, BackendKind, Capability, ContentKind, DirEntry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, IndexConflictReason, IndexPolicy, StorageClass,
-    TxnCapability,
+    AtomicSubtreeEntry, BackendCapabilities, BackendId, BackendKind, Capability, ContentKind,
+    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, IndexConflictReason,
+    IndexPolicy, ScopedAtomicSubtreeEntry, StorageClass, TxnCapability,
 };
 
 fn path_prefix_matches(prefix: &str, path: &str) -> bool {

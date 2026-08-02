@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use ironclaw_host_runtime::{ConnectionAttributionResolver, SandboxActivityRegistry};
 use ironclaw_resources::ResourceGovernor;
 
@@ -243,7 +243,10 @@ impl SandboxRuntimeBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::{ResourceEstimate, ResourceScope},
+    };
     use ironclaw_resources::InMemoryResourceGovernor;
 
     fn governor() -> Arc<dyn ironclaw_resources::ResourceGovernor> {

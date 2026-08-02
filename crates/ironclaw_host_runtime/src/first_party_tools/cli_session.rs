@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    RuntimeDispatchErrorKind, SandboxQuota,
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
 };
 use serde_json::{Value, json};
 
@@ -144,7 +145,7 @@ mod tests {
     use super::*;
     use crate::{CommandExecutionOutput, RuntimeProcessError, RuntimeProcessPort};
     use async_trait::async_trait;
-    use ironclaw_host_api::{CapabilityId, ResourceScope};
+    use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope};
     use std::sync::Mutex;
 
     #[derive(Default)]

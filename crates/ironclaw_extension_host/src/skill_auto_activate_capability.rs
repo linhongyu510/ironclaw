@@ -9,21 +9,31 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    PermissionMode, ProductSurfaceCaller, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    capability::{EffectKind, OriginGateMatrix, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
 pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.push(manifest()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub fn insert_handler(

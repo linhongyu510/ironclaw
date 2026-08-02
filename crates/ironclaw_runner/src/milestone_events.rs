@@ -3,17 +3,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent, RuntimeEventId};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
+    LoopHostMilestoneKind, LoopHostMilestoneSink,
 };
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::{
-    TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
-    },
-};
+use ironclaw_turns::TurnRunId;
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
@@ -411,17 +409,16 @@ mod tests {
     use super::*;
     use ironclaw_events::{EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind};
     use ironclaw_host_api::{
-        AgentId, ExtensionId, FailureKind, InvocationId, ProjectId, RuntimeKind, TenantId,
-        ThreadId, UserId,
+        ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+        result_meta::FailureKind,
+        runtime::RuntimeKind,
+    };
+    use ironclaw_loop_contracts::{
+        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     };
     use ironclaw_threads::ThreadScope;
-    use ironclaw_turns::{
-        CapabilityActivityId, TurnId, TurnScope,
-        run_profile::{
-            HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
-            LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
-        },
-    };
+    use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

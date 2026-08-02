@@ -25,11 +25,21 @@ use ironclaw_filesystem::{
 /// CAS retries until either it wins or this budget is exhausted.
 const CAS_RETRY_ATTEMPTS: usize = 3;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
-    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, MissionId, NetworkPolicy,
-    Obligation, Obligations, Principal, ProjectId, ResourceCeiling, ResourceEstimate,
-    ResourceReservationId, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind,
-    SandboxQuota, ScopedPath, TenantId, ThreadId, UserId,
+    action::NetworkPolicy,
+    approval::InvocationFingerprint,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, EffectKind, RuntimeCredentialRequirementSource,
+    },
+    decision::{Decision, DenyReason, Obligation, Obligations},
+    error::HostApiError,
+    ids::{
+        AgentId, CapabilityGrantId, MissionId, ProjectId, ResourceReservationId, TenantId,
+        ThreadId, UserId,
+    },
+    path::ScopedPath,
+    resource::{ResourceCeiling, ResourceEstimate, ResourceScope, SandboxQuota},
+    runtime::RuntimeKind,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -317,8 +327,8 @@ pub trait CapabilityLeaseStorePort: Send + Sync {
 /// [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
 /// or the in-memory backend for tests). The [`ScopedFilesystem`] resolves
 /// the `/authorization` alias to a tenant/user-scoped
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
-/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL
 /// before any backend dispatch — so tenant isolation is structural, not a
 /// convention this crate has to remember in its path builders.
 ///
@@ -605,7 +615,7 @@ where
 
     /// List the immediate child subdirectories of `prefix`, returning each
     /// child's leaf name. `list_dir` returns
-    /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
+    /// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) results because
     /// resolution has already happened — we strip the leaf so callers can
     /// rebuild a [`ScopedPath`] and let the per-op ACL fire again on the
     /// follow-up read.
@@ -1074,16 +1084,10 @@ fn obligations_for_grant(
         });
     }
 
-    // Process-spawning capabilities must reserve resources before dispatch so a
-    // configured governor can enforce a ceiling on concurrent/aggregate spawns.
-    // NOTE: this is currently a no-op behaviorally — `reserve_resource_obligation`
-    // (ironclaw_host_runtime::obligations::BuiltinObligationHandler) only fails
-    // closed when no resource governor is configured, and production always
-    // constructs a governor with an unlimited default ceiling. Emitting the
-    // obligation here just wires the dispatch-time hook; an actual limit is set
-    // by a later slice. This applies to both TenantSandboxProcessPort and the
-    // unsandboxed local-dev HostProcessPort, since both share
-    // `EffectKind::SpawnProcess`.
+    // Every process-spawning capability crosses the resource-governor
+    // reservation seam before dispatch. The configured governor owns the
+    // actual ceiling; this obligation ensures sandbox and host process lanes
+    // cannot bypass that decision.
     if descriptor.effects.contains(&EffectKind::SpawnProcess) {
         obligations.push(Obligation::ReserveResources {
             reservation_id: ResourceReservationId::new(),
@@ -1517,9 +1521,9 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
 // ── Lease path helpers ────────────────────────────────────────
 //
 // All helpers return [`ScopedPath`] strings under the `/authorization`
-// mount alias. The [`MountView`](ironclaw_host_api::MountView) granted by
+// mount alias. The [`MountView`](ironclaw_host_api::mount::MountView) granted by
 // composition resolves the alias to a tenant/user-scoped
-// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend op —
+// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) before any backend op —
 // so the within-tenant scope (agent/project/mission/thread/invocation)
 // stays in the path while the leading `tenants/<tenant_id>/users/<user_id>`
 // prefix is the MountView's responsibility, not this crate's.
@@ -1589,7 +1593,7 @@ fn within_tenant_scope(scope: &ResourceScope) -> String {
 
 /// Join a leaf segment onto a [`ScopedPath`] prefix. Used when reconstructing
 /// a child path after `list_dir` (which returns
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath)s) so the per-op ACL
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath)s) so the per-op ACL
 /// enforced by [`ScopedFilesystem`] still runs on the follow-up `get`.
 fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, CapabilityLeaseError> {
     ScopedPath::new(format!("{}/{leaf}", prefix.as_str().trim_end_matches('/'),))

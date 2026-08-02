@@ -8,10 +8,13 @@ use ironclaw_auth::{
     RebornManualTokenSubmitRequest, RebornProductAuthServices,
     RuntimeCredentialAccountSelectionRequest,
 };
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
+    ExtensionCredentialSubmitRequest,
+};
+use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
@@ -139,16 +142,16 @@ fn map_auth_error(error: RebornAuthProductError) -> ProductSurfaceError {
 
 fn runtime_credential_setup(
     setup: LifecycleExtensionCredentialSetup,
-) -> ironclaw_host_api::RuntimeCredentialAccountSetup {
+) -> ironclaw_host_api::capability::RuntimeCredentialAccountSetup {
     match setup {
         LifecycleExtensionCredentialSetup::ManualToken => {
-            ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken
         }
         LifecycleExtensionCredentialSetup::OAuth { scopes } => {
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes }
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { scopes }
         }
         LifecycleExtensionCredentialSetup::Pairing => {
-            ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing
         }
     }
 }
@@ -191,12 +194,11 @@ mod tests {
         RebornAuthContinuationDispatcher, RebornProductAuthServices,
     };
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+        ids::{ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
+        resource::ResourceScope,
     };
-    use ironclaw_product::{
-        ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-        LifecycleExtensionCredentialSetup,
-    };
+    use ironclaw_product::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 
     struct NoopDispatcher;
 

@@ -1,8 +1,12 @@
 // arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
-use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
+use ironclaw_host_api::{
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_safety::{
-    validate_optional_provider_metadata_text, validate_provider_arguments,
-    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+    PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
+    validate_provider_arguments, validate_provider_identity, validate_provider_token,
+    validate_provider_tool_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,10 +170,18 @@ impl ProviderToolCallReferenceEnvelope {
         validate_optional_provider_text(
             &self.response_reasoning,
             "provider response reasoning",
-            4096,
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
         )?;
-        validate_optional_provider_text(&self.reasoning, "provider reasoning", 4096)?;
-        validate_optional_provider_text(&self.signature, "provider signature", 4096)?;
+        validate_optional_provider_text(
+            &self.reasoning,
+            "provider reasoning",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_provider_text(
+            &self.signature,
+            "provider signature",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -883,12 +895,8 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 // untrusted, regardless of the enclosing observation's trust.
                 validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
             }
-            if object.contains_key("item_count")
-                && (!object.contains_key("preview") || !object.contains_key("next_offset"))
-            {
-                return Err(
-                    "model observation item_count requires preview and next_offset".to_string(),
-                );
+            if object.contains_key("item_count") && !object.contains_key("next_offset") {
+                return Err("model observation item_count requires next_offset".to_string());
             }
             Ok(())
         }
@@ -997,7 +1005,7 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     // Deserializing the real type makes that drift impossible: a variant added
     // in `host_api` is accepted here the moment it exists.
     let retry = required_string(object, "same_call_retry", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::SameCallRetryConstraint>(
+    serde_json::from_value::<ironclaw_host_api::result_meta::SameCallRetryConstraint>(
         serde_json::Value::String(retry.to_string()),
     )
     .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
@@ -1005,9 +1013,9 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
         validate_model_observation_repairs(repairs)?;
     }
     let hint = required_string(object, "recovery_hint", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::CapabilityRecoveryHint>(serde_json::Value::String(
-        hint.to_string(),
-    ))
+    serde_json::from_value::<ironclaw_host_api::result_meta::CapabilityRecoveryHint>(
+        serde_json::Value::String(hint.to_string()),
+    )
     .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
     Ok(())
 }
@@ -1230,7 +1238,8 @@ fn is_disallowed_control_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, ProviderToolName};
+    use ironclaw_host_api::ids::{CapabilityId, ProviderToolName};
+    use ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES;
 
     use super::{
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
@@ -1982,10 +1991,9 @@ mod tests {
         );
     }
 
-    /// `item_count` is only meaningful alongside a truncated preview -- an
-    /// observation carrying `item_count` without `preview`/`next_offset`
-    /// must drop through the best-effort constructor and fall back to the
-    /// safe summary, mirroring the malformed-type case above.
+    /// `item_count` requires a continuation offset even when an unsafe preview
+    /// was suppressed. Without an offset it must drop through the best-effort
+    /// constructor and fall back to the safe summary.
     #[test]
     fn best_effort_observation_drops_item_count_without_preview() {
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
@@ -2008,12 +2016,41 @@ mod tests {
 
         assert!(
             envelope.model_observation.is_none(),
-            "item_count without preview/next_offset must drop the observation, not persist it"
+            "item_count without next_offset must drop the observation, not persist it"
         );
         assert_eq!(
             envelope.model_visible_content_or_safe_summary(),
             "tool completed"
         );
+    }
+
+    #[test]
+    fn best_effort_observation_keeps_item_count_without_preview() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:item-count-with-suppressed-preview",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview suppressed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:item-count-with-suppressed-preview",
+                    "byte_len": 4096,
+                    "total_bytes": 4096,
+                    "next_offset": 2048,
+                    "item_count": 600
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction succeeds");
+
+        let observation = envelope
+            .model_observation
+            .expect("metadata-only observation is retained");
+        assert_eq!(observation["detail"]["item_count"], 600);
+        assert!(observation["detail"].get("preview").is_none());
     }
 
     fn invalid_input_observation_with_issue(issue: serde_json::Value) -> serde_json::Value {
@@ -2152,6 +2189,27 @@ mod tests {
         let mut envelope = provider_reference();
         envelope.arguments = serde_json::json!({});
         envelope.validate().expect("safe provider metadata");
+    }
+
+    #[test]
+    fn provider_reference_validation_uses_shared_metadata_limit() {
+        let mut envelope = provider_reference();
+        envelope.response_reasoning = Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.reasoning = Some("c".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.signature = Some("s".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope
+            .validate()
+            .expect("metadata at the shared provider limit should remain replayable");
+
+        envelope.response_reasoning =
+            Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES.saturating_add(1)));
+        let error = envelope
+            .validate()
+            .expect_err("metadata beyond the shared provider limit must remain bounded");
+        assert_eq!(
+            error,
+            format!("provider response reasoning exceeds {PROVIDER_METADATA_TEXT_MAX_BYTES} bytes")
+        );
     }
 
     fn provider_reference() -> ProviderToolCallReferenceEnvelope {

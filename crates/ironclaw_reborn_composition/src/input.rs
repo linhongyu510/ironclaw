@@ -5,20 +5,21 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
 };
+use ironclaw_host_api::ids::{AgentId, TenantId};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 use ironclaw_host_runtime::{
     ConnectionAttributionResolver, SandboxActivityRegistry, TenantSandboxProcessPort,
 };
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
+use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
+use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
 use ironclaw_reborn_config::StorageBackend;
@@ -28,14 +29,10 @@ use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
-/// Backend-agnostic: the env var naming convention for an operator-supplied
-/// secrets master key is shared by the Postgres production path
-/// (`resolve_postgres_storage_from_config_and_env`) and the volume-shaped
-/// hosted profiles (`deployment::hosted_single_tenant_volume*_build_input`),
-/// so this stays `pub(crate)` rather than private to this module.
-pub(crate) const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
+const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
 const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
 const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
     "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
@@ -186,43 +183,12 @@ pub struct RebornHostBindings {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
-    /// The `SandboxActivityRegistry` `tenant_sandbox_process_binding`
-    /// constructed and injected into the exec transport, when
-    /// `runtime_process_binding` is a `TenantSandbox` binding. `factory.rs`
-    /// forwards this same instance into `SandboxRuntimeBindings::build` so
-    /// the reaper reads the exact registry the transport writes into,
-    /// rather than a second independently constructed one. `None` for every
-    /// non-sandboxed profile.
     pub(crate) sandbox_activity: Option<Arc<SandboxActivityRegistry>>,
-    /// The egress-allowlist proxy `tenant_sandbox_process_binding` already
-    /// spawned (see `sandbox_boot::TenantSandboxBinding::egress_proxy`),
-    /// when `runtime_process_binding` is a `TenantSandbox` binding.
-    /// `factory.rs` forwards this same instance into
-    /// `SandboxRuntimeBindings::build` so `shutdown_all` shuts down the
-    /// SAME proxy the container was pointed at, rather than a second,
-    /// independently spawned one. `None` for every non-sandboxed profile.
     pub(crate) sandbox_egress_proxy:
         Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
-    /// The SAME attribution resolver `tenant_sandbox_process_binding`
-    /// already wired into the exec transport
-    /// (`sandbox_boot::TenantSandboxBinding::attribution`), when
-    /// `runtime_process_binding` is a `TenantSandbox` binding. `factory.rs`
-    /// forwards this same instance into `SandboxRuntimeBindings::build` so
-    /// the reaper invalidates the exact cache the transport reads from,
-    /// rather than a second, independently constructed resolver. `None` for
-    /// every non-sandboxed profile.
     pub(crate) sandbox_attribution: Option<Arc<ConnectionAttributionResolver>>,
-    /// The host directory the `TenantSandbox` container bind mounts as its
-    /// per-user workspace parent — the SAME value the assembling binary
-    /// passed into `tenant_sandbox_process_binding` to build
-    /// `runtime_process_binding` (see `sandbox_boot::tenant_sandbox_process_binding`
-    /// and `RebornSandboxConfig::new`). `build_local_storage_production_shaped`
-    /// roots the abstract-FS `/workspace` catalog mount
-    /// (`mount_sandbox_user_workspace_root`) here instead of re-deriving
-    /// `<storage root>/users`, so the container bind and the abstract-FS mount
-    /// resolve the SAME host tree for the SAME `{tenant,user}` scope. `None`
-    /// for every non-sandboxed profile; required (fail-closed) whenever
-    /// `runtime_process_binding` is `TenantSandbox`.
+    /// Canonical parent used by both the container bind and the abstract
+    /// filesystem's per-caller `/workspace` leaf.
     pub(crate) sandbox_workspaces_root: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
@@ -280,11 +246,12 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
-    pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
+    pub preference_target_codec: Option<
+        std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
+    >,
 }
 
 #[derive(Clone, Debug)]
@@ -319,18 +286,10 @@ pub(crate) enum PostgresPoolSource {
 
 pub(crate) enum RebornStorageInput {
     Disabled,
-    LocalDev {
+    LocalFilesystem {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
-        /// Externally-supplied secrets master key. `None` for plain
-        /// `local-dev`/`local-dev-yolo` (correct: single-user local dev keeps
-        /// the dotfile/keychain fallback chain). `Some` for the
-        /// libsql-volume-shaped hosted profiles
-        /// (`hosted-single-tenant-volume`, `-sandboxed`), which must never
-        /// fall back to that single-user chain — see
-        /// `deployment::hosted_single_tenant_volume_build_input`.
-        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
     HostedSingleTenantPostgres {
         root: PathBuf,
@@ -450,33 +409,32 @@ impl RebornHostBindings {
         )
     }
 
-    /// Build a local-dev-storage-shaped input from an already-resolved
-    /// deployment. The `debug_assert` is on the storage-shape **axis**, not on
-    /// a list of profile names (§4.4).
-    pub(crate) fn local_dev_from_deployment(
+    /// Build a local-filesystem input from an already-resolved deployment. The
+    /// `debug_assert` is on the storage-shape **axis**, not on a list of profile
+    /// names (§4.4).
+    pub(crate) fn local_filesystem_from_deployment(
         deployment: DeploymentConfig,
         owner_id: impl Into<String>,
         root: PathBuf,
     ) -> Self {
-        debug_assert!(deployment.uses_local_dev_storage_input());
+        debug_assert!(deployment.uses_local_filesystem_storage());
         // Resolve the deployment's runtime policy from its policy request up
-        // front, so a local-dev input is buildable without the caller
+        // front, so a local-filesystem input is buildable without the caller
         // separately calling `.with_runtime_policy(...)`. This is what the
         // `local_runtime_build_input*` bridge did explicitly; folding it in here
-        // removes the bare, unresolved-policy local-dev constructor that left
+        // removes the bare, unresolved-policy storage constructor that left
         // `runtime_policy` unset (and the build failing `MissingRuntimePolicy`).
-        // Resolution is infallible for the non-yolo local-dev shapes; a yolo
+        // Resolution is infallible for host-mediated filesystem shapes; a yolo
         // shape without an acknowledged disclosure resolves to no policy, which
         // the caller can still override via `with_runtime_policy`.
         let resolved_policy = deployment.resolve().ok().flatten();
         let bindings = Self::new(
             deployment,
             owner_id,
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 root,
                 workspace_root: None,
                 host_home_root: None,
-                secret_master_key: None,
             },
         );
         match resolved_policy {
@@ -559,7 +517,7 @@ impl RebornHostBindings {
 
     pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
         match &mut self.storage {
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 workspace_root: root,
                 ..
             } => {
@@ -574,15 +532,11 @@ impl RebornHostBindings {
             _ => {}
         }
         self
-    }
-
-    pub fn with_local_dev_workspace_root(self, workspace_root: PathBuf) -> Self {
-        self.with_local_runtime_workspace_root(workspace_root)
     }
 
     pub fn with_local_runtime_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
         match &mut self.storage {
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 host_home_root: root,
                 ..
             } => {
@@ -595,36 +549,6 @@ impl RebornHostBindings {
                 *root = Some(host_home_root);
             }
             _ => {}
-        }
-        self
-    }
-
-    pub fn with_local_dev_confirmed_host_home_root(self, host_home_root: PathBuf) -> Self {
-        self.with_local_runtime_confirmed_host_home_root(host_home_root)
-    }
-
-    /// Carry an externally-resolved secrets master key on a `LocalDev`-shaped
-    /// storage input so `build_local_runtime` never falls back to the
-    /// single-user dotfile/keychain chain (`resolve_local_dev_secret_master_key`)
-    /// for it. No-op on non-`LocalDev` storage shapes, mirroring
-    /// `with_local_runtime_workspace_root`'s match-and-ignore shape.
-    ///
-    /// Used only by the libsql-volume-shaped hosted profiles
-    /// (`hosted-single-tenant-volume`, `-sandboxed`); plain
-    /// `local-dev`/`local-dev-yolo` never call this, so they keep the
-    /// dotfile/keychain fallback the single-user local-dev shape correctly
-    /// relies on.
-    ///
-    pub(crate) fn with_local_dev_secret_master_key(
-        mut self,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
-    ) -> Self {
-        if let RebornStorageInput::LocalDev {
-            secret_master_key: key,
-            ..
-        } = &mut self.storage
-        {
-            *key = Some(secret_master_key);
         }
         self
     }
@@ -636,10 +560,6 @@ impl RebornHostBindings {
             .is_some_and(|policy| {
                 policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
             })
-    }
-
-    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
-        self.requires_local_runtime_confirmed_host_home_root()
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
@@ -787,7 +707,7 @@ impl RebornHostBindings {
 
     pub fn with_required_runtime_backends(
         mut self,
-        backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
+        backends: impl IntoIterator<Item = ironclaw_host_api::runtime::RuntimeKind>,
     ) -> Self {
         self.deployment.required_runtime_backends = backends.into_iter().collect();
         self
@@ -828,12 +748,6 @@ impl RebornHostBindings {
         self
     }
 
-    /// Supply the `SandboxActivityRegistry` a `tenant_sandbox_process_binding`
-    /// caller received alongside its `TenantSandboxBinding.binding` (see
-    /// `sandbox_boot::TenantSandboxBinding`), so `build_local_runtime` can
-    /// forward the SAME instance into `SandboxRuntimeBindings::build` rather
-    /// than the reaper reading a second, empty registry the transport never
-    /// writes into.
     pub fn with_sandbox_activity_registry(
         mut self,
         activity: Arc<SandboxActivityRegistry>,
@@ -842,12 +756,6 @@ impl RebornHostBindings {
         self
     }
 
-    /// Supply the egress-allowlist proxy handle a `tenant_sandbox_process_binding`
-    /// caller received alongside `TenantSandboxBinding.binding` (see
-    /// `sandbox_boot::TenantSandboxBinding::egress_proxy`), so
-    /// `build_local_runtime` can forward the SAME instance into
-    /// `SandboxRuntimeBindings::build` rather than spawning a second,
-    /// independently owned proxy.
     pub fn with_sandbox_egress_proxy_handle(
         mut self,
         egress_proxy: crate::sandbox_composition::SandboxEgressProxyRuntimeHandle,
@@ -856,12 +764,6 @@ impl RebornHostBindings {
         self
     }
 
-    /// Supply the attribution resolver a `tenant_sandbox_process_binding`
-    /// caller received alongside `TenantSandboxBinding.binding` (see
-    /// `sandbox_boot::TenantSandboxBinding::attribution`), so
-    /// `build_local_runtime` can forward the SAME instance into
-    /// `SandboxRuntimeBindings::build` rather than the reaper invalidating a
-    /// second, disjoint cache the transport never reads from.
     pub fn with_sandbox_attribution_resolver(
         mut self,
         attribution: Arc<ConnectionAttributionResolver>,
@@ -870,13 +772,6 @@ impl RebornHostBindings {
         self
     }
 
-    /// Supply the sandbox workspaces root the assembling binary passed into
-    /// `tenant_sandbox_process_binding` (the same value the `TenantSandbox`
-    /// container bind is rooted at), so the abstract-FS `/workspace` mount
-    /// resolves the identical host directory the container bind uses instead
-    /// of re-deriving it from the plain storage root. Required whenever
-    /// `runtime_process_binding` is `TenantSandbox`; the sandboxed-profile
-    /// build fails closed if it is missing.
     pub fn with_sandbox_workspaces_root(mut self, sandbox_workspaces_root: PathBuf) -> Self {
         self.sandbox_workspaces_root = Some(sandbox_workspaces_root);
         self
@@ -917,7 +812,7 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self
@@ -939,7 +834,7 @@ impl RebornHostBindings {
         self
     }
 
-    /// Override local-dev host HTTP egress for fixture recording and replay.
+    /// Override standalone host HTTP egress for fixture recording and replay.
     ///
     /// This is compiled only for tests/test-support so Reborn QA harnesses can
     /// route host-mediated integration calls through trace record/replay
@@ -998,13 +893,12 @@ impl RebornHostBindings {
         Ok(self)
     }
 
-    /// Set concurrency limits for the in-memory turn-state store.
-    ///
-    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
-    /// factory can apply them when constructing the store. Callers should use
-    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
-        self.deployment.turn_state_store_limits = limits;
+    /// Set claim-time concurrency limits for the process journal.
+    pub(crate) fn with_process_concurrency_limits(
+        mut self,
+        limits: ProcessConcurrencyLimits,
+    ) -> Self {
+        self.deployment.process_concurrency_limits = limits;
         self
     }
 

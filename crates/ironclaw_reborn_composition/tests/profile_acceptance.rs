@@ -1,19 +1,13 @@
-use std::sync::Arc;
-
 use ironclaw_reborn_composition::{
-    RebornCompositionError, RebornCompositionProfile, RebornHostBindings,
-    RebornProductionRuntimePolicy, RebornReadiness, RebornReadinessDiagnostic,
+    RebornCompositionProfile, RebornHostBindings, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntime, RebornRuntimeInput,
     RebornRuntimeProfileOptions, RebornServiceReadiness, RebornWorkerReadiness,
     build_reborn_runtime, hosted_single_tenant_volume_runtime_policy,
-    hosted_single_tenant_volume_sandboxed_runtime_policy, local_dev_yolo_runtime_policy,
-    local_runtime_build_input_with_options,
+    local_runtime_build_input_with_options, standalone_unrestricted_runtime_policy,
 };
 
-use ironclaw_host_api::runtime_policy::{
-    FilesystemBackendKind, ProcessBackendKind, RuntimeProfile, SecretMode,
-};
+use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
 use ironclaw_host_runtime::{
     ProductionWiringComponent, ProductionWiringIssue, ProductionWiringIssueKind,
     ProductionWiringReport,
@@ -34,20 +28,20 @@ fn profile_parse_accepts_kebab_and_snake_case() {
         RebornCompositionProfile::Disabled
     );
     assert_eq!(
-        "local_dev".parse::<RebornCompositionProfile>().unwrap(),
-        RebornCompositionProfile::LocalDev
+        "local-dev".parse::<RebornCompositionProfile>().unwrap(),
+        RebornCompositionProfile::Standalone
     );
     assert_eq!(
         "local_dev_yolo"
             .parse::<RebornCompositionProfile>()
             .unwrap(),
-        RebornCompositionProfile::LocalDevYolo
+        RebornCompositionProfile::StandaloneUnrestricted
     );
     assert_eq!(
         "local-dev-yolo"
             .parse::<RebornCompositionProfile>()
             .unwrap(),
-        RebornCompositionProfile::LocalDevYolo
+        RebornCompositionProfile::StandaloneUnrestricted
     );
     assert_eq!(
         "hosted_single_tenant"
@@ -74,18 +68,6 @@ fn profile_parse_accepts_kebab_and_snake_case() {
         RebornCompositionProfile::HostedSingleTenantVolume
     );
     assert_eq!(
-        "hosted_single_tenant_volume_sandboxed"
-            .parse::<RebornCompositionProfile>()
-            .unwrap(),
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-    );
-    assert_eq!(
-        "hosted-single-tenant-volume-sandboxed"
-            .parse::<RebornCompositionProfile>()
-            .unwrap(),
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-    );
-    assert_eq!(
         "migration-dry-run"
             .parse::<RebornCompositionProfile>()
             .unwrap(),
@@ -95,20 +77,20 @@ fn profile_parse_accepts_kebab_and_snake_case() {
 
 #[test]
 fn profile_predicates_capture_storage_contract() {
-    assert!(!RebornCompositionProfile::Disabled.uses_local_dev_storage_input());
-    assert!(RebornCompositionProfile::LocalDev.uses_local_dev_storage_input());
-    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_dev_storage_input());
-    assert!(!RebornCompositionProfile::HostedSingleTenant.uses_local_dev_storage_input());
-    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_dev_storage_input());
-    assert!(
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed.uses_local_dev_storage_input()
-    );
-    assert!(!RebornCompositionProfile::Production.uses_local_dev_storage_input());
-    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::Disabled.uses_local_filesystem_storage());
+    assert!(RebornCompositionProfile::Standalone.uses_local_filesystem_storage());
+    assert!(RebornCompositionProfile::StandaloneUnrestricted.uses_local_filesystem_storage());
+    assert!(!RebornCompositionProfile::HostedSingleTenant.uses_local_filesystem_storage());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_filesystem_storage());
+    assert!(!RebornCompositionProfile::Production.uses_local_filesystem_storage());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_filesystem_storage());
 
     assert!(!RebornCompositionProfile::Disabled.uses_hosted_extension_installation_state());
-    assert!(!RebornCompositionProfile::LocalDev.uses_hosted_extension_installation_state());
-    assert!(!RebornCompositionProfile::LocalDevYolo.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::Standalone.uses_hosted_extension_installation_state());
+    assert!(
+        !RebornCompositionProfile::StandaloneUnrestricted
+            .uses_hosted_extension_installation_state()
+    );
     assert!(
         RebornCompositionProfile::HostedSingleTenant.uses_hosted_extension_installation_state()
     );
@@ -116,26 +98,21 @@ fn profile_predicates_capture_storage_contract() {
         RebornCompositionProfile::HostedSingleTenantVolume
             .uses_hosted_extension_installation_state()
     );
-    assert!(
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-            .uses_hosted_extension_installation_state()
-    );
     assert!(!RebornCompositionProfile::Production.uses_hosted_extension_installation_state());
     assert!(!RebornCompositionProfile::MigrationDryRun.uses_hosted_extension_installation_state());
 
     assert!(!RebornCompositionProfile::Disabled.starts_live_runtime());
-    assert!(RebornCompositionProfile::LocalDev.starts_live_runtime());
-    assert!(RebornCompositionProfile::LocalDevYolo.starts_live_runtime());
+    assert!(RebornCompositionProfile::Standalone.starts_live_runtime());
+    assert!(RebornCompositionProfile::StandaloneUnrestricted.starts_live_runtime());
     assert!(RebornCompositionProfile::HostedSingleTenant.starts_live_runtime());
     assert!(RebornCompositionProfile::HostedSingleTenantVolume.starts_live_runtime());
-    assert!(RebornCompositionProfile::HostedSingleTenantVolumeSandboxed.starts_live_runtime());
     assert!(RebornCompositionProfile::Production.starts_live_runtime());
     assert!(!RebornCompositionProfile::MigrationDryRun.starts_live_runtime());
 }
 
 #[test]
-fn local_dev_yolo_runtime_policy_inherits_host_environment() {
-    let policy = local_dev_yolo_runtime_policy(true).expect("policy resolves");
+fn standalone_yolo_runtime_policy_inherits_host_environment() {
+    let policy = standalone_unrestricted_runtime_policy(true).expect("policy resolves");
 
     assert_eq!(policy.requested_profile, RuntimeProfile::LocalYolo);
     assert_eq!(policy.resolved_profile, RuntimeProfile::LocalYolo);
@@ -147,8 +124,9 @@ fn local_dev_yolo_runtime_policy_inherits_host_environment() {
 }
 
 #[test]
-fn local_dev_yolo_runtime_policy_requires_disclosure() {
-    let error = local_dev_yolo_runtime_policy(false).expect_err("yolo requires confirmation");
+fn standalone_yolo_runtime_policy_requires_disclosure() {
+    let error =
+        standalone_unrestricted_runtime_policy(false).expect_err("yolo requires confirmation");
 
     assert_eq!(
         error,
@@ -167,88 +145,6 @@ fn hosted_single_tenant_volume_runtime_policy_is_processless_secure_default() {
     assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
     assert_eq!(policy.secret_mode.as_str(), "brokered_handles");
     assert_eq!(policy.network_mode.as_str(), "brokered");
-}
-
-#[test]
-fn hosted_single_tenant_volume_sandboxed_runtime_policy_is_hosted_safe() {
-    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
-        .expect("sandboxed hosted volume policy resolves");
-
-    // Requests the EXISTING `(HostedMultiTenant, HostedSafe)` resolver row
-    // (resolver.rs:325-340) rather than a new resolver row or `RuntimeProfile`
-    // variant.
-    assert_eq!(policy.requested_profile, RuntimeProfile::HostedSafe);
-    assert_eq!(policy.resolved_profile, RuntimeProfile::HostedSafe);
-    assert_eq!(policy.process_backend, ProcessBackendKind::TenantSandbox);
-    assert_eq!(
-        policy.filesystem_backend,
-        FilesystemBackendKind::TenantWorkspace
-    );
-}
-
-// Fail-closed pin: the profile's resolved policy pairs `TenantSandbox` process
-// backend with no bound process port until a production call site wires a
-// tenant sandbox process (a later slice, tracked separately from this
-// profile/routing slice). Uses the existing, already-fail-closed
-// `RebornRuntimeProcessBinding::validate_for_production_policy` guard through
-// its public entry point rather than adding a new one.
-#[test]
-fn hosted_single_tenant_volume_sandboxed_rejects_missing_tenant_sandbox_process_port() {
-    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
-        .expect("sandboxed hosted volume policy resolves");
-
-    let error = RebornProductionRuntimePolicy::without_process_port(policy)
-        .expect_err("TenantSandbox process backend requires a bound process port");
-
-    assert!(matches!(
-        error,
-        RebornCompositionError::MissingTenantSandboxProcessPort
-    ));
-}
-
-/// Counterpart to `..._rejects_missing_tenant_sandbox_process_port` above:
-/// proves the profile's policy accepts a `TenantSandbox` binding once one is
-/// wired — the same production validation gate
-/// (`RebornRuntimeProcessBinding::validate_for_production_policy`, reached
-/// through the same public entry point) that A2's
-/// `ironclaw_reborn_composition::tenant_sandbox_process_binding` boot path
-/// (`crates/ironclaw_reborn_composition/src/sandbox_boot.rs`) must satisfy.
-/// Uses a fake `SandboxCommandTransport` instead of a live Docker daemon —
-/// this is a policy-validation proof, not a real-container proof (the A3/
-/// capstone slices cover that).
-#[test]
-fn hosted_single_tenant_volume_sandboxed_accepts_wired_tenant_sandbox_process_port() {
-    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
-        .expect("sandboxed hosted volume policy resolves");
-
-    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
-        Arc::new(FakeSandboxCommandTransport),
-    ));
-
-    RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(policy, process_port)
-        .expect("TenantSandbox process backend accepts a wired tenant sandbox process port");
-}
-
-#[derive(Debug)]
-struct FakeSandboxCommandTransport;
-
-#[async_trait::async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for FakeSandboxCommandTransport {
-    async fn run_command(
-        &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
-    ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
-    > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
-            output: String::new(),
-            saved_output: None,
-            exit_code: 0,
-            sandboxed: true,
-            duration: std::time::Duration::ZERO,
-        })
-    }
 }
 
 #[test]
@@ -478,11 +374,10 @@ fn production_blocker_rejects_disabled_profile_only() {
     assert_eq!(diagnostic, None);
 
     for profile in [
-        RebornCompositionProfile::LocalDev,
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::Standalone,
+        RebornCompositionProfile::StandaloneUnrestricted,
         RebornCompositionProfile::HostedSingleTenant,
         RebornCompositionProfile::HostedSingleTenantVolume,
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
         RebornCompositionProfile::Production,
         RebornCompositionProfile::MigrationDryRun,
     ] {
@@ -502,12 +397,12 @@ fn production_blocker_rejects_disabled_profile_only() {
 fn dev_only_profiles_are_visible_non_production_in_readiness() {
     for (profile, diagnostic) in [
         (
-            RebornCompositionProfile::LocalDev,
-            RebornReadinessDiagnostic::local_dev(),
+            RebornCompositionProfile::Standalone,
+            RebornReadinessDiagnostic::standalone(),
         ),
         (
-            RebornCompositionProfile::LocalDevYolo,
-            RebornReadinessDiagnostic::local_dev_yolo(),
+            RebornCompositionProfile::StandaloneUnrestricted,
+            RebornReadinessDiagnostic::standalone_unrestricted(),
         ),
     ] {
         assert_eq!(diagnostic.profile, profile);
@@ -544,54 +439,6 @@ fn hosted_single_tenant_volume_is_visible_as_preview_readiness() {
     assert!(diagnostic.blocks_production);
 }
 
-#[test]
-fn hosted_single_tenant_volume_sandboxed_is_visible_as_preview_readiness() {
-    let diagnostic = RebornReadinessDiagnostic::hosted_single_tenant_volume_sandboxed();
-
-    assert_eq!(
-        diagnostic.profile,
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-    );
-    assert_eq!(
-        diagnostic.component,
-        RebornReadinessDiagnosticComponent::CompositionProfile
-    );
-    assert_eq!(
-        diagnostic.reason,
-        RebornReadinessDiagnosticReason::HostedSingleTenantVolumeSandboxedPreview
-    );
-    assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Warning);
-    assert!(diagnostic.blocks_production);
-}
-
-#[tokio::test]
-async fn hosted_single_tenant_volume_sandboxed_factory_readiness_includes_preview_diagnostic() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
-        "readiness-contract-owner",
-        dir.path().to_path_buf(),
-        Default::default(),
-    )
-    .unwrap();
-    let runtime = build_runtime_for_test(input).await;
-    let readiness = runtime.readiness();
-
-    assert_eq!(
-        readiness.profile,
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-    );
-    assert_eq!(
-        readiness.state,
-        RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated
-    );
-    assert_eq!(
-        readiness.diagnostics,
-        vec![RebornReadinessDiagnostic::hosted_single_tenant_volume_sandboxed()]
-    );
-    runtime.shutdown().await.unwrap();
-}
-
 #[tokio::test]
 async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
@@ -621,10 +468,10 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
 }
 
 #[tokio::test]
-async fn local_dev_factory_readiness_includes_non_production_diagnostic() {
+async fn standalone_factory_readiness_includes_non_production_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDev,
+        RebornCompositionProfile::Standalone,
         "readiness-contract-owner",
         dir.path().to_path_buf(),
         Default::default(),
@@ -633,20 +480,20 @@ async fn local_dev_factory_readiness_includes_non_production_diagnostic() {
     let runtime = build_runtime_for_test(input).await;
     let readiness = runtime.readiness();
 
-    assert_eq!(readiness.profile, RebornCompositionProfile::LocalDev);
+    assert_eq!(readiness.profile, RebornCompositionProfile::Standalone);
     assert_eq!(readiness.state, RebornReadinessState::DevOnly);
     assert_eq!(
         readiness.diagnostics,
-        vec![RebornReadinessDiagnostic::local_dev()]
+        vec![RebornReadinessDiagnostic::standalone()]
     );
     runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn local_dev_yolo_factory_readiness_includes_non_production_diagnostic() {
+async fn standalone_yolo_factory_readiness_includes_non_production_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         "readiness-yolo-owner",
         dir.path().to_path_buf(),
         RebornRuntimeProfileOptions {
@@ -654,15 +501,18 @@ async fn local_dev_yolo_factory_readiness_includes_non_production_diagnostic() {
         },
     )
     .unwrap()
-    .with_local_dev_confirmed_host_home_root(dir.path().to_path_buf());
+    .with_local_runtime_confirmed_host_home_root(dir.path().to_path_buf());
     let runtime = build_runtime_for_test(input).await;
     let readiness = runtime.readiness();
 
-    assert_eq!(readiness.profile, RebornCompositionProfile::LocalDevYolo);
+    assert_eq!(
+        readiness.profile,
+        RebornCompositionProfile::StandaloneUnrestricted
+    );
     assert_eq!(readiness.state, RebornReadinessState::DevOnly);
     assert_eq!(
         readiness.diagnostics,
-        vec![RebornReadinessDiagnostic::local_dev_yolo()]
+        vec![RebornReadinessDiagnostic::standalone_unrestricted()]
     );
     runtime.shutdown().await.unwrap();
 }
@@ -731,9 +581,9 @@ fn production_wiring_components_keep_host_runtime_stable_names() {
         ProductionWiringComponent::TrustPolicy,
         ProductionWiringComponent::Filesystem,
         ProductionWiringComponent::ResourceGovernor,
-        ProductionWiringComponent::ProcessStorePort,
+        ProductionWiringComponent::ProcessRuntimePort,
         ProductionWiringComponent::ProcessResultStorePort,
-        ProductionWiringComponent::RunState,
+        ProductionWiringComponent::InvocationState,
         ProductionWiringComponent::ApprovalRequests,
         ProductionWiringComponent::CapabilityLeases,
         ProductionWiringComponent::PersistentApprovalPolicies,
@@ -838,7 +688,7 @@ fn production_wiring_report_maps_through_public_readiness_entrypoint() {
     }
 
     let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
-        RebornCompositionProfile::LocalDev,
+        RebornCompositionProfile::Standalone,
         &report,
     );
     assert_eq!(diagnostics.len(), 3);

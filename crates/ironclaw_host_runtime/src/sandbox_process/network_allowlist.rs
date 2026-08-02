@@ -11,7 +11,7 @@
 //!
 //! This module owns the *domain list* — the set of hosts the sandboxed
 //! profile's `builtin.shell` grant should carry in its
-//! [`NetworkPolicy`](ironclaw_host_api::NetworkPolicy) `allowed_targets`. It
+//! [`NetworkPolicy`](ironclaw_host_api::action::NetworkPolicy) `allowed_targets`. It
 //! does not itself enforce anything; it is the policy input consumed by two
 //! things that do: the CONNECT/forward proxy
 //! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
@@ -22,7 +22,7 @@
 //! pinned `internal: true` with no default route off the host, so the proxy
 //! is the container's only path to the outside world.
 use ironclaw_common::env_helpers::env_or_override;
-use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkTargetPattern};
 use ironclaw_network::NetworkPolicyError;
 
 /// Environment variable operators can set to add domains to the sandboxed

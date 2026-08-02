@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits};
 
 /// Overrides the sandboxed profile's per-tenant concurrent `SpawnProcess`
@@ -138,7 +138,10 @@ pub(crate) fn resolve_local_runtime_tenant_id(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::{ResourceEstimate, ResourceScope},
+    };
     use ironclaw_resources::InMemoryResourceGovernor;
 
     use super::*;

@@ -14,7 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use bollard::Docker;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -724,7 +724,10 @@ mod shell_quote_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     #[test]
     fn relative_workdir_rejects_escape() {
@@ -869,8 +872,8 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let config =
             RebornSandboxConfig::new(temp.path().join("workspaces")).with_network_broker_port(8181);
-        let tenant = ironclaw_host_api::TenantId::new("tenant-a").unwrap();
-        let user = ironclaw_host_api::UserId::new("user-a").unwrap();
+        let tenant = ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap();
+        let user = ironclaw_host_api::ids::UserId::new("user-a").unwrap();
         let proxy_url = format!("http://{}:8181", broker::SANDBOX_EGRESS_NETWORK_GATEWAY);
 
         let launch =

@@ -7,16 +7,23 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::{
+    channel::ConversationModel, memory::MemoryLifecycleHook, recipe::VendorAuthRecipe,
+    surface::CapabilitySurfaceKind,
+};
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestRecord, ExtensionRuntimeV2, HostApiContractRegistry,
     MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, OriginGatePolicy,
-    PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-    VendorAuthRecipe,
+    capability::{
+        EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    },
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+    },
 };
 
 const ACME_MANIFEST: &str =
@@ -521,6 +528,79 @@ access_token = "/access_token"
     )
 }
 
+/// Same shape as [`mcp_manifest`] but with the id (and matching `[mcp]`
+/// namespace) parameterized, for exercising the reserved `mcp-` id
+/// namespace.
+fn mcp_manifest_with_id(id: &str) -> String {
+    format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "{id}"
+name = "Zeta"
+version = "0.1.0"
+description = "Hosted MCP fixture"
+trust = "third_party"
+
+[mcp]
+server = "https://mcp.zeta.example/mcp"
+namespace = "{id}"
+max_tools = 64
+default_permission = "ask"
+effects = ["network", "use_secret"]
+"#
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Reserved `mcp-` id namespace (seed for user-registered MCP servers)
+// ---------------------------------------------------------------------------
+
+/// A non-`UserRegistered` source declaring an `mcp-`-prefixed id must be
+/// rejected — through the public `ExtensionManifestRecord::from_toml` entry
+/// point (one of the two import paths the single `parse_v3` arm must cover).
+#[test]
+fn reserved_mcp_namespace_rejects_non_user_registered_source_via_from_toml() {
+    for source in [
+        ManifestSource::HostBundled,
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
+    ] {
+        let error = parse_v3_with_source(&mcp_manifest_with_id("mcp-foo"), source)
+            .expect_err("non-user-registered source must not claim the mcp- namespace");
+        assert!(
+            error.contains("mcp-"),
+            "error should name the reserved prefix, got: {error}"
+        );
+    }
+}
+
+/// A `UserRegistered` manifest with an `mcp-` id parses fine.
+#[test]
+fn reserved_mcp_namespace_allows_user_registered_source_via_from_toml() {
+    let record = parse_v3_with_source(
+        &mcp_manifest_with_id("mcp-foo"),
+        ManifestSource::UserRegistered,
+    )
+    .expect("user-registered source may declare an mcp- id");
+    assert_eq!(record.manifest().id.as_str(), "mcp-foo");
+}
+
+/// A `UserRegistered` manifest can never declare first-party/system trust,
+/// mcp- id or not.
+#[test]
+fn user_registered_source_cannot_declare_first_party_trust() {
+    let manifest = mcp_manifest_with_id("mcp-foo").replace(
+        "trust = \"third_party\"",
+        "trust = \"first_party_requested\"",
+    );
+    let error = parse_v3_with_source(&manifest, ManifestSource::UserRegistered)
+        .expect_err("user-registered source must never be granted first-party trust");
+    assert!(
+        error.contains("trust"),
+        "error should mention trust, got: {error}"
+    );
+}
+
 #[test]
 fn mcp_manifest_parses_and_synthesizes_a_host_internal_template() {
     let record = parse_v3(&mcp_manifest()).expect("mcp manifest parses");
@@ -827,7 +907,7 @@ network_targets = [{{ scheme = "https", host_pattern = "*.blob.zephyrite.example
     assert_eq!(tool.network_targets.len(), 1);
     assert_eq!(
         tool.network_targets[0].scheme,
-        Some(ironclaw_host_api::NetworkScheme::Https)
+        Some(ironclaw_host_api::action::NetworkScheme::Https)
     );
     assert_eq!(
         tool.network_targets[0].host_pattern,

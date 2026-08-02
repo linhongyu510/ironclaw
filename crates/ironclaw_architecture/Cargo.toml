@@ -16,7 +16,7 @@ tempfile = "3"
 # `ironclaw_architecture` ships no runtime code.
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 toml = "1.1"
 # Dev-only: reborn_tls_verification_escape_hatches.rs's exact-identifier
 # carve-out matching needs Rust's real XID_Continue identifier-continuation

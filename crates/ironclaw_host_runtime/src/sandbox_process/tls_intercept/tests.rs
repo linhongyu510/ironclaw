@@ -20,7 +20,7 @@ use x509_parser::prelude::*;
 // — see that module's `tests::fixture` doc for why it lives there and is
 // `pub(crate)`.
 use crate::sandbox_process::credential_swap::tests as credential_swap_tests;
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_secrets::{CredentialPathPolicy, CredentialTargetPolicy};
 
 /// Shared prefix for every test-only `rustls::ClientConfig` built in this

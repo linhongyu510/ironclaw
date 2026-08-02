@@ -4,7 +4,7 @@
 //!
 //! This test lives in its own integration-test binary so cargo executes it
 //! sequentially with respect to lib unit tests.  The lib unit tests include
-//! `local_dev_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
+//! `standalone_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
 //! this production-runtime build runs in the same binary it starves those
 //! tests on parallel CPU-heavy builds.
 //!
@@ -15,9 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
-    AgentId, TenantId, UserId,
+    ids::{AgentId, TenantId, UserId},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -30,6 +29,8 @@ use ironclaw_host_runtime::{
 use ironclaw_product::{
     AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+use ironclaw_product_contracts::views::RebornViewPage;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -125,10 +126,10 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // An empty list is fine — the key invariant is that the service is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
-    let result = ironclaw_host_api::ProductSurface::query(
+    let result = ironclaw_product_contracts::surface::ProductSurface::query(
         bundle.as_ref(),
         caller,
-        ironclaw_host_api::ProductSurfaceQueryRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
             view_id: AUTOMATIONS_VIEW.id.to_string(),
             input: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),
@@ -138,7 +139,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     )
     .await
     .expect("production automation service must be reachable (not 503)");
-    let result = ironclaw_product::RebornViewPage {
+    let result = RebornViewPage {
         payload: result
             .items
             .into_iter()

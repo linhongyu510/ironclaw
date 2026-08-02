@@ -22,7 +22,10 @@ use bollard::{
     Docker,
     container::{InspectContainerOptions, ListContainersOptions, RemoveContainerOptions},
 };
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, InvocationId, TenantId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{
     CommandExecutionRequest, RebornSandboxUserKey, RuntimeProcessError, RuntimeProcessPort,
 };

@@ -39,8 +39,11 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, AuditEnvelope};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{audit::AuditEnvelope, ids::AgentId};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -171,7 +174,7 @@ pub enum RebornEventStoreConfig {
 /// Reborn composition profile controlling which fallbacks are legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornProfile {
-    LocalDev,
+    Standalone,
     Test,
     Production,
 }
@@ -1768,7 +1771,8 @@ async fn create_secure_dir_all(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, TenantId, UserId,
+        ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, UserId},
+        resource::ResourceScope,
     };
 
     use super::*;
@@ -1787,7 +1791,7 @@ mod tests {
 
     async fn jsonl_event_log(root: std::path::PathBuf) -> Arc<dyn DurableEventLog> {
         build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Jsonl {
                 root,
                 accept_single_node_durable: false,
@@ -1974,13 +1978,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_allows_cleartext_http_libsql_url() {
+    async fn standalone_allows_cleartext_http_libsql_url() {
         // Non-production profiles can still use http:// for local sqld.
         // The build call will fail on the actual connection attempt below
         // for an unreachable address, but it must NOT fail with the
         // cleartext-disabled error.
         let result = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Libsql {
                 path_or_url: "http://127.0.0.1:1".to_string(),
                 auth_token: None,
@@ -2090,14 +2094,14 @@ mod tests {
         ));
     }
     #[tokio::test]
-    async fn local_dev_still_allows_bare_relative_libsql_path() {
-        // The bare-path rejection is a production-only policy. LocalDev /
+    async fn standalone_still_allows_bare_relative_libsql_path() {
+        // The bare-path rejection is a production-only policy. Standalone /
         // Test must still allow `events.db` for ergonomic test/demo configs.
         let temp = tempfile::tempdir().expect("tempdir");
         let cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(temp.path()).expect("chdir to tempdir");
         let result = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Libsql {
                 path_or_url: "events.db".to_string(),
                 auth_token: None,
@@ -2110,7 +2114,7 @@ mod tests {
                 result,
                 Err(RebornEventStoreError::ProductionLibsqlAmbiguousTarget)
             ),
-            "LocalDev must accept bare relative paths"
+            "Standalone must accept bare relative paths"
         );
         // The build itself should succeed for a bare filename in cwd.
         result.expect("local libsql with bare relative path should build");
@@ -2196,7 +2200,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("event-store");
         let stores = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Jsonl {
                 root: root.clone(),
                 accept_single_node_durable: false,

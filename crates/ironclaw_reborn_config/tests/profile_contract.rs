@@ -6,8 +6,11 @@ use ironclaw_reborn_config::{
 
 #[test]
 fn profile_wire_values_are_stable() {
-    assert_eq!(RebornProfile::LocalDev.as_str(), "local-dev");
-    assert_eq!(RebornProfile::LocalDevYolo.as_str(), "local-dev-yolo");
+    assert_eq!(RebornProfile::Standalone.as_str(), "local-dev");
+    assert_eq!(
+        RebornProfile::StandaloneUnrestricted.as_str(),
+        "local-dev-yolo"
+    );
     assert_eq!(
         RebornProfile::HostedSingleTenant.as_str(),
         "hosted-single-tenant"
@@ -29,8 +32,8 @@ fn all_profiles_are_exposed_in_display_order() {
     assert_eq!(
         RebornProfile::all(),
         &[
-            RebornProfile::LocalDev,
-            RebornProfile::LocalDevYolo,
+            RebornProfile::Standalone,
+            RebornProfile::StandaloneUnrestricted,
             RebornProfile::HostedSingleTenant,
             RebornProfile::HostedSingleTenantVolume,
             RebornProfile::HostedSingleTenantVolumeSandboxed,
@@ -44,11 +47,11 @@ fn all_profiles_are_exposed_in_display_order() {
 fn profile_parsing_accepts_expected_values() {
     assert_eq!(
         RebornProfile::from_str("local-dev"),
-        Ok(RebornProfile::LocalDev)
+        Ok(RebornProfile::Standalone)
     );
     assert_eq!(
         RebornProfile::from_str("local-dev-yolo"),
-        Ok(RebornProfile::LocalDevYolo)
+        Ok(RebornProfile::StandaloneUnrestricted)
     );
     assert_eq!(
         RebornProfile::from_str("hosted-single-tenant"),
@@ -74,8 +77,8 @@ fn profile_parsing_accepts_expected_values() {
 
 #[test]
 fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
-    assert!(!RebornProfile::LocalDev.starts_hosted_single_tenant_listener());
-    assert!(!RebornProfile::LocalDevYolo.starts_hosted_single_tenant_listener());
+    assert!(!RebornProfile::Standalone.starts_hosted_single_tenant_listener());
+    assert!(!RebornProfile::StandaloneUnrestricted.starts_hosted_single_tenant_listener());
     assert!(RebornProfile::HostedSingleTenant.starts_hosted_single_tenant_listener());
     assert!(RebornProfile::HostedSingleTenantVolume.starts_hosted_single_tenant_listener());
     assert!(
@@ -84,8 +87,8 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(!RebornProfile::Production.starts_hosted_single_tenant_listener());
     assert!(!RebornProfile::MigrationDryRun.starts_hosted_single_tenant_listener());
 
-    assert!(RebornProfile::LocalDev.uses_standalone_local_runtime_volume());
-    assert!(RebornProfile::LocalDevYolo.uses_standalone_local_runtime_volume());
+    assert!(RebornProfile::Standalone.uses_standalone_local_runtime_volume());
+    assert!(RebornProfile::StandaloneUnrestricted.uses_standalone_local_runtime_volume());
     assert!(!RebornProfile::HostedSingleTenant.uses_standalone_local_runtime_volume());
     assert!(RebornProfile::HostedSingleTenantVolume.uses_standalone_local_runtime_volume());
     assert!(
@@ -95,11 +98,11 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(!RebornProfile::MigrationDryRun.uses_standalone_local_runtime_volume());
 
     assert_eq!(
-        RebornProfile::LocalDev.local_runtime_storage_subdir(),
+        RebornProfile::Standalone.local_runtime_storage_subdir(),
         "local-dev"
     );
     assert_eq!(
-        RebornProfile::LocalDevYolo.local_runtime_storage_subdir(),
+        RebornProfile::StandaloneUnrestricted.local_runtime_storage_subdir(),
         "local-dev"
     );
     assert_eq!(
@@ -123,8 +126,8 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
         "local-dev"
     );
 
-    assert!(RebornProfile::LocalDev.supports_local_runtime_skill_management());
-    assert!(RebornProfile::LocalDevYolo.supports_local_runtime_skill_management());
+    assert!(RebornProfile::Standalone.supports_local_runtime_skill_management());
+    assert!(RebornProfile::StandaloneUnrestricted.supports_local_runtime_skill_management());
     assert!(RebornProfile::HostedSingleTenant.supports_local_runtime_skill_management());
     assert!(RebornProfile::HostedSingleTenantVolume.supports_local_runtime_skill_management());
     assert!(
@@ -135,8 +138,8 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
 }
 
 #[test]
-fn profile_default_is_local_dev_for_explicit_binary_invocations() {
-    assert_eq!(RebornProfile::default(), RebornProfile::LocalDev);
+fn profile_default_is_standalone_for_explicit_binary_invocations() {
+    assert_eq!(RebornProfile::default(), RebornProfile::Standalone);
 }
 
 #[test]
@@ -172,14 +175,14 @@ fn boot_config_resolves_home_and_profile_from_env_parts() {
 }
 
 #[test]
-fn boot_config_defaults_profile_to_local_dev() {
+fn boot_config_defaults_profile_to_standalone() {
     let temp = tempfile::tempdir().expect("tempdir");
 
     let config =
         RebornBootConfig::resolve_from_env_parts(None, Some(temp.path().into()), None, None)
             .expect("boot config should resolve");
 
-    assert_eq!(config.profile(), RebornProfile::LocalDev);
+    assert_eq!(config.profile(), RebornProfile::Standalone);
 }
 
 #[test]

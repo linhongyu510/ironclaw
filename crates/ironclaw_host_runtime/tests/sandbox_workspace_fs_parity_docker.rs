@@ -15,7 +15,11 @@ mod sandbox_transport;
 
 use std::collections::HashMap;
 
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
+use ironclaw_host_api::{
+    ids::{AgentId, InvocationId, TenantId, UserId},
+    path::{HostPath, VirtualPath},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{CommandExecutionRequest, RebornSandboxUserKey, RuntimeProcessPort};
 
 fn owner_scope(tenant: &str, user: &str) -> ResourceScope {
@@ -56,7 +60,7 @@ async fn shell_write_and_abstract_fs_read_share_the_same_workspace_bytes() {
     let mut disk = ironclaw_filesystem::DiskFilesystem::new();
     disk.mount_local(
         VirtualPath::new("/workspace").expect("virtual path"),
-        ironclaw_host_api::HostPath::from_path_buf(workspace_dir.clone()),
+        HostPath::from_path_buf(workspace_dir.clone()),
     )
     .expect("mount /workspace");
 

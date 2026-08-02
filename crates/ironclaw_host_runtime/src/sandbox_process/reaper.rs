@@ -65,7 +65,7 @@ use bollard::{
     models::ContainerSummary,
 };
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
 use crate::RuntimeProcessError;
 

@@ -7,10 +7,17 @@
 
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError, HostPortCatalog,
-    RequestedTrustClass, RuntimeKind, TrustClass, VirtualPath,
+    action::ExtensionLifecycleOperation,
+    error::HostApiError,
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, ExtensionId},
+    path::VirtualPath,
+    runtime::{RuntimeKind, TrustClass},
+    trust::RequestedTrustClass,
 };
 use thiserror::Error;
+
+mod definition_admission;
 
 /// Extension manifest and registry failures.
 #[derive(Debug, Error)]
@@ -223,6 +230,7 @@ pub mod resolved;
 pub mod v2;
 pub mod v3;
 
+pub use definition_admission::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 pub use package::{CapabilityDescriptorSchemaMode, ExtensionPackage};
 
 pub use admin_configuration::{
@@ -237,8 +245,8 @@ pub use hosted_mcp_discovery::{
     package_with_discovered_hosted_mcp_tools,
 };
 pub use resolved::{
-    ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
-    ResolvedSectionSurface,
+    PackageRootBinding, PackageRootError, ResolvedAuthSurface, ResolvedExtensionManifest,
+    ResolvedHostApiRef, ResolvedMcpDeclaration, ResolvedSectionSurface,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
@@ -246,7 +254,7 @@ pub use v2::{
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
     HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
     MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
-    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX, RESERVED_MCP_ID_PREFIX,
 };
 pub use v3::{MANIFEST_SCHEMA_VERSION_V3, ManifestV3Error};
 
@@ -258,8 +266,8 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
-    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationOwner,
-    ManifestHash, MembershipDeactivation,
+    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationIncarnationId,
+    InstallationOwner, ManifestHash, MembershipDeactivation,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

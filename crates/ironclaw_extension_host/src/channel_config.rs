@@ -20,13 +20,19 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RecipeSecretField, ResourceScope, SecretHandle,
+    ids::{ExtensionId, SecretHandle},
+    resource::ResourceScope,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
@@ -659,7 +665,7 @@ fn channel_config_admin_idempotency_key(
     })
 }
 
-/// The production [`ironclaw_product::ChannelConfigProductService`] port
+/// The production [`ChannelConfigProductService`] port
 /// over [`ChannelConfigService`] — the surface the WebUI setup service and
 /// the lifecycle configure action route through.
 pub struct RebornChannelConfigProductService {
@@ -673,11 +679,11 @@ impl RebornChannelConfigProductService {
 }
 
 #[async_trait]
-impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
+impl ChannelConfigProductService for RebornChannelConfigProductService {
     async fn field_status(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
+    ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
         if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
             && !manifest.admin_configuration.is_empty()
         {
@@ -686,7 +692,7 @@ impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProduc
         match self.service.status(extension_id).await {
             Ok(statuses) => Ok(statuses
                 .into_iter()
-                .map(|status| ironclaw_product::RebornChannelConfigField {
+                .map(|status| ChannelConfigField {
                     name: status.handle,
                     label: status.label,
                     secret: status.secret,
@@ -763,8 +769,9 @@ mod tests {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, SecretHandle, UserId,
-        VirtualPath,
+        ids::{InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_secrets::SecretStore;
 
@@ -893,7 +900,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let store = Arc::new(
             ExtensionInstallationStore::load_at(
                 Arc::new(InMemoryBackend::new()),
-                ironclaw_host_api::VirtualPath::new("/system/extensions/.installations/test")
+                ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
                 ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),

@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::{CapabilityId, EffectKind, ProviderToolName, RuntimeKind};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition,
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{CapabilityId, ProviderToolName},
+    runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition};
 
 pub(crate) const TOOL_NAME: &str = "capability_info";
 pub(crate) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";

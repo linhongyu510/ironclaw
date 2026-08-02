@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use ironclaw_host_api::operator_llm::{
+use ironclaw_product_contracts::operator_llm::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
     RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
@@ -772,7 +772,7 @@ mod tests {
         std::mem::forget(temp);
         RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::LocalDev,
+            ironclaw_reborn_config::RebornProfile::Standalone,
         ))
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
         let admin = RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::LocalDev,
+            ironclaw_reborn_config::RebornProfile::Standalone,
         ));
         let entries = admin.menu_entries().expect("menu entries load");
         assert!(

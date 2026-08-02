@@ -37,7 +37,7 @@ use bollard::{
     models::HostConfig,
 };
 use chrono::Utc;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_host_runtime::{SandboxActivityRegistry, SandboxReaper, SandboxReaperConfig};
 
 // The persistent-container identity labels the production launch config

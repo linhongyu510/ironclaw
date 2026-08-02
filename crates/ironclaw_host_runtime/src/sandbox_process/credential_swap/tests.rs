@@ -8,7 +8,10 @@
 
 use super::*;
 
-use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, ResourceScope, SecretHandle};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+};
 use ironclaw_secrets::{CredentialPathPolicy, SecretMaterial};
 
 use super::super::credential_firewall::{

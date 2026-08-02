@@ -23,24 +23,30 @@ mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
+mod backend_store_assembly;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
+mod capability_authorization;
 #[cfg(test)]
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
 mod error;
+mod extension_host_assembly;
 mod factory;
+mod filesystem_assembly;
 mod google_oauth_secret_store;
+mod host_access_assembly;
 mod input;
 mod llm_admin;
-mod local_dev_authorization;
-mod local_dev_mounts;
 mod memory_binding;
 mod memory_provider_factory;
+mod model_gateway_assembly;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
+mod outbound_store_assembly;
+mod process_gate_turn_view;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -49,42 +55,43 @@ mod readiness;
 mod root;
 mod runtime;
 mod runtime_input;
+mod runtime_mounts;
 mod runtime_profile_approval_policy;
 mod sandbox_boot;
 mod sandbox_composition;
 mod sandbox_egress_proxy_task;
 mod sandbox_quota;
 mod sandbox_reaper_task;
+mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
-mod turn_run_snapshot;
+mod trigger_poller_assembly;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
-pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
 /// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
 /// modules that build a production trust policy from the concrete inventory).
 #[cfg(test)]
 pub(crate) use factory::builtin_first_party_trust_policy;
-pub use factory::local_dev_db_path;
-pub use factory::open_local_dev_secret_store;
+pub use factory::open_standalone_secret_store;
 /// Production first-party trust-policy builder over the neutral injected bundle
 /// set. Public so integration tests (which convert the concrete first-party
 /// inventory via the dev-dependency) can build the same trust policy the
 /// production binary composes at build time.
 pub use factory::production_first_party_trust_policy;
-pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
+pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
+pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -99,44 +106,36 @@ pub use ironclaw_auth::{
 };
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
-    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, SecretHandle},
 };
 pub use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, VendorId},
 };
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-pub use ironclaw_product::PreferenceTargetCodec;
-/// Channel-adapter and codec contracts re-exported for the assembling
-/// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
-// Re-exported so `ironclaw_reborn_cli` (`runtime/mod.rs`'s
-// `hosted-single-tenant-volume-sandboxed` boot-input assembly) can obtain a
-// real `TenantSandbox` process binding without depending on
-// `ironclaw_host_runtime` directly — the CLI boundary test
-// (`reborn_cli_binary_crate_stays_separate_from_v1_root`) pins its workspace
-// dependencies to exactly the composition-facade set.
-pub use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornChannelConnectStrategy,
-};
+/// The channel-adapter contract the assembling binary implements is reached at
+/// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
+/// the re-export chain that gave it a second import path through here.
+pub use ironclaw_product::RebornChannelConnectStrategy;
 pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use sandbox_boot::{TenantSandboxBinding, tenant_sandbox_process_binding};
-// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
-// the CLI consumes composition as its facade and must not grow a direct
-// `ironclaw_runner` edge for one summary helper. All other run-failure
-// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
-// retry_disposition}` with consumers repointed (no path-preservation shims).
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -152,6 +151,7 @@ pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
     create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
+pub use sandbox_boot::{TenantSandboxBinding, tenant_sandbox_process_binding};
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
@@ -160,20 +160,19 @@ pub use memory_provider_factory::{
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy,
-    hosted_single_tenant_volume_sandboxed_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options, standalone_runtime_policy,
+    standalone_unrestricted_runtime_policy,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -190,6 +189,7 @@ pub use readiness::{
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -201,8 +201,8 @@ pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseE
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
-    RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    RebornSkillActivationMode, RebornSkillActivationSource, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, blocked_auth_flow_canceller,
     build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
@@ -221,7 +221,8 @@ pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 /// host-identity facade.
 pub mod host_api {
     pub use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+        resource::ResourceScope,
     };
 }
 
@@ -251,10 +252,12 @@ pub use ironclaw_reborn_identity::{
 /// Gated so it ships zero bytes in production binaries.
 #[cfg(any(test, feature = "test-support"))]
 pub fn open_reborn_identity_resolver(
-    tenant_id: &ironclaw_host_api::TenantId,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
 ) -> std::sync::Arc<dyn RebornIdentityResolver> {
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, UserId, VirtualPath,
+        ids::{AgentId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     let root = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::default());
@@ -360,21 +363,22 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     }
 }
 
+use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ProcessBackendKind;
+use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
-use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 use ironclaw_secrets::SecretMaterial;
 use ironclaw_trust::TrustPolicy;
@@ -382,19 +386,11 @@ use ironclaw_turns::TurnError;
 use ironclaw_turns::TurnRunWakeNotifier;
 use thiserror::Error;
 
-pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
-    LibSqlRootFilesystem,
-    FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    ProcessStore<LibSqlRootFilesystem>,
-    ProcessResultStore<LibSqlRootFilesystem>,
->;
+pub type LibSqlProductionHostRuntimeServices =
+    HostRuntimeServices<LibSqlRootFilesystem, FilesystemResourceGovernor<LibSqlRootFilesystem>>;
 
-pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
-    PostgresRootFilesystem,
-    FilesystemResourceGovernor<PostgresRootFilesystem>,
-    ProcessStore<PostgresRootFilesystem>,
-    ProcessResultStore<PostgresRootFilesystem>,
->;
+pub type PostgresProductionHostRuntimeServices =
+    HostRuntimeServices<PostgresRootFilesystem, FilesystemResourceGovernor<PostgresRootFilesystem>>;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
 /// [`invocation_mount_view`]. Each alias resolves to
@@ -408,13 +404,13 @@ const PER_USER_ALIASES: &[&str] = &[
     "/authorization",
     "/outbound",
     "/run-state",
+    "/checkpoint-state",
     "/approvals",
     "/gate-records",
     "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",
-    "/checkpoint-state",
     "/resources",
     "/engine",
     "/skills",
@@ -437,13 +433,13 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
-/// [`ironclaw_host_api::ResourceScope::system`]) routes records under
+/// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under
 /// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
 pub fn invocation_mount_view(
     scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     invocation_mount_view_for_segments(
         resource_scope_path_segment(scope.tenant_id.as_str()),
         resource_scope_path_segment(scope.user_id.as_str()),
@@ -451,7 +447,7 @@ pub fn invocation_mount_view(
 }
 
 pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+    if value == ironclaw_host_api::resource::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value
@@ -461,7 +457,7 @@ pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
 fn invocation_mount_view_for_segments(
     tenant_id: &str,
     user_id: &str,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
@@ -518,6 +514,30 @@ where
     F: RootFilesystem,
 {
     Arc::new(ScopedFilesystem::new(root, invocation_mount_view))
+}
+
+/// Process-journal filesystem handle with read-only access to deployed
+/// per-user legacy authorities during the explicit one-time migration.
+///
+/// The extra alias exists only for the system sentinel and only on this
+/// process-store-specific handle. Ordinary consumers cannot enumerate another
+/// tenant's filesystem tree.
+pub(crate) fn wrap_process_journal_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(root, |scope| {
+        let mut view = invocation_mount_view(scope)?;
+        if scope.is_system() {
+            view.mounts.push(MountGrant::new(
+                MountAlias::new("/legacy-tenants")?,
+                VirtualPath::new("/tenants")?,
+                MountPermissions::read_only(),
+            ));
+            view.validate()?;
+        }
+        Ok(view)
+    }))
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
@@ -577,13 +597,13 @@ pub enum RebornCompositionError {
     )]
     MissingSecretMasterKey,
     #[error("reborn mount view construction failed: {0}")]
-    Mount(#[from] ironclaw_host_api::HostApiError),
+    Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
-    #[error("reborn run-state substrate failed: {0}")]
-    RunState(#[from] RunStateError),
+    #[error("reborn approval store substrate failed: {0}")]
+    ApprovalStore(#[from] ApprovalStoreError),
     #[error("reborn capability lease substrate failed: {0}")]
     CapabilityLease(#[from] CapabilityLeaseError),
     #[error("reborn secret substrate failed: {0}")]
@@ -593,7 +613,7 @@ pub enum RebornCompositionError {
     #[error("reborn turn substrate failed: {0}")]
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
-    RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
     #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
     MissingTenantSandboxProcessPort,
     #[error(
@@ -667,7 +687,8 @@ mod mount_view_tests {
     use super::*;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
-        AgentId, InvocationId, MissionId, ProjectId, ScopedPath, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+        path::ScopedPath,
     };
 
     fn sample_scope() -> ResourceScope {
@@ -706,6 +727,32 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[tokio::test]
+    async fn process_journal_migration_mount_is_system_only_and_read_only() {
+        let root = Arc::new(InMemoryBackend::new());
+        let scoped = wrap_process_journal_scoped(root);
+        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
+            .expect("legacy path");
+        assert!(
+            scoped.resolve(&sample_scope(), &legacy).is_err(),
+            "ordinary user scopes must not enumerate other tenant roots"
+        );
+        assert_eq!(
+            scoped
+                .resolve(&ResourceScope::system(), &legacy)
+                .expect("system migration mount")
+                .as_str(),
+            "/tenants/tenant-a/users/user-a/run-state"
+        );
+        assert!(matches!(
+            scoped
+                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
+                .await
+                .expect_err("migration mount must not mutate legacy authorities"),
+            FilesystemError::PermissionDenied { .. }
+        ));
     }
 
     #[test]
@@ -884,7 +931,9 @@ mod two_tenant_isolation_tests {
     //! resolver back into production wiring trips this test directly.
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
+    use ironclaw_host_api::ids::{
+        AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId,
+    };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
@@ -958,11 +1007,13 @@ mod gate_record_production_mount_tests {
     //! per-tenant path rewriting keeps identically-shaped refs from colliding
     //! across tenants.
     use super::*;
+    use ironclaw_approvals::{GateRecordStore, GateRecordStorePort};
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
+        gate_record::GateRecord,
+        ids::{GateRef, InvocationId, ProjectId, TenantId, UserId},
+        safe_summary::SafeSummary,
     };
-    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {

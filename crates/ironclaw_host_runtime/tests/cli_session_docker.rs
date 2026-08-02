@@ -13,7 +13,26 @@ use std::sync::Arc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        PackageId, ProjectId, RunId, TenantId, UserId,
+    },
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     CLI_SESSION_CAPABILITY_ID, CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices,
     RebornSandboxConfig, RebornScopedSandboxCommandTransport, RuntimeCapabilityOutcome,

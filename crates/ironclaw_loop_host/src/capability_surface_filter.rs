@@ -4,15 +4,18 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch};
-use ironclaw_turns::CapabilityActivityId;
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::{
+    ids::CapabilityId,
+    resolution::{Resolution, ResolutionBatch},
+};
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
     CapabilityDeniedReasonKind, CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
+use ironclaw_turns::CapabilityActivityId;
 
 use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
 
@@ -734,9 +737,12 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{
-        Blocked, CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId,
+        ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+        resolution::Blocked,
+        runtime::RuntimeKind,
     };
-    use ironclaw_turns::run_profile::{
+    use ironclaw_loop_contracts::{AgentLoopDriverDescriptor, RunClassId, RunProfileFingerprint};
+    use ironclaw_loop_contracts::{
         CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
         CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
         LoopDriverId, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
@@ -744,8 +750,7 @@ mod tests {
         SchedulingClass, SteeringPolicy, resolution,
     };
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, LoopGateRef, LoopResultRef, RunClassId, RunProfileFingerprint,
-        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        LoopGateRef, LoopResultRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
     };
 
     use super::*;
@@ -753,7 +758,7 @@ mod tests {
     #[derive(Default)]
     struct SpyPort {
         surface: Mutex<Option<VisibleCapabilitySurface>>,
-        batch_outcome: Mutex<Option<ironclaw_host_api::ResolutionBatch>>,
+        batch_outcome: Mutex<Option<ironclaw_host_api::resolution::ResolutionBatch>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
         provider_call_capability_ids:
             Mutex<HashMap<ProviderToolName, ProviderToolCallCapabilityIds>>,
@@ -817,8 +822,7 @@ mod tests {
         async fn register_provider_tool_call(
             &self,
             request: RegisterProviderToolCallRequest,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
             let RegisterProviderToolCallRequest {
                 tool_call,
                 activity_id,
@@ -833,7 +837,7 @@ mod tests {
                 .expect("registered candidate capability ids lock")
                 .clone()
                 .unwrap_or_else(|| provider_call_capability_ids(&["demo.allowed"]));
-            Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            Ok(ironclaw_loop_contracts::CapabilityCallCandidate {
                 activity_id: activity_id.unwrap_or_default(),
                 surface_version: surface_version(),
                 capability_id: capability_ids.provider_capability_id,
@@ -877,7 +881,7 @@ mod tests {
                 .lock()
                 .expect("batch outcome lock")
                 .clone()
-                .unwrap_or_else(|| ironclaw_host_api::ResolutionBatch {
+                .unwrap_or_else(|| ironclaw_host_api::resolution::ResolutionBatch {
                     resolutions: vec![completed("result:first"), completed("result:second")],
                     stopped_on_suspension: false,
                 }))
@@ -918,6 +922,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             safe_name: capability.to_string(),
             safe_description: format!("{capability} description"),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }
@@ -967,7 +972,7 @@ mod tests {
         resolution::completed(
             LoopResultRef::new(result_ref).expect("test result ref is valid"),
             "done".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,
@@ -1478,7 +1483,7 @@ mod tests {
     async fn visible_filter_batches_staged_capability_info_invocation() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:capability-info")],
                 stopped_on_suspension: false,
             });
@@ -1651,7 +1656,7 @@ mod tests {
     async fn batch_partitions_correctly() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:first"), completed("result:second")],
                 stopped_on_suspension: false,
             });
@@ -1697,7 +1702,7 @@ mod tests {
     async fn partial_inner_outcomes_truncate_correctly() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:first"), completed("result:second")],
                 stopped_on_suspension: true,
             });
@@ -1735,7 +1740,7 @@ mod tests {
     async fn stopped_inner_batch_truncates_denials_after_last_allowed_outcome() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![approval_required("gate:first")],
                 stopped_on_suspension: true,
             });

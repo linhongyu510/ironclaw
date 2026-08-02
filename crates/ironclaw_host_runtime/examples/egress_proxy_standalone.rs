@@ -30,7 +30,7 @@
 //! into the worker container exactly like production's
 //! `exec_transport::user_container_launch_config` would.
 
-use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkTargetPattern};
 use ironclaw_host_runtime::bind_sandbox_egress_proxy_with_tls_intercept;
 
 /// Host-side path (inside THIS binary's own container) the container trust

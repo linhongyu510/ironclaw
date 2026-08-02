@@ -26,7 +26,10 @@ mod docker_gate;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{
     CommandExecutionRequest, RebornSandboxConfig, RebornSandboxUserKey,
     RebornScopedSandboxCommandTransport, SandboxCommandTransport,

@@ -1,5 +1,8 @@
 use super::*;
-use ironclaw_host_api::{CapabilityId, InvocationId, NetworkMethod};
+use ironclaw_host_api::{
+    action::NetworkMethod,
+    ids::{CapabilityId, InvocationId},
+};
 use ironclaw_secrets::CredentialPathPolicy;
 
 const FAR_FUTURE: Duration = Duration::from_secs(3600);

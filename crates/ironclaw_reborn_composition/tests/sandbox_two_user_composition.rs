@@ -18,9 +18,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, MountView, Principal, ResourceEstimate, ResourceScope,
-    RuntimeKind, TrustClass, UserId, runtime_policy::ApprovalPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, RunId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::ApprovalPolicy,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RebornSandboxScopeKey, RuntimeProcessError,
@@ -152,7 +156,7 @@ fn shell_execution_context(user: &str) -> ExecutionContext {
     // resolved_origin`); stamping `run_id` reconstructs the legacy `LoopRun`
     // origin for this direct (non-loop) test invocation, mirroring
     // `trigger_management_execution_context` in `facade_factory.rs`.
-    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context.run_id = Some(RunId::new());
     context
 }
 
@@ -203,16 +207,14 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
     // still bypassing only the approval gate, not the scope-forwarding logic
     // under test.
     let auto_approve = runtime
-        .local_dev_auto_approve_settings_for_test()
+        .standalone_auto_approve_settings_for_test()
         .expect("runtime exposes auto-approve settings for test");
 
     for user in ["user-a", "user-b"] {
         let context = shell_execution_context(user);
         auto_approve
             .set(ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(
-                    context.resource_scope.user_id.clone(),
-                ),
+                updated_by: Principal::User(context.resource_scope.user_id.clone()),
                 scope: context.resource_scope.clone(),
                 enabled: true,
             })

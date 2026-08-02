@@ -18,22 +18,43 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    Timestamp,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
+    },
+    dispatch::{DispatchFailureDetail, DispatchInputIssueCode},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, PackageId, ProjectId, RunId,
+        TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CLI_SESSION_CAPABILITY_ID, CapabilitySurfacePolicy,
-    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID,
-    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-    OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
+    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
     SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
@@ -89,7 +110,6 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             HTTP_CAPABILITY_ID
             | HTTP_SAVE_CAPABILITY_ID
             | SHELL_CAPABILITY_ID
-            | CLI_SESSION_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_UPDATE_CAPABILITY_ID
@@ -374,7 +394,6 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert!(!ids.contains(&SHELL_CAPABILITY_ID));
-    assert!(!ids.contains(&CLI_SESSION_CAPABILITY_ID));
     assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
     assert!(
@@ -391,7 +410,6 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
     )
     .unwrap();
     assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
-    assert!(!handlers.contains_handler(&capability_id(CLI_SESSION_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
 }
@@ -406,12 +424,6 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
             .iter()
             .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
     );
-    assert!(
-        package
-            .capabilities
-            .iter()
-            .any(|descriptor| descriptor.id.as_str() == CLI_SESSION_CAPABILITY_ID)
-    );
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
@@ -419,7 +431,6 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
-    assert!(handlers.contains_handler(&capability_id(CLI_SESSION_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -810,11 +821,10 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
         .expect("created trigger id")
         .to_string();
 
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
-    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
-        run_id,
-    ));
+    context.origin =
+        Some(ironclaw_host_api::invocation::InvocationOrigin::ScheduledLoopRun(run_id));
     for (capability_id, input) in [
         (
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -912,7 +922,7 @@ async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_con
     let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
     let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
     let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
 
     let output = invoke_with_context(
@@ -2447,8 +2457,10 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
             trigger_id: record.trigger_id,
             fire_slot,
             run_id,
-            thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
-                .unwrap(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
+                "01890f0f-fire-7000-8000-000000000001",
+            )
+            .unwrap(),
             submitted_at: fire_slot,
         })
         .await
@@ -3630,78 +3642,6 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
 }
 
 #[tokio::test]
-async fn builtin_cli_session_delegates_start_command_to_process_port() {
-    let process_port = Arc::new(RecordingProcessPort::default());
-    let runtime = runtime_with_process_port(Arc::clone(&process_port));
-
-    let output = invoke_with_context(
-        &runtime,
-        CLI_SESSION_CAPABILITY_ID,
-        json!({"action": "start", "session": "devserver", "command": "npm run dev"}),
-        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output["session"], json!("ic-devserver"));
-    assert_eq!(output["success"], json!(true));
-    let requests = process_port.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].command,
-        "tmux new-session -d -s 'ic-devserver' 'npm run dev'; \
-         printf '\\n---IRONCLAW-CLI-SESSIONS---\\n'; \
-         tmux list-sessions -F '#S' 2>/dev/null || true"
-    );
-    assert_eq!(requests[0].timeout_secs, Some(20));
-    assert_eq!(requests[0].scope.user_id.as_str(), "user");
-}
-
-#[tokio::test]
-async fn builtin_cli_session_send_and_kill_omit_the_session_footer() {
-    let process_port = Arc::new(RecordingProcessPort::default());
-    let runtime = runtime_with_process_port(Arc::clone(&process_port));
-
-    invoke_with_context(
-        &runtime,
-        CLI_SESSION_CAPABILITY_ID,
-        json!({"action": "send", "session": "devserver", "text": "hello"}),
-        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
-    )
-    .await
-    .unwrap();
-    invoke_with_context(
-        &runtime,
-        CLI_SESSION_CAPABILITY_ID,
-        json!({"action": "kill", "session": "devserver"}),
-        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
-    )
-    .await
-    .unwrap();
-
-    let requests = process_port.requests.lock().unwrap();
-    assert_eq!(
-        requests[0].command,
-        "tmux send-keys -t 'ic-devserver' -l -- 'hello' && tmux send-keys -t 'ic-devserver' Enter"
-    );
-    assert_eq!(requests[1].command, "tmux kill-session -t 'ic-devserver'");
-}
-
-#[tokio::test]
-async fn builtin_cli_session_rejects_invalid_session_name_before_dispatch() {
-    let runtime = runtime();
-    let failure = invoke_failure_with_context(
-        &runtime,
-        CLI_SESSION_CAPABILITY_ID,
-        json!({"action": "read", "session": "sess; rm -rf /"}),
-        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::InputEncode);
-}
-
-#[tokio::test]
 async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure() {
     let output = invoke_shell(json!({"command": "printf shell-error >&2; exit 7"}))
         .await
@@ -3823,16 +3763,6 @@ async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_is
 
 #[tokio::test]
 async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
-    // `hosted_dev_policy()` resolves `process_backend: TenantSandbox`, but this
-    // runtime is only wired with a local `RecordingProcessPort` (no
-    // `with_tenant_sandbox_process_port`). `TenantWorkspace` filesystem access
-    // itself now resolves fine (it's a mount-scoped view, same mechanism as
-    // `ScopedVirtual`), so the rejection no longer happens as an authorization
-    // denial — it happens one step later, at process-backend resolution in
-    // `LocalInvocationServicesResolver::resolve`: there is no tenant-sandbox
-    // process port configured to satisfy the `TenantSandbox` plan, so
-    // `InvocationServicesError::UnsupportedProcessBackend` fires and maps to
-    // `FailureKind::Backend`. The handler still never runs.
     let process_port = Arc::new(RecordingProcessPort::default());
     let runtime =
         runtime_with_process_port_and_policy(Arc::clone(&process_port), hosted_dev_policy());
@@ -3846,7 +3776,7 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, FailureKind::Backend);
+    assert_eq!(error, FailureKind::FilesystemDenied);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
         "hosted shell must fail at invocation-service resolution before the handler can run"
@@ -3874,8 +3804,6 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
         json!({"command": "echo hi", "workdir": 123}),
         json!({"command": "echo hi", "timeout": 0}),
         json!({"command": "echo hi", "timeout": "1"}),
-        json!({"command": "echo hi", "output_limit": 0}),
-        json!({"command": "echo hi", "output_limit": "1"}),
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
@@ -3908,27 +3836,12 @@ async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runt
 }
 
 #[tokio::test]
-async fn builtin_shell_honors_timeout_above_the_old_120s_default() {
-    // `timeout` is model-adjustable up to a 600s operator ceiling
-    // (`sandbox_process::shell_limits::SHELL_TIMEOUT_MAX_SECS`); a value
-    // above the 120s default is honored, not rejected.
-    let output = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
+async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
+    let err = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(output["exit_code"], json!(0));
-}
-
-#[tokio::test]
-async fn builtin_shell_clamps_rather_than_rejects_timeout_above_the_600s_ceiling() {
-    // A command that completes immediately still succeeds when `timeout`
-    // overshoots the ceiling: the value is clamped to 600s downstream in the
-    // process port, never rejected at dispatch.
-    let output = invoke_shell(json!({"command": "echo hi", "timeout": 6_000}))
-        .await
-        .unwrap();
-
-    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(err, FailureKind::Resource);
 }
 
 #[tokio::test]
@@ -6576,7 +6489,7 @@ async fn builtin_http_defaults_json_body_content_type() {
 
 #[tokio::test]
 async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
-    let runtime = runtime_with_policy(local_dev_policy());
+    let runtime = runtime_with_policy(local_host_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -7063,39 +6976,17 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 }
 
 #[tokio::test]
-async fn builtin_read_file_under_tenant_workspace_is_mount_gated() {
-    // `TenantWorkspace` now resolves to the same mount-scoped filesystem view
-    // as `ScopedVirtual` (see `LocalInvocationServicesResolver::filesystem_for_plan`),
-    // so it is no longer an unsupported backend that hosted read_file always
-    // fails against. The real security invariant is that access is gated by
-    // the resolved `MountView`: a grant that covers the path allows the read,
-    // and the absence of a covering grant still denies it before the file is
-    // touched.
+async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "tenant workspace read\n").unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
-    // (a) With a read-only /workspace mount granting access, the read succeeds.
-    let output = invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/README.md"}),
-        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output["content"], json!("     1│ tenant workspace read"));
-    assert_eq!(output["path"], json!("/workspace/README.md"));
-
-    // (b) Without any mount covering the path, the same tenant-workspace
-    // resolution still denies the read before touching the filesystem.
     let error = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
-        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], MountView::default()),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
     .unwrap_err();
@@ -8588,7 +8479,7 @@ fn failure_input_issue<'a>(
     path: &str,
     code: DispatchInputIssueCode,
     case_name: &str,
-) -> &'a ironclaw_host_api::DispatchInputIssue {
+) -> &'a ironclaw_host_api::dispatch::DispatchInputIssue {
     let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
         panic!(
             "{case_name}: expected invalid-input detail, got {:?}",
@@ -8609,7 +8500,7 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
-    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+    runtime_with_filesystem_and_policy(filesystem, local_host_policy())
 }
 
 fn runtime_with_filesystem_and_policy<F>(
@@ -8629,7 +8520,7 @@ where
 fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> impl HostRuntime {
     runtime_with_filesystem_policy_and_trigger_repository(
         DiskFilesystem::new(),
-        local_dev_policy(),
+        local_host_policy(),
         repository,
     )
 }
@@ -8659,7 +8550,7 @@ fn runtime_with_trigger_repository_and_create_hook(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -8682,7 +8573,7 @@ fn runtime_with_trigger_repository_and_clock(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -8774,7 +8665,7 @@ struct DeliveryTargetValidatingTriggerCreateHook {
 
 struct SourceResolvingTriggerCreateHook {
     target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
 }
 
 impl SourceResolvingTriggerCreateHook {
@@ -8785,7 +8676,7 @@ impl SourceResolvingTriggerCreateHook {
         }
     }
 
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
         self.seen_run_ids.lock().unwrap().clone()
     }
 }
@@ -8794,8 +8685,8 @@ impl SourceResolvingTriggerCreateHook {
 impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
     async fn resolve_implicit_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
-        run_id: Option<ironclaw_host_api::RunId>,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        run_id: Option<ironclaw_host_api::ids::RunId>,
     ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
         self.seen_run_ids.lock().unwrap().push(run_id);
         Ok(Some(
@@ -8826,7 +8717,7 @@ impl DeliveryTargetValidatingTriggerCreateHook {
 impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
     async fn validate_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
         target: &ironclaw_triggers::TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
         self.validated.lock().unwrap().push(target.to_string());
@@ -9375,7 +9266,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9397,7 +9288,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_http_egress(egress)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9425,7 +9316,7 @@ where
     }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9434,7 +9325,7 @@ fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
 {
-    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+    runtime_with_process_port_and_policy(process_port, local_host_policy())
 }
 
 fn runtime_with_process_port_and_policy<T>(
@@ -9506,11 +9397,11 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .host_runtime_for_local_testing()
 }
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -9523,7 +9414,7 @@ fn local_dev_policy() -> EffectiveRuntimePolicy {
 fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         process_backend: ProcessBackendKind::TenantSandbox,
-        ..local_dev_policy()
+        ..local_host_policy()
     }
 }
 
@@ -9667,7 +9558,6 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
-        CLI_SESSION_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
         TRACE_COMMONS_STATUS_CAPABILITY_ID,
@@ -9676,6 +9566,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,

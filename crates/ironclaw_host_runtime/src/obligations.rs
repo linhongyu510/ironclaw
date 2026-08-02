@@ -2,7 +2,10 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -18,17 +21,27 @@ use ironclaw_events::{
     SecurityDecision,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
-    ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
-    ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    SandboxQuota, SecretHandle, Timestamp, VendorId,
+    Timestamp,
+    action::NetworkPolicy,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::{EffectKind, RuntimeCredentialAccountSetup},
+    decision::{Obligation, RuntimeCredentialAuthRequirement},
+    dispatch::{CapabilityDispatchResult, CredentialStageError},
+    http::RuntimeHttpEgress,
+    ids::{AuditEventId, CapabilityId, ExtensionId, ProcessId, SecretHandle, VendorId},
+    mount::MountView,
+    resource::{
+        ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        SandboxQuota,
+    },
 };
 use ironclaw_network::NetworkHttpEgress;
-use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStorePort};
-#[cfg(test)]
-use ironclaw_resources::ResourceLimits;
+use ironclaw_processes::{
+    ProcessError, ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalKind,
+    ProcessKind, ProcessRecord, ProcessRuntimePort, ProcessStart, ProcessSubmissionLifecycle,
+    capability_process_record, complete_capability_process, fail_capability_process,
+    process_record_from_snapshot, submit_capability_process,
+};
 use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
@@ -532,7 +545,7 @@ impl BuiltinObligationServices {
         inner: Arc<S>,
     ) -> ProcessObligationLifecycleStore
     where
-        S: ProcessStorePort + 'static,
+        S: ProcessRuntimePort + 'static,
     {
         ProcessObligationLifecycleStore::new(
             inner,
@@ -544,7 +557,7 @@ impl BuiltinObligationServices {
 
     pub fn process_obligation_lifecycle_store_dyn(
         &self,
-        inner: Arc<dyn ProcessStorePort>,
+        inner: Arc<dyn ProcessRuntimePort>,
     ) -> ProcessObligationLifecycleStore {
         ProcessObligationLifecycleStore::from_dyn(
             inner,
@@ -659,18 +672,19 @@ impl SecretStorePort for SharedSecretStore {
 }
 
 /// Process-store wrapper that owns spawn-phase obligation handoffs after
-/// `ProcessStorePort::start` succeeds.
+/// process submission succeeds.
 ///
 /// `CapabilityHost` aborts prepared effects when process start fails. Once
 /// start succeeds, this wrapper becomes responsible for discarding staged
 /// network/secret handoffs and reconciling or releasing a prepared resource
 /// reservation when the process reaches a terminal state.
 pub struct ProcessObligationLifecycleStore {
-    inner: Arc<dyn ProcessStorePort>,
+    processes: Arc<dyn ProcessRuntimePort>,
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
-    resource_governor: Arc<dyn ResourceGovernor>,
+    resource_governor: Mutex<Arc<dyn ResourceGovernor>>,
     event_sink: Mutex<Option<Arc<dyn EventSink>>>,
+    observer_registered: AtomicBool,
     active_process_handoffs: Mutex<HashMap<ProcessObligationHandoffKey, ProcessId>>,
     cleaned_process_handoffs: Mutex<HashSet<ProcessObligationProcessKey>>,
 }
@@ -683,9 +697,9 @@ impl ProcessObligationLifecycleStore {
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self
     where
-        S: ProcessStorePort + 'static,
+        S: ProcessRuntimePort + 'static,
     {
-        let inner: Arc<dyn ProcessStorePort> = inner;
+        let inner: Arc<dyn ProcessRuntimePort> = inner;
         Self::from_dyn(
             inner,
             network_policies,
@@ -695,20 +709,52 @@ impl ProcessObligationLifecycleStore {
     }
 
     pub(crate) fn from_dyn(
-        inner: Arc<dyn ProcessStorePort>,
+        processes: Arc<dyn ProcessRuntimePort>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self {
         Self {
-            inner,
+            processes,
             network_policies,
             secret_injections,
-            resource_governor,
+            resource_governor: Mutex::new(resource_governor),
             event_sink: Mutex::new(None),
+            observer_registered: AtomicBool::new(false),
             active_process_handoffs: Mutex::new(HashMap::new()),
             cleaned_process_handoffs: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub(crate) fn set_resource_governor(&self, resource_governor: Arc<dyn ResourceGovernor>) {
+        match self.resource_governor.lock() {
+            Ok(mut slot) => {
+                *slot = resource_governor;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "process resource governor registry unavailable");
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn register_journal_observer(
+        self: &Arc<Self>,
+        runtime: &dyn ProcessRuntimePort,
+    ) -> Result<(), String> {
+        if self
+            .observer_registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let observer: Arc<dyn ProcessJournalCommitObserver> = self.clone();
+        if let Err(error) = runtime.subscribe_process_observer(observer) {
+            self.observer_registered.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Attaches a best-effort event sink for process lifecycle transitions.
@@ -752,7 +798,9 @@ impl ProcessObligationLifecycleStore {
         process_id: ProcessId,
         reconcile: bool,
     ) -> Result<(), ProcessError> {
-        if let Some(record) = self.inner.get(scope, process_id).await? {
+        if let Some(record) =
+            capability_process_record(self.processes.as_ref(), scope, process_id).await?
+        {
             self.cleanup_record_obligations(&record, reconcile)?;
             self.release_active_process_handoff(&record)?;
             self.mark_process_handoff_cleaned(&record)?;
@@ -911,15 +959,105 @@ impl ProcessObligationLifecycleStore {
                 })?;
         }
         if let Some(reservation_id) = record.resource_reservation_id {
+            let governor =
+                self.resource_governor
+                    .lock()
+                    .map_err(|_| ProcessError::InvalidStoredRecord {
+                        reason: "process resource governor registry unavailable".to_string(),
+                    })?;
             if reconcile {
                 close_reservation_once(
-                    self.resource_governor
-                        .reconcile(reservation_id, ResourceUsage::default()),
+                    governor.reconcile(reservation_id, ResourceUsage::default()),
                 )?;
             } else {
-                close_reservation_once(self.resource_governor.release(reservation_id))?;
+                close_reservation_once(governor.release(reservation_id))?;
             }
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for ProcessObligationLifecycleStore {
+    fn process_observer_id(&self) -> &'static str {
+        "process-obligation-lifecycle-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.state.process_kind != ProcessKind::CapabilityInvocation {
+            return Ok(());
+        }
+        let record =
+            process_record_from_snapshot(commit.state).map_err(|error| error.to_string())?;
+        match commit.kind {
+            ProcessJournalKind::Completed => {
+                self.emit_process_event(RuntimeEvent::process_completed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                ))
+                .await;
+                self.cleanup_terminal(&record, true)
+                    .map_err(|error| error.to_string())?;
+            }
+            ProcessJournalKind::Failed => {
+                self.emit_process_event(RuntimeEvent::process_failed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                    record
+                        .error_kind
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ))
+                .await;
+                self.cleanup_terminal(&record, false)
+                    .map_err(|error| error.to_string())?;
+            }
+            ProcessJournalKind::Stopped
+            | ProcessJournalKind::Cancelled
+            | ProcessJournalKind::Killed
+            | ProcessJournalKind::RecoveryRequired => {
+                self.emit_process_event(RuntimeEvent::process_killed(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                ))
+                .await;
+                self.cleanup_terminal(&record, false)
+                    .map_err(|error| error.to_string())?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProcessSubmissionLifecycle for ProcessObligationLifecycleStore {
+    async fn before_submit(&self, start: &ProcessStart) -> Result<(), ProcessError> {
+        self.claim_active_process_handoff(start).map(|_| ())
+    }
+
+    async fn submit_failed(&self, start: &ProcessStart) -> Result<(), ProcessError> {
+        self.release_claimed_process_handoff(&start.scope, &start.capability_id, start.process_id)
+    }
+
+    async fn submitted(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
+        self.emit_process_event(RuntimeEvent::process_started(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
         Ok(())
     }
 }
@@ -976,14 +1114,17 @@ impl ProcessObligationProcessKey {
     }
 }
 
-#[async_trait]
-impl ProcessStorePort for ProcessObligationLifecycleStore {
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+impl ProcessObligationLifecycleStore {
+    pub fn process_runtime(&self) -> Arc<dyn ProcessRuntimePort> {
+        Arc::clone(&self.processes)
+    }
+
+    pub async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let claimed = self.claim_active_process_handoff(&start)?;
         let process_id = start.process_id;
         let scope = start.scope.clone();
         let capability_id = start.capability_id.clone();
-        match self.inner.start(start).await {
+        match submit_capability_process(self.processes.as_ref(), start).await {
             Ok(record) => {
                 self.emit_process_event(RuntimeEvent::process_started(
                     record.scope.clone(),
@@ -1004,78 +1145,73 @@ impl ProcessStorePort for ProcessObligationLifecycleStore {
         }
     }
 
-    async fn complete(
+    pub async fn complete(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.complete(scope, process_id).await?;
-        self.emit_process_event(RuntimeEvent::process_completed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-        ))
-        .await;
+        let record =
+            complete_capability_process(self.processes.as_ref(), scope, process_id).await?;
         self.cleanup_terminal(&record, true)?;
         Ok(record)
     }
 
-    async fn fail(
+    pub async fn fail(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.fail(scope, process_id, error_kind).await?;
-        self.emit_process_event(RuntimeEvent::process_failed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-            record
-                .error_kind
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        ))
-        .await;
+        let record =
+            fail_capability_process(self.processes.as_ref(), scope, process_id, error_kind).await?;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }
 
-    async fn kill(
+    pub async fn kill(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.kill(scope, process_id).await?;
-        self.emit_process_event(RuntimeEvent::process_killed(
-            record.scope.clone(),
-            record.capability_id.clone(),
-            record.extension_id.clone(),
-            record.runtime,
-            record.process_id,
-        ))
-        .await;
+        let result = self
+            .processes
+            .kill_process(ironclaw_processes::KillProcessRequest {
+                scope: scope.clone(),
+                process_id,
+                operation_id: None,
+                reason: None,
+            })
+            .await
+            .map_err(|error| ProcessError::InvalidStoredRecord {
+                reason: error.to_string(),
+            })?;
+        let record = process_record_from_snapshot(result.state)?;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }
 
-    async fn get(
+    pub async fn get(
         &self,
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
-        self.inner.get(scope, process_id).await
+        capability_process_record(self.processes.as_ref(), scope, process_id).await
     }
 
-    async fn records_for_scope(
+    pub async fn records_for_scope(
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
-        self.inner.records_for_scope(scope).await
+        self.processes
+            .process_snapshots(scope)
+            .await
+            .map_err(|error| ProcessError::InvalidStoredRecord {
+                reason: error.to_string(),
+            })?
+            .into_iter()
+            .filter(|snapshot| snapshot.process_kind == ProcessKind::CapabilityInvocation)
+            .map(process_record_from_snapshot)
+            .collect()
     }
 }
 
@@ -1088,32 +1224,9 @@ fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), Pro
     }
 }
 
-/// Lazily-registered per-(tenant, user) concurrency ceiling for the
-/// sandboxed profile's `SpawnProcess` reservations.
-///
-/// Users are not enumerable at boot (composition only knows the deployment
-/// owner then — see `ironclaw_reborn_composition::sandbox_quota::
-/// apply_sandbox_user_ceiling`'s tenant-wide boot ceiling), so this ceiling
-/// registers itself the first time each user actually dispatches a
-/// `SpawnProcess` capability, from [`BuiltinObligationHandler::
-/// reserve_resource_obligation`]. Registration is idempotent: a small
-/// in-process cache of already-registered `(tenant, user)` pairs avoids a
-/// wasted `ResourceGovernor::set_limit` call (backed by a filesystem write
-/// on `FilesystemResourceGovernor`) on every dispatch, and calling
-/// `set_limit` again for an already-registered pair is itself harmless
-/// (`set_limit_in_state` only touches the account's configured limit and
-/// usage ledger, never `reserved_by_account` — the map outstanding
-/// reservations live in — so it cannot disturb a reservation the same user
-/// already holds).
-///
-/// This is a SEPARATE ceiling from the tenant-wide one
-/// (`ResourceAccount::tenant`): both apply simultaneously via
-/// `ResourceAccount::cascade`, which checks every level that carries an
-/// explicit `set_limit`. Per-user = 1 gives serialization (at most one
-/// sandbox invocation in flight per user) and correct attribution; the
-/// tenant-wide ceiling still bounds total container fan-out across every
-/// user. Removing either reopens a hole the sibling ceiling's doc comment
-/// describes.
+/// Lazily installs the sandbox profile's per-(tenant, user) process
+/// concurrency ceiling. Registration preserves every pre-existing resource
+/// limit dimension and is idempotent for the lifetime of this service graph.
 pub struct SandboxPerUserCeiling {
     max_concurrent: u32,
     registered: Mutex<HashSet<(String, String)>>,
@@ -1127,16 +1240,6 @@ impl SandboxPerUserCeiling {
         }
     }
 
-    /// Registers `scope`'s `(tenant, user)` account with this ceiling's
-    /// `max_concurrent`, unless it was already registered by a prior
-    /// dispatch. Cheap on the common (already-registered) path: a single
-    /// lock + `HashSet` lookup, no governor call.
-    ///
-    /// Read-modify-write: this loads the account's current limits (if any)
-    /// and only overwrites `max_concurrency_slots`, so any other limit
-    /// dimension (spend, tokens, wall-clock, …) a different caller set on the
-    /// same account is preserved rather than reset to
-    /// `ResourceLimits::default()`.
     fn ensure_registered(
         &self,
         governor: &Arc<dyn ResourceGovernor>,
@@ -1146,11 +1249,13 @@ impl SandboxPerUserCeiling {
             scope.tenant_id.as_str().to_string(),
             scope.user_id.as_str().to_string(),
         );
+        if self
+            .registered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&key)
         {
-            let registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
-            if registered.contains(&key) {
-                return Ok(());
-            }
+            return Ok(());
         }
         let account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
         let existing_limits = governor
@@ -1161,8 +1266,10 @@ impl SandboxPerUserCeiling {
             account,
             existing_limits.set_max_concurrency_slots(self.max_concurrent),
         )?;
-        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
-        registered.insert(key);
+        self.registered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key);
         Ok(())
     }
 }
@@ -1259,13 +1366,6 @@ impl BuiltinObligationHandler {
         self
     }
 
-    /// Wires the lazy per-user sandbox concurrency ceiling (see
-    /// [`SandboxPerUserCeiling`]). Composition supplies this only when
-    /// building the sandboxed profile — every other profile leaves this
-    /// unset, so `reserve_resource_obligation` never registers a per-user
-    /// limit for non-sandbox `SpawnProcess` callers (e.g. the unsandboxed
-    /// local-dev `HostProcessPort`, which shares `EffectKind::SpawnProcess`
-    /// and therefore the same `ReserveResources` obligation).
     pub fn with_sandbox_per_user_ceiling(mut self, ceiling: Arc<SandboxPerUserCeiling>) -> Self {
         self.sandbox_per_user_ceiling = Some(ceiling);
         self
@@ -1500,11 +1600,6 @@ impl BuiltinObligationHandler {
         let Some(governor) = &self.resource_governor else {
             return Err(resource_obligation_failed());
         };
-        // Lazy per-user registration: bounds how many concurrent sandbox
-        // invocations a single user can hold at once, as a capacity /
-        // fair-share ceiling (see `SANDBOX_PER_USER_MAX_CONCURRENT` in
-        // `ironclaw_reborn_composition::sandbox_quota`). Only set on the
-        // sandboxed profile's handler — see `with_sandbox_per_user_ceiling`.
         if let Some(per_user_ceiling) = &self.sandbox_per_user_ceiling {
             per_user_ceiling
                 .ensure_registered(governor, &request.context.resource_scope)
@@ -2037,7 +2132,7 @@ fn network_policy_obligation(
 }
 
 fn scoped_mount_obligation(
-    context: &ironclaw_host_api::ExecutionContext,
+    context: &ironclaw_host_api::scope::ExecutionContext,
     obligations: &[Obligation],
 ) -> Result<Option<MountView>, CapabilityObligationError> {
     let mut mounts = None;
@@ -2452,9 +2547,15 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, CapabilitySet, CorrelationId, ExecutionContext,
-        ExtensionId, InvocationId, NetworkScheme, NetworkTargetPattern, ProjectId,
-        ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::CapabilitySet,
+        dispatch::CapabilityDisplayOutputPreview,
+        ids::{
+            AgentId, CorrelationId, ExtensionId, InvocationId, ProjectId, ResourceReservationId,
+            TenantId, UserId,
+        },
+        runtime::{RuntimeKind, TrustClass},
+        scope::ExecutionContext,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::SecretStore;
@@ -2594,292 +2695,6 @@ mod tests {
         );
     }
 
-    fn resource_scope_for(tenant: &str, user: &str) -> ResourceScope {
-        ResourceScope {
-            tenant_id: TenantId::new(tenant.to_string()).unwrap(),
-            user_id: UserId::new(user.to_string()).unwrap(),
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        }
-    }
-
-    fn execution_context_for_scope(resource_scope: ResourceScope) -> ExecutionContext {
-        ExecutionContext {
-            run_id: None,
-            origin: None,
-            invocation_id: resource_scope.invocation_id,
-            correlation_id: CorrelationId::new(),
-            process_id: None,
-            parent_process_id: None,
-            tenant_id: resource_scope.tenant_id.clone(),
-            user_id: resource_scope.user_id.clone(),
-            authenticated_actor_user_id: None,
-            agent_id: resource_scope.agent_id.clone(),
-            project_id: resource_scope.project_id.clone(),
-            mission_id: resource_scope.mission_id.clone(),
-            thread_id: resource_scope.thread_id.clone(),
-            extension_id: ExtensionId::new("caller").unwrap(),
-            runtime: RuntimeKind::Wasm,
-            trust: TrustClass::Sandbox,
-            grants: CapabilitySet::default(),
-            mounts: MountView::default(),
-            resource_scope,
-        }
-    }
-
-    fn reserve_resources_obligations() -> Vec<Obligation> {
-        vec![Obligation::ReserveResources {
-            reservation_id: ResourceReservationId::new(),
-        }]
-    }
-
-    async fn prepare_sandbox_spawn(
-        handler: &BuiltinObligationHandler,
-        context: &ExecutionContext,
-    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
-        let capability_id = capability_id();
-        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
-        let obligations = reserve_resources_obligations();
-        handler
-            .prepare(CapabilityObligationRequest {
-                phase: CapabilityObligationPhase::Spawn,
-                context,
-                capability_id: &capability_id,
-                estimate: &estimate,
-                obligations: &obligations,
-            })
-            .await
-    }
-
-    async fn release_sandbox_spawn(
-        handler: &BuiltinObligationHandler,
-        context: &ExecutionContext,
-        outcome: &CapabilityObligationOutcome,
-    ) {
-        let capability_id = capability_id();
-        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
-        let obligations = reserve_resources_obligations();
-        handler
-            .abort(CapabilityObligationAbortRequest {
-                phase: CapabilityObligationPhase::Spawn,
-                context,
-                capability_id: &capability_id,
-                estimate: &estimate,
-                obligations: &obligations,
-                outcome,
-            })
-            .await
-            .expect("releasing an outstanding sandbox reservation succeeds");
-    }
-
-    /// Requirement 1: a second concurrent sandbox reservation for the SAME
-    /// user is denied as a model-visible outcome
-    /// (`CapabilityObligationError::Failed { kind: Resource }`, never a host
-    /// panic/error) while the first is outstanding; once the first releases,
-    /// the next dispatch for that user succeeds.
-    #[tokio::test]
-    async fn sandbox_per_user_ceiling_denies_second_concurrent_reservation_for_same_user() {
-        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let handler = BuiltinObligationHandler::new()
-            .with_resource_governor_dyn(Arc::clone(&governor))
-            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
-        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
-
-        let first = prepare_sandbox_spawn(&handler, &context)
-            .await
-            .expect("first sandbox reservation for user1 is within the per-user ceiling of 1");
-
-        let second = prepare_sandbox_spawn(&handler, &context).await;
-        assert!(
-            matches!(
-                second,
-                Err(CapabilityObligationError::Failed {
-                    kind: CapabilityObligationFailureKind::Resource
-                })
-            ),
-            "a second concurrent sandbox reservation for the SAME user must be denied as a \
-             model-visible outcome while the first is outstanding, got {second:?}"
-        );
-
-        release_sandbox_spawn(&handler, &context, &first).await;
-
-        let third = prepare_sandbox_spawn(&handler, &context).await;
-        assert!(
-            third.is_ok(),
-            "once the first reservation releases, the next dispatch for the same user succeeds"
-        );
-    }
-
-    /// Requirement 2: a second concurrent reservation for a DIFFERENT user in
-    /// the same tenant still succeeds — per-user = 1 must not accidentally
-    /// serialize the whole tenant.
-    #[tokio::test]
-    async fn sandbox_per_user_ceiling_does_not_serialize_other_users_in_the_tenant() {
-        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let handler = BuiltinObligationHandler::new()
-            .with_resource_governor_dyn(Arc::clone(&governor))
-            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
-        let context_a = execution_context_for_scope(resource_scope_for("tenant1", "user-a"));
-        let context_b = execution_context_for_scope(resource_scope_for("tenant1", "user-b"));
-
-        let first = prepare_sandbox_spawn(&handler, &context_a)
-            .await
-            .expect("user-a's reservation is within its own per-user ceiling");
-
-        let second = prepare_sandbox_spawn(&handler, &context_b).await;
-        assert!(
-            second.is_ok(),
-            "a different user in the SAME tenant must not be blocked by user-a's per-user \
-             ceiling, got {second:?}"
-        );
-
-        release_sandbox_spawn(&handler, &context_a, &first).await;
-    }
-
-    /// Requirement 3: the tenant-wide ceiling still bites with the per-user
-    /// ceiling in place — exceeding it across DISTINCT users (each within
-    /// their own per-user=1 budget) is still denied. Mirrors
-    /// `ironclaw_reborn_composition::sandbox_quota`'s tenant-wide coverage,
-    /// asserted here through the same dispatcher this ceiling is wired into.
-    #[tokio::test]
-    async fn tenant_wide_ceiling_still_bites_alongside_the_per_user_ceiling() {
-        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let tenant_id = TenantId::new("tenant1".to_string()).unwrap();
-        governor
-            .set_limit(
-                ResourceAccount::tenant(tenant_id),
-                ResourceLimits::default().set_max_concurrency_slots(1),
-            )
-            .expect("setting the tenant-wide ceiling on an empty account succeeds");
-        let handler = BuiltinObligationHandler::new()
-            .with_resource_governor_dyn(Arc::clone(&governor))
-            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
-        let context_a = execution_context_for_scope(resource_scope_for("tenant1", "user-a"));
-        let context_b = execution_context_for_scope(resource_scope_for("tenant1", "user-b"));
-
-        let first = prepare_sandbox_spawn(&handler, &context_a)
-            .await
-            .expect("user-a's reservation is within both the per-user and tenant ceilings");
-
-        let second = prepare_sandbox_spawn(&handler, &context_b).await;
-        assert!(
-            matches!(
-                second,
-                Err(CapabilityObligationError::Failed {
-                    kind: CapabilityObligationFailureKind::Resource
-                })
-            ),
-            "a different user's reservation must still be denied by the tenant-wide ceiling \
-             even though it is within its OWN per-user budget, got {second:?}"
-        );
-
-        release_sandbox_spawn(&handler, &context_a, &first).await;
-    }
-
-    /// Requirement 4: registration is idempotent. Repeated dispatches for the
-    /// same user (e.g. a sequential spawn after the first released) do not
-    /// disturb an outstanding reservation the SAME user still holds at the
-    /// time a later dispatch re-registers the ceiling.
-    #[tokio::test]
-    async fn sandbox_per_user_ceiling_registration_is_idempotent() {
-        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let ceiling = Arc::new(SandboxPerUserCeiling::new(1));
-        let handler = BuiltinObligationHandler::new()
-            .with_resource_governor_dyn(Arc::clone(&governor))
-            .with_sandbox_per_user_ceiling(Arc::clone(&ceiling));
-        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
-
-        // First dispatch registers the ceiling and takes the sole slot.
-        let first = prepare_sandbox_spawn(&handler, &context)
-            .await
-            .expect("first dispatch registers the ceiling and succeeds");
-
-        // A second, unrelated obligation-handler call for the SAME user that
-        // does NOT reserve resources (e.g. a network-only capability) still
-        // runs `reserve_resource_obligation` with no `ReserveResources`
-        // obligation present, so it returns `Ok(None)` early and never
-        // touches the ceiling — registration only happens on an actual
-        // `ReserveResources` dispatch. Directly re-invoke the governor
-        // through the same ceiling instance to exercise the idempotent path
-        // without perturbing the outstanding reservation above.
-        ceiling
-            .ensure_registered(&governor, &context.resource_scope)
-            .expect("re-registering an already-registered account is a cheap no-op");
-
-        // The outstanding reservation from `first` must be untouched: a
-        // second concurrent dispatch for the same user is still denied.
-        let second = prepare_sandbox_spawn(&handler, &context).await;
-        assert!(
-            matches!(
-                second,
-                Err(CapabilityObligationError::Failed {
-                    kind: CapabilityObligationFailureKind::Resource
-                })
-            ),
-            "idempotent re-registration must not disturb the outstanding reservation, got {second:?}"
-        );
-
-        release_sandbox_spawn(&handler, &context, &first).await;
-    }
-
-    /// Regression: `ensure_registered` used to call
-    /// `governor.set_limit(account, ResourceLimits::default().set_max_concurrency_slots(n))`,
-    /// which writes a WHOLE fresh `ResourceLimits` and silently resets any
-    /// other limit dimension (spend, tokens, wall-clock, …) a different
-    /// caller previously set on the same account. Nothing sets user-level
-    /// limits in production today, so this was latent — but the fix must be
-    /// read-modify-write, not a fresh default, or the day something DOES set
-    /// a user-level spend limit, the first sandbox dispatch for that user
-    /// would silently erase it.
-    #[tokio::test]
-    async fn sandbox_per_user_ceiling_registration_preserves_unrelated_pre_existing_limit() {
-        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let account = ResourceAccount::user(
-            TenantId::new("tenant1".to_string()).unwrap(),
-            UserId::new("user1".to_string()).unwrap(),
-        );
-        let pre_existing_max_usd = rust_decimal::Decimal::from(5);
-        governor
-            .set_limit(
-                account.clone(),
-                ResourceLimits::default().set_max_usd(pre_existing_max_usd),
-            )
-            .expect("setting an unrelated pre-existing limit on the account succeeds");
-
-        let handler = BuiltinObligationHandler::new()
-            .with_resource_governor_dyn(Arc::clone(&governor))
-            .with_sandbox_per_user_ceiling(Arc::new(SandboxPerUserCeiling::new(1)));
-        let context = execution_context_for_scope(resource_scope_for("tenant1", "user1"));
-
-        let first = prepare_sandbox_spawn(&handler, &context)
-            .await
-            .expect("first sandbox reservation registers the per-user ceiling");
-
-        let snapshot = governor
-            .account_snapshot(&account)
-            .expect("reading the account snapshot succeeds")
-            .expect("the account has limits after ceiling registration");
-        let limits = snapshot
-            .limits
-            .expect("ceiling registration must have set limits on the account");
-        assert_eq!(
-            limits.max_usd,
-            Some(pre_existing_max_usd),
-            "ceiling registration must preserve an unrelated pre-existing limit dimension \
-             instead of resetting the whole ResourceLimits to default, got {limits:?}"
-        );
-        assert_eq!(
-            limits.max_concurrency_slots,
-            Some(1),
-            "ceiling registration must still set the per-user concurrency ceiling, got {limits:?}"
-        );
-
-        release_sandbox_spawn(&handler, &context, &first).await;
-    }
-
     // #5459 tenant-shared credential resolution: a caller's own secret wins;
     // otherwise the tenant-shared admin-managed scope; otherwise absent.
     #[tokio::test]
@@ -3002,7 +2817,10 @@ mod tests {
 
     #[tokio::test]
     async fn redact_output_clears_display_preview_side_channel() {
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -3057,7 +2875,10 @@ mod tests {
     #[tokio::test]
     async fn complete_dispatch_extracts_base64_document_into_text() {
         use base64::Engine as _;
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         // Drive the *caller* (`complete_dispatch`), not the helper: a dispatch
         // result carrying `content_base64` + `mime_type` must come back with the
@@ -3126,7 +2947,10 @@ mod tests {
         use ironclaw_events::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
         };
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         // Build a handler with both an audit sink (unused here — we hit the
         // redact branch, not the AuditAfter branch) and a recording
@@ -3233,7 +3057,10 @@ mod tests {
 
     #[tokio::test]
     async fn leak_detector_block_without_security_sink_does_not_panic() {
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),

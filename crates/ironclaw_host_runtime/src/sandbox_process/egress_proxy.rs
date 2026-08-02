@@ -24,7 +24,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::NetworkPolicy;
+use ironclaw_host_api::action::NetworkPolicy;
 use ironclaw_network::{
     host_matches_host_pattern, network_denies_any_resolved_ip, network_denies_resolved_ip,
 };
@@ -1058,7 +1058,7 @@ async fn handle_plain_http(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::NetworkTargetPattern;
+    use ironclaw_host_api::action::NetworkTargetPattern;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;

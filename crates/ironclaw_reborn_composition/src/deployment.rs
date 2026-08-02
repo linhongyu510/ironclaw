@@ -3,7 +3,7 @@
 //!
 //! Deployment modes are configuration data resolved at the composition edge;
 //! each deployment target is one [`DeploymentConfig`] value built by a
-//! named constructor; the difference between local-dev, local-dev-yolo, and
+//! named constructor; the difference between standalone, standalone-unrestricted, and
 //! the hosted volume preview is readable on this one page as data.
 //!
 //! Two deliberate boundaries:
@@ -16,23 +16,23 @@
 //!   `RebornStorageInput`. This value carries only the policy request.
 
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
+use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_reborn_event_store::RebornProfile;
 use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
-use ironclaw_turns::TurnStateStoreLimits;
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::input::RebornHostBindings;
 use crate::readiness::{
     RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
     RebornReadinessState,
 };
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 impl RebornReadinessDiagnostic {
     pub fn disabled() -> Self {
@@ -44,12 +44,12 @@ impl RebornReadinessDiagnostic {
         )
     }
 
-    pub fn local_dev() -> Self {
-        Self::dev_only_profile(RebornCompositionProfile::LocalDev)
+    pub fn standalone() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::Standalone)
     }
 
-    pub fn local_dev_yolo() -> Self {
-        Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
+    pub fn standalone_unrestricted() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::StandaloneUnrestricted)
     }
 
     pub fn hosted_single_tenant_volume() -> Self {
@@ -61,26 +61,21 @@ impl RebornReadinessDiagnostic {
         )
     }
 
-    pub fn hosted_single_tenant() -> Self {
-        Self::composition_profile(
-            RebornCompositionProfile::HostedSingleTenant,
-            RebornReadinessDiagnosticReason::Unverified,
-            RebornReadinessDiagnosticStatus::Info,
-            false,
-        )
-    }
-
-    /// The sandboxed-shell variant of the hosted volume preview: process
-    /// execution routes to a per-tenant Docker sandbox (`TenantSandbox`)
-    /// instead of staying disabled, so it carries its own preview reason
-    /// rather than reusing [`RebornReadinessDiagnostic::hosted_single_tenant_volume`].
-    /// Boots fail-closed until the sandbox transport is wired (A2).
     pub fn hosted_single_tenant_volume_sandboxed() -> Self {
         Self::composition_profile(
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
             RebornReadinessDiagnosticReason::HostedSingleTenantVolumeSandboxedPreview,
             RebornReadinessDiagnosticStatus::Warning,
             true,
+        )
+    }
+
+    pub fn hosted_single_tenant() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessDiagnosticReason::Unverified,
+            RebornReadinessDiagnosticStatus::Info,
+            false,
         )
     }
 
@@ -108,7 +103,7 @@ pub enum RuntimeSubstrate {
 
 /// Which storage handle shape a deployment is assembled from.
 ///
-/// Replaces the `uses_local_dev_storage_input` predicate *and* the
+/// Replaces the `uses_local_filesystem_storage` predicate *and* the
 /// `profile == HostedSingleTenant` pairing checks that guarded
 /// `RebornStorageInput` variants: the question "does this deployment take a
 /// filesystem root, a hosted single-tenant pool, or an operator-supplied
@@ -117,8 +112,8 @@ pub enum RuntimeSubstrate {
 pub enum StorageShape {
     /// No storage is assembled.
     None,
-    /// A local filesystem root (`RebornStorageInput::LocalDev`).
-    LocalDevRoot,
+    /// A local filesystem root (`RebornStorageInput::LocalFilesystem`).
+    LocalFilesystemRoot,
     /// A hosted single-tenant PostgreSQL pool plus a workspace root.
     HostedSingleTenantPool,
     /// An operator-supplied durable store (libSQL or PostgreSQL).
@@ -251,7 +246,7 @@ pub struct DeploymentConfig {
     /// as a separate build-input field. Defaulted empty by every profile
     /// preset; populated by the assembling caller via
     /// [`DeploymentConfig::with_required_runtime_backends`].
-    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::runtime::RuntimeKind>,
     /// Whether the build must provision runtime HTTP egress. Declarative
     /// deployment requirement; defaulted `false` by every preset.
     pub(crate) require_runtime_http_egress: bool,
@@ -272,12 +267,12 @@ pub struct DeploymentConfig {
     /// is not known at preset-construction time); the profile→bindings bridge
     /// installs the accurate value.
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
-    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
+    pub(crate) process_concurrency_limits: ProcessConcurrencyLimits,
     pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
-    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(crate) account_setup_descriptors: Vec<ExtensionAccountSetupDescriptor>,
     pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 
@@ -293,7 +288,7 @@ impl DeploymentConfig {
                 state: RebornReadinessState::Disabled,
                 diagnostics: vec![RebornReadinessDiagnostic::disabled()],
             },
-            event_store_profile: RebornProfile::LocalDev,
+            event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::None,
             required_runtime_backends: Vec::new(),
@@ -302,7 +297,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -311,13 +306,13 @@ impl DeploymentConfig {
         }
     }
 
-    /// Standalone local development on a single-user machine.
-    pub fn local_dev() -> Self {
+    /// Standalone deployment on a single-user machine.
+    pub fn standalone() -> Self {
         Self {
-            profile: RebornCompositionProfile::LocalDev,
+            profile: RebornCompositionProfile::Standalone,
             policy_request: Some(RuntimePolicyRequest {
                 deployment: DeploymentMode::LocalSingleUser,
-                requested_profile: RuntimeProfile::LocalDev,
+                requested_profile: RuntimeProfile::LocalHost,
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
@@ -328,18 +323,18 @@ impl DeploymentConfig {
             },
             readiness: ReadinessContract {
                 state: RebornReadinessState::DevOnly,
-                diagnostics: vec![RebornReadinessDiagnostic::local_dev()],
+                diagnostics: vec![RebornReadinessDiagnostic::standalone()],
             },
-            event_store_profile: RebornProfile::LocalDev,
+            event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: false,
-            storage_shape: StorageShape::LocalDevRoot,
+            storage_shape: StorageShape::LocalFilesystemRoot,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -348,12 +343,12 @@ impl DeploymentConfig {
         }
     }
 
-    /// Trusted-laptop local development with minimal approvals. Requires the
+    /// Trusted-laptop deployment with minimal approvals. Requires the
     /// operator's explicit host-access confirmation; without it the resolver
     /// fails closed with [`ResolveError::YoloRequiresDisclosure`].
-    pub fn local_dev_yolo(confirm_host_access: bool) -> Self {
+    pub fn standalone_unrestricted(confirm_host_access: bool) -> Self {
         Self {
-            profile: RebornCompositionProfile::LocalDevYolo,
+            profile: RebornCompositionProfile::StandaloneUnrestricted,
             policy_request: Some(RuntimePolicyRequest {
                 deployment: DeploymentMode::LocalSingleUser,
                 requested_profile: RuntimeProfile::LocalYolo,
@@ -362,9 +357,9 @@ impl DeploymentConfig {
             }),
             readiness: ReadinessContract {
                 state: RebornReadinessState::DevOnly,
-                diagnostics: vec![RebornReadinessDiagnostic::local_dev_yolo()],
+                diagnostics: vec![RebornReadinessDiagnostic::standalone_unrestricted()],
             },
-            ..Self::local_dev()
+            ..Self::standalone()
         }
     }
 
@@ -375,7 +370,7 @@ impl DeploymentConfig {
             profile: RebornCompositionProfile::HostedSingleTenant,
             policy_request: Some(RuntimePolicyRequest {
                 deployment: DeploymentMode::LocalSingleUser,
-                requested_profile: RuntimeProfile::LocalDev,
+                requested_profile: RuntimeProfile::LocalHost,
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
@@ -388,7 +383,7 @@ impl DeploymentConfig {
                 state: RebornReadinessState::HostedSingleTenantValidated,
                 diagnostics: vec![RebornReadinessDiagnostic::hosted_single_tenant()],
             },
-            event_store_profile: RebornProfile::LocalDev,
+            event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: true,
             storage_shape: StorageShape::HostedSingleTenantPool,
             required_runtime_backends: Vec::new(),
@@ -397,7 +392,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -428,22 +423,14 @@ impl DeploymentConfig {
                 diagnostics: vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
             },
             hosted_extension_installation_state: true,
-            storage_shape: StorageShape::LocalDevRoot,
+            storage_shape: StorageShape::LocalFilesystemRoot,
             ..Self::hosted_single_tenant()
         }
     }
 
-    /// Single-tenant hosted preview identical to
-    /// [`DeploymentConfig::hosted_single_tenant_volume`] except process
-    /// execution routes to a per-tenant Docker sandbox instead of staying
-    /// disabled: requests the existing `(HostedMultiTenant, HostedSafe)`
-    /// resolver row (`ironclaw_runtime_policy::resolver` — filesystem
-    /// `TenantWorkspace`, process `TenantSandbox`) rather than adding a new
-    /// resolver row or `RuntimeProfile` variant. Boots fail-closed
-    /// (`RebornRuntimeProcessBinding::validate_for_production_policy` rejects
-    /// `TenantSandbox` paired with no bound process port) until the sandbox
-    /// transport is wired into a production call site (a later slice) — the
-    /// same "existing guard, new caller" shape as the filesystem side.
+    /// Hosted single-tenant volume with tenant-scoped process execution.
+    /// Filesystem, networking, and secrets remain host-mediated; only the
+    /// process backend changes to the resolver-owned hosted sandbox profile.
     pub fn hosted_single_tenant_volume_sandboxed() -> Self {
         Self {
             profile: RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
@@ -464,9 +451,7 @@ impl DeploymentConfig {
                     RebornReadinessDiagnostic::hosted_single_tenant_volume_sandboxed(),
                 ],
             },
-            hosted_extension_installation_state: true,
-            storage_shape: StorageShape::LocalDevRoot,
-            ..Self::hosted_single_tenant()
+            ..Self::hosted_single_tenant_volume()
         }
     }
 
@@ -494,7 +479,7 @@ impl DeploymentConfig {
             owner_id: String::new(),
             local_runtime_identity: None,
             runtime_policy: None,
-            turn_state_store_limits: TurnStateStoreLimits::default(),
+            process_concurrency_limits: ProcessConcurrencyLimits::default(),
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
@@ -526,8 +511,10 @@ impl DeploymentConfig {
     pub fn for_profile(profile: RebornCompositionProfile, confirm_host_access: bool) -> Self {
         match profile {
             RebornCompositionProfile::Disabled => Self::disabled(),
-            RebornCompositionProfile::LocalDev => Self::local_dev(),
-            RebornCompositionProfile::LocalDevYolo => Self::local_dev_yolo(confirm_host_access),
+            RebornCompositionProfile::Standalone => Self::standalone(),
+            RebornCompositionProfile::StandaloneUnrestricted => {
+                Self::standalone_unrestricted(confirm_host_access)
+            }
             RebornCompositionProfile::HostedSingleTenant => Self::hosted_single_tenant(),
             RebornCompositionProfile::HostedSingleTenantVolume => {
                 Self::hosted_single_tenant_volume()
@@ -576,8 +563,8 @@ impl DeploymentConfig {
         self.storage_shape == StorageShape::OperatorSupplied
     }
 
-    pub(crate) fn uses_local_dev_storage_input(&self) -> bool {
-        self.storage_shape == StorageShape::LocalDevRoot
+    pub(crate) fn uses_local_filesystem_storage(&self) -> bool {
+        self.storage_shape == StorageShape::LocalFilesystemRoot
     }
 
     /// Resolve this deployment's runtime-policy request through the sanctioned
@@ -610,22 +597,6 @@ pub enum RebornRuntimeProfileError {
     Policy(#[from] ResolveError),
     #[error("profile={profile} carries no runtime-policy request to resolve")]
     MissingPolicyRequest { profile: RebornCompositionProfile },
-    /// The libsql-volume-shaped hosted profiles
-    /// (`hosted-single-tenant-volume`, `-sandboxed`) serve real tenant data
-    /// off the operator's own machine, so — unlike `local-dev`/`local-dev-yolo`
-    /// — they must never fall back to the single-user dotfile/keychain
-    /// secrets-master-key chain. Boot fails closed instead of silently
-    /// generating/reading `.reborn-local-dev-secrets-master-key`.
-    #[error(
-        "profile requires a hosted-shaped secrets master key: {env_name} must be set (it must \
-         never fall back to the single-user local-dev dotfile/keychain chain)"
-    )]
-    MissingSecretMasterKeyEnv { env_name: String },
-    /// `{env_name}` was set but the value is unusable (empty, or fails
-    /// `validate_resolved_master_key`'s format check) — named-source error
-    /// from the shared validator, not an opaque `SecretsCrypto` failure.
-    #[error("hosted secrets master key is invalid: {0}")]
-    InvalidSecretMasterKey(RebornBuildError),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -641,11 +612,11 @@ pub(crate) fn deployment_config_for_profile(
     options: RebornRuntimeProfileOptions,
 ) -> Result<DeploymentConfig, RebornRuntimeProfileError> {
     let config = DeploymentConfig::for_profile(profile, options.confirm_host_access);
-    // This module builds the *local-dev storage input* shape (a filesystem
-    // root). Deployments that take an operator-supplied pool or assemble no
+    // This module builds the local-filesystem storage input shape. Deployments
+    // that take an operator-supplied pool or assemble no
     // runtime are not its business — expressed as the config axis rather than
     // a second list of profile names.
-    if !config.uses_local_dev_storage_input() {
+    if !config.uses_local_filesystem_storage() {
         return Err(RebornRuntimeProfileError::UnsupportedProfile { profile });
     }
     Ok(config)
@@ -677,9 +648,6 @@ pub fn local_runtime_build_input_with_options(
     if profile == RebornCompositionProfile::HostedSingleTenantVolume {
         return hosted_single_tenant_volume_build_input(owner_id, root);
     }
-    if profile == RebornCompositionProfile::HostedSingleTenantVolumeSandboxed {
-        return hosted_single_tenant_volume_sandboxed_build_input(owner_id, root);
-    }
 
     // Build the deployment once, here, where the operator's host-access
     // confirmation is known, and carry it on the input rather than letting
@@ -689,61 +657,9 @@ pub fn local_runtime_build_input_with_options(
         .resolve()?
         .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })?;
     Ok(
-        RebornHostBindings::local_dev_from_deployment(deployment, owner_id, root)
+        RebornHostBindings::local_filesystem_from_deployment(deployment, owner_id, root)
             .with_runtime_policy(policy),
     )
-}
-
-/// Resolve and validate the externally-supplied secrets master key required
-/// to boot a libsql-volume-shaped hosted profile
-/// (`hosted-single-tenant-volume`/`-sandboxed`). These profiles serve real
-/// tenant data outside the operator's own machine, so — unlike
-/// `local-dev`/`local-dev-yolo` — they must never fall back to the
-/// single-user local-dev key sources (dotfile, OS keychain); an unset env
-/// var fails closed instead of silently generating/persisting
-/// `.reborn-local-dev-secrets-master-key`. Reuses
-/// `validate_resolved_master_key` so a malformed key gets the same
-/// fail-loud, source-named error as the local-dev resolver, rather than
-/// surfacing as an opaque `SecretsCrypto` error later.
-///
-/// Takes the raw env value as a parameter instead of reading
-/// `std::env::var` inline so tests can drive both branches without
-/// mutating process-global env: this crate is `#![forbid(unsafe_code)]`,
-/// which blocks `std::env::set_var` in-process. Mirrors the established
-/// `resolve_local_dev_secret_master_key_with_env` pattern in `factory.rs`.
-fn hosted_volume_secret_master_key_from_raw(
-    env_name: &'static str,
-    raw_env_value: Option<String>,
-) -> Result<ironclaw_secrets::SecretMaterial, RebornRuntimeProfileError> {
-    let Some(raw) = raw_env_value else {
-        return Err(RebornRuntimeProfileError::MissingSecretMasterKeyEnv {
-            env_name: env_name.to_string(),
-        });
-    };
-    if raw.is_empty() {
-        return Err(RebornRuntimeProfileError::InvalidSecretMasterKey(
-            RebornBuildError::InvalidConfig {
-                reason: format!("{env_name} must not be empty"),
-            },
-        ));
-    }
-    crate::factory::validate_resolved_master_key(
-        &raw,
-        &crate::factory::MasterKeySource::EnvNamed(env_name),
-    )
-    .map_err(RebornRuntimeProfileError::InvalidSecretMasterKey)?;
-    Ok(ironclaw_secrets::SecretMaterial::from(raw))
-}
-
-/// Production entry point: resolves [`hosted_volume_secret_master_key_from_raw`]
-/// against the real `IRONCLAW_REBORN_SECRET_MASTER_KEY` env var — the same
-/// name/constant the Postgres production path defaults to
-/// (`input::DEFAULT_REBORN_SECRET_MASTER_KEY_ENV`), though unlike that path
-/// this profile has no `config.toml` override for the env var name.
-fn hosted_volume_secret_master_key()
--> Result<ironclaw_secrets::SecretMaterial, RebornRuntimeProfileError> {
-    let env_name = crate::input::DEFAULT_REBORN_SECRET_MASTER_KEY_ENV;
-    hosted_volume_secret_master_key_from_raw(env_name, std::env::var(env_name).ok())
 }
 
 /// Build the hosted single-tenant volume substrate input with the matching
@@ -754,76 +670,25 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    let secret_master_key = hosted_volume_secret_master_key()?;
-    Ok(RebornHostBindings::local_dev_from_deployment(
+    Ok(RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
         owner_id,
         root,
     )
-    .with_runtime_policy(policy)
-    .with_local_dev_secret_master_key(secret_master_key))
+    .with_runtime_policy(policy))
 }
 
-/// Build the hosted single-tenant volume-sandboxed substrate input with the
-/// matching `(HostedMultiTenant, HostedSafe)` runtime policy. Mirrors
-/// [`hosted_single_tenant_volume_build_input`] exactly (this profile is
-/// meaningless without durable persistent-volume storage): same local-dev
-/// storage-input shape, same hardened secrets-master-key requirement. The
-/// only difference is the resolved policy's process backend (`TenantSandbox`
-/// instead of `None`), which is why it boots fail-closed until a production
-/// call site binds a tenant sandbox process port (later slice).
-pub(crate) fn hosted_single_tenant_volume_sandboxed_build_input(
+/// Test-support constructor for a local-filesystem build input.
+///
+/// The deployment profile remains configuration data; the bindings constructor
+/// describes only the concrete filesystem substrate it receives.
+#[cfg(any(test, feature = "test-support"))]
+pub fn local_filesystem_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
-    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
-        .map_err(RebornRuntimeProfileError::Policy)?;
-    let secret_master_key = hosted_volume_secret_master_key()?;
-    Ok(RebornHostBindings::local_dev_from_deployment(
-        DeploymentConfig::for_profile(
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
-            false,
-        ),
-        owner_id,
-        root,
-    )
-    .with_runtime_policy(policy)
-    .with_local_dev_secret_master_key(secret_master_key))
-}
-
-/// Resolved policy for the hosted single-tenant volume-sandboxed profile.
-///
-/// Requests the **existing** `(HostedMultiTenant, HostedSafe)` resolver row
-/// (`ironclaw_runtime_policy::resolver` — filesystem `TenantWorkspace`,
-/// process `TenantSandbox`, network `Brokered`, secrets `TenantBroker`,
-/// approvals `AskWrites`) rather than adding a new resolver row or
-/// `RuntimeProfile` variant.
-pub fn hosted_single_tenant_volume_sandboxed_runtime_policy()
--> Result<EffectiveRuntimePolicy, ResolveError> {
-    // Always carries a policy request, so `None` is unreachable in practice;
-    // it maps to the resolver's own fail-closed shape rather than being
-    // unwrapped (mirrors `hosted_single_tenant_volume_runtime_policy`).
-    DeploymentConfig::hosted_single_tenant_volume_sandboxed()
-        .resolve()
-        .and_then(|policy| {
-            policy.ok_or(ResolveError::IncompatibleDeployment {
-                deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
-                profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
-            })
-        })
-}
-
-/// Test-support constructor for a local-dev-shaped build input.
-///
-/// Replaces the removed `RebornHostBindings::local_dev` associated
-/// constructor: a local-dev deployment is *data* (`DeploymentConfig::local_dev`)
-/// plus generic bindings, not a bindings-typed constructor. Behaviour is
-/// identical to the former method — it builds the local-dev deployment and
-/// resolves its runtime policy through `local_dev_from_deployment`.
-#[cfg(any(test, feature = "test-support"))]
-pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> RebornHostBindings {
-    let bindings = RebornHostBindings::local_dev_from_deployment(
-        DeploymentConfig::local_dev(),
+) -> RebornHostBindings {
+    let bindings = RebornHostBindings::local_filesystem_from_deployment(
+        DeploymentConfig::standalone(),
         owner_id,
         root,
     );
@@ -839,35 +704,34 @@ pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> Rebo
     bindings
 }
 
-/// Test-support constructor for a local-dev-shaped build input on a specific
-/// profile (e.g. `LocalDevYolo`, `HostedSingleTenantVolume`). Replaces the
-/// removed `RebornHostBindings::local_dev_with_profile` associated constructor.
+/// Test-support constructor for a local-filesystem build input on a specific
+/// configured profile.
 #[cfg(any(test, feature = "test-support"))]
-pub fn local_dev_build_input_with_profile(
+pub fn local_filesystem_build_input_with_profile(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> RebornHostBindings {
-    let bindings = RebornHostBindings::local_dev_from_deployment(
+    let bindings = RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(profile, false),
         owner_id,
         root,
     );
-    // See `local_dev_build_input`: inject the production first-party surface for
+    // See `local_filesystem_build_input`: inject the production first-party surface for
     // composition's own unit tests (dev-dependency), absent in `test-support`.
     #[cfg(test)]
     let bindings = bindings.with_bundled_first_party_for_test();
     bindings
 }
 
-/// Resolved policy for the standalone local development runtime profile.
-pub fn local_dev_runtime_policy() -> Result<EffectiveRuntimePolicy, ResolveError> {
-    local_runtime_policy_for_local_dev_shape("local-dev")
+/// Resolved policy for the standalone runtime profile.
+pub fn standalone_runtime_policy() -> Result<EffectiveRuntimePolicy, ResolveError> {
+    local_host_runtime_policy_for_profile_label("local-dev")
 }
 
 /// Resolved policy for the hosted single-tenant local product surface.
 pub fn hosted_single_tenant_runtime_policy() -> Result<EffectiveRuntimePolicy, ResolveError> {
-    local_runtime_policy_for_local_dev_shape("hosted-single-tenant")
+    local_host_runtime_policy_for_profile_label("hosted-single-tenant")
 }
 
 /// Resolved policy for a hosted single-tenant preview backed by the local
@@ -889,13 +753,26 @@ pub fn hosted_single_tenant_volume_runtime_policy() -> Result<EffectiveRuntimePo
         })
 }
 
-/// Resolved policy for trusted single-user local development with inherited
+/// Resolved tenant-sandbox policy for the sandboxed hosted volume profile.
+pub fn hosted_single_tenant_volume_sandboxed_runtime_policy()
+-> Result<EffectiveRuntimePolicy, ResolveError> {
+    DeploymentConfig::hosted_single_tenant_volume_sandboxed()
+        .resolve()
+        .and_then(|policy| {
+            policy.ok_or(ResolveError::IncompatibleDeployment {
+                deployment: DeploymentMode::HostedMultiTenant,
+                profile: RuntimeProfile::HostedSafe,
+            })
+        })
+}
+
+/// Resolved policy for trusted single-user deployment with inherited
 /// host environment access.
-pub fn local_dev_yolo_runtime_policy(
+pub fn standalone_unrestricted_runtime_policy(
     confirm_host_access: bool,
 ) -> Result<EffectiveRuntimePolicy, ResolveError> {
     local_runtime_policy(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         RebornRuntimeProfileOptions {
             confirm_host_access,
         },
@@ -903,14 +780,10 @@ pub fn local_dev_yolo_runtime_policy(
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("local-dev-yolo is a local runtime profile")
+            unreachable!("standalone-unrestricted is a local runtime profile") // safety: the fixed profile is mapped to a local deployment configuration.
         }
         RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
-            unreachable!("local-dev-yolo carries a runtime-policy request")
-        }
-        RebornRuntimeProfileError::MissingSecretMasterKeyEnv { .. }
-        | RebornRuntimeProfileError::InvalidSecretMasterKey(_) => {
-            unreachable!("local-dev-yolo does not resolve a hosted secrets master key")
+            unreachable!("standalone-unrestricted carries a runtime-policy request") // safety: the fixed profile always constructs a runtime-policy request.
         }
     })
 }
@@ -924,26 +797,20 @@ fn local_runtime_policy(
         .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })
 }
 
-fn local_runtime_policy_for_local_dev_shape(
+fn local_host_runtime_policy_for_profile_label(
     profile_name: &'static str,
 ) -> Result<EffectiveRuntimePolicy, ResolveError> {
     local_runtime_policy(
-        RebornCompositionProfile::LocalDev,
+        RebornCompositionProfile::Standalone,
         RebornRuntimeProfileOptions::default(),
     )
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("{profile_name} uses the local-dev runtime policy shape")
+            unreachable!("{profile_name} uses the local-host runtime policy shape") // safety: callers pass fixed labels for the standalone local-host profile.
         }
         RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
-            unreachable!("{profile_name} carries a runtime-policy request")
-        }
-        RebornRuntimeProfileError::MissingSecretMasterKeyEnv { .. }
-        | RebornRuntimeProfileError::InvalidSecretMasterKey(_) => {
-            unreachable!(
-                "{profile_name} does not resolve a hosted secrets master key in policy resolution"
-            )
+            unreachable!("{profile_name} carries a runtime-policy request") // safety: callers pass fixed labels whose deployment configs always carry a policy request.
         }
     })
 }
@@ -968,11 +835,10 @@ mod tests {
         // cover every variant so nothing downstream needs its own.
         for profile in [
             RebornCompositionProfile::Disabled,
-            RebornCompositionProfile::LocalDev,
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::Standalone,
+            RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
             RebornCompositionProfile::Production,
             RebornCompositionProfile::MigrationDryRun,
         ] {
@@ -997,12 +863,12 @@ mod tests {
                 false,
             ),
             (
-                RebornCompositionProfile::LocalDev,
+                RebornCompositionProfile::Standalone,
                 RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
-                RebornCompositionProfile::LocalDevYolo,
+                RebornCompositionProfile::StandaloneUnrestricted,
                 RuntimeSubstrate::ProductionShaped,
                 true,
             ),
@@ -1013,11 +879,6 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::HostedSingleTenantVolume,
-                RuntimeSubstrate::ProductionShaped,
-                true,
-            ),
-            (
-                RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
                 RuntimeSubstrate::ProductionShaped,
                 true,
             ),
@@ -1042,8 +903,8 @@ mod tests {
             );
             assert_eq!(profile.starts_live_runtime(), starts_live);
             assert_eq!(
-                profile.uses_local_dev_storage_input(),
-                config.uses_local_dev_storage_input()
+                profile.uses_local_filesystem_storage(),
+                config.uses_local_filesystem_storage()
             );
             assert_eq!(
                 profile.uses_hosted_extension_installation_state(),
@@ -1063,11 +924,10 @@ mod tests {
         // the two independently, the deployment could never start — so the
         // invariant is pinned here rather than discovered at boot.
         for profile in [
-            RebornCompositionProfile::LocalDev,
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::Standalone,
+            RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
             RebornCompositionProfile::Production,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
@@ -1096,11 +956,10 @@ mod tests {
             }
         );
         for profile in [
-            RebornCompositionProfile::LocalDev,
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::Standalone,
+            RebornCompositionProfile::StandaloneUnrestricted,
             RebornCompositionProfile::HostedSingleTenant,
             RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
         ] {
             let config = DeploymentConfig::for_profile(profile, true);
             assert!(
@@ -1164,25 +1023,25 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_resolves_to_local_host_policy() {
-        let policy = resolved(DeploymentConfig::local_dev());
+    fn standalone_resolves_to_local_host_policy() {
+        let policy = resolved(DeploymentConfig::standalone());
         assert_eq!(policy.deployment, DeploymentMode::LocalSingleUser);
-        assert_eq!(policy.resolved_profile, RuntimeProfile::LocalDev);
+        assert_eq!(policy.resolved_profile, RuntimeProfile::LocalHost);
         assert_eq!(policy.process_backend, ProcessBackendKind::LocalHost);
         assert_eq!(policy.approval_policy, ApprovalPolicy::AskDestructive);
     }
 
     #[test]
-    fn local_dev_yolo_without_disclosure_fails_closed() {
-        let error = DeploymentConfig::local_dev_yolo(false)
+    fn standalone_yolo_without_disclosure_fails_closed() {
+        let error = DeploymentConfig::standalone_unrestricted(false)
             .resolve()
             .expect_err("yolo without disclosure must fail");
         assert!(matches!(error, ResolveError::YoloRequiresDisclosure { .. }));
     }
 
     #[test]
-    fn local_dev_yolo_with_disclosure_resolves_minimal_approvals() {
-        let policy = resolved(DeploymentConfig::local_dev_yolo(true));
+    fn standalone_yolo_with_disclosure_resolves_minimal_approvals() {
+        let policy = resolved(DeploymentConfig::standalone_unrestricted(true));
         assert_eq!(policy.resolved_profile, RuntimeProfile::LocalYolo);
         assert_eq!(policy.approval_policy, ApprovalPolicy::Minimal);
     }
@@ -1197,30 +1056,17 @@ mod tests {
     }
 
     #[test]
-    fn hosted_single_tenant_volume_sandboxed_requests_the_existing_hosted_safe_row() {
-        let policy = resolved(DeploymentConfig::hosted_single_tenant_volume_sandboxed());
-        assert_eq!(policy.deployment, DeploymentMode::HostedMultiTenant);
-        assert_eq!(policy.resolved_profile, RuntimeProfile::HostedSafe);
-        assert_eq!(policy.process_backend, ProcessBackendKind::TenantSandbox);
-        assert_eq!(
-            policy.filesystem_backend,
-            ironclaw_host_api::runtime_policy::FilesystemBackendKind::TenantWorkspace
-        );
-        assert_eq!(policy.approval_policy, ApprovalPolicy::AskWrites);
-    }
-
-    #[test]
     fn deployment_targets_differ_only_as_data() {
         // The whole local/hosted diff is field values on one struct — the
         // §4.4 claim this module exists to make true. `DeploymentConfig` is no
         // longer `PartialEq` (it now carries non-`Eq` secret/config DATA), so
         // compare the observable axes the claim is actually about.
-        let local = DeploymentConfig::local_dev();
+        let local = DeploymentConfig::standalone();
         let hosted = DeploymentConfig::hosted_single_tenant_volume();
         assert_ne!(local.readiness().state, hosted.readiness().state);
         assert_eq!(
-            DeploymentConfig::local_dev().readiness().state,
-            DeploymentConfig::local_dev().readiness().state
+            DeploymentConfig::standalone().readiness().state,
+            DeploymentConfig::standalone().readiness().state
         );
     }
 }
@@ -1241,25 +1087,25 @@ mod local_runtime_profile_tests {
         // input must carry the config built *here* instead.
         let dir = std::env::temp_dir().join("reborn-yolo-disclosure-test");
         let input = local_runtime_build_input_with_options(
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::StandaloneUnrestricted,
             "yolo-owner",
             dir,
             RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },
         )
-        .expect("confirmed local-dev-yolo builds");
+        .expect("confirmed standalone-unrestricted builds");
 
         assert_eq!(
             input.profile(),
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::StandaloneUnrestricted,
             "the carried deployment must keep the requested profile label"
         );
         let carried = input
             .deployment()
             .resolve()
             .expect("carried deployment resolves")
-            .expect("local-dev-yolo makes a policy request");
+            .expect("standalone-unrestricted makes a policy request");
         assert_eq!(
             carried.resolved_profile,
             RuntimeProfile::LocalYolo,
@@ -1272,7 +1118,7 @@ mod local_runtime_profile_tests {
     fn unconfirmed_yolo_fails_closed_before_an_input_is_built() {
         let dir = std::env::temp_dir().join("reborn-yolo-unconfirmed-test");
         let error = local_runtime_build_input_with_options(
-            RebornCompositionProfile::LocalDevYolo,
+            RebornCompositionProfile::StandaloneUnrestricted,
             "yolo-owner",
             dir,
             RebornRuntimeProfileOptions {
@@ -1289,8 +1135,8 @@ mod local_runtime_profile_tests {
     }
 
     #[test]
-    fn deployments_without_the_local_dev_storage_shape_are_rejected() {
-        // The helper builds the local-dev storage input shape; the rejection is
+    fn deployments_without_the_standalone_storage_shape_are_rejected() {
+        // The helper builds the standalone storage input shape; the rejection is
         // expressed as the storage-shape axis, not a list of profile names.
         for profile in [
             RebornCompositionProfile::Disabled,
@@ -1304,218 +1150,11 @@ mod local_runtime_profile_tests {
                     confirm_host_access: true,
                 },
             )
-            .expect_err("non-local-dev-storage deployments are not this helper's business");
+            .expect_err("non-standalone-storage deployments are not this helper's business");
             assert!(matches!(
                 error,
                 RebornRuntimeProfileError::UnsupportedProfile { .. }
             ));
         }
-    }
-}
-
-/// Regression coverage for the C1 slice: the libsql-volume-shaped hosted
-/// profiles (`hosted-single-tenant-volume`, `-sandboxed`) must require an
-/// externally-supplied `IRONCLAW_REBORN_SECRET_MASTER_KEY` and fail closed
-/// instead of falling back to the single-user local-dev dotfile/keychain
-/// chain. Plain `local-dev`/`local-dev-yolo` are untouched — see
-/// `local_runtime_profile_tests::unconfirmed_yolo_fails_closed_before_an_input_is_built`
-/// for that shape's (correct) fallback behaviour.
-///
-/// The resolution/validation logic (`hosted_volume_secret_master_key_from_raw`)
-/// is exercised with an injected raw value rather than a mutated
-/// `std::env::var`: this crate is `#![forbid(unsafe_code)]`, which blocks
-/// `std::env::set_var` in-process (see `factory.rs`'s
-/// `resolve_local_dev_secret_master_key_with_env` for the same established
-/// pattern). The "env-unset" cases below instead rely on the ambient test
-/// process never setting `IRONCLAW_REBORN_SECRET_MASTER_KEY`, which is real
-/// production behaviour, not a simulation.
-#[cfg(test)]
-mod hosted_volume_secret_master_key_tests {
-    use super::*;
-
-    fn valid_master_key() -> String {
-        ironclaw_secrets::keychain::generate_master_key_hex()
-    }
-
-    /// Case 1 (headline regression): with a valid key resolved and carried on
-    /// the build input — the exact shape `hosted_single_tenant_volume_build_input`
-    /// produces once `IRONCLAW_REBORN_SECRET_MASTER_KEY` is set — a full
-    /// `build_reborn_services` build succeeds AND never writes the plaintext
-    /// dotfile that sits next to the encrypted secrets in the data root. This
-    /// locks the actual gap: before this slice, `secret_master_key` was
-    /// hardcoded to `None` for every `LocalDev`-shaped input, so this profile
-    /// always fell through to `resolve_local_dev_secret_master_key`, which
-    /// generates and persists that dotfile.
-    #[tokio::test]
-    async fn env_set_valid_key_builds_and_never_writes_the_local_dev_dotfile() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("data-root");
-        let key = valid_master_key();
-
-        let policy = hosted_single_tenant_volume_runtime_policy().expect("policy resolves");
-        let input = RebornHostBindings::local_dev_from_deployment(
-            DeploymentConfig::for_profile(
-                RebornCompositionProfile::HostedSingleTenantVolume,
-                false,
-            ),
-            "volume-owner",
-            root.clone(),
-        )
-        .with_runtime_policy(policy)
-        .with_local_dev_secret_master_key(ironclaw_secrets::SecretMaterial::from(key));
-
-        crate::factory::build_runtime_substrate(input)
-            .await
-            .expect("hosted-single-tenant-volume build succeeds with an explicit master key");
-
-        let dotfile = root.join(crate::factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
-        assert!(
-            !dotfile.exists(),
-            "an explicit master key must never be persisted to the local-dev dotfile at {}",
-            dotfile.display()
-        );
-    }
-
-    /// Case 2: an explicit-but-malformed key must fail with
-    /// `validate_resolved_master_key`'s named, source-attributed error — not
-    /// an opaque `SecretsCrypto` rejection several layers deeper.
-    #[test]
-    fn env_set_malformed_key_fails_with_validate_resolved_master_key_named_error() {
-        // 64 zero chars: passes the length floor but has a single distinct
-        // byte, so the entropy check rejects it (mirrors
-        // `resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting`).
-        let error = hosted_volume_secret_master_key_from_raw(
-            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-            Some("0".repeat(64)),
-        )
-        .expect_err("malformed master key must be rejected");
-
-        let reason = match error {
-            RebornRuntimeProfileError::InvalidSecretMasterKey(
-                RebornBuildError::InvalidConfig { reason },
-            ) => reason,
-            other => panic!("expected InvalidSecretMasterKey(InvalidConfig), got {other:?}"),
-        };
-        assert!(
-            reason.contains("IRONCLAW_REBORN_SECRET_MASTER_KEY"),
-            "error must name the env var, got: {reason}"
-        );
-        assert!(
-            reason.contains("master key"),
-            "error must mention the master key (validate_resolved_master_key's message), got: {reason}"
-        );
-    }
-
-    /// Case 3 (headline regression): with the env var unset, the profile
-    /// boots fail-closed instead of silently generating a key. No dotfile is
-    /// ever generated because the failure happens before `build_local_runtime`
-    /// (and therefore `build_secret_store`) is ever reached.
-    #[test]
-    fn env_unset_fails_closed_and_never_generates_a_dotfile() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("data-root");
-        assert!(!root.exists(), "precondition: data root not yet created");
-
-        let error = match hosted_single_tenant_volume_build_input("volume-owner", root.clone()) {
-            Ok(_) => panic!("an unset master-key env must fail closed"),
-            Err(error) => error,
-        };
-
-        assert!(
-            matches!(
-                &error,
-                RebornRuntimeProfileError::MissingSecretMasterKeyEnv { env_name }
-                    if env_name == "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-            ),
-            "expected MissingSecretMasterKeyEnv, got {error:?}"
-        );
-        assert!(
-            !root
-                .join(crate::factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH)
-                .exists(),
-            "a fail-closed boot must never generate/persist a local-dev dotfile"
-        );
-    }
-
-    /// Case 4: a pre-seeded (valid) dotfile must NOT rescue an unset env var.
-    /// Unlike plain `local-dev`, this profile never consults the dotfile at
-    /// all — proven here because the failure occurs in the build-input layer,
-    /// before any code that would open the data root ever runs.
-    #[test]
-    fn dotfile_preseeded_env_unset_still_fails_closed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("data-root");
-        std::fs::create_dir_all(&root).expect("create data root");
-        let dotfile = root.join(crate::factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
-        std::fs::write(&dotfile, valid_master_key()).expect("seed a valid cached dotfile");
-        assert!(dotfile.exists(), "precondition: dotfile is seeded");
-
-        let error = match hosted_single_tenant_volume_build_input("volume-owner", root.clone()) {
-            Ok(_) => panic!("a pre-seeded dotfile must not rescue an unset env var"),
-            Err(error) => error,
-        };
-
-        assert!(
-            matches!(
-                &error,
-                RebornRuntimeProfileError::MissingSecretMasterKeyEnv { .. }
-            ),
-            "expected MissingSecretMasterKeyEnv (dotfile ignored), got {error:?}"
-        );
-    }
-
-    /// Case 5: this resolution path never calls into the OS keychain — it
-    /// only ever reads `IRONCLAW_REBORN_SECRET_MASTER_KEY` and validates the
-    /// result. That is a structural guarantee (`hosted_volume_secret_master_key_from_raw`'s
-    /// body has no keychain touchpoint), not one that depends on
-    /// `IRONCLAW_DISABLE_OS_KEYCHAIN` being set — so resolution behaves
-    /// identically regardless of that flag. This documents that the
-    /// local-dev keychain-ambiguity (see project memory on reborn test
-    /// keychain suppression) is out of scope for this profile by being
-    /// inapplicable: there is no keychain fallback branch to suppress.
-    #[test]
-    fn keychain_is_never_consulted_regardless_of_disable_keychain_env() {
-        let key = valid_master_key();
-        let resolved = hosted_volume_secret_master_key_from_raw(
-            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-            Some(key.clone()),
-        )
-        .expect("valid explicit key resolves without touching the keychain");
-        assert_eq!(
-            secrecy::ExposeSecret::expose_secret(&resolved),
-            key.as_str(),
-            "the resolved key must be exactly the supplied env value, never a keychain-sourced one"
-        );
-    }
-
-    /// The "+1" build-through-the-caller test: drives the *outermost*
-    /// production entry point (`local_runtime_build_input_with_options`, the
-    /// function `serve`/the CLI actually call) rather than the
-    /// profile-specific inner helper, proving the fail-closed dispatch is
-    /// wired all the way through — not just reachable when a test calls the
-    /// inner function directly.
-    #[test]
-    fn local_runtime_build_input_with_options_fails_closed_for_volume_profile_when_env_unset() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("data-root");
-
-        let error = match local_runtime_build_input_with_options(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            "volume-owner",
-            root,
-            RebornRuntimeProfileOptions::default(),
-        ) {
-            Ok(_) => panic!("the outermost production entry point must also fail closed"),
-            Err(error) => error,
-        };
-
-        assert!(
-            matches!(
-                &error,
-                RebornRuntimeProfileError::MissingSecretMasterKeyEnv { env_name }
-                    if env_name == "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-            ),
-            "expected MissingSecretMasterKeyEnv, got {error:?}"
-        );
     }
 }

@@ -6,14 +6,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityFileName, identity_message_ref,
 };
-use ironclaw_turns::{
-    LoopMessageRef,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::LoopMessageRef;
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
@@ -208,7 +206,7 @@ fn validate_default_system_prompt(
     if !path.starts_with(storage_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "path is outside the local-dev storage root".to_string(),
+            reason: "path is outside the standalone storage root".to_string(),
         });
     }
     let metadata = path
@@ -239,7 +237,7 @@ fn validate_default_system_prompt(
     if !canonical_path.starts_with(&canonical_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "canonical path escapes the local-dev storage root".to_string(),
+            reason: "canonical path escapes the standalone storage root".to_string(),
         });
     }
     if metadata.len() > MAX_DEFAULT_SYSTEM_PROMPT_BYTES {
@@ -259,7 +257,7 @@ fn ensure_prompt_parent(
     if !parent.starts_with(storage_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: parent.to_path_buf(),
-            reason: "parent is outside the local-dev storage root".to_string(),
+            reason: "parent is outside the standalone storage root".to_string(),
         });
     }
     let relative_parent =
@@ -267,7 +265,7 @@ fn ensure_prompt_parent(
             .strip_prefix(storage_root)
             .map_err(|_| DefaultSystemPromptError::InvalidFile {
                 path: parent.to_path_buf(),
-                reason: "parent is outside the local-dev storage root".to_string(),
+                reason: "parent is outside the standalone storage root".to_string(),
             })?;
     let mut current = storage_root.to_path_buf();
     for component in relative_parent.components() {
@@ -341,11 +339,11 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 
@@ -387,7 +385,7 @@ mod tests {
         assert_eq!(candidates[0].name.as_str(), DEFAULT_SYSTEM_PROMPT_NAME);
         assert!(
             prompt_path.exists(),
-            "source should seed the editable local-dev prompt file"
+            "source should seed the editable standalone prompt file"
         );
 
         let content = source
@@ -487,6 +485,14 @@ mod tests {
         assert!(on_content.contains("tool_describe"));
         assert!(on_content.contains("tool_call"));
         assert!(on_content.contains("Tool Discovery"));
+        assert!(
+            on_content.contains("When `tool_search` is present"),
+            "bridged-mode guidance must be conditional on the outgoing surface actually advertising tool_search"
+        );
+        assert!(
+            on_content.contains("When `tool_search` is absent"),
+            "below-threshold guidance must direct the model to use the complete direct surface"
+        );
     }
 
     #[tokio::test]
@@ -560,7 +566,7 @@ mod tests {
             .await
             .expect("first candidates load");
 
-        std::fs::write(&prompt_path, "edited local-dev prompt").expect("prompt edits");
+        std::fs::write(&prompt_path, "edited standalone prompt").expect("prompt edits");
         let edited_candidates = source
             .load_identity_candidates(&context, PromptMode::TextOnly)
             .await
@@ -587,7 +593,7 @@ mod tests {
         // runtime (#6734): it is appended unconditionally, so an install whose
         // SYSTEM.md predates the guidance (or was edited to drop it) still tells
         // the model to look its own capabilities up instead of guessing.
-        assert!(content.content.starts_with("edited local-dev prompt"));
+        assert!(content.content.starts_with("edited standalone prompt"));
         assert!(
             content.content.contains("## Self-Knowledge"),
             "self-knowledge guidance must be appended even when SYSTEM.md omits it"
