@@ -849,3 +849,105 @@ review_after = "2026-10-31"
 # -- the `extension_lifecycle_capabilities.rs` 217 -> 218 correction -- is
 # retained: it fixes a PRE-EXISTING entry that pointed at the `?error,` field
 # instead of the message literal, i.e. it was waiving the wrong line.
+
+# ---------------------------------------------------------------------------
+# WS5 naming traps: seven `struct`/field declaration lines in
+# `ironclaw_conversations/src/types.rs`.
+#
+# These are the DTO-quartet renames -- `AcceptInboundMessageRequest` ->
+# `AcceptConversationMessageRequest`, `AcceptedInboundMessage` ->
+# `AcceptedConversationMessage`, its `Replay`/`Lookup` siblings, and
+# `ThreadMessageRecord` -> `ConversationMessageRecord`. Every changed line is
+# either a `pub struct <Name> {` header or a `pub <field>: <Type>,`
+# declaration. Nothing executable changed; the bodies that construct and read
+# these types are unchanged and are covered elsewhere.
+#
+# They are exempted because the file has NO LLVM region on any of them, which
+# is checkable in the merged tracefile for this PR (run 30713493949,
+# `reborn-integration-merged.lcov`):
+#
+#   the file carries 42 DA records spanning lines 17..312, and the suite does
+#   execute it -- `pub(crate) fn new(` at line 298 scores 18 hits. But there is
+#   a complete DA gap between line 60 and line 298, and all seven lines below
+#   (199, 209, 211, 215, 233, 246, 247) fall inside it. Not one of them has a
+#   DA record at all, so there is no counter for a test to move.
+#
+# This is why the gate reports the file as "contributed no instrumented lines"
+# rather than listing them as uncovered: every changed candidate line in the
+# instrumented span resolves to zero measurable lines. A type declaration
+# emits no region; only the code that constructs the type does, and that code
+# is not what this PR changed.
+#
+# This was NOT concluded by inference -- the obvious objection is that these
+# types all `#[derive(Serialize, Deserialize)]`, so a test that round-trips
+# them might instantiate the derived impls and light the declaration lines up.
+# That was tried, and it does not:
+# `filesystem_conversation_services_round_trip_persisted_state_on_reopen`
+# (crates/ironclaw_conversations/tests/conversation_state_store_contract.rs)
+# now serializes AND deserializes ConversationMessageRecord,
+# AcceptedConversationMessage, AcceptedConversationMessageReplay and
+# AcceptedConversationMessageLookup, asserting their wire field names survive
+# the rename. Re-measured with `cargo llvm-cov` over that test binary, the file
+# still reports exactly 42 DA records over exactly lines 17..312 -- byte for
+# byte the same set as before the test existed, with none of the seven lines
+# gaining a record. Derive-generated code is `#[automatically_derived]` and
+# carries no coverage regions at the declaration site, so no test can move
+# these counters. The round-trip test is kept anyway: it is the regression
+# that pins the persisted encoding across the rename, which is the risk the
+# WS5 CHECKLIST row actually cares about.
+#
+# Line 318 (`InboundTurnResponse::accepted_message`) has no record either, but
+# it sits outside the 17..312 instrumented span, so the gate never makes it a
+# candidate and it is deliberately not listed below.
+
+[[exemption]]
+path = "crates/ironclaw_conversations/src/types.rs"
+lines = [199, 209, 211, 215, 233, 246, 247]
+owner = "@nearai/reborn"
+reason = "Type positions only: `pub struct` headers and `pub <field>: <Type>` declarations for the renamed accepted-message DTO quartet (199 AcceptedConversationMessageLookup, 209/211 AcceptedConversationMessageReplay + its accepted_message field, 215 AcceptConversationMessageRequest, 233 AcceptedConversationMessage, 246/247 ConversationMessageRecord + its accepted field). A declaration carries no LLVM coverage region, so none of these lines can ever be covered: the merged tracefile has 42 DA records for this file over lines 17..312 -- including line 298 at 18 hits, proving the file executes -- yet a complete DA gap from 60 to 298 leaves all seven with no record at all. Proven, not inferred: a serde round-trip contract test for all five types was added and the file STILL reports the identical 42 records over the identical 17..312 span, because derive-generated code is `#[automatically_derived]` and emits no region at the declaration site. The only change on each line is the type rename; see the block comment above."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# Gate-route recording: three of the five
+# `if let Ok(..) = ExternalConversationRef::new(..)` sites in
+# `record_gate_route_if_needed` have an `Err` arm no test can reach.
+#
+# Two of the five CAN fail and are NOT exempted. Lines 40 and 53 also pass
+# `vendor_message_ref` as the topic -- a raw, unvalidated `String` field on
+# `DeliveredChannelMessage` (crates/ironclaw_product/src/run_delivery.rs:143)
+# copied verbatim out of whatever the channel adapter returned in
+# `PartDeliveryOutcome::Sent`
+# (crates/ironclaw_product/src/delivery_coordinator.rs:659-662). A vendor can
+# therefore hand back a ref that is not a legal external id, and
+# `observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route`
+# (crates/ironclaw_product/tests/run_delivery_contract.rs) now drives both of
+# those arms down `Err` with a control-character ref, asserting the exact
+# surviving fingerprint set.
+#
+# The three below pass ONLY accessor reads off an existing, already-validated
+# `ExternalConversationRef` plus literal `None`s, and that type makes an
+# invalid value unconstructible:
+#
+#   * all four fields are private
+#     (crates/ironclaw_extension_contracts/src/external.rs:144-149);
+#   * the only value-producing paths are `new` (152-175), which runs
+#     `validate_external_id` over every non-`None` argument, `Deserialize`
+#     (234-248), which delegates to `new`, `Clone`, and `without_reply_target`
+#     (201-208), which copies fields `new` already validated;
+#   * `validate_external_id` (12-32) is a pure predicate on the string --
+#     non-empty, <= 512 bytes, no NUL/control characters.
+#
+# So `space_id()`, `conversation_id()` and `topic_id()` can only return a
+# string that already satisfies that predicate, and re-running the identical
+# predicate inside a fresh `new` cannot fail. No program state, hostile
+# channel package, or malformed inbound payload reaches these three `Err`
+# arms; a test asserting one would have to construct a value the type forbids.
+
+[[exemption]]
+path = "crates/ironclaw_product/src/run_delivery/gate_routes.rs"
+branch_lines = [45, 58, 74]
+owner = "@nearai/reborn"
+reason = "The `Err` arm of three `ExternalConversationRef::new` calls whose every argument is an accessor read off an already-validated `ExternalConversationRef` plus literal `None`s: line 45 = the delivered message's (space_id, conversation_id), line 58 = its conversation_id alone, line 74 = the source conversation's space_id/conversation_id/topic_id. The type's four fields are private and its only value-producing paths -- `new`, `Deserialize` (delegates to `new`), `Clone`, `without_reply_target` -- all run or inherit `validate_external_id`, a pure predicate on the string (non-empty, <= 512 bytes, no NUL/control chars), so re-validating a value that already passed it cannot fail. The two sibling sites that also take the unvalidated `vendor_message_ref` (lines 40 and 53) ARE reachable and are covered by `observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route`; no exemption is claimed for those. See the block comment above."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

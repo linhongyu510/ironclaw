@@ -21,6 +21,7 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
@@ -65,15 +66,15 @@ use ironclaw_product::{
     EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    InboundAttachmentLander, InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
-    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
@@ -14841,8 +14842,8 @@ impl InboundAttachmentLander for RecordingLander {
         &self,
         _thread_scope: &ThreadScope,
         _referenced_storage_keys: &[String],
-    ) -> Result<ironclaw_product::AttachmentCleanupReport, ProductSurfaceError> {
-        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    ) -> Result<ironclaw_attachments::AttachmentCleanupReport, ProductSurfaceError> {
+        Ok(ironclaw_attachments::AttachmentCleanupReport::default())
     }
 }
 

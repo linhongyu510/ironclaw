@@ -5,16 +5,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
+use ironclaw_attachments::ProjectScopedAttachmentLander;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::{
-    ChannelConnectionService, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
-    ProjectScopedFilesystemReader, RebornAutomationProductService,
-    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductService,
+    ChannelConnectionService, ProjectScopedAttachmentReader, ProjectScopedFilesystemReader,
+    RebornAutomationProductService, RebornServices as ProductRebornServices,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductService,
 };
 use ironclaw_product_contracts::operator_llm::LlmConfigService;
 use ironclaw_product_contracts::operator_service::OperatorStatusService;

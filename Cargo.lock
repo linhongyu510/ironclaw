@@ -3548,11 +3548,16 @@ dependencies = [
 name = "ironclaw_attachments"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "ironclaw_common",
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
+ "ironclaw_threads",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "tokio",
@@ -3659,6 +3664,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
@@ -3752,6 +3758,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
@@ -5180,6 +5187,7 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.2",
  "http-body-util",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_extension_contracts",

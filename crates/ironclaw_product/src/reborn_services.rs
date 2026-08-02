@@ -43,6 +43,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
@@ -53,7 +54,6 @@ use ironclaw_host_api::turn::{
     TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
-    attachment::InboundAttachment,
     capability::{EffectKind, GrantConstraints, PermissionMode},
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
@@ -70,10 +70,9 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceValidationCode,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
-    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
@@ -2139,72 +2138,6 @@ fn operator_diagnostics_surface_status(
     } else {
         RebornOperatorSurfaceStatus::Available
     }
-}
-
-/// Lands inbound attachment bytes into durable, agent-accessible storage and
-/// returns the transcript references to persist on the user message.
-///
-/// Injected by host composition, which owns the project-scoped filesystem
-/// authority. `message_id` is a stable per-message id (the idempotency key)
-/// used only to disambiguate the storage path; the implementation writes
-/// through the same `MountView` the agent's file tools resolve through, so
-/// landed bytes are readable by `file_read`/`list_dir` in later turns.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AttachmentCleanupReport {
-    pub scanned_batches: usize,
-    pub deleted_batches: usize,
-}
-
-#[async_trait]
-pub trait InboundAttachmentLander: Send + Sync {
-    async fn land(
-        &self,
-        thread_scope: &ThreadScope,
-        message_id: &str,
-        attachments: Vec<InboundAttachment>,
-    ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
-
-    /// Remove one complete batch previously returned by [`Self::land`].
-    ///
-    /// The inbound workflow calls this only when durable message acceptance
-    /// fails after landing. Implementations must constrain deletion to the
-    /// batch represented by `attachments`; they must never sweep unrelated
-    /// workspace paths.
-    async fn rollback(
-        &self,
-        thread_scope: &ThreadScope,
-        attachments: &[AttachmentRef],
-    ) -> Result<(), ProductSurfaceError>;
-
-    /// Reconcile old committed batches against an exhaustive set of durable
-    /// attachment storage keys for this exact thread scope.
-    ///
-    /// Callers must skip this operation when their reference scan was
-    /// truncated. The complete snapshot may include attachment domains the
-    /// implementation does not own, such as agent-created outbound workspace
-    /// files; implementations ignore those references and fail closed when no
-    /// owned reference proves the snapshot usable. Implementations keep a
-    /// reconciliation window and bounded filesystem scan so recent in-flight
-    /// work and unrelated workspace paths are never removed.
-    async fn cleanup_stale(
-        &self,
-        thread_scope: &ThreadScope,
-        referenced_storage_keys: &[String],
-    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
-}
-
-/// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
-/// read counterpart of [`InboundAttachmentLander`]: host composition implements
-/// it over the same project-scoped workspace filesystem the lander wrote
-/// through, so `storage_key` is re-scoped through that mount authority and never
-/// treated as a host path.
-#[async_trait]
-pub trait InboundAttachmentReader: Send + Sync {
-    async fn read(
-        &self,
-        thread_scope: &ThreadScope,
-        storage_key: &str,
-    ) -> Result<Vec<u8>, ProductSurfaceError>;
 }
 
 /// Product-side command membrane for the generic [`ProductSurface::invoke`]

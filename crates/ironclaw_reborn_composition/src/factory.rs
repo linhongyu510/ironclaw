@@ -82,10 +82,9 @@ use ironclaw_capabilities::{
     CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
-};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::extension_lifecycle::{

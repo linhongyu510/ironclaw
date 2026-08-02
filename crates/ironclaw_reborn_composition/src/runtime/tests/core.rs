@@ -5145,7 +5145,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     // this test resolves the same authority a vision-capable model would.
     let read_port =
         ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
-    let lander = ironclaw_product::ProjectScopedAttachmentLander::new(read_write_filesystem);
+    let lander = ironclaw_attachments::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
@@ -5154,7 +5154,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
         mission_id: None,
     };
-    let refs = ironclaw_product::InboundAttachmentLander::land(
+    let refs = ironclaw_attachments::InboundAttachmentLander::land(
         &lander,
         &thread_scope,
         "msg-attachment-mount",
