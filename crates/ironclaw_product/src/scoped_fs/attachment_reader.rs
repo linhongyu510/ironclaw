@@ -315,8 +315,18 @@ mod tests {
     #[tokio::test]
     async fn product_reader_maps_a_malformed_storage_key_to_a_sanitized_500() {
         // `storage_key` reaches here from a stored attachment ref, so a
-        // corrupted one must fail closed at `ScopedPath::new` — and the 500 it
-        // becomes must not echo the rejected value back to the caller.
+        // corrupted one must fail closed at `ScopedPath::new` rather than be
+        // handed to the filesystem — and it must classify as Internal, not as
+        // NotFound/Forbidden, which would tell the caller something false about
+        // an attachment that may well exist.
+        //
+        // Note on what is NOT asserted: that the rejected value is absent from
+        // the error. `ProductSurfaceError` has no reason-bearing field and
+        // `internal_from` logs its source and discards it, so any such check
+        // could never fail — the non-leak is structural, not behavioral, and an
+        // assertion for it would be vacuous. Equality against `internal()`
+        // pins the whole sanitized shape instead, so a future variant that
+        // *did* add a detail field would fail here.
         let reader =
             ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::read_write()));
         let error = InboundAttachmentReader::read(
@@ -326,10 +336,7 @@ mod tests {
         )
         .await
         .expect_err("a URL is not a scoped path");
+        assert_eq!(error, ProductSurfaceError::internal());
         assert_eq!(error.status_code, 500);
-        assert!(
-            !format!("{error:?}").contains("evil.example.com"),
-            "the sanitized product error must not carry the rejected key: {error:?}"
-        );
     }
 }
