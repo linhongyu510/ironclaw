@@ -142,14 +142,10 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
             .with_usage(resource_usage(started)));
         }
 
-        let input: ReplaceInput = serde_json::from_value(request.input).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                .with_usage(resource_usage(started))
-        })?;
-        let group_id = AdminConfigurationGroupId::new(input.group_id).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                .with_usage(resource_usage(started))
-        })?;
+        let input: ReplaceInput = serde_json::from_value(request.input)
+            .map_err(|error| rejected_input(started, "input", error))?;
+        let group_id = AdminConfigurationGroupId::new(input.group_id)
+            .map_err(|error| rejected_input(started, "group_id", error))?;
         let idempotency_key =
             AdminConfigurationIdempotencyKey::new(request.scope.invocation_id.to_string())
                 .map_err(|error| rejected_input(started, "idempotency_key", error))?;
@@ -488,6 +484,7 @@ mod tests {
             let subscriber = tracing_subscriber::fmt()
                 .without_time()
                 .with_target(false)
+                .with_ansi(false)
                 .with_max_level(tracing::Level::DEBUG)
                 .with_writer(logs.clone())
                 .finish();

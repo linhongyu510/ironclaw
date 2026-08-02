@@ -85,7 +85,7 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
             .installation_store
             .list_installations()
             .await
-            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?
+            .map_err(installed_extension_listing_error)?
             .into_iter()
             .map(|installation| installation.extension_id().as_str().to_string())
             .collect::<BTreeSet<_>>();
@@ -715,6 +715,9 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_target(false)
+            // The level prefix is read below, so it must not be wrapped in
+            // ANSI colour escapes.
+            .with_ansi(false)
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(logs.clone())
             .finish();
