@@ -251,13 +251,27 @@ mod tests {
     /// One authenticated WebUI call, shaped the way the product surface
     /// stamps it: the scope's user is the verified actor.
     fn set_request(user: &str, enabled: bool) -> FirstPartyCapabilityRequest {
+        raw_request(
+            user,
+            SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+            serde_json::json!({ "enabled": enabled }),
+        )
+    }
+
+    /// The same authenticated shape as [`set_request`], but with the two
+    /// fields the rejection taxonomy discriminates on -- the dispatched
+    /// capability id and the raw input payload -- left to the caller.
+    fn raw_request(
+        user: &str,
+        capability_id: &str,
+        input: serde_json::Value,
+    ) -> FirstPartyCapabilityRequest {
         let user_id = UserId::new(user).expect("user id");
         let mut request = FirstPartyCapabilityRequest::request_for_test(
-            CapabilityId::new(SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID)
-                .expect("capability id"),
+            CapabilityId::new(capability_id).expect("capability id"),
             ResourceScope::local_default(user_id.clone(), InvocationId::new())
                 .expect("resource scope"),
-            serde_json::json!({ "enabled": enabled }),
+            input,
             None,
         );
         request.authenticated_actor_user_id = Some(user_id);
@@ -349,4 +363,183 @@ mod tests {
             .expect("the real owner still claims the switch afterwards");
         assert!(!auto_activate_learned.load(Ordering::Relaxed));
     }
+
+    /// The rejection taxonomy of a *well-authenticated* caller: the two
+    /// pre-write validators (`ensure_declared`, `parse_enabled`) must each
+    /// answer with their own `RuntimeDispatchErrorKind`, and neither may let
+    /// the write through.
+    ///
+    /// Both matter beyond tidiness. `ensure_declared` is what stops a handler
+    /// registered under one id from servicing a dispatch for another, so a
+    /// misrouted registry entry has to surface as `UndeclaredCapability`
+    /// rather than silently writing the deployment default. `parse_enabled`
+    /// rejects a payload carrying *extra* keys, not just a missing/ill-typed
+    /// `enabled`: this capability's input schema is closed, and accepting an
+    /// unknown sibling key is how a later schema revision starts silently
+    /// ignoring a field callers believe they set.
+    ///
+    /// Driven through the registry-resolved handler with the *same* verified
+    /// caller as the happy path, so the only thing that varies between the
+    /// accepted call and each rejected one is the discriminating argument
+    /// under test -- the dispatched capability id, or the input payload.
+    #[tokio::test]
+    async fn malformed_requests_are_rejected_by_kind_without_moving_the_switch() {
+        let auto_activate_learned = Arc::new(AtomicBool::new(true));
+        let handler = handler(Arc::clone(&auto_activate_learned));
+
+        let rejections: Vec<(&str, FirstPartyCapabilityRequest, RuntimeDispatchErrorKind)> = vec![
+            (
+                "a dispatch for a capability this handler does not declare",
+                raw_request(
+                    "alice",
+                    "ironclaw.skill.auto_activate_learned_unset",
+                    serde_json::json!({ "enabled": false }),
+                ),
+                RuntimeDispatchErrorKind::UndeclaredCapability,
+            ),
+            (
+                "a non-object payload",
+                raw_request(
+                    "alice",
+                    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+                    serde_json::json!(false),
+                ),
+                RuntimeDispatchErrorKind::InputEncode,
+            ),
+            (
+                "an object with no `enabled` field",
+                raw_request(
+                    "alice",
+                    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+                    serde_json::json!({ "enable": false }),
+                ),
+                RuntimeDispatchErrorKind::InputEncode,
+            ),
+            (
+                "a closed schema carrying an unknown sibling key",
+                raw_request(
+                    "alice",
+                    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+                    serde_json::json!({ "enabled": false, "scope": "everyone" }),
+                ),
+                RuntimeDispatchErrorKind::InputEncode,
+            ),
+        ];
+
+        for (case, request, expected) in rejections {
+            let Err(error) = handler.dispatch(request).await else {
+                panic!("{case} must be rejected");
+            };
+            assert_eq!(
+                error.kind(),
+                Some(expected),
+                "{case} reports the wrong kind"
+            );
+            assert!(
+                auto_activate_learned.load(Ordering::Relaxed),
+                "{case} must not reach the store"
+            );
+        }
+
+        // The same caller still owns the switch afterwards: a rejected request
+        // is not allowed to have claimed it on the way out.
+        handler
+            .dispatch(set_request("alice", false))
+            .await
+            .expect("a rejected request left the switch unclaimed");
+        assert!(!auto_activate_learned.load(Ordering::Relaxed));
+    }
+
+    /// `extend_builtin_first_party_package` is only ever handed the
+    /// host-bundled built-in package, which is materialized -- so the
+    /// `materialized_root()` failure arm has never run. It is still the guard
+    /// that keeps a rootless package from being published with this
+    /// capability grafted onto it, and it must fail closed with a manifest
+    /// error rather than panicking or silently dropping the root.
+    #[test]
+    fn a_rootless_package_cannot_be_extended_with_this_capability() {
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            VIRTUAL_MANIFEST,
+            ironclaw_extensions::ManifestSource::UserRegistered,
+            &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+            &{
+                let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+                contracts
+                    .register(Arc::new(
+                        ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                            .expect("capability-provider contract"),
+                    ))
+                    .expect("register contract");
+                contracts
+            },
+        )
+        .expect("virtual manifest parses");
+        // A virtual package carries its descriptors inline (there is no tree to
+        // read `$ref` schemas from), so project them the way hosted-MCP
+        // discovery does at `ironclaw_extension_host::hosted_mcp_manifest`.
+        let capabilities = manifest
+            .capabilities
+            .iter()
+            .map(
+                |capability| ironclaw_host_api::capability::CapabilityDescriptor {
+                    id: capability.id.clone(),
+                    provider: manifest.id.clone(),
+                    runtime: manifest.runtime.kind(),
+                    trust_ceiling: manifest.descriptor_trust_default,
+                    description: capability.description.clone(),
+                    parameters_schema: serde_json::Value::Null,
+                    effects: capability.effects.clone(),
+                    default_permission: capability.default_permission,
+                    runtime_credentials: capability.runtime_credentials.clone(),
+                    network_targets: capability.network_targets.clone(),
+                    max_egress_bytes: capability.max_egress_bytes,
+                    resource_profile: capability.resource_profile.clone(),
+                    origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                },
+            )
+            .collect();
+        let package = ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
+            .expect("remote-only package");
+
+        let error = extend_builtin_first_party_package(package)
+            .expect_err("a virtual package has no filesystem root to extend");
+        assert!(
+            matches!(
+                &error,
+                ExtensionError::InvalidManifest { reason }
+                    if reason.contains("built-in package requires a materialized root")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// A remote-only (virtual) package: an MCP-over-HTTP runtime, so it has no
+    /// filesystem tree and therefore no materialized root.
+    const VIRTUAL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "remote-tools"
+name = "Remote Tools"
+version = "0.1.0"
+description = "Remote-only tool provider"
+trust = "untrusted"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/mcp"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "remote-tools.invoke"
+description = "Invoke a remote tool"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
+"#;
 }

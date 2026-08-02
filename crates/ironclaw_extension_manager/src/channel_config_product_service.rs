@@ -129,8 +129,14 @@ fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigReactivationError};
-    use ironclaw_extensions::ExtensionInstallationStore;
+    use ironclaw_extensions::{
+        ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+        ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
+        ExtensionManifestRef, MembershipDeactivation,
+    };
     use ironclaw_filesystem::{
         Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     };
@@ -139,7 +145,7 @@ mod tests {
         path::VirtualPath,
         resource::ResourceScope,
     };
-    use ironclaw_secrets::SecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
 
@@ -216,6 +222,257 @@ mod tests {
         assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
         assert_eq!(error.status_code, 503);
         assert!(error.retryable, "a storage fault is worth retrying");
+    }
+
+    /// The field projection itself: `ChannelConfigFieldStatus` (host) ->
+    /// `ChannelConfigField` (product wire). It renames `handle` to `name` and
+    /// carries `label`/`secret`/`provided` across, and nothing had ever run it
+    /// -- every other case here drives an empty list, which cannot tell a
+    /// correct mapping from one that transposed two fields or dropped
+    /// `provided`.
+    ///
+    /// Reaching it needs the `NotInstalled` fall-through at the suppression
+    /// check, which is exactly what that arm exists for: `field_status` asks
+    /// the host twice against a shared durable store, so an extension that
+    /// finishes installing between the two reads answers "not installed" to
+    /// the first and hands the second a manifest with fields. The comment on
+    /// that arm says it falls through "rather than deciding it twice"; this is
+    /// the case where the second decision differs.
+    ///
+    /// Non-vacuous by construction: the double is keyed on `extension_id` and
+    /// defers only `telegram`'s first read, so `slack` -- installed in the same
+    /// store, visible to both of its reads -- takes the suppression path and
+    /// projects nothing. Same service, same call, two answers.
+    #[tokio::test]
+    async fn manifest_field_status_is_projected_onto_the_product_wire_shape() {
+        let telegram = ExtensionId::new("telegram").expect("extension id");
+        let slack = ExtensionId::new("slack").expect("extension id");
+        let scope = ResourceScope::local_default(
+            UserId::new("channel-config-owner").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let installation_store =
+            installed_store(&[(TELEGRAM_MANIFEST, "telegram"), (SLACK_MANIFEST, "slack")]).await;
+        let secrets = Arc::new(SecretStore::ephemeral());
+        // One field already has stored material, so `provided` cannot pass by
+        // being uniformly false.
+        secrets
+            .put(
+                scope.clone(),
+                ironclaw_host_api::ids::SecretHandle::new("telegram_bot_token")
+                    .expect("secret handle"),
+                ironclaw_secrets::SecretMaterial::from("bot-token".to_string()),
+                None,
+            )
+            .await
+            .expect("seed the stored bot token");
+
+        let service = RebornChannelConfigProductService::new(Arc::new(ChannelConfigService::new(
+            Arc::new(DeferredFirstManifestRead {
+                inner: installation_store,
+                deferred: telegram.clone(),
+                reads: AtomicUsize::new(0),
+            }),
+            secrets,
+            scope,
+            Arc::new(NeverReactivates),
+        )));
+
+        let fields = service
+            .field_status(&telegram)
+            .await
+            .expect("an installed manifest's fields project onto the wire shape");
+        assert_eq!(
+            fields,
+            vec![
+                ChannelConfigField {
+                    name: "telegram_bot_token".to_string(),
+                    label: "Bot token".to_string(),
+                    secret: true,
+                    provided: true,
+                },
+                ChannelConfigField {
+                    name: "telegram_webhook_secret".to_string(),
+                    label: "Webhook secret token".to_string(),
+                    secret: true,
+                    provided: false,
+                },
+                ChannelConfigField {
+                    name: "telegram_webhook_url".to_string(),
+                    label: "Public webhook URL".to_string(),
+                    secret: false,
+                    provided: false,
+                },
+                ChannelConfigField {
+                    name: "bot_username".to_string(),
+                    label: "Bot username".to_string(),
+                    secret: false,
+                    provided: false,
+                },
+            ],
+            "the handle becomes `name`, and label/secret/provided cross unchanged"
+        );
+
+        assert_eq!(
+            service
+                .field_status(&slack)
+                .await
+                .expect("an administrator-configured extension still answers"),
+            Vec::new(),
+            "an extension whose manifest is visible to both reads is suppressed, \
+             so the projection above is keyed on the extension asked about"
+        );
+    }
+
+    /// An installation store that answers one named extension's *first*
+    /// manifest read as "not installed" and everything after -- and every
+    /// other extension, always -- from the real store. Models the install that
+    /// lands between `field_status`'s two reads.
+    struct DeferredFirstManifestRead {
+        inner: Arc<ExtensionInstallationStore>,
+        deferred: ExtensionId,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExtensionInstallationStorePort for DeferredFirstManifestRead {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.list_manifests().await
+        }
+
+        async fn get_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            if extension_id == &self.deferred && self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(None);
+            }
+            self.inner.get_manifest(extension_id).await
+        }
+
+        async fn persist_removal_tombstone(
+            &self,
+            manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.persist_removal_tombstone(manifest).await
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            manifest: ExtensionManifestRecord,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .upsert_manifest_and_installation(manifest, installation)
+                .await
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_installations().await
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.get_installation(installation_id).await
+        }
+
+        async fn upsert_installation(
+            &self,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_installation(installation).await
+        }
+
+        async fn activate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+            self.inner
+                .activate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn deactivate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+            self.inner
+                .deactivate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn delete_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_installation(installation_id).await
+        }
+
+        async fn delete_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_manifest(extension_id).await
+        }
+    }
+
+    /// Real first-party manifests, so the projected field set is the shipped
+    /// one rather than a fixture that can drift from it.
+    const TELEGRAM_MANIFEST: &str =
+        include_str!("../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
+    const SLACK_MANIFEST: &str =
+        include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+
+    async fn installed_store(manifests: &[(&str, &str)]) -> Arc<ExtensionInstallationStore> {
+        let store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                Arc::new(InMemoryBackend::new()),
+                VirtualPath::new("/system/extensions/.installations/test")
+                    .expect("valid test path"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+                ironclaw_host_runtime::default_host_api_contract_registry()
+                    .expect("host contracts"),
+            )
+            .await
+            .expect("filesystem extension installation store"),
+        );
+        for (manifest_toml, id) in manifests {
+            let record = ExtensionManifestRecord::from_toml(
+                *manifest_toml,
+                ironclaw_extensions::ManifestSource::HostBundled,
+                &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+                None,
+                &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+                None,
+            )
+            .expect("fixture manifest parses");
+            let extension_id = ExtensionId::new(*id).expect("extension id");
+            store
+                .upsert_manifest_and_installation(
+                    record,
+                    ExtensionInstallation::new(
+                        ExtensionInstallationId::new(id.to_string()).expect("installation id"),
+                        extension_id.clone(),
+                        ExtensionManifestRef::new(extension_id, None),
+                        Vec::new(),
+                        chrono::Utc::now(),
+                        ironclaw_extensions::InstallationOwner::Tenant,
+                    )
+                    .expect("installation"),
+                )
+                .await
+                .expect("persist install");
+        }
+        store
     }
 
     /// Every arm of the status table, in one table-driven case.

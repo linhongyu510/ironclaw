@@ -1072,4 +1072,47 @@ mod attachment_seam_tests {
             b"attachment-seam-bytes".to_vec(),
         );
     }
+
+    /// Store-level regression for `RebornRuntimeStores::channel_config_service`
+    /// (extension-runtime §6.4): the port the WebUI setup service and the
+    /// lifecycle configure action route operator channel config through.
+    ///
+    /// Nothing drove this accessor -- the integration harness reaches the seam
+    /// through the `RebornRuntime` wrapper's same-named method, so the store
+    /// recipe (build the manager-side product port over the composed
+    /// `ChannelConfigService`) was only ever compiled, never run. A regression
+    /// here -- a port built over the wrong service handle, or one that panics
+    /// on its first read -- would surface only downstream. Asking the returned
+    /// port about an extension the composition has not installed proves it is
+    /// live and answers on the contract's terms: an extension with nothing to
+    /// configure projects an empty field list rather than erroring, which is
+    /// what makes the WebUI setup view render for it.
+    #[tokio::test]
+    async fn the_channel_config_seam_hands_out_a_usable_product_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "channel-config-seam-owner",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+
+        let channel_config = services
+            .channel_config_service()
+            .expect("a standalone composition exposes the §6.4 configure port");
+        assert_eq!(
+            channel_config
+                .field_status(
+                    &ironclaw_host_api::ids::ExtensionId::new("not-installed-extension")
+                        .expect("extension id")
+                )
+                .await
+                .expect(
+                    "an uninstalled extension has nothing to configure, and that is not an error"
+                ),
+            Vec::new(),
+        );
+    }
 }

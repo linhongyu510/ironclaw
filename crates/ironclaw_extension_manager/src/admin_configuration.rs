@@ -504,6 +504,209 @@ mod tests {
         );
     }
 
+    /// The `installed` flag on each `used_by` entry is the whole reason this
+    /// view reads the installation store at all: it is what tells the operator
+    /// "this configuration group is used by an extension you have installed"
+    /// versus "…by one you could install". Every existing case drives an empty
+    /// installation list, which cannot tell a correct projection from one that
+    /// hardcodes `false`.
+    ///
+    /// So this asserts the answer **differs by which extension is installed**,
+    /// on one query against one group: the consumer whose `package_id` matches
+    /// a listed installation reports `installed: true`, and its sibling in the
+    /// same group -- listed by the catalog, absent from the store -- reports
+    /// `false`. A projection that ignored the store, or that matched on the
+    /// wrong field, fails one half or the other.
+    #[tokio::test]
+    async fn a_used_by_entry_is_marked_installed_only_when_the_store_lists_it() {
+        use ironclaw_extensions::{
+            AdminConfigurationField, AdminConfigurationGroupId,
+            ExtensionAdminConfigurationDescriptor, ExtensionManifestRef, InstallationOwner,
+        };
+        use ironclaw_host_api::ids::SecretHandle;
+
+        let installed = ExtensionId::new("installed-ext").expect("extension id");
+        let group_id = AdminConfigurationGroupId::new("extension.fixture").expect("group id");
+        let descriptor = ExtensionAdminConfigurationDescriptor {
+            group_id: group_id.clone(),
+            display_name: "Fixture".to_string(),
+            description: String::new(),
+            fields: vec![AdminConfigurationField {
+                handle: SecretHandle::new("api_token").expect("handle"),
+                label: "API token".to_string(),
+                secret: true,
+                required: true,
+            }],
+        };
+        let uses = vec![
+            AdminConfigurationCatalogUse {
+                descriptor: descriptor.clone(),
+                package_id: installed.as_str().to_string(),
+                display_name: "Installed Extension".to_string(),
+            },
+            AdminConfigurationCatalogUse {
+                descriptor: descriptor.clone(),
+                package_id: "absent-ext".to_string(),
+                display_name: "Absent Extension".to_string(),
+            },
+        ];
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new("installed-ext").expect("installation id"),
+            installed.clone(),
+            ExtensionManifestRef::new(installed, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            InstallationOwner::Tenant,
+        )
+        .expect("installation");
+
+        let provider = AdminConfigurationViewProvider::new(
+            Arc::new(admin_configuration_service(vec![descriptor])),
+            uses,
+            Arc::new(StaticInstallationStore(vec![installation])),
+        );
+        let page = provider
+            .query(caller(true), serde_json::json!({}), None)
+            .await
+            .expect("a granted caller reads the administrator-configuration view");
+        let response: RebornAdminConfigurationListResponse =
+            serde_json::from_value(page.payload).expect("list response");
+
+        let group = response
+            .groups
+            .iter()
+            .find(|group| group.group_id == group_id.as_str())
+            .expect("the registered descriptor renders one group");
+        let flags: Vec<(&str, bool)> = group
+            .used_by
+            .iter()
+            .map(|usage| (usage.package_id.as_str(), usage.installed))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![("installed-ext", true), ("absent-ext", false)],
+            "only the consumer the installation store lists may report installed"
+        );
+    }
+
+    /// The wiring `provider_with_unavailable_installation_store` builds, with
+    /// the descriptor set left to the caller so a case can register a group
+    /// for the view to render.
+    fn admin_configuration_service(
+        descriptors: Vec<ironclaw_extensions::ExtensionAdminConfigurationDescriptor>,
+    ) -> ComposedAdminConfigurationService {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        ComposedAdminConfigurationService::new(
+            ironclaw_extension_host::FilesystemAdminConfigurationStore::new(Arc::new(
+                ScopedFilesystem::new(filesystem, |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration").expect("mount alias"),
+                        VirtualPath::new("/tenants/test/shared/admin-configuration")
+                            .expect("virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                }),
+            )),
+            secrets,
+            descriptors,
+        )
+        .expect("admin configuration service")
+    }
+
+    /// An installation store that lists a fixed set and refuses everything
+    /// else, so a case can control exactly which extensions read as installed.
+    struct StaticInstallationStore(Vec<ExtensionInstallation>);
+
+    #[async_trait]
+    impl ExtensionInstallationStorePort for StaticInstallationStore {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_manifest(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Ok(None)
+        }
+
+        async fn persist_removal_tombstone(
+            &self,
+            _manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            Ok(())
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            _manifest: ExtensionManifestRecord,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            Ok(())
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            Ok(self.0.clone())
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            Ok(self
+                .0
+                .iter()
+                .find(|installation| installation.installation_id() == installation_id)
+                .cloned())
+        }
+
+        async fn upsert_installation(
+            &self,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            Ok(())
+        }
+
+        async fn activate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            _user_id: &UserId,
+        ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })
+        }
+
+        async fn deactivate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            _user_id: &UserId,
+        ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })
+        }
+
+        async fn delete_installation(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            Ok(())
+        }
+
+        async fn delete_manifest(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            Ok(())
+        }
+    }
+
     /// An installation store that cannot serve a read, with the backend text
     /// carrying the shape the reviewer flagged: a host mount path.
     struct UnavailableInstallationStore {

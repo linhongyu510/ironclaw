@@ -951,3 +951,82 @@ owner = "@nearai/reborn"
 reason = "The `Err` arm of three `ExternalConversationRef::new` calls whose every argument is an accessor read off an already-validated `ExternalConversationRef` plus literal `None`s: line 45 = the delivered message's (space_id, conversation_id), line 58 = its conversation_id alone, line 74 = the source conversation's space_id/conversation_id/topic_id. The type's four fields are private and its only value-producing paths -- `new`, `Deserialize` (delegates to `new`), `Clone`, `without_reply_target` -- all run or inherit `validate_external_id`, a pure predicate on the string (non-empty, <= 512 bytes, no NUL/control chars), so re-validating a value that already passed it cannot fail. The two sibling sites that also take the unvalidated `vendor_message_ref` (lines 40 and 53) ARE reachable and are covered by `observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route`; no exemption is claimed for those. See the block comment above."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2 consolidation (PR #7018). Thirteen lines across six files. Every other
+# hole the gate named in this stack was closed with a test, not an exemption:
+# the fail-closed rejection taxonomy of the skill-auto-activate capability
+# (undeclared capability id, non-object payload, missing `enabled`, and a
+# closed schema carrying an unknown sibling key), the five operator-config
+# store-failure paths (auto-approve write, override clear, persistent grant,
+# override write, and the policy revoke whose `UnknownPolicy` is deliberately
+# swallowed), the administrator-configuration `used_by[].installed` flag, the
+# `[channel.config]` field projection, the rootless-package guard, and the
+# composition-store channel-config seam.
+#
+# What is left divides into two mechanical classes.
+#
+# (1) `tracing` MESSAGE LITERALS. A `tracing::debug!(...)` spanning several
+# lines puts its message literal in the callsite's `static Metadata`, which is
+# constructed once at program init and carries no coverage region attributable
+# to the source line. The macro-invocation line IS coverable and every one of
+# them below scores hits in the same tracefile — that is the proof the site
+# executes and the literal line still cannot. (Where the invocation and the
+# message share ONE line, as in operator_config_capability.rs, the line is
+# coverable and is covered by a test in this PR; no exemption is claimed for
+# any of those five.)
+#
+# (2) PRE-EXISTING AND BEHAVIOURALLY UNTOUCHED. The line's only change is a
+# crate/type path or a rustfmt re-wrap performed by the WS2 port inversion,
+# and its pre-image scored zero in the BASE commit's merged tracefile
+# (5a1d81285294b3f484b3921a040102cc2d71b3ae, run 30734077730). No coverage was
+# lost; the gate sees the line because the text moved, not because a tested
+# path became untested.
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/admin_configuration.rs"
+lines = [173]
+owner = "@nearai/reborn"
+reason = "`tracing` message literal. Line 173 is the message argument of the multi-line `tracing::debug!` in `installed_extension_listing_error`; it lives in the callsite's static Metadata and carries no attributable region. The site demonstrably executes in the same merged tracefile: line 171 (the macro invocation) scores 1, and lines 175/176 (the ProductSurfaceError construction and the function's close) score 1 each, driven by `a_failing_installation_store_is_sanitized_for_the_caller_and_still_diagnosable`, which asserts on the emitted log text through a `tracing_subscriber::fmt` over a shared writer. Line 172 (`error = %error,`) has no DA record at all, which is the same artifact one line earlier."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/admin_configuration_capability.rs"
+lines = [151, 249]
+owner = "@nearai/reborn"
+reason = "Two classes. Line 249 is the message argument of the multi-line `tracing::debug!` in `rejected_input`: line 246 (the macro invocation) scores 3 hits in the merged tracefile and lines 251-253 (the returned FirstPartyCapabilityError) score 3 each, so the site runs three times while the literal line stays at zero; lines 247-248 (the `error`/`field` fields) have no DA record at all. Line 151 is an error arm no input can reach -- the `map_err` on `AdminConfigurationIdempotencyKey::new(request.scope.invocation_id.to_string())`. `InvocationId` is a `uuid_id!` newtype over `uuid::Uuid` (crates/ironclaw_host_api/src/ids.rs:441 and the macro at 170-206), so its `Display` is always the 36-character hyphenated form; the constructor rejects only empty, over-256-byte (MAX_IDEMPOTENCY_KEY_BYTES, crates/ironclaw_extension_host/src/admin_configuration_store.rs:34), or control-bearing values, and no `Uuid` renders as any of those. The other three `rejected_input` call sites in this function (lines 146, 148, 158) take unvalidated caller JSON and ARE reachable and covered -- `rejected_input` scores 3 hits, once per site -- so no exemption is claimed for those and the helper itself is exercised."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/skill_auto_activate_capability.rs"
+lines = [67, 70, 129, 130, 161]
+owner = "@nearai/reborn"
+reason = "Two classes. Lines 129-130 are the two-line message literal of the fail-closed cross-user `tracing::debug!` in `claim_switch`: line 128 (the invocation) scores 1 and lines 132-135 (the PolicyDenied return) score 1, driven by `a_second_user_cannot_move_the_process_global_default`, so the guard executes and only the literal cannot be attributed. Lines 67, 70 and 161 are error arms that no input can reach: 67 and 70 are the `?` on `CapabilityProfileSchemaRef::new(\"schemas/builtin/skill_auto_activate_learned_set.{input,output}.v1.json\")`, whose argument is a compile-time literal that `validate_schema_ref` accepts (the surrounding lines 65/68/71 score 108), and 161 is the `map_err` on `serde_json::to_value` over `RebornSkillActionResponse { success: bool, message: String }`, a derived Serialize with no fallible field and no non-string map key. All three are also pre-existing: their pre-images at crates/ironclaw_extension_host/src/skill_auto_activate_capability.rs:62, 65 and inside the same dispatch body scored zero in the base tracefile, with byte-identical text."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/webui_extension_credentials.rs"
+lines = [89, 90]
+owner = "@nearai/reborn"
+reason = "`tracing` message literal, continued across two source lines by a `\\`-escape. Lines 89-90 are the message argument of the `tracing::debug!` that records the `CrossScopeDenied` -> `Ok(None)` collapse. Line 86 (the macro invocation) scores 1 in the merged tracefile and line 92 (the `None` the arm evaluates to) scores 1, so the arm runs; lines 87-88 (the `provider`/`requester_extension` fields) have no DA record, and 89-90 have a record that can never move."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_operator/src/llm_admin/provider_admin.rs"
+lines = [429]
+owner = "@nearai/reborn"
+reason = "Pre-existing and behaviourally untouched. The only change on line 429 is the type path: `let request = ironclaw_product::LlmProbeRequest {` became `let request = LlmProbeRequest {` because the WS2 port inversion moved the DTO to `ironclaw_product_contracts::operator_llm`, which the file now imports. Its pre-image is line 429 of the same file at the base commit, which scored zero; the whole enclosing `probe_candidate` (lines 415-437) scores zero in BOTH the base and the head merged tracefiles, so the head state is identical to the base state. Not testable at this tier for an unrelated reason: `probe_candidate` ends in `probe_candidate_provider`, a live outbound HTTP probe against the provider's base URL."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime.rs"
+lines = [1414, 1415, 1416, 3433]
+owner = "@nearai/reborn"
+reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-1416 are the tail of `RebornRuntime::nearai_login_callback_mount`: the composition-local shim crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs was deleted (a 19-line file whose whole body re-wrapped the operator mount as `PublicRouteMount::new(mount.router, mount.descriptors)`), so the same four arguments -- `session, reload, boot, states` -- now go to `ironclaw_operator::nearai_login_callback_mount`, which returns the host-owned carrier directly. The pre-image (base runtime.rs:1411-1415) scored zero and the whole enclosing function scores zero in BOTH tracefiles (base 1401-1415, head 1396-1417), so nothing became untested; the callee itself IS covered, at crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs:86-104 with 2 hits per line. Line 3433 is the same shape one crate over: `ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher)` became `crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(...)` and rustfmt collapsed the call from three lines to one; the pre-image (base runtime.rs:3433/3435) scored zero, and the entire surrounding skill-learning assembly block (3425-3440) scores zero in both tracefiles. Reaching either would need a fully LLM-wired `RebornRuntime` built through `build_runtime_with_resource_governor`, which no tier below E2E stands up."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
