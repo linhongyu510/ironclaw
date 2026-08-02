@@ -10620,6 +10620,7 @@ struct SetupRecordingLlmConfigService {
     next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+    next_login_error: Mutex<Option<LlmConfigServiceError>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10636,6 +10637,7 @@ impl Default for SetupRecordingLlmConfigService {
             next_snapshot_error: Mutex::new(None),
             next_upsert_error: Mutex::new(None),
             next_set_active_error: Mutex::new(None),
+            next_login_error: Mutex::new(None),
         }
     }
 }
@@ -10675,6 +10677,22 @@ impl SetupRecordingLlmConfigService {
 
     fn fail_next_upsert(&self, error: LlmConfigServiceError) {
         *self.next_upsert_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_login(&self, error: LlmConfigServiceError) {
+        *self.next_login_error.lock().expect("login error lock") = Some(error);
+    }
+
+    fn take_login_error(&self) -> Result<(), LlmConfigServiceError> {
+        match self
+            .next_login_error
+            .lock()
+            .expect("login error lock")
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn fail_next_set_active(&self, error: LlmConfigServiceError) {
@@ -10804,12 +10822,21 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         })
     }
 
+    // The three vendor logins answer with `next_login_error` when one is armed.
+    // They used to `panic!("not used by operator setup tests")`, which made the
+    // *failure* half of each path untestable -- and that half is the whole
+    // point: WS5 replaced product's own `map_llm_config_error` with the `From`
+    // projection declared beside the port, so these three are the call sites
+    // that prove the projection is what product actually returns.
     async fn start_nearai_login(
         &self,
         _caller: ProductSurfaceCaller,
         _request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
-        panic!("start_nearai_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiLoginStart {
+            auth_url: "https://auth.example/v1/auth/github".to_string(),
+        })
     }
 
     async fn complete_nearai_wallet_login(
@@ -10817,14 +10844,19 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         _caller: ProductSurfaceCaller,
         _request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
-        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiWalletLoginResult { active: true })
     }
 
     async fn start_codex_login(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
-        panic!("start_codex_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(CodexLoginStart {
+            user_code: "ABCD-EFGH".to_string(),
+            verification_uri: "https://auth.example/device".to_string(),
+        })
     }
 }
 
@@ -16680,4 +16712,96 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     );
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
+}
+
+/// The three vendor-login paths, driven through `RebornServices`, on their
+/// failure half.
+///
+/// WS5 moved `LlmConfigServiceError`'s projection onto `ProductSurfaceError`
+/// out of product (`map_llm_config_error`) and into the `From` impl declared
+/// beside the port, so these three `.map_err(ProductSurfaceError::from)` call
+/// sites are what proves product still answers with the sanitized taxonomy --
+/// and there is a wrapper plus an `Option` unwrap between the port and the
+/// answer, so a direct test of the `From` impl would not prove it
+/// (`.claude/rules/testing.md`, "Test through the caller").
+///
+/// `Unavailable` is the arm that matters: it is the only retryable one, so a
+/// projection that lost it would turn a transient backend failure into a
+/// permanent-looking error in the Inference tab.
+#[tokio::test]
+async fn vendor_login_failures_project_the_sanitized_port_taxonomy() {
+    let nearai_request = || NearAiLoginRequest {
+        provider: ironclaw_product_contracts::operator_llm::NearAiAuthProvider::Github,
+        origin: "https://app.example".to_string(),
+    };
+    let wallet_request = || NearAiWalletLoginRequest {
+        account_id: "alice.near".to_string(),
+        public_key: "ed25519:key".to_string(),
+        signature: "c2ln".to_string(),
+        message: "login".to_string(),
+        recipient: "ironclaw".to_string(),
+        nonce: vec![0u8; 32],
+        callback_url: None,
+    };
+
+    // Unavailable -> 503, retryable.
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect_err("an unavailable backend must fail the login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable, "Unavailable is the one retryable arm");
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_codex_login(caller())
+        .await
+        .expect_err("an unavailable backend must fail the codex login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .complete_nearai_wallet_login(caller(), wallet_request())
+        .await
+        .expect_err("an unavailable backend must fail the wallet login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    // The non-retryable arms keep their own statuses, and none of them leaks a
+    // backend string: `InvalidRequest`'s reason is dropped by the projection.
+    for (arm, status) in [
+        (
+            LlmConfigServiceError::InvalidRequest {
+                field: Some("provider".to_string()),
+                reason: "backend said /var/lib/ironclaw is unreadable".to_string(),
+            },
+            400,
+        ),
+        (LlmConfigServiceError::NotFound, 404),
+        (LlmConfigServiceError::Internal, 500),
+    ] {
+        llm_config.fail_next_login(arm);
+        let error = services
+            .start_nearai_login(caller(), nearai_request())
+            .await
+            .expect_err("the armed error must surface");
+        assert_eq!(error.status_code, status);
+        assert!(!error.retryable, "only Unavailable is retryable");
+        let on_the_wire = serde_json::to_string(&error).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains("/var/lib/ironclaw"),
+            "no backend string may cross the membrane: {on_the_wire}"
+        );
+    }
+
+    // And the success half still works, so the double is not simply broken.
+    let start = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect("a healthy backend starts the login");
+    assert!(start.auth_url.contains("/v1/auth/github"));
 }

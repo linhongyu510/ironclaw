@@ -309,6 +309,22 @@ mod tests {
         let bounded = truncate_utf8_with_suffix(&"x".repeat(marker * 4), marker + 1);
         assert!(bounded.len() <= marker + 1);
         assert!(bounded.ends_with(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX));
+
+        // The other half of the same fail-safe: the `end > 0` arm of the
+        // back-up loop. Every case above is ASCII, so `is_char_boundary` is
+        // true on the first look and the loop never runs — the guard is only
+        // reached when the walk backs all the way to zero, which needs a
+        // multi-byte character straddling the cut.
+        //
+        // `marker + 1` puts the cut at offset 1, inside the leading 3-byte
+        // character, so `end` steps 1 -> 0 and the loop must stop on `end > 0`
+        // rather than underflow. Nothing of the value survives, which is the
+        // correct answer: there is no whole character that fits.
+        let bounded = truncate_utf8_with_suffix(&"€".repeat(marker * 4), marker + 1);
+        assert_eq!(
+            bounded, OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX,
+            "when no whole character fits, the bound is the marker alone"
+        );
     }
 
     struct EchoingLifecycle;
