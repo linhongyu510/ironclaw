@@ -2,7 +2,7 @@
 
 - Own adapter-safe conversation binding and inbound-turn service contracts only: external actor/conversation refs, source/reply binding refs, participant checks, message acceptance refs, and idempotency semantics.
 - Do not parse concrete Slack/Telegram/Web/CLI payloads in this crate. Product adapters normalize protocol payloads before calling these services.
-- Do not persist raw user or assistant message content in turn-facing records. Use content/message refs; durable transcript content belongs to the SessionThreadService/TranscriptStore storage boundary.
+- Do not persist raw user or assistant message content in turn-facing records. Use content/message refs; durable transcript content belongs to the `InboundConversationService`/TranscriptStore storage boundary (the service was named `SessionThreadService` before the WS5 naming-trap fix).
 - Keep `TurnCoordinator` inputs canonical: `TurnScope`, `TurnActor`, `AcceptedMessageRef`, `SourceBindingRef`, and `ReplyTargetBindingRef`.
 - Binding resolution must fail closed for unpaired actors, unknown/inaccessible threads, invalid refs, participant-policy denials, tenant/adapter-installation mismatches, and delimiter-like external IDs that could collide if flattened into strings.
 - Conversation binding identity excludes per-message external IDs; bind on stable `(space_id, conversation_id, thread_id)` route identity so adapters that include message IDs do not fork canonical threads.

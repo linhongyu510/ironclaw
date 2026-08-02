@@ -1326,6 +1326,17 @@ async fn observer_records_gate_route_after_approval_prompt() {
         ExternalConversationRef::new(Some("space-1"), "conv-1", Some("1700.1"), None)
             .expect("conversation")
             .conversation_fingerprint();
+    // Non-vacuity for the membership check below: if the topic did NOT
+    // participate in the fingerprint, `source_fingerprint` would just be the
+    // untargeted conversation's key, which the route records anyway — so the
+    // assertion would pass while proving nothing about topic routing.
+    assert_ne!(
+        source_fingerprint,
+        ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+            .expect("conversation")
+            .conversation_fingerprint(),
+        "the conversation topic must participate in the fingerprint"
+    );
     assert!(
         route
             .delivered_conversation_fingerprints

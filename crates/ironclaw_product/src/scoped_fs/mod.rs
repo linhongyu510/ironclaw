@@ -11,10 +11,10 @@
 //! `ironclaw_attachments` with the WS5 widening; the reader stays because it
 //! also implements `ironclaw_loop_host`'s `LoopAttachmentReadPort`.
 
-pub mod attachment_landing;
+pub mod attachment_reader;
 pub mod project_filesystem_reader;
 
-pub use attachment_landing::ProjectScopedAttachmentReader;
+pub use attachment_reader::ProjectScopedAttachmentReader;
 pub use project_filesystem_reader::{
     ProjectScopedFilesystemReader, file_name_of, guard_readable_file, map_filesystem_error,
     map_kind, mime_for_path,

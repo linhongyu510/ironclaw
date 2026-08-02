@@ -51,7 +51,9 @@ use std::path::Path;
 #[allow(dead_code)]
 mod ratchet_support;
 
-use ratchet_support::{TypeDefOccurrence, collect_type_defs, workspace_root};
+use ratchet_support::{
+    TypeDefOccurrence, collect_type_defs, strip_comments_and_strings, workspace_root,
+};
 
 const TYPE_KEYWORDS: &[&str] = &["trait ", "struct ", "enum "];
 
@@ -125,48 +127,6 @@ fn stripped_production_source(root: &Path, crate_name: &str) -> String {
         !out.trim().is_empty(),
         "{crate_name}'s production source scanned empty — the walk is broken"
     );
-    out
-}
-
-/// Line-based comment/string stripping. Deliberately conservative: it removes
-/// `//` line comments and double-quoted literals, which is what makes "the name
-/// appears in a doc comment" and "the name appears in a panic message" not
-/// count as a declaration.
-fn strip_comments_and_strings(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    for line in source.lines() {
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut kept = String::with_capacity(line.len());
-        let bytes: Vec<char> = line.chars().collect();
-        let mut index = 0;
-        while index < bytes.len() {
-            let ch = bytes[index];
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    in_string = false;
-                }
-                index += 1;
-                continue;
-            }
-            if ch == '"' {
-                in_string = true;
-                index += 1;
-                continue;
-            }
-            if ch == '/' && index + 1 < bytes.len() && bytes[index + 1] == '/' {
-                break;
-            }
-            kept.push(ch);
-            index += 1;
-        }
-        out.push_str(&kept);
-        out.push('\n');
-    }
     out
 }
 
@@ -376,23 +336,36 @@ fn the_attachment_ports_and_size_ceilings_live_in_the_attachments_crate() {
     );
 }
 
-/// Self-test: the strip must remove prose and literals but keep code, or every
+/// Self-test for `ratchet_support::strip_comments_and_strings` as this gate
+/// uses it: the strip must remove prose and literals but keep code, or every
 /// assertion above that reads stripped source is measuring the wrong thing.
+/// The shared lexer also handles the shapes a local line-based copy would miss
+/// — nested block comments, raw strings, char literals — so those are pinned
+/// here too rather than left to the other gates that share it.
 #[test]
 fn the_source_strip_removes_prose_and_literals_but_not_code() {
     let stripped = strip_comments_and_strings(
-        r#"
+        r##"
 /// fn conversation_actor_ref in a doc comment
 // fn conversation_actor_ref in a line comment
+/* fn conversation_actor_ref in a block comment
+   /* fn conversation_actor_ref in a NESTED block comment */
+*/
 fn real_code() -> &'static str { "fn conversation_actor_ref in a literal" }
+fn raw_literal() -> &'static str { r#"fn conversation_actor_ref in a raw literal"# }
+fn char_literal() -> char { '"' }
 pub fn attachment_capabilities() -> u8 { 0 } // trailing fn conversation_actor_ref
-"#,
+"##,
     );
     assert!(
         !stripped.contains("fn conversation_actor_ref"),
         "prose and literals must not survive the strip: {stripped}"
     );
     assert!(stripped.contains("fn real_code"), "code must survive");
+    assert!(
+        stripped.contains("fn raw_literal") && stripped.contains("fn char_literal"),
+        "a raw string and a char literal must not swallow the code around them: {stripped}"
+    );
     assert!(
         stripped.contains("pub fn attachment_capabilities"),
         "code before a trailing comment must survive"

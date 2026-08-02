@@ -1405,7 +1405,6 @@ pub(crate) struct ActorKey {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
     pub(crate) adapter_installation_id: AdapterInstallationId,
-    #[serde(with = "crate::stored_refs::actor_ref")]
     pub(crate) external_actor_ref: ExternalActorRef,
 }
 
@@ -1686,7 +1685,6 @@ pub(crate) struct AcceptedMessageReplayKey {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
     pub(crate) adapter_installation_id: AdapterInstallationId,
-    #[serde(with = "crate::stored_refs::actor_ref")]
     pub(crate) external_actor_ref: ExternalActorRef,
     pub(crate) external_event_id: crate::ExternalEventId,
 }

@@ -1,8 +1,13 @@
 //! Project-scoped inbound attachment *read-back* for product adapters.
 //!
+//! Named for what it holds. After the WS5 widening this module is the reader
+//! and nothing else, so the path no longer says `attachment_landing` — a path
+//! that would send discovery here looking for landing behavior that lives in
+//! another crate.
+//!
 //! The write half — the [`InboundAttachmentLander`] port and its default
-//! implementation — moved to `ironclaw_attachments` with the WS5 attachments
-//! widening (PROPOSAL §6.4.9). This reader could not follow it: besides
+//! implementation — moved to `ironclaw_attachments` with that widening
+//! (PROPOSAL §6.4.9). This reader could not follow it: besides
 //! [`InboundAttachmentReader`] it also implements
 //! [`LoopAttachmentReadPort`], and `ironclaw_loop_host` is a `loops`-layer
 //! crate a `substrates` crate may not depend on — and once the struct moved,

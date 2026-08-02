@@ -89,20 +89,20 @@ pub(crate) fn map_external_ref_error(error: ProductAdapterError) -> InboundTurnE
 /// carries the per-event `reply_target_message_id`. Bindings are keyed by this
 /// projection so two messages in the same conversation resolve to the same
 /// binding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExternalConversationIdentity {
     pub(crate) space_id: Option<String>,
     pub(crate) conversation_id: String,
     /// The external thread/topic within the conversation. Named `topic_id`
     /// after the `conversations`/`threads` naming-trap fix: it is the *channel's*
     /// sub-conversation, never a canonical [`ThreadId`](ironclaw_host_api::ids::ThreadId).
-    /// Durable records written before the rename spell it `thread_id`, which
-    /// `Deserialize` still accepts.
     ///
-    /// That acceptance is **upgrade-only**: `Serialize` is derived, so this
-    /// build writes `topic_id` and never `thread_id`. See the rollback boundary
-    /// on [`crate::stored_refs`] — it governs this key too, and for the same
-    /// reason.
+    /// The *record* keeps the released spelling, `thread_id`. Both `Serialize`
+    /// and `Deserialize` below are hand-written for that reason, and
+    /// [`crate::stored_refs`] carries the argument: this identity keys
+    /// `BindingKey`, so a spelling the reader on the other side of a deploy
+    /// cannot see does not merely misroute a threaded reply — it collides two
+    /// bindings onto one key and drops the earlier one.
     pub(crate) topic_id: Option<String>,
 }
 
@@ -117,6 +117,29 @@ impl ExternalConversationIdentity {
     }
 }
 
+impl Serialize for ExternalConversationIdentity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        /// The durable grammar. Field names here are the *record's*, not the
+        /// type's — see [`crate::stored_refs`].
+        #[derive(Serialize)]
+        struct StoredExternalConversationIdentity<'a> {
+            space_id: Option<&'a str>,
+            conversation_id: &'a str,
+            thread_id: Option<&'a str>,
+        }
+
+        StoredExternalConversationIdentity {
+            space_id: self.space_id.as_deref(),
+            conversation_id: &self.conversation_id,
+            thread_id: self.topic_id.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
 impl<'de> Deserialize<'de> for ExternalConversationIdentity {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -126,10 +149,11 @@ impl<'de> Deserialize<'de> for ExternalConversationIdentity {
         struct RawExternalConversationIdentity {
             space_id: Option<String>,
             conversation_id: String,
-            /// `thread_id` is the pre-unification spelling persisted by
-            /// released builds; both are accepted, only `topic_id` is written.
-            #[serde(alias = "thread_id")]
-            topic_id: Option<String>,
+            /// `thread_id` is the durable spelling, written by released builds
+            /// and by this one; `topic_id` is accepted so a record written by
+            /// an intermediate build of the rename still loads.
+            #[serde(alias = "topic_id")]
+            thread_id: Option<String>,
         }
 
         let raw = RawExternalConversationIdentity::deserialize(deserializer)?;
@@ -139,7 +163,7 @@ impl<'de> Deserialize<'de> for ExternalConversationIdentity {
         ExternalConversationRef::new(
             raw.space_id.as_deref(),
             raw.conversation_id.as_str(),
-            raw.topic_id.as_deref(),
+            raw.thread_id.as_deref(),
             None,
         )
         .map(|conversation_ref| Self::from_ref(&conversation_ref))
