@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is nineteen shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-three shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -34,9 +34,13 @@ Today that is nineteen shipped modules (plus the dev-only `test_support`, gated 
 | `prompt_source` | Gate-prompt enrichment ports: `ApprovalPromptContextSource`, `BlockedAuthPromptSource`, `BlockedAuthPromptRequest`. Rendering stays in product. |
 | `command` | `ProductCommandContext` (the authority-bearing dispatch context) and the `CommandActorRoleResolver` admission port. |
 | `action` | Inbound-action identity (`ProductActionId`), the bounded product tokens, and `ActionFingerprintKey`. The ledger record and saga are product's. |
-| `admin_users` | The `AdminUserService` port, its records, and its error taxonomy. The `Reborn*` HTTP wire DTOs stay with product's frozen surface. |
+| `admin_users` | The `AdminUserService` port, its records, its error taxonomy, and the `Reborn*` HTTP wire DTOs that wrap them (moved here by the WS5 inversion — §6.1.3's frozen inventory is the concrete *constants*, not the request/response bodies). |
 | `operator_tools` | `RebornOperatorToolCatalog` + `RebornOperatorToolInfo`. |
-| `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. `ProductView` (the typed declaration wrapper) stays with product's frozen inventory. |
+| `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. The typed `ProductView` wrapper sits in `descriptors` with the other two operation shapes. |
+| `descriptors` | The three `ProductSurface` operation shapes — `ProductSurfaceCommandDescriptor`, `ProductCapabilityDescriptor`, `ProductView`, `EmptyProductCommandInput` — plus their encode/decode glue. The *types*; product keeps the concrete constants as its frozen inventory. |
+| `inbound_requests` | The browser/API request bodies a transport hands to `ProductSurface` (`ProductSubmitTurnRequest`, `ProductCreateThreadRequest`, the cancel/gate/retry/setup/list bodies, `ProductInboundAttachment`). Field shapes and the `serde` contract only — normalization stays in product. |
+| `product_wire` | The `Reborn*` product wire DTO family every product transport serializes across the boundary. Payload vocabulary only: no service, handler, or projection reducer. |
+| `workspace_views` | Project and filesystem-browse wire vocabulary for the Projects page and the Workspace/Files explorer. The read ports that serve them stayed in product. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
 | `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 
@@ -184,15 +188,29 @@ Two rules follow, both pinned by tests:
 
 ## Deferred by design (not missing)
 
-§6.1.3's Owns list also names the **operator service ports** (`LlmConfigService`,
-`ActiveModelReader`, `OperatorLogsService`, `OperatorServiceLifecycleService`,
-`OperatorStatusService` + their DTOs) and the command/view/capability
-**descriptor types** (`ProductSurfaceCommandDescriptor`,
-`ProductCapabilityDescriptor`, `ProductView`). Those are sourced from
-`ironclaw_product`, and CHECKLIST WS2's `operator`/`webui`/`openai_compat` flips
-own them by name. They land in this crate; they land with the PRs that repoint
-their implementors, because moving a port definition without its implementation
-buys no dependency-edge removal.
+✎ **2026-08-01, the WS5 transport inversion discharged most of this.** The
+command/view/capability **descriptor types** now live in `descriptors`; the
+inbound request bodies in `inbound_requests`; the `Reborn*` response bodies in
+`product_wire`; the operator LLM-admin DTOs in `operator_llm`; the admin-user
+wire DTOs in `admin_users`; the project/filesystem-browse DTOs in
+`workspace_views`. What is still sourced from `ironclaw_product` and owed to the
+WS5 **`operator`** row is the operator service *ports* themselves
+(`LlmConfigService`, `ActiveModelReader`, `OperatorLogsService`,
+`OperatorServiceLifecycleService`, `OperatorStatusService`) — they land with the
+PR that repoints their implementor, because moving a port definition without its
+implementation buys no dependency-edge removal.
+
+**The line that did *not* move, and must not be crossed casually.** §6.1.3 gives
+this crate the descriptor *types* and explicitly withholds "product's 27/33/18
+concrete constants, which stay in product as the frozen inventory". Those
+constants are what a route handler actually names to call the surface, so they
+are the whole reason `ironclaw_webui` (91 of them) and
+`ironclaw_reborn_openai_compat` (3) still depend on `ironclaw_product` after the
+inversion. `reborn_transport_product_boundary.rs` pins the split in **both**
+directions — the moved vocabulary must be here, and a sample of the inventory
+must **not** be — so "finish the row" cannot quietly mean "move the inventory
+too". That is an owner decision recorded on the CHECKLIST WS5 `webui` row, not a
+cleanup.
 
 `ProductCommandAdmissionService` is a special case worth recording rather than
 deciding: §6.1.3 names its "shape" for this crate, but `admit` takes a

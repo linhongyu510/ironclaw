@@ -9,9 +9,11 @@
 //! admin-configuration view is implemented by `ironclaw_extension_manager`
 //! (WS2.4).
 //!
-//! Never here: any concrete view id, any provider implementation, or the
-//! typed `ProductView` declaration wrapper (that carries product's frozen
-//! request/response DTOs and stays with them).
+//! Never here: any concrete view id, or any provider implementation. The typed
+//! `ProductView` declaration wrapper lives beside the other two operation
+//! shapes in [`crate::descriptors`] — WS1.4 left it in product because it
+//! carried product-defined request/response DTOs, and the WS5 port inversion
+//! removed that reason (PROPOSAL §6.1.3 names it as a descriptor *type*).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

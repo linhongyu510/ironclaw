@@ -186,6 +186,13 @@ pub use generic_host::{
     boot_installation_records, build_generic_extension_host, effective_resolved_for_package,
 };
 pub use host_api_contracts::product_extension_host_api_contract_registry;
+// Exported for `ironclaw_extension_manager`'s two post-install classifiers.
+// The predicate deliberately lives beside the producer that emits the reason
+// strings (see `hosted_mcp_manifest`); the WS2.4 split moved both of its
+// consumers into the manager crate, so the single source of truth is reached
+// across the crate boundary rather than duplicated back into two inline string
+// comparisons — the exact drift shape the predicate was extracted to close.
+pub use hosted_mcp_manifest::hosted_mcp_discovery_left_the_install_usable;
 pub use hosted_mcp_preparation::HostedMcpPreparationDependencies;
 pub use inbound_batches::FilesystemInboundBatchStore;
 pub use install_policy::{

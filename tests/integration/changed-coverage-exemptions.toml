@@ -121,7 +121,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [483]
+lines = [105]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -782,6 +782,13 @@ review_after = "2026-10-31"
 #   line 220 (error construction) hits 1
 #   line 221 (closing brace)      hits 1
 #
+# (Corrected in #7000: this block and the entry below both named line 217,
+# which is the `?error,` field, not the message literal. The entry was
+# therefore exempting a line that is not the uncovered one — inert today
+# because neither line is in #7000's changed set, but it would have failed to
+# apply the moment a PR touched the real line. Re-verified against run
+# 30706965794's merged lcov.)
+#
 # The function ran, the macro ran, and the error was built. What LLVM does not
 # count is the message literal: `tracing` bakes it into the callsite's `static`
 # `Metadata`, so the region on that line belongs to a static initializer and is
@@ -814,3 +821,31 @@ owner = "@nearai/reborn"
 reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 214/215/220/221 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence. Path repointed with the file when `extension_lifecycle_capabilities.rs` moved to `ironclaw_extension_manager` in WS2.4."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+# ===========================================================================
+# WS2.2 (#7000): no exemption entries, deliberately.
+#
+# An earlier revision of this branch carried a ~250-line tranche of waivers for
+# the `ProductSurfaceFailure` -> `ProductOperationFailure` repoint. That
+# repoint reached `main` ahead of this branch (via #7002), so the comparison
+# those entries were derived from no longer exists: this PR's base already
+# contains the renamed type, and what remains here is a test-and-coverage
+# follow-up.
+#
+# Deleted rather than re-justified, because an exemption is scoped to a
+# `(path, line)` pair and NOT to the PR that added it -- an inert entry today
+# silently waives whichever line lands on that number in someone else's PR
+# tomorrow. Raised by @serrrfirat on #7000; the entries were kept only by the
+# stale rationale, so re-dating them would have been an appeasement edit.
+#
+# Verified, not assumed, by replaying this gate against CI's own merged lcov
+# (run 30715247952, head 81bfee448e) both with and WITHOUT the tranche:
+#
+#   with:    100.00% (11/11), 0 uncovered   <- matches CI's published
+#   without: 100.00% (11/11), 0 uncovered      reborn-changed-coverage.json
+#                                              byte for byte
+#
+# The changed set is 4 files / 11 lines and every one is covered by a test, so
+# not a single deleted entry was load-bearing. The one edit above this comment
+# -- the `extension_lifecycle_capabilities.rs` 217 -> 218 correction -- is
+# retained: it fixes a PRE-EXISTING entry that pointed at the `?error,` field
+# instead of the message literal, i.e. it was waiving the wrong line.

@@ -522,9 +522,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP catalog preparation failed:")
-                || reason
-                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+            if ironclaw_extension_host::hosted_mcp_discovery_left_the_install_usable(&reason) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
@@ -686,6 +684,71 @@ fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError 
 
 #[cfg(test)]
 mod tests {
+    fn installed_response() -> LifecycleProductResponse {
+        LifecycleProductResponse::projection(
+            Some(
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail")
+                    .expect("package ref"),
+            ),
+            InstallationState::Installed,
+            Vec::new(),
+        )
+    }
+
+    /// The capability-tier twin of the lifecycle service's post-install
+    /// classifier: it decides which activation failures are reported to the
+    /// *model* as a successful install. The two must agree on which failures
+    /// are swallowed, or the same install reads as success through one caller
+    /// and failure through the other. Only the error varies between cases —
+    /// the same `installed_response()` goes in every time.
+    #[test]
+    fn post_install_activation_failures_are_swallowed_only_when_the_install_still_stands() {
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "an unconfigured provider must reach the model, not hide behind a green install"
+        );
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::Transient {
+                    reason: "db timeout".to_string(),
+                },
+                installed_response(),
+            )
+            .ok(),
+            Some(installed_response()),
+            "a transient reconciliation blip leaves the install itself intact"
+        );
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "generic extension host rejected the activation: hosted MCP \
+                             discovery published no callable tools"
+                        .to_string(),
+                },
+                installed_response(),
+            )
+            .ok(),
+            Some(installed_response()),
+            "a hosted-MCP discovery miss still leaves an installed extension"
+        );
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "some other rejection".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "the guard is reason-specific: any other rejection must still surface"
+        );
+    }
+
     /// The serialization guard is defensive — a well-formed projection does
     /// not fail `serde_json` — but the mapping is a live contract with two
     /// halves, and this asserts both: the model sees `OutputDecode` and never

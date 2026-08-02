@@ -63,7 +63,20 @@ pub trait LifecycleProductService: Send + Sync {
     /// caller's fault. Changing it changes an HTTP status on a live route, so
     /// it belongs in its own change with the WebUI path re-checked;
     /// `bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding`
-    /// pins today's behavior so the flip cannot happen silently.
+    /// pins today's behavior so the flip cannot happen silently. The flip —
+    /// and this test's assertion with it — is owned by the CHECKLIST WS2 row
+    /// "The four WS2.1 follow-ups", which sizes it as the behavior change it
+    /// is rather than as a signature correction.
+    ///
+    /// ✎ **Known stringly-typed signature, carried verbatim by the WS2.1
+    /// move.** The key should be `ExtensionId`, not `String` — the host
+    /// implementation already holds a typed `ExtensionId` and stringifies only
+    /// to satisfy this signature. Retyping it changes the contract for every
+    /// implementor, which PLAN operating principle 2 keeps out of a move-shaped
+    /// PR; it is owned by the CHECKLIST WS2 row "The four WS2.1 follow-ups".
+    /// It is independent of the `ProductSurfaceFailure` slice — `ExtensionId`
+    /// is `host_api` vocabulary this crate may already name — so it need not
+    /// wait on it.
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
