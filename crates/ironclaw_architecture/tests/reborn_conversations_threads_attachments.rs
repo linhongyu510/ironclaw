@@ -258,16 +258,71 @@ fn the_external_ref_pair_is_declared_only_by_the_extension_contracts_crate() {
     // And conversations must not become a second *import path* for the pair
     // (PROPOSAL §11.2.4's re-export trap).
     let conversations_source = stripped_production_source(&root, "ironclaw_conversations");
+    // Match the type name inside any `pub use` statement rather than against
+    // hand-written path spellings. The two exact strings this used to compare
+    // (`pub use ids::X` and `pub use ironclaw_extension_contracts::external::X`)
+    // caught only the single-item form, so the idiomatic braced group —
+    // `pub use ironclaw_extension_contracts::external::{ExternalActorRef,
+    // ExternalConversationRef};` — matched neither, as did `crate::ids::X`,
+    // `self::ids::X`, and a re-export through any other intermediate module.
+    // The gate passed while the second import path existed, which is the
+    // fail-open direction for a guard whose whole promise is "not through this
+    // crate". Raised by CodeRabbit on #7018.
+    //
+    // Each statement runs from its own `pub use` to the next `;`. Splitting the
+    // whole concatenated source on `;` and keeping the chunks that *contain*
+    // "pub use" is not equivalent and is wrong: a chunk is bounded by the
+    // previous statement's semicolon, so it can carry unrelated code, and a
+    // type named anywhere in that code reads as a re-export. The source is
+    // already stripped of comments and string literals, so a name in prose
+    // cannot false-positive either way.
+    // `use` must end on a word boundary: the field declaration `pub user_id:
+    // UserId,` contains the substring "pub use" and would otherwise open a
+    // bogus statement that swallows the rest of the struct.
+    let pub_use_statements = conversations_source
+        .match_indices("pub use")
+        .filter(|(at, _)| {
+            conversations_source[at + "pub use".len()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        })
+        .map(|(at, _)| {
+            let rest = &conversations_source[at..];
+            match rest.find(';') {
+                Some(end) => &rest[..=end],
+                None => rest,
+            }
+        })
+        .collect::<Vec<_>>();
     for name in pair {
+        let offending = pub_use_statements
+            .iter()
+            .find(|statement| names_item(statement, name));
         assert!(
-            !conversations_source.contains(&format!("pub use ids::{name}"))
-                && !conversations_source.contains(&format!(
-                    "pub use ironclaw_extension_contracts::external::{name}"
-                )),
+            offending.is_none(),
             "ironclaw_conversations re-exports {name} — consumers must import it from its owner, \
-             `ironclaw_extension_contracts::external`, not through this crate"
+             `ironclaw_extension_contracts::external`, not through this crate. Offending \
+             statement: {}",
+            offending.map(|s| s.trim()).unwrap_or_default()
         );
     }
+}
+
+/// Whether a `pub use` statement names `item` as a whole word, so
+/// `ExternalActorRefBuilder` does not read as `ExternalActorRef`.
+fn names_item(statement: &str, item: &str) -> bool {
+    statement.match_indices(item).any(|(at, _)| {
+        let before_ok = statement[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        let after_ok = statement[at + item.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        before_ok && after_ok
+    })
 }
 
 #[test]
