@@ -235,4 +235,101 @@ mod tests {
             other => panic!("expected a backend refusal, got {other}"),
         }
     }
+
+    // The `InboundAttachmentReader` half — the product-surface translation —
+    // had no coverage at all: every test above drives `read_attachment_bytes`
+    // (the loop port), so the whole `map_err` taxonomy below it was dead to the
+    // suite. These four pin it, because the taxonomy IS the contract for the
+    // bytes endpoint: a caller distinguishes "gone" from "not yours" from
+    // "broken" only by the status this closure picks.
+    //
+    // Crate tier rather than `tests/integration/`: the int tier reaches the
+    // success path already (`tests/integration/attach.rs` drives the production
+    // wiring), but the three failure arms need a mount that denies reads and a
+    // storage key that fails `ScopedPath` validation — both are properties of
+    // this adapter's construction, not of a wired runtime.
+
+    #[tokio::test]
+    async fn product_reader_serves_landed_bytes_through_the_thread_scope() {
+        let fs = workspace_fs(MountPermissions::read_write());
+        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
+        let refs = lander
+            .land(
+                &thread_scope(),
+                "msg1",
+                vec![InboundAttachment {
+                    id: "att-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("diagram.png".to_string()),
+                    bytes: vec![9, 8, 7],
+                }],
+            )
+            .await
+            .expect("landing succeeds");
+        let storage_key = refs[0].storage_key.as_deref().expect("storage_key set");
+
+        let reader = ProjectScopedAttachmentReader::new(Arc::clone(&fs));
+        let bytes = InboundAttachmentReader::read(&reader, &thread_scope(), storage_key)
+            .await
+            .expect("the product reader serves the landed bytes");
+        assert_eq!(bytes, vec![9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn product_reader_maps_a_missing_attachment_to_404_not_found() {
+        let reader =
+            ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::read_write()));
+        let error = InboundAttachmentReader::read(
+            &reader,
+            &thread_scope(),
+            "/workspace/attachments/2026-06-14/m1-0-missing.png",
+        )
+        .await
+        .expect_err("an absent attachment is an error, not empty bytes");
+        assert_eq!(error.status_code, 404);
+        assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+        assert_eq!(error.kind, ProductSurfaceErrorKind::NotFound);
+        assert!(
+            !error.retryable,
+            "a missing attachment never becomes present"
+        );
+    }
+
+    #[tokio::test]
+    async fn product_reader_maps_a_denied_mount_to_403_rather_than_404() {
+        // The distinction matters: answering 404 for a readable-but-forbidden
+        // attachment would tell a caller it does not exist.
+        let reader = ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::none()));
+        let error = InboundAttachmentReader::read(
+            &reader,
+            &thread_scope(),
+            "/workspace/attachments/2026-06-14/m1-0-diagram.png",
+        )
+        .await
+        .expect_err("a mount that grants no read must not serve bytes");
+        assert_eq!(error.status_code, 403);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
+        assert_eq!(error.kind, ProductSurfaceErrorKind::ParticipantDenied);
+    }
+
+    #[tokio::test]
+    async fn product_reader_maps_a_malformed_storage_key_to_a_sanitized_500() {
+        // `storage_key` reaches here from a stored attachment ref, so a
+        // corrupted one must fail closed at `ScopedPath::new` — and the 500 it
+        // becomes must not echo the rejected value back to the caller.
+        let reader =
+            ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::read_write()));
+        let error = InboundAttachmentReader::read(
+            &reader,
+            &thread_scope(),
+            "https://evil.example.com/attachment.png",
+        )
+        .await
+        .expect_err("a URL is not a scoped path");
+        assert_eq!(error.status_code, 500);
+        assert!(
+            !format!("{error:?}").contains("evil.example.com"),
+            "the sanitized product error must not carry the rejected key: {error:?}"
+        );
+    }
 }
