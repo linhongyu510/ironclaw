@@ -2,9 +2,10 @@
 //!
 //! [`crate::package_lifecycle`] owns the lifecycle *values*; this module owns
 //! the service that answers in them. The split matters because the only
-//! production implementation lives **below** product, in
-//! `ironclaw_extension_host` — it is the crate that may write lifecycle state —
-//! while product and every transport call it through this port.
+//! production implementation lives **outside** product, in
+//! `ironclaw_extension_manager` (WS2.4) — which calls the lifecycle
+//! *authority* in `ironclaw_extension_host`, the crate that may write lifecycle
+//! state — while product and every transport call it through this port.
 //!
 //! Never here: any lifecycle authority, install policy, or service
 //! implementation (including the unsupported-runtime fallback, which is

@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ratchet_support::{
-    cfg_test_only_files, names_crate, strip_comments_and_strings, workspace_root,
+    names_crate, production_rust_files, strip_comments_and_strings, workspace_root,
 };
 
 const HOST: &str = "ironclaw_extension_host";
@@ -200,46 +200,32 @@ fn crate_src(root: &Path, name: &str) -> PathBuf {
 /// skipping the entry. A scan that silently swallows a failed `read_dir` walks
 /// a smaller tree and passes vacuously, which is the exact way a shrink-only
 /// list stops protecting anything.
+/// Every production `.rs` file under `dir`, relative to it.
+///
+/// Delegates to `ratchet_support::production_rust_files` — the single
+/// definition of "production code" for every ratchet — rather than spelling the
+/// fatal walk, the name/directory exclusions, and the `cfg_test_only_files`
+/// subtraction again here. This file originally carried its own copy, and it
+/// had already drifted from the port-inversion ratchet's (that one skipped
+/// `node_modules`, this one did not), which is precisely how two gates end up
+/// enforcing shrink-only lists against different trees. Raised by @serrrfirat
+/// on #7003.
+///
+/// ⚠ Follow-up, deliberately not done inside this split PR: ~19 other ratchets
+/// under `crates/ironclaw_architecture/tests/` still roll their own `read_dir`
+/// walk. Migrating them belongs in a dedicated change against
+/// `ratchet_support`, not in a crate split — the two this reviewer named are
+/// the pair that shared the `cfg_test_only_files` recipe, and they are the two
+/// converted here.
 fn production_files(dir: &Path) -> Vec<PathBuf> {
-    // A production-looking name is not enough: a file reachable only through a
-    // `#[cfg(test)] mod …;` chain is test code, and counting it would let a
-    // test double keep a residue row or a module-presence claim satisfied.
-    let test_only = cfg_test_only_files(dir);
-    let mut out = Vec::new();
-    walk(dir, dir, &mut out);
-    out.retain(|relative| !test_only.contains(&dir.join(relative)));
-    out.sort();
-    out
-}
-
-fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("read_dir {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| panic!("dir entry in {}: {error}", dir.display()));
-        let path = entry.path();
-        if path.is_dir() {
-            if matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("target") | Some("tests")
-            ) {
-                continue;
-            }
-            walk(base, &path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if name == "tests.rs" || name.ends_with("_tests.rs") {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(base)
-                .unwrap_or_else(|error| panic!("strip {}: {error}", path.display()));
-            out.push(relative.to_path_buf());
-        }
-    }
+    production_rust_files(dir)
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(dir)
+                .unwrap_or_else(|error| panic!("strip {}: {error}", path.display()))
+                .to_path_buf()
+        })
+        .collect()
 }
 
 fn read(root: &Path, crate_name: &str, relative: &Path) -> String {

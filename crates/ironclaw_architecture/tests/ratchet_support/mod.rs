@@ -306,6 +306,63 @@ fn trailing_attribute_run_contains(before: &str, needle: &str) -> bool {
     false
 }
 
+/// Directories a production scan never descends into.
+const NON_PRODUCTION_DIRS: &[&str] = &["target", "node_modules", "tests"];
+
+/// Whether `path`'s file name is one of the conventional test-file shapes.
+fn is_test_file_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    name == "tests.rs" || name.ends_with("_tests.rs")
+}
+
+/// **The** definition of "a production Rust file under `src`", as absolute
+/// paths, sorted: the fatal walk, the conventional name/directory exclusions,
+/// and the [`cfg_test_only_files`] subtraction, composed once.
+///
+/// Ratchets used to each spell this two-step recipe themselves, and they had
+/// already drifted: `reborn_extension_host_port_inversion.rs` skipped
+/// `node_modules` and `reborn_extension_manager_split.rs` did not. That is
+/// exactly the failure mode a shrink-only list cannot survive — two gates
+/// disagreeing about what production code *is* means one of them is measuring
+/// a different tree than the row it enforces was written against. Raised by
+/// @serrrfirat on #7003 (and independently on #7004).
+///
+/// I/O errors are **fatal**, not skipped: a scan that silently swallows a
+/// failed `read_dir` walks a smaller tree and passes a shrink-only list
+/// vacuously.
+///
+/// ⚠ Other ratchets in this directory still carry their own walkers. Adopting
+/// this helper across them is tracked separately — see the module note in
+/// `reborn_extension_manager_split.rs`.
+#[allow(dead_code)]
+pub fn production_rust_files(src: &Path) -> Vec<PathBuf> {
+    let test_only = cfg_test_only_files(src);
+    let mut all = Vec::new();
+    all_rust_files(src, &mut all);
+    let mut out: Vec<PathBuf> = all
+        .into_iter()
+        .filter(|path| {
+            !is_test_file_name(path)
+                && !test_only.contains(path)
+                && path
+                    .strip_prefix(src)
+                    .map(|relative| {
+                        !relative.components().any(|component| {
+                            NON_PRODUCTION_DIRS
+                                .iter()
+                                .any(|skip| component.as_os_str() == *skip)
+                        })
+                    })
+                    .unwrap_or(true)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Every `.rs` file under `src` that is test-only **despite a
 /// production-looking name**: reachable only through a `#[cfg(test)]`-gated
 /// out-of-line `mod` declaration, or (transitively) declared from a file that

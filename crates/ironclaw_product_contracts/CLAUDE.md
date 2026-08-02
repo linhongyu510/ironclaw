@@ -27,7 +27,7 @@ Today that is nineteen shipped modules (plus the dev-only `test_support`, gated 
 | `interaction_commands` | The channel-neutral interaction-reply grammar (`parse_interaction_resolution_text`). |
 | `operator_llm` | The operator LLM menu vocabulary. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`) — see the ruling below. |
-| `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_host` — the only crate that may write lifecycle state. |
+| `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_manager` (WS2.4); the *authority* it calls — the only writer of lifecycle state — stayed in `ironclaw_extension_host`. |
 | `delivery` | The delivery-resolution ports: `ChannelDeliveryResolver`, `ResolvedChannelDelivery`, `DeliveryReplyContextSource`. The coordinator itself is product's. |
 | `account_setup` | `AccountConnectionStatusSource` + the extension account-setup descriptor/notice/error vocabulary. The declaration registry is product's (it holds mutable state). |
 | `channel_config` | `ChannelConfigProductService` — per-extension `[channel.config]` operator config, implemented over the installation store. |
@@ -122,14 +122,24 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 **The twelve ports WS2 relocated, and the five it could not.** The
 `extension_host` port-inversion row moved every product-declared port the
 extension host reaches whose signature this crate may legally name. **Ten of
-them `extension_host` itself implements** — those are the ones
-`reborn_extension_host_port_inversion.rs::INVERTED_PORTS` enumerates and pins:
-`AccountConnectionStatusSource`, `ApprovalPromptContextSource`,
-`BlockedAuthPromptSource`, `ChannelConfigProductService`,
-`ChannelDeliveryResolver`, `CommandActorRoleResolver`,
-`DeliveryReplyContextSource`, `LifecycleProductService`,
-`ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made
-it declarable), `RebornViewProvider`.
+them the extension side implements** — those are the ones
+`reborn_extension_host_port_inversion.rs::INVERTED_PORT_IMPLEMENTORS`
+enumerates and pins, each *with its implementing crate*, because WS2.4 split
+the extension-management product face out of the host and four of the ten went
+with it:
+
+| Port | Implemented by |
+|---|---|
+| `AccountConnectionStatusSource` | `ironclaw_extension_host` |
+| `ApprovalPromptContextSource` | `ironclaw_extension_host` |
+| `BlockedAuthPromptSource` | `ironclaw_extension_host` |
+| `ChannelDeliveryResolver` | `ironclaw_extension_host` |
+| `CommandActorRoleResolver` | `ironclaw_extension_host` |
+| `DeliveryReplyContextSource` | `ironclaw_extension_host` |
+| `ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made it declarable) | `ironclaw_extension_host` |
+| `ChannelConfigProductService` | `ironclaw_extension_manager` |
+| `LifecycleProductService` | `ironclaw_extension_manager` |
+| `RebornViewProvider` | `ironclaw_extension_manager` |
 **Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
 they moved for the same reason — a port whose implementation sits outside
 product does not belong inside it: `AdminUserService`,

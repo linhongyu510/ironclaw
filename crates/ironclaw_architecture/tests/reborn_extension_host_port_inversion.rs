@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use ratchet_support::{
     TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
-    strip_comments_and_strings, workspace_root,
+    production_rust_files, strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_product";
@@ -183,35 +183,6 @@ fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
 /// scan that silently shrinks its input passes while enforcing nothing, which
 /// is the failure mode this whole file exists to prevent. A missing directory,
 /// an unreadable entry, or a permission error must red the gate, not thin it.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!("cannot read an entry under {}: {error}", dir.display())
-        });
-        let path = entry.path();
-        if path.is_dir() {
-            if matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("target") | Some("node_modules") | Some("tests")
-            ) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if name == "tests.rs" || name.ends_with("_tests.rs") {
-                continue;
-            }
-            out.push(path);
-        }
-    }
-}
-
 /// Remove `#[cfg(test)]`-gated items. Only the *production* edge blocks the
 /// layer flip: a test double may implement a product trait through the crate's
 /// dev-dependency without the shipped artifact depending on product. Same
@@ -360,10 +331,7 @@ fn traits_implemented_by(
     minimum_files: usize,
 ) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
-    let test_only = cfg_test_only_files(&src);
-    let mut files = Vec::new();
-    rust_files(&src, &mut files);
-    files.retain(|file| !test_only.contains(file));
+    let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
         "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
@@ -552,10 +520,7 @@ fn production_files_naming(
     minimum_files: usize,
 ) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
-    let test_only = cfg_test_only_files(&src);
-    let mut files = Vec::new();
-    rust_files(&src, &mut files);
-    files.retain(|file| !test_only.contains(file));
+    let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
         "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
@@ -799,5 +764,72 @@ fn files_reachable_only_through_cfg_test_modules_are_not_production() {
         test_only.contains(&evader),
         "channel_host/e2e_auth_challenge.rs is reachable only through a #[cfg(test)] \
          module chain and must be classified test-only"
+    );
+}
+
+/// The two halves of `cfg_test_only_files` the in-tree pin above cannot reach,
+/// on a synthetic tree so nothing depends on a fixture staying put:
+///
+/// 1. **Direct `#[cfg(test)] mod …;` seeding.** The in-tree chain starts at
+///    `e2e_tests.rs`, whose *name* already seeds it via the `*_tests.rs` rule —
+///    so the seeding loop that reads the `cfg(test)` gate is never the reason
+///    that chain is classified. Verified by deleting that loop: the pin above
+///    stayed green. A production-named `fixture.rs` declared directly as
+///    `#[cfg(test)] mod fixture;` would therefore have become countable with no
+///    test failing.
+/// 2. **Default (non-`#[path]`) transitive resolution.** The in-tree child is
+///    reached through an explicit `#[path = "…"]`, so `resolve`'s ordinary
+///    `<dir>/<name>.rs` and `<dir>/<name>/mod.rs` lookups are unexercised.
+///
+/// Both are the shapes that let a test double keep a residue row or an
+/// implementor pin satisfied after the real impl is gone. Raised by
+/// @serrrfirat on #7003.
+#[test]
+fn direct_cfg_test_module_and_default_child_are_test_only() {
+    let tree = tempfile::tempdir().expect("temp tree");
+    let src = tree.path().join("src");
+    std::fs::create_dir_all(src.join("fixture")).expect("fixture dir");
+
+    // Production-named, and reachable only through a cfg(test) gate.
+    std::fs::write(
+        src.join("lib.rs"),
+        "pub mod real;\n#[cfg(test)]\nmod fixture;\n",
+    )
+    .expect("lib.rs");
+    // Declares BOTH default resolution shapes: `<dir>/<name>.rs` and
+    // `<dir>/<name>/mod.rs`. No `#[path]` anywhere.
+    std::fs::write(src.join("fixture.rs"), "mod child;\nmod nested;\n").expect("fixture.rs");
+    std::fs::write(src.join("fixture").join("child.rs"), "// child\n").expect("child.rs");
+    std::fs::create_dir_all(src.join("fixture").join("nested")).expect("nested dir");
+    std::fs::write(
+        src.join("fixture").join("nested").join("mod.rs"),
+        "// nested\n",
+    )
+    .expect("nested/mod.rs");
+    // Ungated sibling: must NOT be swept up, or the function would be
+    // classifying the whole tree rather than the cfg(test) reachable set.
+    std::fs::write(src.join("real.rs"), "// real production code\n").expect("real.rs");
+
+    let test_only = cfg_test_only_files(&src);
+
+    for expected in [
+        src.join("fixture.rs"),
+        src.join("fixture").join("child.rs"),
+        src.join("fixture").join("nested").join("mod.rs"),
+    ] {
+        assert!(
+            test_only.contains(&expected),
+            "{} is reachable only through `#[cfg(test)] mod fixture;` and must be \
+             test-only, got {test_only:?}",
+            expected.display()
+        );
+    }
+    assert!(
+        !test_only.contains(&src.join("real.rs")),
+        "an ungated production module must stay production, got {test_only:?}"
+    );
+    assert!(
+        !test_only.contains(&src.join("lib.rs")),
+        "the declaring file is production; only the gated target is not"
     );
 }
