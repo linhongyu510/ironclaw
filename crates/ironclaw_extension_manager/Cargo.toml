@@ -17,11 +17,18 @@ layer = "products"
 # Lightweight in-crate test fixtures (the full lifecycle service bundle)
 # reused by downstream integration tests. Zero-byte in production.
 test-support = [
+    "dep:ironclaw_authorization",
     "dep:ironclaw_first_party_extensions",
+    "dep:ironclaw_network",
+    "dep:ironclaw_processes",
+    "dep:ironclaw_resources",
+    "dep:ironclaw_safety",
+    "dep:ironclaw_triggers",
+    "dep:ironclaw_trust",
     "ironclaw_auth/test-support",
     "ironclaw_extension_host/test-support",
     "ironclaw_filesystem/test-support",
-    "ironclaw_processes/test-support",
+    "ironclaw_processes?/test-support",
 ]
 
 [dependencies]
@@ -30,7 +37,12 @@ base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_auth = { path = "../ironclaw_auth" }
-ironclaw_authorization = { path = "../ironclaw_authorization" }
+# The optional crates below are used only by the `test_support` lifecycle
+# fixture (`cfg(any(test, feature = "test-support"))`): production builds of
+# this crate never link them. They are enabled by the `test-support` feature
+# for downstream fixture consumers and repeated in `[dev-dependencies]` for
+# this crate's own `cfg(test)` builds.
+ironclaw_authorization = { path = "../ironclaw_authorization", optional = true }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
@@ -38,21 +50,18 @@ ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions",
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
-ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
-ironclaw_network = { path = "../ironclaw_network" }
-ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_network = { path = "../ironclaw_network", optional = true }
+ironclaw_processes = { path = "../ironclaw_processes", optional = true }
 ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
-ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
-ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_resources = { path = "../ironclaw_resources", optional = true }
+ironclaw_safety = { path = "../ironclaw_safety", optional = true }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_triggers = { path = "../ironclaw_triggers" }
-ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_triggers = { path = "../ironclaw_triggers", optional = true }
+ironclaw_trust = { path = "../ironclaw_trust", optional = true }
 ed25519-dalek = "2.2.0"
 hex = "0.4.3"
-secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -64,14 +73,22 @@ url = "2"
 
 [dev-dependencies]
 ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
+ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
+ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+secrecy = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 # `tracing` short-circuits on the null dispatcher, so a plain unit test cannot

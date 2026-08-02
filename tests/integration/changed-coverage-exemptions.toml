@@ -654,9 +654,9 @@ review_after = "2026-10-31"
 #   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
 #   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
 # The service it hands back is itself covered: `RebornChannelConfigProductService`
-# is exercised by the extension_host channel-config suite, and the port contract
-# by `ironclaw_product_contracts::channel_config`'s own tests, both added in this
-# PR. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
+# is exercised by its own unit tests (it moved to `ironclaw_extension_manager`
+# with WS2.4), and the port contract by
+# `ironclaw_product_contracts::channel_config`'s own tests. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
 # the caller lives in a lane whose lcov does not attribute hits back to this
 # `#[cfg(any(test, feature = "test-support"))]` accessor in the composition
 # bucket build.

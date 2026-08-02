@@ -39,8 +39,10 @@ impl ChannelConfigProductService for RebornChannelConfigProductService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
-        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
-            && !manifest.admin_configuration.is_empty()
+        if let Ok(true) = self
+            .service
+            .declares_admin_configuration(extension_id)
+            .await
         {
             return Ok(Vec::new());
         }

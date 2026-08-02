@@ -187,12 +187,21 @@ impl ChannelConfigService {
         Ok(channel_config_fields(record.resolved()))
     }
 
+    /// Whether the installed manifest declares `[admin_configuration]`.
+    ///
     /// `pub` for the manager-side product service (§6.8.3): the
     /// `ChannelConfigProductService` projection suppresses the field list for
-    /// an extension that declares `[admin_configuration]`, which it can only
-    /// decide by reading the installed manifest. The read stays here; only
-    /// the projection left.
-    pub async fn resolved_manifest(
+    /// such an extension. Only this yes/no leaves the crate — the manifest
+    /// read itself stays internal.
+    pub async fn declares_admin_configuration(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ChannelConfigError> {
+        let manifest = self.resolved_manifest(extension_id).await?;
+        Ok(!manifest.admin_configuration.is_empty())
+    }
+
+    async fn resolved_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Arc<ResolvedExtensionManifest>, ChannelConfigError> {

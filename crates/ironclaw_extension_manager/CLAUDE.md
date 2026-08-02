@@ -63,9 +63,11 @@ structural rather than effort:
 `docs/reborn/target-architecture/families/extensions.md` gives this crate
 `product_contracts` + `extension_contracts` + `extension_registry` +
 `extension_host`. It also depends on `ironclaw_product` today, in exactly seven
-files, and every one is a **product DTO or a capability-id constant** — never a
-workflow call. Those symbols belong in `ironclaw_product_contracts` by §6.1.3
-and are waiting on rows that own them.
+files, and every one is a **product DTO, a capability-id constant, or one of
+two port-inversion residues** (the `ExtensionCredentialSetupService` port and
+the auth-continuation fixture wiring) — never a workflow call. Those symbols
+belong in `ironclaw_product_contracts` by §6.1.3 and are waiting on rows that
+own them.
 
 The list is frozen exact-match and shrink-only in
 `reborn_extension_manager_split.rs`. Adding a file to it is not how you make a

@@ -200,13 +200,13 @@ name = "ironclaw_extension_host"
 # capabilities and commands, the lifecycle product service, the
 # admin/operator/skill capability handlers, credential views, the channel-config
 # product projection, and the extension hub — moved to
-# `ironclaw_extension_manager`. The `floor_covered_lines = 22271` numerator was
-# captured at 26,569 instrumented lines and therefore no longer describes this
-# crate: it is structurally unreachable, not a regression. Same disposition as
-# the `ironclaw_turns` entry above, and for the same reason — this entry drops
-# to a percentage floor for one release, with `floor_percent` retained
-# UNCHANGED rather than weakened. The ratio is the invariant that survives a
-# split; the absolute numerator is the one that cannot.
+# `ironclaw_extension_manager`. The pre-split `floor_covered_lines = 22271`
+# numerator was captured at 26,569 instrumented lines and therefore no longer
+# describes this crate: it is structurally unreachable, not a regression. The
+# ratio is the invariant that survives a split; the absolute numerator is the
+# one that cannot — and both were recaptured in the same PR (below), so unlike
+# the `ironclaw_turns` entry above, no release runs on a percentage floor
+# alone.
 #
 # RECAPTURED from this PR's own merged coverage artifact
 # (`reborn-integration-coverage-merged` from run 30689658637, the first

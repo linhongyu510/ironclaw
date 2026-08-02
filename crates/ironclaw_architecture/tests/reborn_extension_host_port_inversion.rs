@@ -38,7 +38,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, strip_comments_and_strings, workspace_root,
+    TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
+    strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_product";
@@ -133,6 +134,21 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
 /// inverted `ProductConversationSubjectRouteResolver`; WS2.4 moved
 /// `ExtensionCredentialSetupService`'s implementation out of the crate.)
 const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 4;
+
+/// The manager twin of the host list above. WS2.4 moved
+/// `ExtensionCredentialSetupService`'s implementation out of the host, which
+/// removed it from the host's frozen residue — but the trait is still declared
+/// in `ironclaw_product`, so the inverted edge now runs from the *manager* and
+/// needs its own freeze: without one, any product-declared trait could quietly
+/// gain a manager implementation at file granularity the residue list in
+/// `reborn_extension_manager_split.rs` cannot see.
+const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)] = &[(
+    "ExtensionCredentialSetupService",
+    "implemented in webui_extension_credentials.rs; the port stays declared in \
+     ironclaw_product because its vocabulary is ironclaw_auth credential-account \
+     projections — it moves to ironclaw_product_contracts when that vocabulary \
+     is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
+)];
 
 fn crate_src(root: &Path, name: &str) -> PathBuf {
     root.join("crates").join(name).join("src")
@@ -323,9 +339,31 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
     names
 }
 
-fn traits_implemented_by(root: &Path, crate_name: &str, minimum_files: usize) -> BTreeSet<String> {
+/// Traits implemented by `crate_name`'s production code, counted only in files
+/// whose (comment/string/`#[cfg(test)]`-stripped) code names `referenced_crate`
+/// as a whole token.
+///
+/// The qualification exists because `implemented_trait_names` records
+/// *unqualified* final path segments: without it, a crate-local trait that
+/// merely shares an inverted port's name would satisfy the implementor pin
+/// while the contracts trait went unimplemented — the pin would fail open. A
+/// real implementation must have the trait in scope, which spells the owning
+/// crate's name in the file.
+///
+/// Files reachable only through `#[cfg(test)] mod …;` chains are excluded up
+/// front: they are test code wearing a production filename, and a test double
+/// in one of them must satisfy nothing (see `cfg_test_only_files`).
+fn traits_implemented_by(
+    root: &Path,
+    crate_name: &str,
+    referenced_crate: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
+    let src = crate_src(root, crate_name);
+    let test_only = cfg_test_only_files(&src);
     let mut files = Vec::new();
-    rust_files(&crate_src(root, crate_name), &mut files);
+    rust_files(&src, &mut files);
+    files.retain(|file| !test_only.contains(file));
     assert!(
         files.len() >= minimum_files,
         "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
@@ -336,19 +374,30 @@ fn traits_implemented_by(root: &Path, crate_name: &str, minimum_files: usize) ->
     for file in files {
         let source = std::fs::read_to_string(&file)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(&source));
+        if !names_crate(&cleaned, referenced_crate) {
+            continue;
+        }
         names.extend(implemented_trait_names(&source));
     }
     names
 }
 
-#[test]
-fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits() {
+/// Shared body of the host/manager residue checks: the crate implements
+/// exactly the frozen set of product-declared traits, no more (a new inverted
+/// edge) and no fewer (a stale row).
+fn assert_product_trait_residue_is_exact(
+    crate_name: &str,
+    minimum_files: usize,
+    residue: &[(&str, &str)],
+    baseline: usize,
+) {
     let root = workspace_root();
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, EXTENSION_HOST, 21);
+    let implemented = traits_implemented_by(&root, crate_name, PRODUCT, minimum_files);
 
     let found: BTreeSet<String> = implemented.intersection(&product_traits).cloned().collect();
-    let frozen: BTreeSet<String> = PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS
+    let frozen: BTreeSet<String> = residue
         .iter()
         .map(|(name, _)| (*name).to_string())
         .collect();
@@ -356,14 +405,14 @@ fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits()
     let mut violations = Vec::new();
     for name in found.difference(&frozen) {
         violations.push(format!(
-            "{EXTENSION_HOST} implements {PRODUCT}::{name}, which re-inverts the \
-             extension_host -> product edge. Define the port in {PRODUCT_CONTRACTS} \
+            "{crate_name} implements {PRODUCT}::{name}, which re-inverts the \
+             {crate_name} -> product edge. Define the port in {PRODUCT_CONTRACTS} \
              (PROPOSAL §6.1.3) instead of adding a row here"
         ));
     }
     for name in frozen.difference(&found) {
         violations.push(format!(
-            "{name} is listed as residue but {EXTENSION_HOST} no longer implements a \
+            "{name} is listed as residue but {crate_name} no longer implements a \
              {PRODUCT}-defined trait by that name — delete its row in the same change"
         ));
     }
@@ -374,10 +423,30 @@ fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits()
         violations.join("\n")
     );
     assert!(
-        found.len() <= WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE,
+        found.len() <= baseline,
         "the product-defined trait residue is shrink-only: {} > baseline {}",
         found.len(),
-        WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE
+        baseline
+    );
+}
+
+#[test]
+fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits() {
+    assert_product_trait_residue_is_exact(
+        EXTENSION_HOST,
+        21,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS,
+        WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE,
+    );
+}
+
+#[test]
+fn extension_manager_implements_only_the_frozen_residue_of_product_defined_traits() {
+    assert_product_trait_residue_is_exact(
+        EXTENSION_MANAGER,
+        10,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS.len(),
     );
 }
 
@@ -386,8 +455,8 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
     let root = workspace_root();
     let contract_traits = traits_defined_in(&root, PRODUCT_CONTRACTS);
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, 21);
-    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, 10);
+    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
+    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
 
     let mut violations = Vec::new();
     for (port, implementor) in INVERTED_PORT_IMPLEMENTORS {
@@ -419,10 +488,15 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
             EXTENSION_HOST => (&manager_impls, EXTENSION_MANAGER),
             _ => (&host_impls, EXTENSION_HOST),
         };
+        // Scope note: "exactly one" is asserted between the two split crates
+        // only. Impls elsewhere (product's own Unsupported*/Unavailable*
+        // fallbacks, composition doubles) are legal downward edges this gate
+        // deliberately does not police.
         if other.0.contains(*port) {
             violations.push(format!(
-                "{port} is implemented in both {implementor} and {}; the split moves a \
-                 surface, it does not fork it",
+                "{port} is implemented in both {implementor} and {} — within the split \
+                 pair a port has exactly one home; the split moves a surface, it does \
+                 not fork it",
                 other.1
             ));
         }
@@ -478,8 +552,10 @@ fn production_files_naming(
     minimum_files: usize,
 ) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
+    let test_only = cfg_test_only_files(&src);
     let mut files = Vec::new();
     rust_files(&src, &mut files);
+    files.retain(|file| !test_only.contains(file));
     assert!(
         files.len() >= minimum_files,
         "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
@@ -660,5 +736,68 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     assert!(
         found.contains("ArrowBound"),
         "an `Fn(..) -> T` bound must not hide the trait: {found:?}"
+    );
+}
+
+#[test]
+fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
+    let source = r#"
+        #[cfg(test)]
+        mod gated;
+        #[allow(dead_code)]
+        #[cfg(test)]
+        mod stacked_attrs;
+        mod plain;
+        pub mod public_plain;
+        pub(crate) mod crate_plain;
+        mod inline_module { fn f() {} }
+        // mod commented_out;
+    "#;
+    let decls: BTreeMap<String, bool> = out_of_line_mod_decls(&strip_comments_and_strings(source))
+        .into_iter()
+        .collect();
+    assert_eq!(decls.get("gated"), Some(&true), "{decls:?}");
+    assert_eq!(
+        decls.get("stacked_attrs"),
+        Some(&true),
+        "cfg(test) anywhere in the contiguous attribute run gates the module: {decls:?}"
+    );
+    assert_eq!(decls.get("plain"), Some(&false), "{decls:?}");
+    assert_eq!(decls.get("public_plain"), Some(&false), "{decls:?}");
+    assert_eq!(decls.get("crate_plain"), Some(&false), "{decls:?}");
+    assert!(
+        !decls.contains_key("inline_module"),
+        "inline modules stay with their file: {decls:?}"
+    );
+    assert!(
+        !decls.contains_key("commented_out"),
+        "comments are stripped before scanning: {decls:?}"
+    );
+}
+
+/// The concrete in-tree shape that motivated the test-only exclusion:
+/// `channel_host.rs` declares `#[cfg(test)] mod e2e_tests;`, and
+/// `e2e_tests.rs` declares `mod e2e_auth_challenge;` — a file whose
+/// production-looking name evades every name-based rule while holding a fake
+/// `impl` of a product-declared port. Counting it would let the fake keep a
+/// residue row or an implementor pin satisfied after the real impl is gone.
+/// (If the fixture is ever renamed to `*_tests.rs` or moved under `tests/`,
+/// update or delete this pin in the same change.)
+#[test]
+fn files_reachable_only_through_cfg_test_modules_are_not_production() {
+    let root = workspace_root();
+    let src = crate_src(&root, EXTENSION_HOST);
+    let test_only = cfg_test_only_files(&src);
+    let evader = src.join("channel_host").join("e2e_auth_challenge.rs");
+    assert!(
+        evader.is_file(),
+        "{} is gone — point this pin at another cfg(test)-declared, \
+         production-named module file, or delete it if none remain",
+        evader.display()
+    );
+    assert!(
+        test_only.contains(&evader),
+        "channel_host/e2e_auth_challenge.rs is reachable only through a #[cfg(test)] \
+         module chain and must be classified test-only"
     );
 }

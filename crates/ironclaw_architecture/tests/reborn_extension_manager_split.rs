@@ -37,46 +37,62 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ratchet_support::{strip_comments_and_strings, workspace_root};
+use ratchet_support::{
+    cfg_test_only_files, names_crate, strip_comments_and_strings, workspace_root,
+};
 
 const HOST: &str = "ironclaw_extension_host";
 const MANAGER: &str = "ironclaw_extension_manager";
 const PRODUCT: &str = "ironclaw_product";
 
 /// Modules that carry lifecycle **authority** and therefore stay in the host
-/// (§6.8.2). Each is the reason the host cannot simply be absorbed.
-const HOST_AUTHORITY_MODULES: &[(&str, &str)] = &[
+/// (§6.8.2). Each is the reason the host cannot simply be absorbed. The middle
+/// column is a **content witness** — an identifier the module must still
+/// define/carry — so an empty stub cannot keep the filename while the
+/// authority quietly rebuilds elsewhere.
+const HOST_AUTHORITY_MODULES: &[(&str, &str, &str)] = &[
     (
         "lifecycle.rs",
+        "ExtensionHost",
         "ExtensionHost — the only writer of installation state",
     ),
     (
         "generic_host.rs",
+        "GenericExtensionHost",
         "the generic host build and its bound snapshot",
     ),
-    ("activation_transaction.rs", "activation transactions"),
+    (
+        "activation_transaction.rs",
+        "ExtensionActivationOperations",
+        "activation transactions",
+    ),
     (
         "extension_ingress.rs",
+        "ChannelIngressRegistration",
         "the vendor-blind ingress router and verifier",
     ),
     (
         "install_policy.rs",
+        "RemoveDecision",
         "install/remove authorization decisions",
     ),
     (
         "product_lifecycle.rs",
+        "ExtensionLifecycleManager",
         "ExtensionLifecycleManager — the lifecycle workflow every product-face \
          caller goes through. §6.8.3 says the manager 'never owns lifecycle \
          authority (calls extension_host)', and this is what it calls",
     ),
     (
         "channel_config.rs",
+        "ChannelConfigService",
         "the ChannelConfigService core: manifest validation, the durable/secret \
          write split, and the §6.5 reactivate cycle. Only its product \
          projection moved",
     ),
     (
         "channel_pairing.rs",
+        "ChannelPairingCode",
         "the pairing service core §6.8.2 keeps here; five host modules consume it",
     ),
 ];
@@ -126,10 +142,12 @@ const MANAGER_PRODUCT_FACE_MODULES: &[(&str, &str)] = &[
 /// `extension_host`, and that is a fact this list keeps honest rather than
 /// aspirational.
 ///
-/// Every entry is a **DTO or capability-id constant**, not a workflow call.
-/// That is the finding: the manager does not reach into product's workflow at
-/// all; it reaches for vocabulary §6.1.3 already assigns to
-/// `ironclaw_product_contracts` and that the WS1.4 sweep did not carry.
+/// Every entry is a **DTO, a capability-id constant, or one of two
+/// port-inversion residues** (`ExtensionCredentialSetupService` — a port still
+/// declared in product — and the auth-continuation dispatcher wiring the
+/// fixture builds); none is a workflow call. The manager does not reach into
+/// product's workflow at all; it reaches for vocabulary §6.1.3 already assigns
+/// to `ironclaw_product_contracts` and that the WS1.4 sweep did not carry.
 const MANAGER_PRODUCT_RESIDUE: &[(&str, &str)] = &[
     (
         "admin_configuration.rs",
@@ -183,8 +201,13 @@ fn crate_src(root: &Path, name: &str) -> PathBuf {
 /// a smaller tree and passes vacuously, which is the exact way a shrink-only
 /// list stops protecting anything.
 fn production_files(dir: &Path) -> Vec<PathBuf> {
+    // A production-looking name is not enough: a file reachable only through a
+    // `#[cfg(test)] mod …;` chain is test code, and counting it would let a
+    // test double keep a residue row or a module-presence claim satisfied.
+    let test_only = cfg_test_only_files(dir);
     let mut out = Vec::new();
     walk(dir, dir, &mut out);
+    out.retain(|relative| !test_only.contains(&dir.join(relative)));
     out.sort();
     out
 }
@@ -308,17 +331,41 @@ fn each_half_of_the_split_kept_its_own_job() {
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         .collect();
 
+    // A module may be a file or a directory; both directions accept either
+    // spelling, so authority recreated as `name/mod.rs` is as loud as `name.rs`.
+    let holds = |files: &BTreeSet<String>, module: &str| -> Option<String> {
+        let stem = module.trim_end_matches(".rs");
+        if files.contains(module) {
+            return Some(module.to_string());
+        }
+        let dir_spelling = format!("{stem}/mod.rs");
+        files.contains(&dir_spelling).then_some(dir_spelling)
+    };
+
     let mut violations = Vec::new();
-    for (module, why) in HOST_AUTHORITY_MODULES {
-        if !host_files.contains(*module) {
-            violations.push(format!(
+    for (module, witness, why) in HOST_AUTHORITY_MODULES {
+        match holds(&host_files, module) {
+            None => violations.push(format!(
                 "{HOST} no longer holds {module} ({why}). Authority does not move to the \
                  manager — §6.8.3 says the manager calls the host, never replaces it"
-            ));
+            )),
+            Some(spelling) => {
+                // Presence is not retention: an empty stub keeps the filename
+                // while the authority rebuilds elsewhere. The witness is the
+                // module's flagship identifier; if it was legitimately renamed,
+                // update the row in the same change.
+                let code = strip_comments_and_strings(&read(&root, HOST, Path::new(&spelling)));
+                if !code.contains(witness) {
+                    violations.push(format!(
+                        "{HOST}/src/{spelling} no longer defines {witness} ({why}) — the file \
+                         kept its name but not its authority"
+                    ));
+                }
+            }
         }
-        if manager_files.contains(*module) {
+        if let Some(spelling) = holds(&manager_files, module) {
             violations.push(format!(
-                "{MANAGER} holds {module}, which is authority ({why})"
+                "{MANAGER} holds {spelling}, which is authority ({why})"
             ));
         }
     }
@@ -370,9 +417,11 @@ fn manager_product_coupling_is_frozen_and_shrink_only() {
     let mut found = BTreeSet::new();
     for relative in &files {
         let code = strip_comments_and_strings(&read(&root, MANAGER, relative));
-        // Match the crate path, not the prefix: `ironclaw_product_contracts`
-        // is the *sanctioned* dependency and must never register here.
-        if code.contains(&format!("{PRODUCT}::")) || code.contains(&format!("use {PRODUCT};")) {
+        // Match the crate as a whole token, not the prefix or a `::` path:
+        // `ironclaw_product_contracts` is the *sanctioned* dependency and must
+        // never register here, while `use ironclaw_product as p;` must —
+        // an alias keeps the edge compiling with the crate name spelled once.
+        if names_crate(&code, PRODUCT) {
             found.insert(relative.to_string_lossy().replace('\\', "/"));
         }
     }
@@ -408,6 +457,65 @@ fn manager_product_coupling_is_frozen_and_shrink_only() {
         found.len(),
         MANAGER_PRODUCT_RESIDUE_BASELINE
     );
+
+    // The source scan above sees the crate's real name only; a manifest rename
+    // (`p = { package = "ironclaw_product" }`) would blind it entirely, and a
+    // dependency that outlives the last residue row is an edge with no owner.
+    // Tie the manifest to the list: never renamed, and present as a normal
+    // dependency exactly while the list is non-empty.
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages");
+    let manager = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some(MANAGER))
+        .unwrap_or_else(|| panic!("{MANAGER} must be a workspace member"));
+    let product_deps: Vec<&serde_json::Value> = manager["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|dependency| dependency["name"].as_str() == Some(PRODUCT))
+        .collect();
+    for dependency in &product_deps {
+        assert!(
+            dependency["rename"].is_null(),
+            "{MANAGER} renames its {PRODUCT} dependency to {:?} — the residue scan matches \
+             the real crate name and a rename would let the edge grow unseen",
+            dependency["rename"]
+        );
+    }
+    let has_normal_dep = product_deps
+        .iter()
+        .any(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal");
+    assert_eq!(
+        has_normal_dep,
+        !MANAGER_PRODUCT_RESIDUE.is_empty(),
+        "{MANAGER}'s normal dependency on {PRODUCT} must exist exactly while the residue \
+         list is non-empty — when the last row goes, delete the manifest edge in the same \
+         change (and vice versa)"
+    );
+}
+
+/// The residue matcher must see every spelling that keeps the dependency
+/// compiling, and never the sanctioned `_contracts` crate.
+#[test]
+fn the_residue_matcher_sees_aliases_and_ignores_the_contracts_crate() {
+    for (code, expected) in [
+        ("use ironclaw_product::Thing;", true),
+        ("use ironclaw_product;", true),
+        ("use ironclaw_product as p;", true),
+        ("use ::ironclaw_product as p;", true),
+        ("extern crate ironclaw_product as p;", true),
+        ("use ironclaw_product_contracts::Thing;", false),
+        ("fn my_ironclaw_product() {}", false),
+    ] {
+        assert_eq!(
+            names_crate(code, PRODUCT),
+            expected,
+            "names_crate misread {code:?}"
+        );
+    }
 }
 
 /// The scanner must be loud when it cannot walk, not quietly empty.

@@ -766,9 +766,15 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     let mut violations = Vec::new();
     for relative_root in untrusted_src_roots {
         let dir = root.join(relative_root);
-        if !dir.exists() {
-            continue;
-        }
+        // A missing root is a stale entry, not a pass: silently skipping it is
+        // exactly how a crate rename would drop a whole tree out of this guard
+        // while the list still reads as covering it.
+        assert!(
+            dir.is_dir(),
+            "untrusted-ingress scan root {relative_root} does not exist — if the crate was \
+             renamed or removed, update this list in the same change so the guard keeps \
+             scanning the real tree"
+        );
         collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 

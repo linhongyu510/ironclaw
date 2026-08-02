@@ -129,10 +129,13 @@ fn render_group(
             .map(|field| RebornAdminConfigurationField {
                 handle: field.handle.as_str().to_string(),
                 label: field.label,
-                secret: field.secret,
                 required: field.required,
                 provided: field.provided,
-                value: field.value,
+                // Defense in depth, same as the capability handler's
+                // `render_state`: the service already redacts secret values,
+                // but this view must not depend on that staying true.
+                value: if field.secret { None } else { field.value },
+                secret: field.secret,
             })
             .collect(),
     }
@@ -331,8 +334,11 @@ mod tests {
     fn the_service_error_table_gives_each_failure_its_own_answer() {
         use ironclaw_extension_host::AdminConfigurationServiceError as E;
 
+        use ProductSurfaceErrorCode as Code;
+        use ProductSurfaceErrorKind as Kind;
+
         let cases = [
-            (E::UnknownGroup, 404, false),
+            (E::UnknownGroup, 404, false, Code::NotFound, Kind::NotFound),
             (
                 E::RevisionConflict {
                     expected: 1,
@@ -340,23 +346,129 @@ mod tests {
                 },
                 409,
                 false,
+                Code::Conflict,
+                Kind::Conflict,
             ),
-            (E::IdempotencyConflict, 409, false),
-            (E::UnknownField, 400, false),
-            (E::DuplicateField, 400, false),
-            (E::MissingRequiredField, 400, false),
-            (E::ValueTooLarge, 400, false),
-            (E::InvalidDescriptor, 500, false),
-            (E::DescriptorConflict, 500, false),
-            (E::Unavailable, 503, true),
+            (
+                E::IdempotencyConflict,
+                409,
+                false,
+                Code::Conflict,
+                Kind::Conflict,
+            ),
+            (
+                E::UnknownField,
+                400,
+                false,
+                Code::InvalidRequest,
+                Kind::Validation,
+            ),
+            (
+                E::DuplicateField,
+                400,
+                false,
+                Code::InvalidRequest,
+                Kind::Validation,
+            ),
+            (
+                E::MissingRequiredField,
+                400,
+                false,
+                Code::InvalidRequest,
+                Kind::Validation,
+            ),
+            (
+                E::ValueTooLarge,
+                400,
+                false,
+                Code::InvalidRequest,
+                Kind::Validation,
+            ),
+            (
+                E::InvalidDescriptor,
+                500,
+                false,
+                Code::Internal,
+                Kind::Internal,
+            ),
+            (
+                E::DescriptorConflict,
+                500,
+                false,
+                Code::Internal,
+                Kind::Internal,
+            ),
+            (
+                E::Unavailable,
+                503,
+                true,
+                Code::Unavailable,
+                Kind::ServiceUnavailable,
+            ),
         ];
 
-        for (error, status, retryable) in cases {
+        for (error, status, retryable, code, kind) in cases {
             let label = error.to_string();
             let projected = map_admin_configuration_error(error);
             assert_eq!(projected.status_code, status, "status for {label}");
             assert_eq!(projected.retryable, retryable, "retryable for {label}");
+            // Arms sharing a status must still project the right code/kind
+            // pair — the WebUI branches on these, not on the raw number.
+            assert_eq!(projected.code, code, "code for {label}");
+            assert_eq!(projected.kind, kind, "kind for {label}");
         }
+    }
+
+    /// A secret field's value never reaches the view payload, even if the
+    /// service hands one over.
+    ///
+    /// The service already redacts (`AdminConfigurationGroupState` is
+    /// documented as redacted query state), so this guard is defense in depth
+    /// — the same second lock `render_state` holds on the capability path. The
+    /// sentinel drives the guard directly: if `render_group` ever goes back to
+    /// passing `field.value` through unconditionally, this fails.
+    #[test]
+    fn a_secret_value_from_the_service_is_redacted_by_the_view() {
+        use ironclaw_extension_host::AdminConfigurationFieldState;
+        use ironclaw_extensions::AdminConfigurationGroupId;
+        use ironclaw_host_api::ids::SecretHandle;
+
+        let state = AdminConfigurationGroupState {
+            group_id: AdminConfigurationGroupId::new("extension.fixture").expect("group id"),
+            display_name: "Fixture".to_string(),
+            description: String::new(),
+            revision: 1,
+            complete: true,
+            fields: vec![
+                AdminConfigurationFieldState {
+                    handle: SecretHandle::new("api_token").expect("handle"),
+                    label: "API token".to_string(),
+                    secret: true,
+                    required: true,
+                    provided: true,
+                    value: Some("sentinel-secret".to_string()),
+                },
+                AdminConfigurationFieldState {
+                    handle: SecretHandle::new("region").expect("handle"),
+                    label: "Region".to_string(),
+                    secret: false,
+                    required: false,
+                    provided: true,
+                    value: Some("eu-west-1".to_string()),
+                },
+            ],
+        };
+
+        let group = render_group(state, &[], &BTreeSet::new());
+        assert_eq!(
+            group.fields[0].value, None,
+            "a secret value must not survive into the view payload"
+        );
+        assert_eq!(
+            group.fields[1].value.as_deref(),
+            Some("eu-west-1"),
+            "a non-secret value must survive — redaction may not blank the whole form"
+        );
     }
 
     /// No arm of the table hands the caller a field name or a validation code.
