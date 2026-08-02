@@ -342,7 +342,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [725, 728, 732, 733, 3703]
+lines = [725, 728, 732, 733, 3701]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"

@@ -4715,7 +4715,7 @@ where
         service
             .test_connection(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn list_llm_models(
@@ -4731,7 +4731,7 @@ where
         service
             .list_models(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_nearai_login(
@@ -4746,7 +4746,7 @@ where
         service
             .start_nearai_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_codex_login(
@@ -4760,7 +4760,7 @@ where
         service
             .start_codex_login(caller)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn complete_nearai_wallet_login(
@@ -4775,7 +4775,7 @@ where
         service
             .complete_nearai_wallet_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 }
 

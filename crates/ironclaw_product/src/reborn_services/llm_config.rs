@@ -11,7 +11,7 @@
 //! `RebornServices` wiring that calls through the port.
 
 use ironclaw_product_contracts::llm_config::{
-    LlmConfigServiceError, LlmConfigSnapshot, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    LlmConfigSnapshot, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
 
@@ -26,17 +26,6 @@ pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "llm_config",
     paginated: false,
 };
-
-/// Project the port error onto the surface error.
-///
-/// The status table is **not** repeated here: it is defined once, beside the
-/// error, as `impl From<LlmConfigServiceError> for ProductSurfaceError` in
-/// `ironclaw_product_contracts::llm_config`. This wrapper survives only so the
-/// call sites keep reading as `.map_err(map_llm_config_error)`; deleting it in
-/// favour of `ProductSurfaceError::from` is a pure rename.
-pub(super) fn map_llm_config_error(error: LlmConfigServiceError) -> ProductSurfaceError {
-    ProductSurfaceError::from(error)
-}
 
 /// Error returned when an LLM-config method is invoked but no service is wired.
 pub(super) fn llm_config_unavailable() -> ProductSurfaceError {
@@ -66,7 +55,7 @@ where
         service
             .upsert_provider(caller, request)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -88,7 +77,7 @@ where
         service
             .delete_provider(caller, provider_id)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -106,7 +95,7 @@ where
         service
             .set_active(caller, request)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -118,7 +107,10 @@ where
             .llm_config
             .as_ref()
             .ok_or_else(llm_config_unavailable)?;
-        service.snapshot(caller).await.map_err(map_llm_config_error)
+        service
+            .snapshot(caller)
+            .await
+            .map_err(ProductSurfaceError::from)
     }
 }
 

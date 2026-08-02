@@ -13,7 +13,8 @@ pub use llm_admin::{
     LlmKeyStore, LlmKeyStoreError, LlmReloadTrigger, ProviderActiveModelReader,
     ProviderProbeOutcome, ProviderRepo, ProviderRepoError, RebornLlmConfigService,
     RebornLlmReloadAdapter, RebornProviderAdmin, RebornProviderAdminError, RebornProviderFactory,
-    ResolvedRebornLlm, apply_stored_api_key, resolve_reborn_runtime_llm,
+    ResolvedRebornLlm, apply_stored_api_key, nearai_login_callback_mount,
+    resolve_reborn_runtime_llm,
 };
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use operator_service_lifecycle::OperatorServiceLifecycle;

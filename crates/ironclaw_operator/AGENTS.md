@@ -8,16 +8,21 @@
     `LlmConfigService` implementation the WebChat Inference tab drives.
   - `llm_admin/provider_admin.rs` — the typed provider/model admin surface the
     standalone CLI and the product command workflow share.
-  - `llm_admin/provider_repo.rs`, `llm_key_store.rs`, `llm_catalog.rs`,
-    `llm_reload.rs`, `active_model.rs`, `resolved_llm.rs` — the provider
+  - `llm_admin/provider_repo.rs`, `llm_admin/llm_key_store.rs`,
+    `llm_admin/llm_catalog.rs`, `llm_admin/llm_reload.rs`,
+    `llm_admin/active_model.rs`, `llm_admin/resolved_llm.rs` — the provider
     catalog overlay, the operator-scoped key store, the live reload handle.
   - `llm_admin/nearai_login_serve.rs` — the one Axum route this crate owns
     (the public NEAR AI login callback).
   - `llm_admin/nearai_mcp.rs` — NEAR AI MCP endpoint/bootstrap config.
+  - `llm_admin/mod.rs` — the `llm_admin` re-export surface `lib.rs` lifts to the
+    crate root.
   - `operator_logs.rs` — the operator log ring (`OperatorLogBuffer`) and its
     `tracing` layer.
   - `operator_service_lifecycle.rs` — OS-service install/start/stop/status.
-  - Re-derive this list with `ls crates/ironclaw_operator/src/`.
+  - Re-derive this list with `rg --files crates/ironclaw_operator/src`. Every
+    entry above except the two `operator_*.rs` files lives under `src/llm_admin/`,
+    so a non-recursive `ls` of `src/` cannot reproduce it.
 - Read the contract this crate implements *against*, never the crate beside it:
   - `crates/ironclaw_product_contracts/CLAUDE.md` — `llm_config`,
     `operator_service`, `operator_llm`, `operator_tools`, `surface`.
@@ -73,4 +78,12 @@
 - **`nearai_mcp.rs` is forked.** `ironclaw_extension_host/src/nearai_mcp.rs`
   is a near-verbatim copy of the endpoint/config half. This crate's copy is the
   richer one (it also holds the env and `LlmConfig` loaders and the bootstrap
-  outcome enum). CHECKLIST WS2's strays row deletes the fork.
+  outcome enum). The fork is deliberate: `ironclaw_operator` is a `products`
+  crate, so once `extension_host` drops to `loops` an import of this copy would
+  be an upward edge — the fork is what *prevents* an `extension_host → operator`
+  dependency. Removal is owned by the CHECKLIST WS2 row **"Kill the cross-crate
+  `include_str!` reach-ins (gmail/github/nearai-mcp manifests)"**, not by the
+  strays row above it, which measured the claim and handed it over. The required
+  replacement mechanism is **package inventory supplied by the binary**: the
+  binary provides the endpoint configuration alongside the manifest, retiring
+  the fork and the `include_str!` reach-in as one change rather than two.

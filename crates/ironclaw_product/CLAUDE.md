@@ -73,9 +73,12 @@ What this crate kept from the operator move, and why: the frozen view
 descriptors (`LLM_CONFIG_VIEW`, `LOGS_VIEW`, `OPERATOR_LOGS_VIEW`) because the
 concrete inventory is product's; the fail-closed `Unsupported*` services and the
 `Static*` doubles because a default *implementation* is not a contract; the
-`RebornOperator*` command-plane envelope that wraps the moved DTOs; and
-`map_llm_config_error`, now a one-line delegate to the `From` impl in contracts
-so the status table has one home.
+and the
+`RebornOperator*` command-plane envelope that wraps the moved DTOs. The
+`LlmConfigServiceError` → `ProductSurfaceError` status table has one home, the
+`impl From` in `ironclaw_product_contracts::llm_config`; call sites here use
+`.map_err(ProductSurfaceError::from)` directly, with no product-local alias in
+between.
 
 What stayed, and why: the **implementations** (`DeliveryCoordinator`,
 `NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,

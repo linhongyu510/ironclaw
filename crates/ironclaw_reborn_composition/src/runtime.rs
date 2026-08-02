@@ -1408,14 +1408,12 @@ impl RebornRuntime {
         let Some(states) = self.webui_nearai_login_states() else {
             return Ok(None);
         };
-        // Called directly: operator now returns the host-owned
-        // `PublicRouteMount`, so the composition-side repackaging shim that
-        // existed only to convert an operator-local carrier is gone.
-        Ok(Some(
-            ironclaw_operator::llm_admin::nearai_login_serve::nearai_login_callback_mount(
-                session, reload, boot, states,
-            )?,
-        ))
+        // Called through operator's crate-root facade: operator now returns the
+        // host-owned `PublicRouteMount`, so the composition-side repackaging
+        // shim that existed only to convert an operator-local carrier is gone.
+        Ok(Some(ironclaw_operator::nearai_login_callback_mount(
+            session, reload, boot, states,
+        )?))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
