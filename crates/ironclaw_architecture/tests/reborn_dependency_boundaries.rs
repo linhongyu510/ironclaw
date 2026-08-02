@@ -3281,6 +3281,59 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // The deployment-operator control plane (PROPOSAL §6.9.2). It had
+            // **no rule at all** until the WS5 operator row — the audit's
+            // clearest correlation was guidance-and-gate presence ↔ discipline,
+            // and this crate had neither, which is how its `ironclaw_product`
+            // edge survived every earlier sweep.
+            //
+            // `ironclaw_product` is the headline: operator is product's
+            // *sibling*, not its consumer. It implements product-side ports,
+            // and those ports are declared in `ironclaw_product_contracts` —
+            // so naming product here is the inversion re-inverting.
+            // `reborn_operator_port_inversion.rs` proves the same fact through
+            // `cargo metadata` and additionally pins where each port landed;
+            // this rule states the invariant where a reader looking for the
+            // crate's boundary will find it.
+            //
+            // The rest are shape rules: no assembly root
+            // (`ironclaw_reborn_composition`), no transports
+            // (`ironclaw_webui`, `ironclaw_reborn_openai_compat`), no extension
+            // machinery (`ironclaw_extension_host`, `ironclaw_extensions`,
+            // `ironclaw_first_party_extensions`), no lanes
+            // (`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`,
+            // `ironclaw_scripts`) and no turn kernel (`ironclaw_turns`,
+            // `ironclaw_runner`, `ironclaw_loop_host`). Operator administers
+            // LLM providers, rings logs, and controls an OS service; none of
+            // that needs to see a turn.
+            //
+            // `ironclaw_secrets` is deliberately **not** here. WS3's row
+            // ("tighten direct `secrets` consumers: remove the `webui` and
+            // `operator` edges via `product_contracts` ports") removes it, and
+            // PROPOSAL §12.1b names it security-sensitive with "port
+            // replacements land first". Adding it before that port exists
+            // would either fail today or force a waiver — the row owns it.
+            crate_name: "ironclaw_operator",
+            forbidden: vec![
+                "ironclaw_extension_host",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_host",
+                "ironclaw_mcp",
+                "ironclaw_product",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_openai_compat",
+                "ironclaw_runner",
+                "ironclaw_scripts",
+                "ironclaw_slack_extension",
+                "ironclaw_telegram_extension",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_webui",
+            ],
+        },
+        BoundaryRule {
             // Concrete Telegram channel extension. It had no rule at all until
             // WS1.3, which is how its `ironclaw_product` edge survived: the
             // crate reached product for `PreferenceTargetCodec` /

@@ -75,6 +75,7 @@ use ironclaw_product::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+use ironclaw_product_contracts::operator_llm::ActiveModelReader;
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
@@ -1407,11 +1408,12 @@ impl RebornRuntime {
         let Some(states) = self.webui_nearai_login_states() else {
             return Ok(None);
         };
-        Ok(Some(
-            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
-                session, reload, boot, states,
-            )?,
-        ))
+        // Called through operator's crate-root facade: operator now returns the
+        // host-owned `PublicRouteMount`, so the composition-side repackaging
+        // shim that existed only to convert an operator-local carrier is gone.
+        Ok(Some(ironclaw_operator::nearai_login_callback_mount(
+            session, reload, boot, states,
+        )?))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1436,9 +1438,7 @@ impl RebornRuntime {
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
-    pub(crate) fn webui_active_model_reader(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
+    pub(crate) fn webui_active_model_reader(&self) -> Option<Arc<dyn ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
         Some(Arc::new(ironclaw_operator::ProviderActiveModelReader::new(
             parts.reload_handle.primary_provider(),
@@ -3430,9 +3430,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let skill_learned_notifier: Arc<
             dyn ironclaw_extension_host::skill_learning::SkillLearnedNotifier,
         > = Arc::new(
-            ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(
-                skill_learning_publisher,
-            ),
+            crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(skill_learning_publisher),
         );
         let extraction_tasks =
             Arc::new(ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks::new());

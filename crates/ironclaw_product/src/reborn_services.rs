@@ -21,6 +21,15 @@ use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::operator_service::{
+    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
+    normalize_operator_log_context_value,
+};
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
@@ -174,7 +183,6 @@ pub use ironclaw_product_contracts::descriptors::{
     ProductView,
 };
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
-pub use ironclaw_product_contracts::product_wire::SettingsToolPermissionState;
 pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
@@ -187,10 +195,10 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -211,16 +219,10 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
+    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
 };
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
-pub use llm_config::{
-    ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
-};
+pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
@@ -571,9 +573,6 @@ const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
-const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
-const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
-
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
@@ -587,7 +586,7 @@ fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultF
     }
 }
 
-fn model_command_view(title: &str, snapshot: &llm_config::LlmConfigSnapshot) -> CommandResultView {
+fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResultView {
     let mut fields = Vec::new();
     let mut lines = Vec::new();
     match &snapshot.active {
@@ -731,14 +730,6 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     }
 }
 
-#[async_trait]
-pub trait OperatorStatusService: Send + Sync {
-    async fn status(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct StaticOperatorStatusService {
     response: RebornOperatorStatusResponse,
@@ -773,15 +764,6 @@ impl OperatorStatusService for UnsupportedOperatorStatusService {
     }
 }
 
-#[async_trait]
-pub trait OperatorLogsService: Send + Sync {
-    async fn query_logs(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, ProductSurfaceError>;
-}
-
 #[derive(Debug, Default)]
 pub struct UnsupportedOperatorLogsService;
 
@@ -794,15 +776,6 @@ impl OperatorLogsService for UnsupportedOperatorLogsService {
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         Err(operator_surface_unavailable())
     }
-}
-
-#[async_trait]
-pub trait OperatorServiceLifecycleService: Send + Sync {
-    async fn control_service(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError>;
 }
 
 #[derive(Debug, Default)]
@@ -4637,7 +4610,7 @@ where
         service
             .test_connection(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn list_llm_models(
@@ -4653,7 +4626,7 @@ where
         service
             .list_models(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_nearai_login(
@@ -4668,7 +4641,7 @@ where
         service
             .start_nearai_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_codex_login(
@@ -4682,7 +4655,7 @@ where
         service
             .start_codex_login(caller)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn complete_nearai_wallet_login(
@@ -4697,7 +4670,7 @@ where
         service
             .complete_nearai_wallet_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 }
 
@@ -7037,36 +7010,12 @@ fn bounded_operator_logs_context_string(value: Option<String>) -> Option<String>
     })
 }
 
-pub fn normalize_operator_log_context_value(value: &str) -> String {
-    truncate_utf8_with_suffix(value, OPERATOR_LOGS_CONTEXT_MAX_BYTES)
-}
-
 fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
     let mut end = max_bytes.min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     value[..end].to_string()
-}
-
-fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_string();
-    }
-
-    if max_bytes <= OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len() {
-        return OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes].to_string();
-    }
-
-    let mut end = max_bytes - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    let mut truncated = String::with_capacity(max_bytes);
-    truncated.push_str(&value[..end]);
-    truncated.push_str(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX);
-    truncated
 }
 
 fn product_agent_bound_caller_from_webui(
