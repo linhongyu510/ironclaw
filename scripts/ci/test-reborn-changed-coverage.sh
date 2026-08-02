@@ -774,6 +774,14 @@ echo "▶ lines already uncovered at base leave the denominator; nothing else do
 pre_crate="crates/ironclaw_preimage"
 pre_path="${pre_crate}/src/lib.rs"
 write_crate_manifest "${pre_crate}"
+# Written here rather than inherited: every assertion below is an exact
+# denominator, so an exemption left over from an earlier section would move the
+# numbers without failing anything.
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
 printf '%s\n' \
   'pub fn alpha(value: bool) -> bool {' \
   '    value' \
@@ -1029,6 +1037,13 @@ check_rc "no base coverage requested is the strict denominator" 1
 check_text "the un-requested case is still announced" "Base coverage: NOT APPLIED"
 check_text "the subtraction count is reported even when nothing is subtracted" \
   "Pre-existing uncovered lines excluded from the denominator: 0"
+
+# Two sources of base coverage is an operator error, not a precedence question:
+# silently preferring one would make which lcov was consulted unknowable.
+run_gate_base --base-lcov "${work}/base.lcov" --fetch-base-coverage
+check_rc "asking for two base-coverage sources is refused outright" 1
+check_text "the conflicting flags are named" \
+  "--base-lcov cannot be combined with --fetch-base-coverage"
 
 echo "▶ the artifact lookup is exercised, not just the local-file shortcut"
 # `--fetch-base-coverage` is the mode CI runs. Testing only `--base-lcov` would

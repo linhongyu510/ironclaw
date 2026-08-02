@@ -28,15 +28,27 @@ CI already publishes the merged lcov of every run as the artifact
 
 1. ``GET /repos/{repo}/actions/workflows/reborn-tests.yml/runs?head_sha={base}&
    status=completed`` — this workflow's completed runs for that exact commit,
-   newest first, **every event**. Event breadth is load-bearing: the ``push``
-   run for a ``main`` commit is frequently cancelled by the next merge
-   (``cancel-in-progress``), while the merge-queue run for the same commit
-   survives with its artifact intact. Measured over 30 consecutive ``main``
-   commits, ``push`` alone found coverage for 16; adding the merge-queue run
-   recovers commits ``push`` lost.
+   newest first, deliberately **not** filtered by event, so a merge-queue run
+   counts when the ``push`` run for the same commit does not.
+
+   Availability is partial and that is expected. Measured over 30 consecutive
+   ``main`` commits, this lookup found coverage for **17**; every miss is a
+   commit whose ``push`` run was cancelled by the next merge landing
+   (``concurrency.cancel-in-progress`` keyed on ``github.ref``), so no run
+   reached the publishing job. The fallback below is therefore the ordinary
+   path roughly two times in five, not a rare edge — which is exactly why it
+   has to be the *strict* behaviour and has to announce itself. Raising
+   availability is a concurrency-key change in this workflow, not a change
+   here.
 2. ``GET /repos/{repo}/actions/runs/{id}/artifacts`` — first unexpired artifact
-   with that name. Conclusion is not consulted: a run that failed elsewhere
-   still uploaded a valid merged lcov, and the artifact step is ``always()``.
+   with that name. Run *conclusion* is not consulted, and does not need to be:
+   the publishing job (``coverage-report``) has no ``if: always()``, so GitHub
+   skips it unless every coverage lane it ``needs`` succeeded. A partially
+   executed lcov — the one input that could over-forgive, by reporting covered
+   lines as uncovered at base — therefore cannot be published at all. Verified
+   over 14 consecutive ``main`` runs: the artifact is present exactly when
+   ``coverage-report`` succeeded, and absent otherwise, independent of whether
+   the run as a whole failed.
 3. ``GET /repos/{repo}/actions/artifacts/{id}/zip`` — the member above.
 
 The job needs ``actions: read``. ``--base-lcov`` takes an already-downloaded
