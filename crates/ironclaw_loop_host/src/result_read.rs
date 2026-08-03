@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
     ids::{InvocationId, UserId},
+    model_result_preview::ModelResultPreview,
     resolution::Resolution,
     result_meta::FailureKind,
 };
@@ -276,6 +277,20 @@ fn result_read_observation(
     next_offset: Option<u64>,
     content: String,
 ) -> ModelVisibleToolObservation {
+    // The paged chunk is capability output, so it must clear the same
+    // credential/content gate as the initial first-look preview
+    // (`ironclaw_loop_contracts::resolution::result_preview_parts` uses
+    // `ModelResultPreview::new(text).ok()`). A chunk that fails — a genuine
+    // credential marker or secret-like token — must not ride the inline
+    // `preview` field at all: drop only the preview, keep the durable
+    // `result_ref`/`total_bytes`/`next_offset` continuation metadata so the
+    // model can page past the suppressed chunk. Constructing an already-safe
+    // observation avoids relying on downstream envelope repair
+    // (`strip_unsafe_result_reference_preview`) which runs later and whose
+    // strip-then-revalidate path is best-effort.
+    let preview = ModelResultPreview::new(content)
+        .ok()
+        .map(|preview| preview.into_inner());
     ModelVisibleToolObservation {
         schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
@@ -283,7 +298,7 @@ fn result_read_observation(
         detail: ToolObservationDetail::ResultReference {
             result_ref: result_ref.to_string(),
             byte_len,
-            preview: Some(content),
+            preview,
             total_bytes: Some(total_bytes),
             next_offset,
             // `content` here is always a paged text chunk, never array-shaped.
@@ -574,5 +589,61 @@ mod tests {
         assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
         assert_eq!(error.safe_summary, "result reader storage is unavailable");
         assert!(error.detail.is_none());
+    }
+
+    #[test]
+    fn result_read_observation_drops_preview_for_credential_chunk_but_keeps_continuation() {
+        // A paged chunk whose content trips the credential gate (the
+        // `secret` marker at a word boundary) must drop ONLY the inline
+        // `preview`. The durable `result_ref`, `total_bytes`, and
+        // `next_offset` continuation metadata must survive so the model can
+        // page past the suppressed chunk instead of losing the reference.
+        let observation = result_read_observation(
+            "result:source",
+            2048,
+            4096,
+            Some(2048),
+            "secret payload the model must not see inline".to_string(),
+        );
+        let value = serde_json::to_value(&observation).expect("observation serializes");
+        let detail = &value["detail"];
+        assert_eq!(detail["kind"], "result_reference");
+        assert_eq!(detail["result_ref"], "result:source");
+        assert_eq!(detail["total_bytes"], 4096);
+        assert_eq!(detail["next_offset"], 2048);
+        assert!(
+            detail.get("preview").is_none() || detail["preview"].is_null(),
+            "credential-bearing chunk preview must be suppressed, got: {detail}"
+        );
+        let serialized = serde_json::to_string(&value).expect("serializes");
+        assert!(
+            !serialized.contains("\"preview\""),
+            "suppressed preview must not serialize the preview key: {serialized}"
+        );
+    }
+
+    #[test]
+    fn result_read_observation_keeps_preview_for_ordinary_document_chunk() {
+        // Ordinary document content (including the #6129 `Secretary` substring
+        // that must NOT be scrubbed as a `secret` false positive) keeps the
+        // inline preview so the model sees the paged chunk directly.
+        let observation = result_read_observation(
+            "result:source",
+            2048,
+            4096,
+            Some(2048),
+            "Memo from the Secretary of the Treasury.".to_string(),
+        );
+        let value = serde_json::to_value(&observation).expect("observation serializes");
+        let detail = &value["detail"];
+        let preview = detail["preview"]
+            .as_str()
+            .expect("ordinary document chunk must keep its inline preview");
+        assert!(
+            preview.contains("Secretary of the Treasury"),
+            "ordinary document text must survive the credential gate: {preview}"
+        );
+        assert_eq!(detail["next_offset"], 2048);
+        assert_eq!(detail["total_bytes"], 4096);
     }
 }
