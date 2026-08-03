@@ -2,6 +2,9 @@
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
 
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
@@ -37,18 +40,15 @@ use tokio::sync::Semaphore;
 
 use super::prompts;
 use super::{
-    BlockedActionableMarker, BlockedAuthPromptRequest, DeliveredChannelMessage, HINT_SEEN_CAP,
-    HintSeenSet, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
-    blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
-    gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
-    turn_scope_from_thread_scope,
+    BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
+    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
+    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
+    thread_scope_from_binding, turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{
-    ChannelConnectionNoticePolicy, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
-};
+use crate::{ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1476,4 +1476,22 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod delivery_claim_tests {
+    use super::{DeliveryClaim, DeliveryRunLedger};
+    use ironclaw_turns::TurnRunId;
+
+    #[test]
+    fn delivery_run_ledger_distinguishes_active_and_delivered_claims() {
+        let mut ledger = DeliveryRunLedger::default();
+        let run_id = TurnRunId::new();
+
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::Claimed);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyActive);
+
+        ledger.record_delivered(run_id);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyDelivered);
+    }
 }

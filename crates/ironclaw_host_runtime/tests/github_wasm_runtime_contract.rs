@@ -1,5 +1,5 @@
 // arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -42,8 +42,8 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
-    RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
-    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution,
+    WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::json;
 
@@ -1324,9 +1324,16 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         Arc::clone(&search_http),
     );
     assert_eq!(search.error, None);
+    let search_output: serde_json::Value = serde_json::from_str(
+        search
+            .output_json
+            .as_deref()
+            .expect("search should return compact JSON"),
+    )
+    .expect("compact search output should be valid JSON");
     assert_eq!(
-        search.output_json.as_deref(),
-        Some(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#)
+        search_output,
+        json!({"total_count": 0, "incomplete_results": false, "items": []})
     );
     assert_single_wasm_request(
         &search_http,
@@ -1859,8 +1866,8 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
 #[tokio::test]
 async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
-        "github.search_issues",
-        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        "github.get_issue",
+        json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 1}),
         Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
             status: 200,
             headers_json: "{}".to_string(),
@@ -1870,6 +1877,25 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
 
     assert_eq!(execution.output_json.as_deref(), Some("not-json"));
     assert_eq!(execution.error, None);
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_malformed_compacted_search_response() {
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+            status: 200,
+            headers_json: "{}".to_string(),
+            body: b"not-json".to_vec(),
+        })),
+    );
+
+    assert_eq!(execution.output_json, None);
+    assert_eq!(
+        structured_wasm_error_code(&execution).as_deref(),
+        Some("github_api_invalid_response")
+    );
 }
 
 #[test]
@@ -2202,7 +2228,7 @@ fn filesystem_with_slack_user_package() -> DiskFilesystem {
 fn slack_user_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/slack")
+        .join("crates/extensions/packages/slack")
 }
 
 fn slack_policy() -> NetworkPolicy {
@@ -2218,7 +2244,7 @@ fn slack_policy() -> NetworkPolicy {
 }
 
 /// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
-/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// request. Kept in lockstep with `crates/extensions/packages/slack/manifest.toml`, where the
 /// read-only tools request only read scopes and only send_message adds chat:write.
 fn slack_user_scopes() -> Vec<String> {
     [
@@ -2343,7 +2369,7 @@ fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
 fn github_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/github")
+        .join("crates/extensions/packages/github")
 }
 
 fn google_drive_asset_root() -> std::path::PathBuf {
@@ -2353,7 +2379,7 @@ fn google_drive_asset_root() -> std::path::PathBuf {
 fn google_asset_root(package_id: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets")
+        .join("crates/extensions/packages")
         .join(package_id)
 }
 
@@ -2504,13 +2530,10 @@ fn execute_bundled_github_wasm(
     input: serde_json::Value,
     http: Arc<RecordingWasmHostHttp>,
 ) -> WitToolExecution {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
-    let wasm_bytes =
-        std::fs::read(github_wasm_path()).expect("first-party GitHub WASM must be built");
-    let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
+    let (runtime, prepared) = bundled_github_runtime();
     runtime
         .execute(
-            &prepared,
+            prepared,
             WitToolHost::deny_all().with_http(http),
             WitToolRequest::new(input.to_string()).with_context(
                 json!({
@@ -2527,17 +2550,36 @@ fn execute_bundled_google_drive_wasm(
     context: Option<&str>,
     http: Arc<RecordingWasmHostHttp>,
 ) -> WitToolExecution {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
-    let wasm_bytes = std::fs::read(google_drive_wasm_path())
-        .expect("first-party Google Drive WASM must be built");
-    let prepared = runtime.prepare("google-drive", &wasm_bytes).unwrap();
+    let (runtime, prepared) = bundled_google_drive_runtime();
     let request = match context {
         Some(context) => WitToolRequest::new(input.to_string()).with_context(context.to_string()),
         None => WitToolRequest::new(input.to_string()),
     };
     runtime
-        .execute(&prepared, WitToolHost::deny_all().with_http(http), request)
+        .execute(prepared, WitToolHost::deny_all().with_http(http), request)
         .unwrap()
+}
+
+fn bundled_github_runtime() -> &'static (WitToolRuntime, PreparedWitTool) {
+    static BUNDLE: OnceLock<(WitToolRuntime, PreparedWitTool)> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+        let wasm_bytes =
+            std::fs::read(github_wasm_path()).expect("first-party GitHub WASM must be built");
+        let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
+        (runtime, prepared)
+    })
+}
+
+fn bundled_google_drive_runtime() -> &'static (WitToolRuntime, PreparedWitTool) {
+    static BUNDLE: OnceLock<(WitToolRuntime, PreparedWitTool)> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+        let wasm_bytes = std::fs::read(google_drive_wasm_path())
+            .expect("first-party Google Drive WASM must be built");
+        let prepared = runtime.prepare("google-drive", &wasm_bytes).unwrap();
+        (runtime, prepared)
+    })
 }
 
 fn assert_single_wasm_request(

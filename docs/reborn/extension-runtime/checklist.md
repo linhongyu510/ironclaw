@@ -75,7 +75,7 @@ Rules — kept short on purpose:
   caller-level test. Ticks with that caller-level test.
 - [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
   `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
-  (`crates/ironclaw_host_api/src/surface.rs`, doc "no manifest section projects
+  (`crates/ironclaw_extension_contracts/src/surface.rs`, doc "no manifest section projects
   this kind yet"), wire-pinned by
   `surface_kind_wire_shape_is_snake_case_and_matches_as_str`; nothing binds them
   at runtime by construction — the binding rule (LIFE-1) binds only
@@ -322,7 +322,7 @@ Rules — kept short on purpose:
   request targets `slack.com` and carries the injected bearer token.
 - [x] TOOL-8 `slack.send_message` remains an explicit side-effect tool; final
   replies never route through it. — `slack.send_message` stays a declared
-  capability (`ironclaw_first_party_extensions/assets/slack/manifest.toml`);
+  capability (`crates/extensions/packages/slack/manifest.toml`);
   final replies ride the delivery coordinator path, not the tool:
   `slack_final_reply_flows_through_the_real_delivery_coordinator`
   (`tests/integration/extension_delivery.rs`) and the P6 §10 e2e reply-out
@@ -607,7 +607,7 @@ Rules — kept short on purpose:
   `respond_outcome_answers_without_enqueue_within_bounds`
   (`ingress_router_contract.rs`);
   `url_verification_challenge_becomes_an_immediate_response`
-  (`crates/ironclaw_slack_extension/src/channel.rs`); production-mount leg
+  (`crates/extensions/packages/slack/src/channel.rs`); production-mount leg
   in `tests/integration/extension_ingress.rs`.
 - [x] ING-10 Normalized messages flow through existing identity/conversation
   binding and turn submission (integration: signed vendor POST → turn). —
@@ -766,7 +766,7 @@ Rules — kept short on purpose:
   deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
   manifest's `[channel.presentation]` (`supports_markdown`,
   `max_message_chars`) now feeds prompt construction per channel. The resolved
-  `ChannelPresentation` (`ironclaw_host_api::channel`) flows manifest →
+  `ChannelPresentation` (`ironclaw_extension_contracts::channel`) flows manifest →
   `LifecycleExtensionSummary.channel_presentation`
   (`available_extensions.rs::summary` / `channel_presentation_from_manifest_record`)
   → the communication provider → `ConnectedChannelSummary.presentation` →
@@ -883,7 +883,7 @@ Rules — kept short on purpose:
   ~145 at the start of P7b). **Lane A holds**: composition's package
   catalog/registration names no first-party package — every userland package
   (github, gmail, google×5, notion, slack, telegram, web-access) is a
-  self-contained module under `ironclaw_first_party_extensions::packages`,
+  self-contained module under `ironclaw_extension_support::packages`,
   consumed as an opaque bundle; the factory trust-policy iterates the inventory
   generically. Every remaining entry is now **lane-4 residue**, regrouped in
   the const under `// lane-4: <category>` markers and characterized in the
@@ -934,10 +934,10 @@ Rules — kept short on purpose:
   `TelegramChannelAdapter::{inbound,activate,cleanup}` with
   `shared_secret_header` verification host-side and `setWebhook`/
   `deleteWebhook` over `RestrictedEgress`
-  (`crates/ironclaw_telegram_extension/src/channel.rs`). P5 completed the
+  (`crates/extensions/packages/telegram/src/channel.rs`). P5 completed the
   chain: bundled package assets + inventory module
-  (`ironclaw_first_party_extensions/assets/telegram/manifest.toml`,
-  `ironclaw_first_party_extensions::packages::telegram`; P7b DEL-8 lane A
+  (`crates/extensions/packages/telegram/manifest.toml`,
+  `ironclaw_extension_support::packages::telegram`; P7b DEL-8 lane A
   migrated the former `available_extensions.rs::telegram_package` builder into
   the self-contained inventory), the binary-assembled
   entrypoint binding (`crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`),
@@ -1105,8 +1105,8 @@ Rules — kept short on purpose:
   bounds + malformed-never-panics + challenge, full-envelope delivery with
   structured per-part reports against a scripted vendor server,
   internal publish/cleanup-hook idempotency, unsupported surfaces fail cleanly.
-  Consumers: `crates/ironclaw_slack_extension/tests/channel_conformance.rs`,
-  `crates/ironclaw_telegram_extension/tests/channel_conformance.rs`, and
+  Consumers: `crates/extensions/packages/slack/tests/channel_conformance.rs`,
+  `crates/extensions/packages/telegram/tests/channel_conformance.rs`, and
   the acme fixture in `tests/integration/extension_runtime.rs`.
 - [x] TEST-2 The tool-adapter conformance checks run against static, WASM,
   and MCP lanes. (P2 landed the WASM-lane proof — the five Slack tools
