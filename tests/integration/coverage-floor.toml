@@ -281,10 +281,19 @@ rationale = "Secret and path redaction prevent unsafe model, user, and log outpu
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
+name = "ironclaw_sandbox"
+floor_percent = 87.09
+floor_covered_lines = 3185
+captured_total_lines = 3657
+captured_date = "2026-08-03"
+rationale = "The sandboxed-process lane created by the WS3 merge (#7065) of ironclaw_process_sandbox + host_runtime::sandbox_process + ironclaw_scripts. Floored on arrival so the merge is not a net loss of ratchet coverage: neither merged crate was floored before, and the sandbox_process half was only protected as part of host_runtime's floor, which this PR necessarily lowers in line count. Guards plan validation, the credential firewall, the network allowlist, and the sandbox CA."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
 name = "ironclaw_host_runtime"
-floor_percent = 88.23
-floor_covered_lines = 20538
-captured_total_lines = 23277
-captured_date = "2026-07-30"
-rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution."
+floor_percent = 88.65
+floor_covered_lines = 18854
+captured_total_lines = 21267
+captured_date = "2026-08-03"
+rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured for the WS3 sandbox-lane merge (#7065): sandbox_process/** moved to ironclaw_sandbox, so the denominator fell 23277 -> 21267 (-2010 instrumented lines) and covered lines fell with it. This is a code move, not a coverage regression - the percentage floor RISES 88.23 -> 88.65, and the lines that left are now floored in their new home (see the ironclaw_sandbox entry below)."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
