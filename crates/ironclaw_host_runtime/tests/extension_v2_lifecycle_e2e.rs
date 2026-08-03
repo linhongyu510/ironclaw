@@ -9,9 +9,10 @@ use ironclaw_capabilities::{
     ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
     ToolResolver,
 };
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
-    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
+    ExtensionPackage, ExtensionRegistry, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{

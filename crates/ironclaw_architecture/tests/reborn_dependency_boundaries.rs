@@ -4138,7 +4138,7 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 13;
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 11;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4192,31 +4192,17 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "MCP runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_mcp",
         dependency_name: "ironclaw_resources",
         introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "MCP runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_scripts",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "script runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
+        removes_in: "WS3",
+        reason: "re-verified during WS3: the lane needs the ResourceGovernor authority port (reserve/reconcile/release) and the ResourceError denial cone (ResourceDenial/ResourceApprovalNeeded/BudgetWarning/ResourceDimension/ResourceAccount/ResourceValue) - NOT the estimate/usage vocabulary, which already lives in host_api::resource and which this lane already imports from there. PROPOSAL 6.6.3's \"moving the shapes it needs into host_api::resource\" is refuted as written: moving a 10-method kernel budget-authority trait plus its account/limit cone into the zero-internal-dep contracts crate is a kernel carve-out, not a vocabulary move. It clears when the lane takes a narrow reserve/reconcile/release port instead of the governor - a design change owed its own slice",
     },
     LayerMatrixException {
         crate_name: "ironclaw_scripts",
         dependency_name: "ironclaw_resources",
         introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "script runtime support still depends on resource contracts currently classed with kernel behavior",
+        removes_in: "WS3",
+        reason: "re-verified during WS3: the lane needs the ResourceGovernor authority port (reserve/reconcile/release) and the ResourceError denial cone (ResourceDenial/ResourceApprovalNeeded/BudgetWarning/ResourceDimension/ResourceAccount/ResourceValue) - NOT the estimate/usage vocabulary, which already lives in host_api::resource and which this lane already imports from there. PROPOSAL 6.6.3's \"moving the shapes it needs into host_api::resource\" is refuted as written: moving a 10-method kernel budget-authority trait plus its account/limit cone into the zero-internal-dep contracts crate is a kernel carve-out, not a vocabulary move. It clears when the lane takes a narrow reserve/reconcile/release port instead of the governor - a design change owed its own slice",
     },
     LayerMatrixException {
         crate_name: "ironclaw_runner",

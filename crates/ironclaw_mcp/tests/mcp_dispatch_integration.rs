@@ -238,7 +238,9 @@ fn mcp_request_from_manifest(
     let package = Box::leak(Box::new(package_from_manifest(manifest)));
     let capability_id = Box::leak(Box::new(CapabilityId::new("github-mcp.search").unwrap()));
     McpExecutionRequest {
-        package,
+        extension: &package.id,
+        capabilities: &package.capabilities,
+        runtime: &package.manifest.runtime,
         capability_id,
         scope: sample_scope(),
         estimate: ResourceEstimate::default()

@@ -1,11 +1,11 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_contracts::{
     channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
 };
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
-    ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};

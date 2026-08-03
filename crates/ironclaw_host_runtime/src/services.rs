@@ -22,7 +22,8 @@ use ironclaw_events::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
-use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};

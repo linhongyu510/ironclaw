@@ -50,7 +50,9 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -109,7 +111,9 @@ async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -691,7 +695,9 @@ async fn mcp_runtime_with_concrete_http_client_consumes_shared_egress_end_to_end
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -1159,7 +1165,9 @@ async fn mcp_runtime_fails_closed_for_external_stdio_process_egress() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -1193,7 +1201,9 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_output_bytes(10_000),
@@ -1222,7 +1232,9 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1250,7 +1262,9 @@ async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1284,7 +1298,9 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &non_mcp,
+                extension: &non_mcp.id,
+                capabilities: &non_mcp.capabilities,
+                runtime: &non_mcp.manifest.runtime,
                 capability_id: &CapabilityId::new("script.echo").unwrap(),
                 scope: scope.clone(),
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1306,7 +1322,9 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &mcp,
+                extension: &mcp.id,
+                capabilities: &mcp.capabilities,
+                runtime: &mcp.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.missing").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1344,7 +1362,9 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -1384,7 +1404,9 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -1427,7 +1449,9 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
         .execute_extension_json(
             &governor,
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()

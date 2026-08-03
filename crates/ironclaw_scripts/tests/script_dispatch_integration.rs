@@ -151,7 +151,9 @@ fn script_request(input: serde_json::Value) -> ScriptExecutionRequest<'static> {
     let package = Box::leak(Box::new(package_from_manifest(SCRIPT_MANIFEST)));
     let capability_id = Box::leak(Box::new(CapabilityId::new("script.echo").unwrap()));
     ScriptExecutionRequest {
-        package,
+        extension: &package.id,
+        capabilities: &package.capabilities,
+        runtime: &package.manifest.runtime,
         capability_id,
         scope: sample_scope(),
         estimate: ResourceEstimate::default()

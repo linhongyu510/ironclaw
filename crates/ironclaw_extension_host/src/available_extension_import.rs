@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
 use ironclaw_extensions::{
-    ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
-    ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
@@ -74,10 +74,8 @@ pub fn extension_asset_path(
 ) -> Result<VirtualPath, ProductOperationFailure> {
     let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
         .map_err(map_binding_error)?;
-    ExtensionAssetPath::new(asset_path.to_string())
-        .map_err(map_binding_error)?
-        .resolve_under(&root)
-        .map_err(map_binding_error)
+    let asset = ExtensionAssetPath::new(asset_path.to_string()).map_err(map_binding_error)?;
+    ironclaw_extensions::resolve_asset_under(&asset, &root).map_err(map_binding_error)
 }
 
 /// Read every file under `root` into inline bytes (paths relative to `root`),
