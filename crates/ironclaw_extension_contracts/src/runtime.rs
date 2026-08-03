@@ -150,3 +150,110 @@ impl ExtensionRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every rejection branch of the asset-path validator, plus the shapes it
+    /// must keep accepting.
+    ///
+    /// The validator moved here from `ironclaw_extensions` with the type it
+    /// constructs, where it was only ever reached indirectly through manifest
+    /// parsing. A contracts crate that carries validation owes that validation
+    /// a direct test — otherwise the reject branches are pinned by nothing.
+    #[test]
+    fn asset_path_rejects_every_unsafe_shape_and_accepts_manifest_relative_paths() {
+        for (value, expected) in [
+            ("", "asset path must not be empty"),
+            (
+                "wasm/\u{0}echo.wasm",
+                "NUL/control characters are not allowed",
+            ),
+            ("wasm/\techo.wasm", "NUL/control characters are not allowed"),
+            (
+                "https://example.test/x.wasm",
+                "URLs are not extension asset paths",
+            ),
+            ("/etc/passwd", "asset path must be relative"),
+            (
+                "C:\\wasm\\echo.wasm",
+                "host path separators are not allowed",
+            ),
+            ("wasm\\echo.wasm", "host path separators are not allowed"),
+            (
+                "wasm//echo.wasm",
+                "empty or dot path segments are not allowed",
+            ),
+            (
+                "wasm/./echo.wasm",
+                "empty or dot path segments are not allowed",
+            ),
+            (
+                "wasm/../../etc/passwd",
+                "empty or dot path segments are not allowed",
+            ),
+        ] {
+            let error =
+                ExtensionAssetPath::new(value).expect_err(&format!("{value:?} must be rejected"));
+            assert_eq!(error.reason, expected, "wrong reason for {value:?}");
+            assert_eq!(error.path, value);
+            assert!(
+                error.to_string().contains(expected),
+                "Display must carry the reason: {error}"
+            );
+        }
+
+        for value in ["echo.wasm", "wasm/echo.wasm", "a/b/c/echo.wasm"] {
+            let path = ExtensionAssetPath::new(value).expect("valid manifest-relative path");
+            assert_eq!(path.as_str(), value);
+        }
+    }
+
+    /// `kind()` is the projection every lane uses to reject a runtime it does
+    /// not serve, so it must stay total over the enum.
+    #[test]
+    fn every_runtime_variant_projects_to_its_kind() {
+        let cases = [
+            (
+                ExtensionRuntime::Wasm {
+                    module: ExtensionAssetPath::new("wasm/echo.wasm").expect("valid"),
+                },
+                RuntimeKind::Wasm,
+            ),
+            (
+                ExtensionRuntime::Script {
+                    runner: "docker".to_string(),
+                    image: None,
+                    command: "echo".to_string(),
+                    args: Vec::new(),
+                },
+                RuntimeKind::Script,
+            ),
+            (
+                ExtensionRuntime::Mcp {
+                    transport: "http".to_string(),
+                    command: None,
+                    args: Vec::new(),
+                    url: Some("https://mcp.example.test/mcp".to_string()),
+                },
+                RuntimeKind::Mcp,
+            ),
+            (
+                ExtensionRuntime::FirstParty {
+                    service: "memory".to_string(),
+                },
+                RuntimeKind::FirstParty,
+            ),
+            (
+                ExtensionRuntime::System {
+                    service: "shell".to_string(),
+                },
+                RuntimeKind::System,
+            ),
+        ];
+        for (runtime, expected) in cases {
+            assert_eq!(runtime.kind(), expected, "wrong kind for {runtime:?}");
+        }
+    }
+}
