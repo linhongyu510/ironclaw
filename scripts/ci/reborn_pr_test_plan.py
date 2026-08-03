@@ -19,9 +19,17 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
-IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/", ".claude/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+# First-party extension packages live under `crates/extensions/packages/<pkg>/`
+# as siblings of the support crate (WS2 colocated them here). Their prompt,
+# schema, manifest, and `wasm-src/` guest-source assets are not workspace
+# members, so the workspace-package lookup below cannot map them. They are
+# production inputs to the shipped WASM extension and route to the support
+# crate, which is the freshness-gate anchor and buckets into `wasm-sandbox`.
+EXTENSION_PACKAGES_PREFIX = "crates/extensions/packages/"
+EXTENSION_PACKAGES_OWNER = "ironclaw_extension_support"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -386,6 +394,12 @@ def build_plan(
                 None,
             )
             if package is None:
+                if path.startswith(EXTENSION_PACKAGES_PREFIX):
+                    production_packages.add(EXTENSION_PACKAGES_OWNER)
+                    reasons.append(
+                        f"extension package asset changed: {path}"
+                    )
+                    continue
                 raise ValueError(f"unmapped crate path: {path}")
             directory = next(
                 directory

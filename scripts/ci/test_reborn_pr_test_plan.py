@@ -58,12 +58,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         paths: list[str],
         *,
         lockfile_manifest_owned: bool = False,
+        canonical_packages: list[str] | None = None,
     ) -> dict:
         return planner.build_plan(
             event=event,
             changed_paths=paths,
             metadata=metadata(),
-            canonical_packages=self.canonical,
+            canonical_packages=canonical_packages or self.canonical,
             lockfile_manifest_owned=lockfile_manifest_owned,
         )
 
@@ -362,6 +363,49 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_unclassified_build_input_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Dockerfile"])
+
+    def test_claude_agent_guidance_paths_are_ignored(self) -> None:
+        # `.claude/` holds agent guidance, not compiled test surface; it must
+        # not trip the unclassified-path guard or inflate a PR matrix.
+        plan = self.plan(
+            "pull_request",
+            [".claude/skills/promote-run-regression/SKILL.md"],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertNotIn("ironclaw_extension_support", plan["changed_packages"])
+        self.assertTrue(plan["run_qa_replay"])
+
+    def test_extension_package_asset_routes_to_support_owner(self) -> None:
+        # WS2 colocated first-party extension packages under
+        # `crates/extensions/packages/<pkg>/` as siblings of the support crate.
+        # Prompts, schemas, manifests, and `wasm-src/` guest sources are not
+        # workspace members, so they route to the support crate (the
+        # freshness-gate anchor; buckets into `wasm-sandbox`).
+        canonical = self.canonical + ["ironclaw_extension_support"]
+        for path in [
+            "crates/extensions/packages/github/prompts/github/list_pull_requests.md",
+            "crates/extensions/packages/github/wasm-src/src/lib.rs",
+            "crates/extensions/packages/github/manifest.toml",
+            "crates/extensions/packages/github/wasm/github_tool.wasm",
+        ]:
+            plan = self.plan(
+                "pull_request",
+                [path],
+                canonical_packages=canonical,
+            )
+            self.assertEqual(plan["mode"], "selected")
+            self.assertIn(
+                "ironclaw_extension_support",
+                plan["changed_packages"],
+                f"extension package asset should route to support owner: {path}",
+            )
+            self.assertTrue(
+                any(
+                    "extension package asset changed" in reason
+                    for reason in plan["reasons"]
+                ),
+                f"expected extension-package reason for {path}",
+            )
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))

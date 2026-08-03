@@ -93,6 +93,14 @@ tests/fixtures/llm_traces/live/*.log
 test-tools/*.zip
 test-tools/*/wasm-src/target/
 
+# First-party WASM guest crates under crates/extensions/packages/<pkg>/wasm-src/
+# resolve their own Cargo.lock at build time (see
+# scripts/ci/check-wasm-artifact-freshness.py: `Cargo.lock` is not source). The
+# lockfiles are regenerable build artifacts — never tracked — so a local build
+# never lands in a commit and launders a stale digest.
+crates/extensions/packages/*/wasm-src/Cargo.lock
+crates/extensions/packages/*/wasm-src/target/
+
 # node_modules must never be committed — vendored JS deps belong to the package
 # manager + lockfile, not git. A bare `node_modules/` (no leading slash) matches
 # a directory of that name at ANY depth, so this catches every frontend
