@@ -30,6 +30,14 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # crate, which is the freshness-gate anchor and buckets into `wasm-sandbox`.
 EXTENSION_PACKAGES_PREFIX = "crates/extensions/packages/"
 EXTENSION_PACKAGES_OWNER = "ironclaw_extension_support"
+# Root-level repository hygiene files that do not alter compiled test
+# surface. `.gitignore`/`.dockerignore` change which untracked files a local
+# checkout sees; they do not change which workspace crates or tests run.
+IGNORED_ROOT_PATHS = {
+    ".gitignore",
+    ".dockerignore",
+    ".gitattributes",
+}
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -349,6 +357,9 @@ def build_plan(
         if path.startswith(IGNORED_PREFIXES) or (
             path.endswith(".md") and "/" not in path
         ):
+            continue
+        if path in IGNORED_ROOT_PATHS:
+            reasons.append(f"repository hygiene file owns: {path}")
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
             reasons.append("Code Style owns WebUI lint, tests, and production build")

@@ -375,6 +375,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertNotIn("ironclaw_extension_support", plan["changed_packages"])
         self.assertTrue(plan["run_qa_replay"])
 
+    def test_repository_hygiene_files_are_ignored(self) -> None:
+        # Root ignore/attributes files change which untracked files a checkout
+        # sees, not which workspace crates or tests run.
+        for path in [".gitignore", ".dockerignore", ".gitattributes"]:
+            plan = self.plan("pull_request", [path])
+            self.assertEqual(plan["mode"], "none")
+            self.assertTrue(plan["run_qa_replay"])
+            self.assertTrue(
+                any("repository hygiene file owns" in r for r in plan["reasons"]),
+                f"expected hygiene-file reason for {path}",
+            )
+
     def test_extension_package_asset_routes_to_support_owner(self) -> None:
         # WS2 colocated first-party extension packages under
         # `crates/extensions/packages/<pkg>/` as siblings of the support crate.
