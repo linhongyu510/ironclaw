@@ -72,6 +72,21 @@ no production constructor (`with_script_runtime` and
   spawning through the transport seam; the merge colocated the two halves that
   makes that possible but did **not** perform the rewiring, because that is a
   behavior change and this was a move.
+- **The Docker fail-closed switch is wired to nothing (pre-existing, inherited
+  with the move).** `tests/support/docker_gate.rs` says
+  `IRONCLAW_REQUIRE_DOCKER_TESTS=1` is what turns a missing daemon or image from
+  a silent skip into a hard failure, and that "CI sets this". **Nothing sets
+  it** — the name appears only in `docker_gate.rs` and `attribution_tests.rs`,
+  in this tree and on `main`. So every real-Docker test in this crate skips-and-
+  passes everywhere, which is the exact gap the gate's own comment says let
+  sandbox security bugs ship unnoticed. Separately, `tests/docker_security.rs`
+  does not use the gate at all: it open-codes its own `docker version` check and
+  three `return`s, so it would not fail closed even once something does set the
+  variable. WS3 only *enrolled* that test in the required Rust e2e lane
+  (`scripts/reborn-e2e-rust.sh`); it did not author the skip. Fixing this means
+  setting the variable in the lanes that have a daemon **and** repointing
+  `docker_security.rs` onto `docker_gate` — a CI-behavior change, deliberately
+  not made inside a move PR. Guardrail-claim-vs-reality, the #6945 class.
 - **`ironclaw_resources` dependency.** The lane holds a `runtimes → kernel`
   layer-matrix exception because it takes `&dyn ResourceGovernor` and constructs
   `ResourceError`. See that exception's `reason` field in
