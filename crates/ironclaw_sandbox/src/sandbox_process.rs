@@ -8,7 +8,6 @@
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 

@@ -12,10 +12,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
-use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
+use ironclaw_host_api::resource::ResourceScope;
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
-use thiserror::Error;
 use tokio::process::Command;
 
 use crate::process_aliases::{
