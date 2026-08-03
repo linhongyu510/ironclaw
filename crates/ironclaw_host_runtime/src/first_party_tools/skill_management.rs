@@ -138,8 +138,13 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
                 &mut usage,
             )
             .await
+            // Deliberately NOT `skill_management_error`: the install-input path
+            // never logged before this executor moved out of the crate, and a
+            // move-only change must not add a log line. The `dispatch` arm below
+            // keeps the debug record it already had.
             .map_err(|error| {
-                skill_management_error(error).with_usage(usage_with_elapsed(&usage, started))
+                FirstPartyCapabilityError::new(error.kind())
+                    .with_usage(usage_with_elapsed(&usage, started))
             })?
         } else {
             request.input.clone()
