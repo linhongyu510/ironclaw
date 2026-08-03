@@ -26,6 +26,11 @@ QA_HARNESS_PREFIXES = (
     "scripts/reborn_webui_v2_live_qa/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+INTEGRATION_SUPPORT_OWNERS = {
+    "tests/support/hosted_mcp_registration_server.rs": (
+        "tests/integration/hosted_mcp_registration.rs"
+    ),
+}
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -370,6 +375,11 @@ def build_plan(
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
             continue
+        if path in INTEGRATION_SUPPORT_OWNERS:
+            owner = INTEGRATION_SUPPORT_OWNERS[path]
+            integration_lanes.add(integration_inventory[owner])
+            reasons.append(f"integration test support changed: {path}")
+            continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
             reasons.append(
@@ -383,6 +393,17 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
+            raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # E2E scenarios and support live in the dedicated
+            # `reborn-e2e.yml` workflow, which runs its own changed-path
+            # filter and provider/shard matrix. They are not part of the
+            # crate-bucket / root-partition / integration-lane plan emitted
+            # here, so skip them instead of failing closed on an unmapped
+            # path.
+            reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
         if path.startswith("crates/"):
             package = next(
