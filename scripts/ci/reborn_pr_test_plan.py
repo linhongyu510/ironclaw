@@ -335,6 +335,11 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
             continue
+        if path.startswith("wit/"):
+            reasons.append(
+                f"Platform & Compat owns WIT compatibility evidence: {path}"
+            )
+            continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue

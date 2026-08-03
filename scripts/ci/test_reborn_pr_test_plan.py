@@ -325,6 +325,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
+    def test_wit_changes_are_owned_by_platform_and_compat(self) -> None:
+        for path in ("wit/tool.wit", "wit/channel.wit"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertIn("Platform & Compat", plan["reasons"][0])
+
+    def test_wit_change_preserves_affected_crate_selection(self) -> None:
+        plan = self.plan(
+            "pull_request", ["wit/tool.wit", "crates/alpha/src/lib.rs"]
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+        )
+
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
             "pull_request",
