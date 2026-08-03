@@ -282,9 +282,32 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_host_runtime"
-floor_percent = 88.23
-floor_covered_lines = 20538
-captured_total_lines = 23277
-captured_date = "2026-07-30"
-rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution."
+# Re-captured with the WS3 first-party-tool move (skill-install executor →
+# `ironclaw_extension_support`). The percentage went UP (88.23 → 88.59) because
+# the crate shed well-covered code, but `floor_covered_lines` is an absolute
+# assertion and went the other way: 20538 → 20485, breaching the 20518 effective
+# floor. That is the whole point of having both halves, and it is why this entry
+# is re-captured here rather than left for the merge queue to discover.
+#
+# Measured, not estimated — the ratchet does not run on `pull_request`
+# (`scripts/ci/reborn_pr_test_plan.py:21`, issue #7036), so the numbers come from
+# a full-plan `workflow_dispatch` run on this exact head:
+#   https://github.com/nearai/ironclaw/actions/runs/30858257594
+#   head_sha e07b3b0299b0add11117e9591da71d46d7a7c832
+# which reported `RATCHET FAIL: ironclaw_host_runtime — observed 88.59%
+# (20485 / 23124)` against the old entry. Both numbers below are that observation.
+#
+# ⚠ The destination crate is deliberately NOT floored here, and cannot be: every
+# crate under `crates/extensions/` is invisible to the coverage tooling because
+# `scripts/ci/lib/reborn_coverage_lcov.py:19`'s `CRATE_RE` still requires a crate
+# directory *directly* under `crates/`. Pre-existing since #7037 colocated the
+# family; filed as #7083. The moved lines' coverage is therefore not merely
+# unfloored, it is unmeasured — which is also why the global denominator is
+# 7,727 lines below its capture and why the global floor is left alone here
+# rather than raised onto a hole.
+floor_percent = 88.59
+floor_covered_lines = 20485
+captured_total_lines = 23124
+captured_date = "2026-08-03"
+rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured for the WS3 skill-install executor move; percentage raised to the newly observed value rather than held."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
