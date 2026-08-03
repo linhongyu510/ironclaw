@@ -355,13 +355,79 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
-    def test_unmapped_crate_path_fails_fast(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
-            self.plan("pull_request", ["crates/deleted/src/lib.rs"])
+    def test_unmapped_crate_path_widens_instead_of_refusing(self) -> None:
+        """A crate path with no owning package widens to the exhaustive plan.
+
+        This used to raise. It made every crate deletion or rename unplannable
+        — `git diff` reports the removed crate's old paths, and CI feeds the
+        planner that diff — which blocked the PR rather than protecting it.
+        Widening cannot under-select, so it is the safe resolution; genuinely
+        malformed input is still rejected by the unclassified-path branch.
+        """
+        plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("deletion or rename", plan["reasons"][0])
 
     def test_unclassified_build_input_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Dockerfile"])
+
+    def test_agent_guidance_paths_are_prose_and_select_nothing(self) -> None:
+        """`.claude/**` is guidance, like `docs/**`.
+
+        Regression fixture: the planner used to fail closed on every
+        `.claude/` path, so any PR that updated a rule, skill, or command
+        alongside its code could not be planned at all.
+        """
+        for path in (
+            ".claude/commands/triage-prs.md",
+            ".claude/rules/safety-and-sandbox.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan, docs)
+
+    def test_crate_tree_prose_outside_any_package_selects_nothing(self) -> None:
+        """`crates/AGENTS.md` and friends belong to no package.
+
+        Regression fixture: the planner fail-closed with "unmapped crate path"
+        on the family-level guidance files, which the restructure edits in the
+        same PR as the crates they describe.
+        """
+        docs = self.plan("pull_request", ["docs/reborn/README.md"])
+        for path in ("crates/AGENTS.md", "crates/README.md", "crates/Architecture.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                # `reasons` is human-facing narration; the selection must match.
+                self.assertEqual(
+                    {k: v for k, v in plan.items() if k != "reasons"},
+                    {k: v for k, v in docs.items() if k != "reasons"},
+                )
+
+    def test_crate_prose_stays_narrow_while_crate_code_widens(self) -> None:
+        """Negative probe: the prose carve-out must not swallow crate code.
+
+        `crates/AGENTS.md` selects nothing; a source file under the same
+        unmapped directory widens to `full`. If the Markdown check were
+        wrongly applied, the second case would also select nothing.
+        """
+        self.assertEqual(self.plan("pull_request", ["crates/AGENTS.md"])["mode"], "none")
+        self.assertEqual(
+            self.plan("pull_request", ["crates/not_a_package/src/lib.rs"])["mode"],
+            "full",
+        )
+
+    def test_unclassified_paths_outside_guidance_still_fail_closed(self) -> None:
+        """Negative probe: widening IGNORED_PREFIXES must not open the gate."""
+        for path in ("Dockerfile", "claude/rules/x.md", ".claudeignore"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))

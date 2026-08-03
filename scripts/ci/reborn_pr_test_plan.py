@@ -19,7 +19,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
-IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+# Prose only. `.claude/` is agent guidance (rules, skills, commands) in the
+# same sense `docs/` is human guidance: no Rust test reads either as data —
+# the only in-tree references are prose citations in test doc comments — so a
+# change there cannot alter a test outcome. Without this the planner
+# fail-closes on every PR that updates a crate guide alongside its crate,
+# which is exactly the "guidance travels with the change" discipline the
+# restructure requires.
+IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/", ".claude/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
@@ -377,6 +384,16 @@ def build_plan(
             reasons.append("recorded QA evidence changed")
             continue
         if path.startswith("crates/"):
+            # Family-level prose that belongs to no package: `crates/AGENTS.md`,
+            # `crates/README.md`, `crates/Architecture.md`, and the family
+            # `AGENTS.md` files the target-architecture tree move adds. Matched
+            # by "Markdown that no package directory owns", checked below, so a
+            # genuinely unmapped *crate* path still fails closed.
+            if Path(path).suffix == ".md" and not any(
+                path.startswith(f"{directory}/") for directory in package_directories
+            ):
+                reasons.append(f"crate-tree guidance changed: {path}")
+                continue
             package = next(
                 (
                     name
@@ -386,7 +403,22 @@ def build_plan(
                 None,
             )
             if package is None:
-                raise ValueError(f"unmapped crate path: {path}")
+                # The path is under `crates/` but belongs to no workspace
+                # package. The normal cause is a crate this PR **deletes or
+                # renames** — `git diff` reports its old paths, and the merge
+                # or rename is exactly the change shape the target-architecture
+                # restructure ships (PROPOSAL §2 plans six crate deletions).
+                #
+                # Refusing to plan is the wrong resolution: it blocks the PR
+                # outright. Widening is the safe one — the exhaustive plan is a
+                # superset of any narrowing, so an unattributable path can never
+                # cause under-selection. Malformed input is still rejected: a
+                # path outside every classified prefix raises below.
+                return _full_plan(
+                    "a crate path maps to no workspace package (deletion or "
+                    f"rename): {path}; this PR runs the exhaustive plan",
+                    canonical_packages,
+                )
             directory = next(
                 directory
                 for directory, name in package_directories.items()
