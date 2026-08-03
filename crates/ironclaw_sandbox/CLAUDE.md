@@ -13,8 +13,9 @@ no longer declares any of the three.
 
 ## Wiring status — read before assuming this is dead code
 
-Two production call paths cross this crate today, and both are **plan
-validation**, not execution:
+**Three** production call paths cross this crate today, and none of them is
+execution. Only the first is plan validation — do not delete the other two as
+dead code on the strength of a "plan validation only" reading:
 
 - `ironclaw_host_runtime::production::host_runtime_spawn_input_for_capability`
   parses and validates `SandboxProcessPlan` → `ValidatedSandboxProcessPlan` on

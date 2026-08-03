@@ -22,9 +22,11 @@
 //!
 //! ## Wiring status
 //!
-//! Two production call paths cross this crate today, and both are *plan
-//! validation*, not execution: `host_runtime`'s spawn path parses and validates
-//! `SandboxProcessPlan`, and `loop_host` compares against the capability id.
+//! Three production call paths cross this crate today, and none of them is
+//! execution. Only the first is *plan validation*: `host_runtime`'s spawn path
+//! parses and validates `SandboxProcessPlan`; `loop_host` compares against the
+//! capability id; and `host_runtime::process_output` derives the scoped
+//! saved-output directory through `RebornSandboxScopeKey`'s digest.
 //! There is still no production backend for
 //! `system.process_sandbox.run` — the Docker/CA machinery and the script lane
 //! have no production constructor. See this crate's `CLAUDE.md`.

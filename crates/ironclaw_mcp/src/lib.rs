@@ -98,6 +98,22 @@ pub struct McpExecutionRequest<'a> {
     /// and taking the package forced a `runtimes -> loops` dependency on the
     /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extensions` exception).
     /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** `extension`,
+    /// `capabilities`, and `runtime` are three independent borrows, so the type
+    /// no longer *structurally* guarantees they came from one package the way
+    /// `&ExtensionPackage` did. `execute_extension_json` re-checks the
+    /// descriptor half (`descriptor.provider == extension`), but nothing in an
+    /// `&ExtensionRuntime` identifies its owning extension, so the runtime half
+    /// cannot be re-derived here — a caller that paired extension A's
+    /// descriptors with extension B's runtime stanza would authenticate as A
+    /// and dial B. **Always project all three from the same `ExtensionPackage`
+    /// in one expression.** The single production caller
+    /// (`ironclaw_host_runtime::services::runtime_adapters`) does exactly that.
+    /// Restoring the compile-time binding needs a sealed projection minted by
+    /// the package owner — it cannot be a check inside this lane, and it must
+    /// not be a re-addition of the registry edge; tracked with the WS3 lane
+    /// work.
     pub extension: &'a ExtensionId,
     pub capabilities: &'a [CapabilityDescriptor],
     pub runtime: &'a ExtensionRuntime,

@@ -77,6 +77,15 @@ pub struct ScriptExecutionRequest<'a> {
     /// and taking the package forced a `runtimes -> loops` dependency on the
     /// registry crate (the W7 `ironclaw_sandbox -> ironclaw_extensions` exception).
     /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** These three are
+    /// independent borrows, so the type no longer *structurally* guarantees
+    /// they came from one package the way `&ExtensionPackage` did, and nothing
+    /// in an `&ExtensionRuntime` identifies its owning extension. **Always
+    /// project all three from the same `ExtensionPackage` in one expression.**
+    /// Identical shape and identical obligation to
+    /// `ironclaw_mcp::McpExecutionRequest`, whose field doc carries the full
+    /// rationale.
     pub extension: &'a ExtensionId,
     pub capabilities: &'a [CapabilityDescriptor],
     pub runtime: &'a ExtensionRuntime,
