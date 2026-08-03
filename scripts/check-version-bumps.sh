@@ -119,23 +119,23 @@ version_was_bumped() {
 WIT_TOOL_CHANGED=false
 WIT_CHANNEL_CHANGED=false
 
-if echo "$CHANGED_FILES" | grep -qx 'wit/tool\.wit'; then
+if echo "$CHANGED_FILES" | grep -qx 'crates/ironclaw_wasm/wit/tool\.wit'; then
     WIT_TOOL_CHANGED=true
 fi
-if echo "$CHANGED_FILES" | grep -qx 'wit/channel\.wit'; then
+if echo "$CHANGED_FILES" | grep -qx 'crates/ironclaw_wasm/wit/channel\.wit'; then
     WIT_CHANNEL_CHANGED=true
 fi
 
 if $WIT_TOOL_CHANGED; then
     echo ""
-    echo "=== wit/tool.wit changed ==="
+    echo "=== crates/ironclaw_wasm/wit/tool.wit changed ==="
 
-    NEW_VER=$(extract_wit_version "wit/tool.wit")
-    OLD_VER=$(extract_wit_version_base "wit/tool.wit")
+    NEW_VER=$(extract_wit_version "crates/ironclaw_wasm/wit/tool.wit")
+    OLD_VER=$(extract_wit_version_base "crates/ironclaw_wasm/wit/tool.wit")
     echo "  WIT package version: ${OLD_VER:-<none>} -> ${NEW_VER:-<missing>}"
 
     if ! version_was_bumped "${NEW_VER}" "${OLD_VER}"; then
-        echo "  ERROR: wit/tool.wit package version was not bumped (${OLD_VER} -> ${NEW_VER:-<missing>})."
+        echo "  ERROR: crates/ironclaw_wasm/wit/tool.wit package version was not bumped (${OLD_VER} -> ${NEW_VER:-<missing>})."
         ERRORS=$((ERRORS + 1))
     else
         echo "  OK: WIT package version bumped."
@@ -146,23 +146,23 @@ if $WIT_TOOL_CHANGED; then
     # deleted under Tier B).
     CONST_VER=$(extract_rust_const "crates/ironclaw_wasm/src/config.rs" "WIT_TOOL_VERSION")
     if [[ -n "$NEW_VER" && "$CONST_VER" != "$NEW_VER" ]]; then
-        echo "  ERROR: WIT_TOOL_VERSION in crates/ironclaw_wasm/src/config.rs is '${CONST_VER}' but wit/tool.wit has '${NEW_VER}'. They must match."
+        echo "  ERROR: WIT_TOOL_VERSION in crates/ironclaw_wasm/src/config.rs is '${CONST_VER}' but crates/ironclaw_wasm/wit/tool.wit has '${NEW_VER}'. They must match."
         ERRORS=$((ERRORS + 1))
     elif [[ -n "$NEW_VER" ]]; then
-        echo "  OK: WIT_TOOL_VERSION matches wit/tool.wit."
+        echo "  OK: WIT_TOOL_VERSION matches crates/ironclaw_wasm/wit/tool.wit."
     fi
 fi
 
 if $WIT_CHANNEL_CHANGED; then
     echo ""
-    echo "=== wit/channel.wit changed ==="
+    echo "=== crates/ironclaw_wasm/wit/channel.wit changed ==="
 
-    NEW_VER=$(extract_wit_version "wit/channel.wit")
-    OLD_VER=$(extract_wit_version_base "wit/channel.wit")
+    NEW_VER=$(extract_wit_version "crates/ironclaw_wasm/wit/channel.wit")
+    OLD_VER=$(extract_wit_version_base "crates/ironclaw_wasm/wit/channel.wit")
     echo "  WIT package version: ${OLD_VER:-<none>} -> ${NEW_VER:-<missing>}"
 
     if ! version_was_bumped "${NEW_VER}" "${OLD_VER}"; then
-        echo "  ERROR: wit/channel.wit package version was not bumped (${OLD_VER} -> ${NEW_VER:-<missing>})."
+        echo "  ERROR: crates/ironclaw_wasm/wit/channel.wit package version was not bumped (${OLD_VER} -> ${NEW_VER:-<missing>})."
         ERRORS=$((ERRORS + 1))
     else
         echo "  OK: WIT package version bumped."

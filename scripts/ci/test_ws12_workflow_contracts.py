@@ -257,8 +257,9 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         )
         workflows = self.sabotage(
             PLATFORM_WORKFLOW,
-            "^(wit/|",
-            "^(wit/|crates/([^/]+/)*ironclaw_wasm_product_adapters/|",
+            "^(crates/([^/]+/)*ironclaw_common/|",
+            "^(crates/([^/]+/)*ironclaw_wasm_product_adapters/"
+            "|crates/([^/]+/)*ironclaw_common/|",
         )
         with self.patched_filters((stale,)):
             errors = validate_crate_scope_filters(workflows, ROOT)

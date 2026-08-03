@@ -2211,7 +2211,7 @@ pub(crate) fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).unwrap();
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", include_str!("../../../../wit/tool.wit"))
+        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
         .unwrap();
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))

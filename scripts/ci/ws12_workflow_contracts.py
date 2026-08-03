@@ -261,7 +261,10 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=PLATFORM_WORKFLOW,
         name="has_direct_wasm_abi_risk",
-        anchor="wit/",
+        # Anchored on the build script rather than on a path prefix: the WIT
+        # directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so the bare
+        # `wit/` alternative that used to anchor this filter is gone.
+        anchor="build-wasm-extensions",
         kind="regex",
         crates=(
             ("ironclaw_common", "src/lib.rs"),
@@ -274,7 +277,12 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         # moves again this stops discovering files or stops matching them,
         # either way loudly.
         crate_globs=(("ironclaw_extension_support", "../packages/*/manifest.toml"),),
-        in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
+        in_scope=(
+            "crates/ironclaw_wasm/wit/host.wit",
+            "crates/lanes/ironclaw_wasm/wit/host.wit",
+            "registry/tools/x.json",
+            "scripts/build-wasm-extensions.sh",
+        ),
         out_of_scope=(
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
