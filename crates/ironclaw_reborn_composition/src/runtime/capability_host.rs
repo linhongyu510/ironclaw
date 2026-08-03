@@ -9,8 +9,14 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExecutionContext, ExtensionId, FailureKind, InvocationId, MountView,
-    Resolution, ResourceScope, RuntimeKind, TrustClass, UserId,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    resolution::Resolution,
+    resource::ResourceScope,
+    result_meta::FailureKind,
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
@@ -23,22 +29,20 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
+    ToolObservationStatus, resolution,
+};
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    ExternalToolCatalog, LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
-        ToolObservationStatus, resolution,
-    },
-};
+use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};
@@ -1260,16 +1264,18 @@ fn host_api_agent_loop_error(
 /// shape — replacing the byte-identical per-file copies (CodeRabbit #6299).
 #[cfg(test)]
 pub(crate) fn assert_recoverable_failure(
-    resolution: &ironclaw_host_api::Resolution,
-    expected: ironclaw_host_api::FailureKind,
+    resolution: &ironclaw_host_api::resolution::Resolution,
+    expected: ironclaw_host_api::result_meta::FailureKind,
 ) {
     match resolution {
-        ironclaw_host_api::Resolution::Done(outcome) => {
+        ironclaw_host_api::resolution::Resolution::Done(outcome) => {
             assert_eq!(outcome.verdict.error_kind(), Some(&expected));
             let detail = outcome
                 .verdict
                 .diagnostic()
-                .and_then(ironclaw_host_api::ModelFailureDiagnostic::model_visible_text)
+                .and_then(
+                    ironclaw_host_api::result_meta::ModelFailureDiagnostic::model_visible_text,
+                )
                 .expect("recoverable failures must carry a model-visible cause");
             assert!(
                 !detail.trim().is_empty(),

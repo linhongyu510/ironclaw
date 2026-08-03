@@ -21,18 +21,24 @@ export function WorkspacePage() {
     currentUser?: { tenant_id?: string | null; user_id?: string | null } | null;
     workspaceRequiresScopedProjection?: boolean;
   };
+  const workspaceThreadId = params.workspaceThreadId || null;
   const selectedPath = params["*"] || DEFAULT_WORKSPACE_PATH;
-  const workspace = useWorkspaceBrowser(
-    selectedPath,
+  const workspace = useWorkspaceBrowser(selectedPath, {
     currentUser,
-    workspaceRequiresScopedProjection,
+    requireScopedWorkspace: workspaceRequiresScopedProjection,
+    threadId: workspaceThreadId,
+  });
+
+  const navigateWithinWorkspace = React.useCallback(
+    (path) => navigate(routeForWorkspacePath(path, workspaceThreadId)),
+    [navigate, workspaceThreadId],
   );
 
   const handleSelectFile = React.useCallback(
     (path) => {
-      navigate(routeForWorkspacePath(path));
+      navigateWithinWorkspace(path);
     },
-    [navigate]
+    [navigateWithinWorkspace]
   );
 
   return (
@@ -79,12 +85,11 @@ export function WorkspacePage() {
           >
             <WorkspaceSidebar
               rootEntries={workspace.rootEntries}
-              currentUser={workspace.currentUser}
-              requireScopedWorkspace={workspaceRequiresScopedProjection}
-              workspaceScopeKey={workspace.workspaceScopeKey}
               selectedPath={selectedPath}
               expandedPaths={workspace.expandedPaths}
               filter={workspace.filter}
+              scopeKey={workspace.scopeKey}
+              listDirectory={workspace.listDirectory}
               onFilterChange={workspace.setFilter}
               isLoadingTree={workspace.isLoadingTree}
               onToggleDirectory={workspace.toggleDirectory}
@@ -98,7 +103,7 @@ export function WorkspacePage() {
                     isLoading={workspace.isLoadingListing}
                     filter={workspace.filter}
                     onOpen={handleSelectFile}
-                    onNavigate={navigate}
+                    onNavigate={navigateWithinWorkspace}
                   />
                 )
               : (
@@ -106,7 +111,7 @@ export function WorkspacePage() {
                     path={selectedPath}
                     file={workspace.file}
                     isLoading={workspace.isLoadingFile}
-                    onNavigate={navigate}
+                    onNavigate={navigateWithinWorkspace}
                   />
                 )}
           </div>

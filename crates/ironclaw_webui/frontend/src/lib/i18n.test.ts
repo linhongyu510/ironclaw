@@ -261,6 +261,66 @@ test("locale packs include client-generated chat failure copy", () => {
   }
 });
 
+test("locale packs include composer command menu and command failure copy", () => {
+  const requiredKeys = [
+    "chat.commandMenu",
+    "chat.commandFailed",
+    "chat.commandMenuHintRun",
+    "chat.commandMenuHintComplete",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("commandMenuHintRun is an imperative verb, not a bare noun or transliteration", () => {
+  // Regression: several locales translated the paired "Run"/"Complete"
+  // composer hints inconsistently — an action-noun (or, for de, an ASCII
+  // transliteration dropping the umlaut entirely) for Run alongside a proper
+  // imperative/infinitive verb for Complete. Every locale below already uses
+  // an imperative verb for every other action label in the same file (see
+  // e.g. common.cancel/common.save); commandMenuHintRun must match that
+  // convention instead of standing out as the one noun-shaped label.
+  // ar/en/ja/ko/zh-CN are deliberately absent: their existing values already
+  // follow their language's own idiomatic convention for action labels
+  // (Arabic masdar, CJK action-noun compounds, English base-form) and are
+  // correct as-is.
+  const expected = {
+    de: "Ausführen",
+    es: "Ejecutar",
+    fr: "Exécuter",
+    "pt-BR": "Executar",
+    uk: "Запустити",
+    hi: "रन करें",
+  };
+
+  for (const [locale, value] of Object.entries(expected)) {
+    const pack = loadLocalePack(locale);
+    assert.equal(pack["chat.commandMenuHintRun"], value, `${locale} chat.commandMenuHintRun`);
+  }
+});
+
+test("locale packs include the command-result presentation's list heading", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(
+      typeof pack["chat.commandListTitle"],
+      "string",
+      `${locale} missing chat.commandListTitle`,
+    );
+    assert.notEqual(
+      pack["chat.commandListTitle"].trim(),
+      "",
+      `${locale} chat.commandListTitle should not be empty`,
+    );
+  }
+});
+
 test("locale packs include lazy-route loading and recovery copy", () => {
   const requiredKeys = [
     "app.loadingPage",
@@ -272,6 +332,16 @@ test("locale packs include lazy-route loading and recovery copy", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);
     for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("locale packs include logs pagination copy", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of ["logs.loadOlder", "logs.retentionLimitReached"]) {
       assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
       assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
     }
@@ -403,13 +473,30 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
 
-test("zh-CN localizes Reborn Projects summary copy", () => {
+test("locale packs include API-backed project states and access roles", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of [
+      "projects.projectRole.owner",
+      "projects.projectRole.editor",
+      "projects.projectRole.viewer",
+      "projects.projectRole.unknown",
+      "projects.status.archived",
+    ]) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("zh-CN localizes API-backed Projects overview copy", () => {
   const pack = loadLocalePack("zh-CN");
 
   assert.equal(pack["projects.summary.projects"], "项目");
-  assert.equal(pack["projects.summary.attentionQueue"], "关注队列");
-  assert.equal(pack["projects.summary.spendToday"], "今日花费");
-  assert.equal(pack["projects.card.pendingGates"], "待处理门禁：{count}");
+  assert.equal(pack["projects.status.active"], "活跃");
+  assert.equal(pack["projects.status.archived"], "已归档");
+  assert.equal(pack["projects.projectRole.owner"], "所有者");
+  assert.equal(pack["projects.projectRole.unknown"], "未知");
   assert.equal(pack["projects.files.label"], "文件");
 });
 

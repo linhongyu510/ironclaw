@@ -23,10 +23,14 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };
-use ironclaw_host_api::{
-    CapabilityId, DispatchError, DispatchErrorLane, DispatchFailureDetail, ExtensionId,
-    ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind,
+use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
+};
+use ironclaw_host_api::{
+    dispatch::{DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind},
+    ids::{CapabilityId, ExtensionId},
+    resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
 };
 
 use crate::active::ResolvedToolBinding;

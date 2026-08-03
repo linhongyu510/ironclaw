@@ -14,10 +14,10 @@ use tracing::{debug, error};
 
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
-use crate::failure_categories::{
+use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -55,6 +55,7 @@ pub(crate) fn sanitized_driver_failure(
             | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
+            | TRANSCRIPT_WRITE_FAILED_CATEGORY
             | CHECKPOINT_REJECTED_CATEGORY
             | "model_context_overflow"
             | "model_output_truncated"
@@ -74,8 +75,9 @@ pub(crate) fn sanitized_driver_failure(
     } else {
         sanitized_failure("driver_failed")
     };
-    // Carry the secret-scrubbed model-visible detail onto the failure record so
-    // it can reach `TurnLifecycleEvent.detail` and the failure explainer.
+    // Carry the bounded detail onto the durable failure record. Model-stage
+    // details may reach the explainer; transcript failures carry only their
+    // fixed host-authored cause and bypass model inference in projection.
     base.map(|failure| match detail {
         Some(detail) => failure.with_detail(detail),
         None => failure,
@@ -95,10 +97,7 @@ pub trait HostFactory: Send + Sync {
     async fn create_host(
         &self,
         claimed: &ClaimedTurnRun,
-    ) -> Result<
-        Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
-        HostFactoryError,
-    >;
+    ) -> Result<Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>, HostFactoryError>;
 }
 
 /// Error returned when host construction fails.
@@ -126,7 +125,7 @@ impl std::error::Error for HostFactoryError {}
 #[cfg(test)]
 mod tests {
     use super::sanitized_driver_failure;
-    use crate::failure_categories::{
+    use ironclaw_host_api::failure::categories::{
         BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
         MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     };
@@ -190,6 +189,21 @@ mod tests {
             failure.detail(),
             Some("configured model spend budget is exhausted")
         );
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_transcript_write_category_and_safe_cause() {
+        let failure = sanitized_driver_failure(
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            Some("assistant transcript write failed"),
+        )
+        .expect("transcript write category is valid");
+
+        assert_eq!(
+            failure.category(),
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+        );
+        assert_eq!(failure.detail(), Some("assistant transcript write failed"));
     }
 
     #[test]

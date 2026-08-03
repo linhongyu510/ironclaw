@@ -30,7 +30,9 @@ use ironclaw_auth::{
 };
 use ironclaw_first_party_extensions::GoogleCredentialResolver;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, Principal, ResourceScope, SecretHandle, TenantId, UserId,
+    ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_llm::{
     LlmConfig, LlmProvider, NearAiConfig, ProviderProtocol, RegistryProviderConfig, SessionConfig,
@@ -40,6 +42,7 @@ use ironclaw_llm::{
         ReplayingHttpInterceptor,
     },
 };
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -55,7 +58,7 @@ use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus, run_profile::ModelProfileId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::support::trace_llm::{LlmTrace, TraceResponse};
@@ -1876,7 +1879,9 @@ fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
     };
     use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelRequest,

@@ -15,7 +15,7 @@
 //! destroyed 17 names — and with them every remediation hint the model could
 //! have acted on.
 //!
-//! They are now one closed `ironclaw_host_api::FailureKind` plus projection
+//! They are now one closed `ironclaw_host_api::result_meta::FailureKind` plus projection
 //! functions (`fate()`, retry-category, wire tag, HTTP status). Every
 //! projection is a wildcard-free exhaustive match beside the single
 //! definition, so a new kind cannot compile until each consumer classifies it.
@@ -29,7 +29,10 @@
 //! skips comment lines rather than path-scoping the files that carry that
 //! history.
 
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod ratchet_support;
+
+use std::path::Path;
 
 /// Type names retired by the collapse. Any live reference means a layer has
 /// started re-declaring the failure domain again.
@@ -44,6 +47,8 @@ const RETIRED_TYPES: &[&str] = &[
     "FailureKindValue",
 ];
 
+use ratchet_support::workspace_root;
+
 /// Conversion helpers that existed only to move a value between two spellings
 /// of the same domain. Their absence is what proves the collapse is real
 /// rather than a rename with the mapping tax still attached.
@@ -55,14 +60,6 @@ const RETIRED_MAPPERS: &[&str] = &[
     "failure_kind_of",
     "exhausted_capability_failure_kind",
 ];
-
-fn workspace_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/ironclaw_architecture -> crates -> workspace root
-    path.pop();
-    path.pop();
-    path
-}
 
 /// Blank out comment spans so prose about the retired vocabulary stays legal
 /// while code that names it does not, preserving line numbers for reporting.
@@ -188,7 +185,7 @@ fn reborn_code_never_redeclares_the_failure_vocabulary() {
     assert!(
         hits.is_empty(),
         "the retired failure vocabulary is back in live code — one closed \
-         `ironclaw_host_api::FailureKind` plus projections is the single \
+         `ironclaw_host_api::result_meta::FailureKind` plus projections is the single \
          definition (#6284); a second spelling drifts from it, and the drift \
          is where recoverability dies:\n{}",
         hits.join("\n")

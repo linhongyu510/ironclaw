@@ -32,10 +32,13 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+    ids::{AgentId, InvocationId, TenantId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_product::ChannelConnectionService;
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
+use ironclaw_extension_contracts::channel_identity::ChannelIdentityPostBindFactory;
 use ironclaw_extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionService,
 };
@@ -43,7 +46,7 @@ use ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisionin
 use ironclaw_extension_host::channel_identity_binding::{
     ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
-use ironclaw_host_api::{ChannelIdentityPostBindFactory, RebornUserIdentityLookup};
+use ironclaw_host_api::user_identity::RebornUserIdentityLookup;
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;
@@ -112,7 +115,7 @@ pub fn build_channel_connection_for_test(
             Some(Arc::clone(&installation_store)),
             Arc::clone(&identity_store) as Arc<dyn RebornUserIdentityLookup>,
             Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             credential_cleanup,
             account_status_reader,
             Some(runtime.channel_dm_target_store.clone()),
@@ -150,9 +153,9 @@ pub fn build_channel_connection_for_test(
         installation_store: Some(installation_store),
         channel_config: Some(runtime.channel_config_service.clone()),
         binding_store: Arc::clone(&identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
         post_bind_factory,
         overrides: Vec::new(),
     };

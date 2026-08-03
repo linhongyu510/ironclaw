@@ -4,9 +4,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, MountView, Resolution, ResolutionBatch, UserId,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::MountView,
+    resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_host_runtime::HostRuntime;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
+};
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     wrap_external_tools, wrap_surface_disclosure,
@@ -15,12 +23,6 @@ use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
-    LoopHostMilestoneSink, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
-};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
@@ -89,7 +91,7 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     /// Always empty at the sole production call site (`capability_host.rs`'s
     /// `create_capability_port`); populated only by the `test-support`
     /// constructor.
-    pub(super) additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
+    pub(super) additional_capability_grants: Vec<ironclaw_host_api::capability::CapabilityGrant>,
 }
 
 pub(crate) async fn create_refreshing_capability_port(
@@ -163,7 +165,7 @@ struct RefreshingCapabilityPort {
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
     capability_id_filter: Option<HashSet<CapabilityId>>,
-    additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
+    additional_capability_grants: Vec<ironclaw_host_api::capability::CapabilityGrant>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -192,7 +194,7 @@ impl RefreshingCapabilityPort {
         // Overlays network+secrets onto a same-id builtin grant, or inserts
         // the whole synthetic grant when the id has no grant at all.
         if !self.additional_capability_grants.is_empty() {
-            let mut missing: Vec<ironclaw_host_api::CapabilityGrant> = Vec::new();
+            let mut missing: Vec<ironclaw_host_api::capability::CapabilityGrant> = Vec::new();
             for synthetic in &self.additional_capability_grants {
                 if extension_surface
                     .capability(&synthetic.capability)

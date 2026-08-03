@@ -32,6 +32,7 @@ use crate::readiness::{
     RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
     RebornReadinessState,
 };
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 impl RebornReadinessDiagnostic {
     pub fn disabled() -> Self {
@@ -236,7 +237,7 @@ pub struct DeploymentConfig {
     /// as a separate build-input field. Defaulted empty by every profile
     /// preset; populated by the assembling caller via
     /// [`DeploymentConfig::with_required_runtime_backends`].
-    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::runtime::RuntimeKind>,
     /// Whether the build must provision runtime HTTP egress. Declarative
     /// deployment requirement; defaulted `false` by every preset.
     pub(crate) require_runtime_http_egress: bool,
@@ -262,7 +263,7 @@ pub struct DeploymentConfig {
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
-    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(crate) account_setup_descriptors: Vec<ExtensionAccountSetupDescriptor>,
     pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 

@@ -18,11 +18,39 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The canonical local composition of the deterministic Reborn gates is
+`scripts/ci/run-hermetic-deterministic-suite.sh all`. CI invokes the same
+checked-in stages through that runner so credentials, ambient behavior,
+mutable roots, clock/seed inputs, and non-loopback egress have one mechanical
+boundary. Setup and exclusions are documented in
+`docs/internal/hermetic-deterministic-suite.md`.
+
 The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
 for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
 changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
 they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
+
+`reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
+integration, and frontend suites without LLVM instrumentation. Recorded QA
+replay remains a baseline on every pull request because it detects ordering
+and cross-surface regressions that cannot be inferred from changed paths. The
+full transitive reverse workspace dependency closure is included in PR crate
+selection. Foundational-crate changes that span more than three canonical
+buckets coalesce every changed and dependent package into at most three PR
+jobs instead of omitting consumer tests. The merge queue and pushes to `main`
+still run every crate bucket, root
+partition, group suite, integration lane, frontend test, recorded replay, and
+coverage gate. Unknown paths, empty diffs, and recognized test-topology or
+workspace-topology changes fail closed to that same full plan on the pull
+request. A planner execution or schema failure also fails the required check
+loudly.
+The queue therefore preserves exhaustive deterministic evidence while
+ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
+parallelism is capped at three crate buckets, one root partition, and one
+integration lane; merge queue and main retain full matrix parallelism so this
+feedback optimization does not serialize the production gate.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
@@ -64,16 +92,26 @@ Rules for a roll-up job that is (or may become) required:
 2. Tolerate `skipped` only for jobs that are event- or scope-gated by design;
    anything that ran must have succeeded.
 3. Assert expected coverage where feasible — the Code Style roll-up fails if a
-   merge-queue/push run's clippy matrix is missing any of the three feature
-   lanes, so a "green but slim" regression cannot come back silently.
+   merge-queue/push run's clippy matrix is missing any required feature lane,
+   so a "green but slim" regression cannot come back silently.
+
+Code Style deliberately consolidates formatting, dependency policy, static
+guards, panic checks, and composition-budget checks into one
+`fast-checks` job. These checks complete in seconds to a few minutes and do not
+benefit from separate runners; keeping them together bounds a code-changing
+pull request to at most six active Code Style jobs while preserving every
+command. Clippy, WebUI checks, and CLI smoke remain separate because they are
+expensive or independently scope-gated.
 
 ## Reborn release and manual compile preflight
 
 `ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
 `ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
 release targets, produce archives and checksums plus shell, PowerShell, and MSI
-installers, and create the tag's GitHub Release. cargo-dist derives the
-Release title and body from the release metadata and `CHANGELOG.md`.
+installers, and create the tag's GitHub Release. After that Release exists, the
+workflow publishes the regular `nearaidev/ironclaw` Docker image with version,
+`latest`, and source-SHA tags. cargo-dist derives the Release title and body
+from the release metadata and `CHANGELOG.md`.
 
 cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
 setting for built-in job permissions. The checked-in workflow is therefore
@@ -174,12 +212,14 @@ the configuration:
   Windows/bench/docker deep coverage). Called workflows use the `deep` marker
   input instead: it defaults to true and only materializes under
   `workflow_call`.
-- **A called workflow that references `secrets.*` needs `secrets: inherit` at
-  the call site.** Otherwise the entire caller run dies at trigger time as a
-  `startup_failure` with zero jobs — including any in-run alert job. Nightly
-  Deep CI had zero successful runs from its creation (2026-05-06) through
-  2026-07-08 — 65 of its 74 retained runs are startup_failures — precisely
-  because this failure mode is invisible from inside the run.
+- **A called workflow that references `secrets.*` needs those secrets passed at
+  the call site**, either through an explicit mapping (preferred for a
+  narrowly privileged publish job) or `secrets: inherit` when it truly needs
+  the caller's full secret set. Otherwise the entire caller run dies at trigger
+  time as a `startup_failure` with zero jobs — including any in-run alert job.
+  Nightly Deep CI had zero successful runs from its creation (2026-05-06)
+  through 2026-07-08 — 65 of its 74 retained runs are startup_failures —
+  precisely because this failure mode is invisible from inside the run.
   `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks each
   nightly's latest scheduled run from outside and posts the failure to Slack
   even when the run itself never started.
@@ -198,38 +238,50 @@ trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
 
-### Main branch alerting
+### Main branch and merge-queue alerting
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
-current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
-Platform & Compat, Replay Snapshot Gate, Code Coverage,
+current `push` to `main` and `merge_group` workflows: Code Style, Tests
+(Reborn), Reborn E2E, Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
-message with the workflow, conclusion, failed job names, commit, actor, and run
-link.
+message with the workflow, conclusion, failed job and step names, available
+failure annotations, commit, actor, and run link. Merge-queue alerts also
+resolve the PR number from GitHub's `gh-readonly-queue/main/pr-<number>-...`
+ref and include the PR title, author, and link.
 
-Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
-webhook URL or multiple URLs separated by newlines or commas. This is
-intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
-alerts can target dedicated channels.
+Main-branch alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be
+a single webhook URL or multiple URLs separated by newlines or commas.
+Merge-queue alerts go to `secrets.SLACK_WEBHOOK_URL`, the existing live-canary
+channel. This keeps post-merge CI alerts in their dedicated channels while
+making queue bounces visible alongside live-canary failures.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
+
+Code Coverage uses same-ref concurrency with cancellation. When merges land
+faster than coverage completes, only the newest cumulative `main` commit keeps
+running; superseded post-merge coverage runs do not consume runners needed by
+pull requests.
 
 ## Reborn-only release policy
 
 For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
 `ironclaw` package. The active tag DAG consists of cargo-dist planning, the
 seven target builds, universal installer generation, and GitHub Release
-hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
-images, and the old registry-checksum/announcement path are outside this DAG.
-The generated `announce` job remains as cargo-dist's final release step; it does
-not restore any of those retired products.
+hosting, followed by the regular Reborn Docker image. Legacy v1 artifacts,
+independently published WASM extensions, `ironclaw-worker`, and the old
+registry-checksum path remain outside this DAG. The generated `announce` job
+remains cargo-dist's final release step and does not restore those retired
+products.
 
-`docker.yml` keeps its independent manual and hourly entry points; a Reborn
-version tag does not invoke them. The manual `reborn-release-compile.yml`
-preflight is also independent from publishing. Restoring any retired release
-product requires adding it back explicitly instead of making it a dependency
-of the Reborn package by default.
+The `docker-image` job runs only after `host` creates the GitHub Release. If
+Docker publishing fails, the existing GitHub Release and its artifacts remain
+available while the overall workflow reports failure for retry/repair. Release
+builds publish only `nearaidev/ironclaw`; they do not dispatch
+`nearai/ironclaw-dind` because the caller explicitly sets `trigger_dind: false`.
+The reusable `docker.yml` keeps its independent manual and hourly staging entry
+points, including their existing optional DIND dispatch. The manual
+`reborn-release-compile.yml` preflight remains independent from publishing.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

@@ -18,7 +18,11 @@ use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle, UserId},
+    path::VirtualPath,
+};
 
 fn extension_id(value: &str) -> ExtensionId {
     ExtensionId::new(value).unwrap()
@@ -416,6 +420,7 @@ fn persisted_reconstruction_preserves_timestamp_and_bindings() {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
+            incarnation_id: None,
             credential_bindings: vec![binding.clone()],
             updated_at,
             owner: owner.clone(),

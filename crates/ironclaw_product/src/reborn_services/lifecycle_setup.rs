@@ -1,18 +1,23 @@
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+use ironclaw_product_contracts::views::RebornViewDescriptor;
 use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
-use ironclaw_host_api::{
-    ExtensionId, InstallationState, LifecyclePublicState, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceValidationCode,
+use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
+use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 
 use crate::{
-    ChannelConfigProductService, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductResponse,
-    LifecycleProductService, LifecycleProductSurfaceContext, ProductSetupExtensionRequest,
-    ProductSurfaceFailure, RebornChannelConfigField, RebornExtensionCredentialSetup,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
-    RebornViewDescriptor, lifecycle_product_surface_error,
+    LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction, LifecycleProductResponse, ProductSetupExtensionRequest,
+    ProductSurfaceFailure, RebornExtensionCredentialSetup, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornSetupExtensionResponse, lifecycle_product_surface_error,
 };
 
 use super::{
@@ -336,9 +341,9 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-    use ironclaw_host_api::{
-        CapabilitySurfaceKind, InstallationState, ProductSurfaceErrorCode, TenantId, UserId,
-    };
+    use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_product_contracts::surface::ProductSurfaceErrorCode;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

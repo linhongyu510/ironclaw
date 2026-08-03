@@ -5,7 +5,7 @@
 //! `input` JSON, its [`ResourceEstimate`], the prior-approval identity, the
 //! input ref, and the correlation id — currently rides *in-band* through the
 //! untrusted loop on [`CapabilityApprovalResume`] /
-//! [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+//! [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 //! and is stashed in the loop's own serialized checkpoint. The
 //! capability-result collapse (arch-simplification §5.3) makes the loop-facing
 //! `Resolution` carry only an opaque resume token (equal to the
@@ -13,7 +13,7 @@
 //! reconstitute it on resume.
 //!
 //! [`ReplayPayload`] is therefore the exact opposite of a
-//! [`GateRecord`](ironclaw_host_api::GateRecord): a `GateRecord` is the
+//! [`GateRecord`](ironclaw_host_api::gate_record::GateRecord): a `GateRecord` is the
 //! *model-visible* content a pending gate renders from and carries only a
 //! `SafeSummary`; a `ReplayPayload` is **host-private** and carries the raw tool
 //! input. It must never be model-visible. Moving it host-side also retires a
@@ -44,21 +44,24 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    CorrelationId, HostApiError, InvocationId, ResourceEstimate, ResourceScope, ScopedPath,
+    error::HostApiError,
+    ids::{CorrelationId, InvocationId},
+    path::ScopedPath,
+    resource::{ResourceEstimate, ResourceScope},
 };
-use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
+use ironclaw_loop_contracts::{AuthResumeApprovalIdentity, CapabilityInputRef};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Host-private replay payload for a gate/auth resume, keyed by [`InvocationId`].
 ///
 /// Reuses the exact field types carried by
-/// [`CapabilityApprovalResume`](ironclaw_turns::run_profile::CapabilityApprovalResume)
-/// / [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+/// [`CapabilityApprovalResume`](ironclaw_loop_contracts::CapabilityApprovalResume)
+/// / [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 /// so a later resume-read slice reconstitutes them without any lossy re-typing.
 ///
 /// **Never model-visible.** Unlike a
-/// [`GateRecord`](ironclaw_host_api::GateRecord) this deliberately carries no
+/// [`GateRecord`](ironclaw_host_api::gate_record::GateRecord) this deliberately carries no
 /// `SafeSummary` — it holds the raw tool `input` and `estimate` and exists only
 /// for host-side re-dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,8 +166,8 @@ struct StoredReplayPayload {
 /// Mirrors `ironclaw_approvals`'s `GateRecordStore`: construct with a
 /// [`ScopedFilesystem`] over any [`RootFilesystem`]. The [`ScopedFilesystem`]
 /// resolves the `/replay-payloads` alias to a tenant/user-scoped
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
-/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL before
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL before
 /// any backend dispatch — so tenant isolation is structural. Within-tenant axes
 /// (agent/project/mission/thread) remain in the alias-relative path because they
 /// are not covered by the per-tenant `MountAlias`.

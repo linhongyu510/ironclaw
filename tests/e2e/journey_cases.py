@@ -2,14 +2,15 @@
 
 import json
 import os
-import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
+import tomllib
 from journey_types import (
     CargoEvidence,
+    DeliveryAddressEvidence,
     JourneyCase,
     JourneyDeliveryTarget,
     JourneyExecution,
@@ -18,8 +19,10 @@ from journey_types import (
     ObservableAssertion,
     ProductJourneyCase,
     ProviderJourneyCase,
+    ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
+    SlackChannelFixture,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 
@@ -117,6 +120,18 @@ _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",
 }
+_PROVIDER_REPLAY_FACTS = {
+    "qa_7c_slack_bug_logger_routine": ProviderJourneyReplayFacts(
+        google_spreadsheet_id="sheet_reborn_bug_tracker"
+    ),
+    "qa_7e_slack_bug_sheet_delivery": ProviderJourneyReplayFacts(
+        google_spreadsheet_id="sheet_reborn_bug_tracker"
+    ),
+    "qa_10e_slack_error_honesty": ProviderJourneyReplayFacts(
+        slack_channel=SlackChannelFixture.MISSING,
+        expected_capability_failure="channel_not_found",
+    ),
+}
 
 _PYTEST_PROVIDER_EVIDENCE = PytestEvidence(
     source="tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
@@ -161,6 +176,7 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
     excluded = set(manifest["no_model_cases"])
     excluded.update(manifest.get("quarantined_model_cases", []))
     cases = []
+    consumed_replay_facts = set()
     for case_id in manifest["selected_cases"]:
         if case_id in excluded:
             continue
@@ -169,6 +185,8 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
         calls = _tool_calls(trace)
         if not any(call["name"] in EMULATE_SUPPORTED_TOOLS for call in calls):
             continue
+        if case_id in _PROVIDER_REPLAY_FACTS:
+            consumed_replay_facts.add(case_id)
         cases.append(
             ProviderJourneyCase(
                 case_id=case_id,
@@ -184,6 +202,9 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                     ObservableAssertion.PROVIDER_READBACK,
                 ),
                 evidence=_PYTEST_PROVIDER_EVIDENCE,
+                replay=_PROVIDER_REPLAY_FACTS.get(
+                    case_id, ProviderJourneyReplayFacts()
+                ),
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
                 live_evidence=LiveEvidence(
                     workflow=".github/workflows/live-canary.yml",
@@ -193,6 +214,10 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                 ),
             )
         )
+    assert consumed_replay_facts == set(_PROVIDER_REPLAY_FACTS), (
+        "replay facts declared for unknown provider journey cases: "
+        f"{sorted(set(_PROVIDER_REPLAY_FACTS) - consumed_replay_facts)}"
+    )
     return tuple(cases)
 
 
@@ -305,12 +330,21 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="slack_final_reply_flows_through_the_real_delivery_coordinator",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="C777",
+                thread_anchor="1710000200.000050",
+                exact_count=1,
+                assertion="assert_slack_thread_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -323,12 +357,50 @@ PRODUCT_JOURNEY_CASES = (
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="telegram_update_becomes_a_turn_and_a_coordinated_reply",
             target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="-1008675309",
+                thread_anchor="77",
+                exact_count=1,
+                assertion="assert_telegram_topic_delivery_evidence",
+            ),
+        ),
+    ),
+    ProductJourneyCase(
+        case_id="telegram_pairing_chat_unpair_repair",
+        provider_worlds=(ProviderWorld.TELEGRAM,),
+        mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
+        ingress=JourneyIngress.TELEGRAM,
+        execution=JourneyExecution.REBORN_INTEGRATION,
+        delivery_target=JourneyDeliveryTarget.TELEGRAM,
+        assertions=(
+            ObservableAssertion.DURABLE_STATE,
+            ObservableAssertion.EXACT_DESTINATION,
+            ObservableAssertion.EXACT_MUTATION_COUNT,
+        ),
+        evidence=CargoEvidence(
+            source="tests/integration/extension_delivery.rs",
+            test=(
+                "unbound_telegram_actor_pairs_via_web_minted_code_then_"
+                "turns_attribute_to_the_paired_user"
+            ),
+            target="reborn_integration_extension_delivery",
+        ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="515151",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_telegram_chat_delivery_evidence",
+            ),
         ),
     ),
     ProductJourneyCase(
@@ -354,21 +426,45 @@ PRODUCT_JOURNEY_CASES = (
             target="trigger_poller_e2e",
             manifest="crates/ironclaw_reborn_composition/Cargo.toml",
         ),
+        delivery_addresses=(
+            DeliveryAddressEvidence(
+                conversation_id="D-TRIGGER-DEFAULT",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_dm_delivery_evidence",
+            ),
+            DeliveryAddressEvidence(
+                conversation_id="C-TRIGGER-OVERRIDE",
+                thread_anchor=None,
+                exact_count=1,
+                assertion="assert_slack_channel_delivery_evidence",
+            ),
+        ),
     ),
 )
 
 ALL_JOURNEY_CASES = (*PROVIDER_JOURNEY_CASES, *PRODUCT_JOURNEY_CASES)
 
 
-def _production_channel_surfaces(direction: str) -> set[str]:
-    surfaces = set()
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+def _production_channel_capabilities(
+    direction: str, *, asset_root: Path = ASSET_ROOT
+) -> dict[str, dict]:
+    capabilities: dict[str, dict] = {}
+    for manifest_path in sorted(asset_root.glob("*/manifest.toml")):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         channel = manifest.get("channel")
         if channel is not None and channel.get(direction) is True:
-            surfaces.add(manifest["id"])
-    return surfaces
+            surface = manifest.get("id")
+            assert isinstance(surface, str) and surface, (
+                f"{manifest_path}: channel manifest declares no non-empty id"
+            )
+            capabilities[surface] = channel.get("presentation") or {}
+    return capabilities
+
+
+def _production_channel_surfaces(direction: str) -> set[str]:
+    return set(_production_channel_capabilities(direction))
 
 
 def required_ingresses() -> set[str]:

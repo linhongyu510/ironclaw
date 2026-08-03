@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { listWorkspace } from "../lib/workspace-api";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
 type WorkspaceEntry = {
@@ -10,22 +9,14 @@ type WorkspaceEntry = {
   is_dir: boolean;
 };
 
-type WorkspaceCurrentUser =
-  | {
-      tenant_id?: string | null;
-      user_id?: string | null;
-    }
-  | null;
-
 type TreeNodeProps = {
   entry: WorkspaceEntry;
   depth: number;
-  currentUser: WorkspaceCurrentUser;
-  requireScopedWorkspace: boolean;
-  workspaceScopeKey: string;
   selectedPath: string;
   expandedPaths: Set<string>;
   filter: string;
+  scopeKey: string;
+  listDirectory: (path: string) => Promise<{ entries: WorkspaceEntry[] }>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   focusedPathRef: React.RefObject<string>;
@@ -42,12 +33,11 @@ type TreeNodeProps = {
 
 type WorkspaceTreeProps = {
   entries: WorkspaceEntry[];
-  currentUser?: WorkspaceCurrentUser;
-  requireScopedWorkspace?: boolean;
-  workspaceScopeKey?: string;
   selectedPath: string;
   expandedPaths: Set<string>;
   filter: string;
+  scopeKey: string;
+  listDirectory: (path: string) => Promise<{ entries: WorkspaceEntry[] }>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   isLoading: boolean;
@@ -80,12 +70,11 @@ function visibleEntries(entries, filter, expandedPaths) {
 const TreeNode = React.memo(function WorkspaceTreeNode({
   entry,
   depth,
-  currentUser,
-  requireScopedWorkspace,
-  workspaceScopeKey,
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onToggleDirectory,
   onSelectFile,
   focusedPathRef,
@@ -103,12 +92,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
   const isExpanded = expandedPaths.has(entry.path);
   const displayName = depth === 0 ? areaDisplayName(entry.path, t) : entry.name;
   const childQuery = useQuery({
-    queryKey: ["workspace-list", workspaceScopeKey, entry.path],
-    queryFn: () =>
-      listWorkspace(entry.path, {
-        currentUser,
-        requireScopedWorkspace,
-      }),
+    queryKey: ["workspace-list", scopeKey, entry.path],
+    queryFn: () => listDirectory(entry.path),
     enabled: entry.is_dir && isExpanded,
   });
 
@@ -170,12 +155,11 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
                     key={child.path}
                     entry={child}
                     depth={depth + 1}
-                    currentUser={currentUser}
-                    requireScopedWorkspace={requireScopedWorkspace}
-                    workspaceScopeKey={workspaceScopeKey}
                     selectedPath={selectedPath}
                     expandedPaths={expandedPaths}
                     filter={filter}
+                    scopeKey={scopeKey}
+                    listDirectory={listDirectory}
                     onToggleDirectory={onToggleDirectory}
                     onSelectFile={onSelectFile}
                     focusedPathRef={focusedPathRef}
@@ -307,12 +291,11 @@ const useBrowserLayoutEffect =
 
 export function WorkspaceTree({
   entries,
-  currentUser = null,
-  requireScopedWorkspace = false,
-  workspaceScopeKey = "__unscoped__",
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onToggleDirectory,
   onSelectFile,
   isLoading,
@@ -500,12 +483,11 @@ export function WorkspaceTree({
           key={entry.path}
           entry={entry}
           depth={0}
-          currentUser={currentUser}
-          requireScopedWorkspace={requireScopedWorkspace}
-          workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}
+          scopeKey={scopeKey}
+          listDirectory={listDirectory}
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
           focusedPathRef={focusedPathRef}

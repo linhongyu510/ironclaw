@@ -18,18 +18,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
-    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    SYSTEM_RESERVED_ID, UserId,
+    ids::{InvocationId, ResourceReservationId, UserId},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage, SYSTEM_RESERVED_ID},
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
+    LoopModelResponse, LoopModelUsage, LoopRunContext, ModelCallOutcome, ModelProfileId,
+    ModelWorkOutcome, ModelWorkRequest,
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
     BudgetGateStorePort, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded,
     ResourceError, ResourceGovernor, ResourceLimits,
-};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
-    LoopModelResponse, LoopModelUsage, LoopRunContext, ModelCallOutcome, ModelProfileId,
-    ModelWorkOutcome, ModelWorkRequest,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use rust_decimal::Decimal;
@@ -752,7 +752,7 @@ fn usage_for_reported_usage(
 }
 
 fn usage_for_model_work(
-    usage: ironclaw_turns::run_profile::ModelWorkUsage,
+    usage: ironclaw_loop_contracts::ModelWorkUsage,
     estimate: &ResourceEstimate,
 ) -> ResourceUsage {
     // Provider-supplied token counts and USD have not yet been threaded into
@@ -806,22 +806,24 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{ResourceReceipt, ResourceReservation, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        ids::{TenantId, ThreadId},
+        resource::{ResourceReceipt, ResourceReservation},
+    };
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+        LoopModelRequest, LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId,
+        PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+    };
     use ironclaw_resources::{
         AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
         ReservationOutcome, ResourceAccount, ResourceLimits,
     };
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId,
-        TurnScope,
-        run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopModelRequest, LoopModelResponse,
-            LoopRunContext, ModelCallOutcome, ModelProfileId, PersonalContextPolicy,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
-        },
+        RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -1085,8 +1087,8 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
@@ -1279,8 +1281,8 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
@@ -1331,13 +1333,13 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
             effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
-            usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
+            usage: Some(ironclaw_loop_contracts::LoopModelUsage {
                 input_tokens: 7,
                 output_tokens: 3,
                 ..Default::default()
@@ -1656,13 +1658,13 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
             effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
-            usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
+            usage: Some(ironclaw_loop_contracts::LoopModelUsage {
                 input_tokens: 7,
                 output_tokens: 3,
                 ..Default::default()

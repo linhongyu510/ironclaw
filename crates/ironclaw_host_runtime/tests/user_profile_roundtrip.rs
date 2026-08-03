@@ -25,15 +25,25 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrantId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, Principal, ProjectId, ResourceEstimate, RunId, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, ExtensionId, PackageId, ProjectId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
@@ -41,13 +51,13 @@ use ironclaw_host_runtime::{
     register_native_memory_tools,
 };
 use ironclaw_host_runtime::{builtin_first_party_package, native_memory_first_party_package};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest, RunProfileResolver,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::{
-    RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
-    run_profile::{InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest},
-};
+use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 use serde_json::json;
 
 // ── Noop HTTP egress (profile_set does not need network) ──
@@ -134,10 +144,10 @@ fn memory_mounts() -> MountView {
 fn dispatch_grant_with_mounts(
     capability: &str,
     mounts: MountView,
-) -> ironclaw_host_api::CapabilityGrant {
-    ironclaw_host_api::CapabilityGrant {
+) -> ironclaw_host_api::capability::CapabilityGrant {
+    ironclaw_host_api::capability::CapabilityGrant {
         id: CapabilityGrantId::new(),
-        capability: ironclaw_host_api::CapabilityId::new(capability).unwrap(),
+        capability: ironclaw_host_api::ids::CapabilityId::new(capability).unwrap(),
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
@@ -205,7 +215,7 @@ fn agent_scoped_context(
 async fn loop_run_context_with_user(
     tenant_id: &str,
     user_id: &str,
-) -> ironclaw_turns::run_profile::LoopRunContext {
+) -> ironclaw_loop_contracts::LoopRunContext {
     let resolved_run_profile = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
@@ -217,7 +227,7 @@ async fn loop_run_context_with_user(
         ThreadId::new("thread-profile-roundtrip-test").unwrap(),
     );
     let actor = TurnActor::new(UserId::new(user_id).unwrap());
-    ironclaw_turns::run_profile::LoopRunContext::new(
+    ironclaw_loop_contracts::LoopRunContext::new(
         scope,
         TurnId::new(),
         TurnRunId::new(),
@@ -299,7 +309,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     let outcome = runtime
         .invoke_capability((
             context,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "Asia/Tokyo", "locale": "ja-JP", "location": "Tokyo, Japan"}),
         ))
@@ -419,7 +429,7 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     let outcome = runtime
         .invoke_capability((
             context_a,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "America/New_York", "locale": "en-US"}),
         ))

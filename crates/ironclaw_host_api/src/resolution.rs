@@ -8,7 +8,7 @@
 //! (§1.2). The target model replaces that with **five distinct channels** — one
 //! per real outcome kind:
 //!
-//! - [`crate::HostFailure`] — infrastructure failure (the `Err` arm; already landed).
+//! - [`crate::failure::HostFailure`] — infrastructure failure (the `Err` arm; already landed).
 //! - `Outcome` — tool success or recoverable failure (a later slice).
 //! - a terminal `Denied` — model-visible policy denial, **not** re-entrant.
 //! - [`Blocked`] — re-entrant gates (this module).
@@ -37,9 +37,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelDiagnostic, ModelFailureDiagnostic,
-    ModelResultPreview, OutputDigest, ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId,
-    SafeSummary, TerminateHint,
+    decision::DenyReason,
+    ids::{DenyRef, GateRef, ProcessRef, ResultRef, RunId},
+    model_result_preview::ModelResultPreview,
+    result_meta::{
+        FailureKind, LoopRef, ModelDiagnostic, ModelFailureDiagnostic, OutputDigest,
+        ResultProgress, ResumeToken, TerminateHint,
+    },
+    safe_summary::SafeSummary,
 };
 
 /// A pending-gate handle plus the additive context needed to resume and correlate
@@ -118,7 +123,7 @@ impl ProcessWaypoint {
 /// The dependent child's staged result, carried **inline** on
 /// [`Suspension::DependentRun`] so the loop observes the child's output on
 /// resume without reading host storage — the loop cannot read the durable
-/// [`GateRecord::DependentRun`](crate::GateRecord) sidecar. This mirrors the way
+/// [`GateRecord::DependentRun`](crate::gate_record::GateRecord) sidecar. This mirrors the way
 /// [`Resolution::Done`] carries a spawned child run's content on its [`Outcome`]:
 /// the record is the durable copy, this is the loop-visible one.
 ///
@@ -255,7 +260,7 @@ pub enum Suspension {
     /// inline, so the loop observes the child's output on resume without
     /// reading host storage (mirrors how [`Resolution::Done`] carries a spawned
     /// child run's content; the durable copy is the
-    /// [`GateRecord::DependentRun`](crate::GateRecord) sidecar).
+    /// [`GateRecord::DependentRun`](crate::gate_record::GateRecord) sidecar).
     DependentRun {
         waypoint: GateWaypoint,
         result: DependentRunResult,
@@ -306,7 +311,7 @@ impl Suspension {
     /// The dependent child's staged result, present exactly on
     /// [`Suspension::DependentRun`]. This is the loop-visible copy the executor
     /// reads on resume; the durable copy lives in the
-    /// [`GateRecord::DependentRun`](crate::GateRecord) sidecar.
+    /// [`GateRecord::DependentRun`](crate::gate_record::GateRecord) sidecar.
     pub fn dependent_result(&self) -> Option<&DependentRunResult> {
         match self {
             Suspension::DependentRun { result, .. } => Some(result),
@@ -442,8 +447,9 @@ pub struct OutcomeRefs {
     pub preview: Option<ModelResultPreview>,
     /// Continuation metadata for a TRUNCATED first-look preview so the model can
     /// read the full result (`result_read`, large results): the referenced ref,
-    /// full byte size, next offset, and JSON-array element count. Empty (all
-    /// `None`) for a complete inline preview or no preview.
+    /// full byte size, next offset, and JSON-array element count. The metadata
+    /// remains present when an unsafe preview is suppressed, so the durable
+    /// source ref stays authoritative without exposing rejected content.
     #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
     pub preview_meta: ResultPreviewMeta,
     /// The preserved originating loop result ref, so output the loop staged under
@@ -459,9 +465,9 @@ pub struct OutcomeRefs {
     pub output_digest: Option<OutputDigest>,
 }
 
-/// Continuation metadata for a truncated first-look result preview (§5838). All
-/// fields default to `None` — an empty value means the preview (if any) is the
-/// complete result and needs no `result_read` follow-up.
+/// Continuation metadata for a first-look result preview (§5838). All fields
+/// default to `None`; metadata can remain non-empty when preview content is
+/// suppressed by model-visible safety validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultPreviewMeta {
     /// The result ref the preview is OF. A `result_read` reading ANOTHER result
@@ -512,7 +518,7 @@ impl ResultPreviewMeta {
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
 ///
 /// This is the `Resolution::Done` payload (a later slice adds the `Resolution`
-/// umbrella). It pairs with [`crate::Invocation`] as the two ends of a capability
+/// umbrella). It pairs with [`crate::invocation::Invocation`] as the two ends of a capability
 /// call: the request in, the outcome out. The typed [`ToolVerdict`] replaces
 /// variant-matching / summary-sniffing; the [`SafeSummary`] is model-visible and
 /// redacted; the full output is reached through [`OutcomeRefs`].
@@ -592,7 +598,7 @@ impl Denial {
 
 /// The composed answer of one capability invocation — the single value
 /// `AgentLoopHost::invoke` returns in its `Ok` arm (§3, §5.4); the `Err` arm is
-/// [`crate::HostFailure`]. This is the **five-channel** replacement for today's
+/// [`crate::failure::HostFailure`]. This is the **five-channel** replacement for today's
 /// overloaded ten-variant `CapabilityOutcome` (§1.2): each channel is a distinct
 /// type, so a recoverable result, a terminal denial, a re-entrant gate, and
 /// parked work can never be confused for one another.
@@ -870,7 +876,7 @@ mod tests {
         // The structured, model-visible diagnostic rides the verdict so a later
         // slice can render the correction hint without reading host storage.
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: crate::ModelDiagnostic::new("tool input rejected").unwrap(),
+            text: crate::result_meta::ModelDiagnostic::new("tool input rejected").unwrap(),
         };
         let verdict = ToolVerdict::RecoverableFailure {
             error_kind: FailureKind::InputEncode,

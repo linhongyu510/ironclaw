@@ -1,16 +1,19 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
 
 use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor, GateRef,
-    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile, TurnScope,
-    events::TurnEventProjectionSource,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
+    IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
+    TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 
 fn scope() -> TurnScope {
     TurnScope::new(
@@ -47,7 +50,7 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         model_usage: None,
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
-            .map(|_| GateRef::new("gate:process-journal").expect("gate")),
+            .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
@@ -181,7 +184,7 @@ async fn fail_agent_process_with_category<F>(
 ) where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
 {
-    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_host_api::turn::SanitizedFailure;
     use ironclaw_processes::{
         ClaimProcessesRequest, FailProcessRequest, ProcessKind, ProcessTransitionPort,
         ProcessWorkerId,
@@ -253,7 +256,7 @@ async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
             scope: turn_scope.clone(),
             actor,
             run_id,
-            gate_resolution_ref: GateRef::new("gate:stale-resume").expect("gate"),
+            gate_resolution_ref: TurnGateRef::new("gate:stale-resume").expect("gate"),
             source_binding_ref: SourceBindingRef::new("source:stale-resume").expect("source"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:stale-resume")
                 .expect("reply"),
@@ -321,7 +324,7 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
         .expect("claim")
         .pop()
         .expect("claimed");
-    let gate_ref = GateRef::new("gate:foreign-test").expect("gate");
+    let gate_ref = TurnGateRef::new("gate:foreign-test").expect("gate");
     store
         .suspend_process(SuspendProcessRequest {
             process_id: claim.state.process_id,
@@ -333,7 +336,8 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
             suspension: ProcessSuspension {
                 kind: ProcessSuspensionKind::Approval,
                 gate_ref: Some(
-                    ironclaw_host_api::TurnGateRef::new(gate_ref.as_str()).expect("turn gate"),
+                    ironclaw_host_api::turn::TurnGateRef::new(gate_ref.as_str())
+                        .expect("turn gate"),
                 ),
                 activity_id: None,
                 credential_requirements: Vec::new(),
@@ -634,7 +638,7 @@ async fn retry_rejects_checkpoint_rejection_without_creating_a_process() {
         &turn_scope,
         run_id,
         None,
-        crate::LoopFailureKind::CheckpointRejected.as_str(),
+        ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected.as_str(),
     )
     .await;
 
@@ -800,7 +804,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             created_at: Utc::now(),
             link_to_process: true,
             metadata: serde_json::json!({
-                "kind": crate::run_profile::LoopCheckpointKind::Final,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::Final,
             }),
         })
         .await
@@ -834,7 +838,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
 
 #[tokio::test]
 async fn retry_rebinds_checkpoint_through_the_real_process_store() {
-    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_host_api::turn::SanitizedFailure;
     use ironclaw_processes::{
         ClaimProcessesRequest, FailProcessRequest, GetProcessCheckpointRequest,
         ProcessCheckpointId, ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef,
@@ -905,7 +909,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             link_to_process: true,
             metadata: serde_json::json!({
                 "source": "retry-test",
-                "kind": crate::run_profile::LoopCheckpointKind::BeforeModel,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::BeforeModel,
             }),
         })
         .await
@@ -1095,7 +1099,7 @@ fn lifecycle_event_projects_to_process_journal_entry() {
         model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:process-journal").expect("gate")),
+        gate_ref: Some(TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: Some(CapabilityActivityId::new()),
         credential_requirements: Vec::new(),
         failure: None,
@@ -1288,7 +1292,7 @@ impl ProcessJournalSource for FakeProcessJournalSource {
     async fn read_process_journal_after(
         &self,
         _scope: &ResourceScope,
-        _owner_user_id: Option<&ironclaw_host_api::UserId>,
+        _owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         _after: Option<ProcessJournalCursor>,
         _limit: usize,
     ) -> Result<ProcessJournalPage, Self::Error> {
@@ -1309,12 +1313,12 @@ fn runner_outcomes_map_to_process_outcomes() {
     let failure = crate::SanitizedFailure::new("runner_failed").expect("failure");
     let blocked = TurnRunnerOutcome::Blocked {
         checkpoint_id: TurnCheckpointId::new(),
-        state_ref: crate::run_profile::LoopCheckpointStateRef::new(
+        state_ref: ironclaw_loop_contracts::LoopCheckpointStateRef::new(
             "checkpoint:state-process-journal".to_string(),
         )
         .expect("state ref"),
         reason: BlockedReason::ExternalTool {
-            gate_ref: GateRef::new("gate:process-journal").expect("gate"),
+            gate_ref: TurnGateRef::new("gate:process-journal").expect("gate"),
         },
         blocked_activity_id: Some(CapabilityActivityId::new()),
     };

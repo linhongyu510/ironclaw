@@ -1,19 +1,19 @@
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
-    LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
+    LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
-use ironclaw_turns::{
-    run_profile::{
-        CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary,
-    },
-    scope::{TurnActor, TurnScope},
+use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
+use ironclaw_loop_contracts::{
+    CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use tokio::join;
 use tokio::time::timeout;
 
@@ -230,21 +230,24 @@ mod tests {
     use crate::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
-        LifecycleProductResponse, LifecycleProductService, OutboundPreferencesProductService,
-        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-        RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-        RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+        LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+        OutboundPreferencesProductService, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
+        RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+        RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
-    use ironclaw_host_api::{
-        AgentId, CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller,
-        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, TenantId,
-        UserId,
+    use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::turn::{TurnActor, TurnScope};
+    use ironclaw_loop_contracts::{
+        CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
     };
-    use ironclaw_turns::{
-        run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
-        scope::{TurnActor, TurnScope},
+    use ironclaw_product_contracts::lifecycle_service::{
+        LifecycleProductContext, LifecycleProductService,
+    };
+    use ironclaw_product_contracts::surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };
 
     use super::RuntimeCommunicationContextProvider;
@@ -254,7 +257,7 @@ mod tests {
             tenant_id: TenantId::new("tenant-test").unwrap(),
             agent_id: Some(AgentId::new("agent-test").unwrap()),
             project_id: Some(ProjectId::new("project-test").unwrap()),
-            thread_id: ironclaw_host_api::ThreadId::new("thread-test").unwrap(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new("thread-test").unwrap(),
             thread_owner: Default::default(),
         }
     }
@@ -548,7 +551,7 @@ mod tests {
             TenantId::new("tenant-test").unwrap(),
             Some(AgentId::new("agent-test").unwrap()),
             Some(ProjectId::new("project-test").unwrap()),
-            ironclaw_host_api::ThreadId::new("thread-test").unwrap(),
+            ironclaw_host_api::ids::ThreadId::new("thread-test").unwrap(),
             Some(UserId::new("owner-test").unwrap()),
         );
 
@@ -679,11 +682,13 @@ mod tests {
         // is included; github (non-channel) and slack (inactive channel) are not.
         // The telegram summary also carries a declared presentation (OUT-11).
         let mut telegram = channel_extension("telegram");
-        telegram.summary.channel_presentation = Some(ironclaw_host_api::ChannelPresentation {
-            supports_markdown: true,
-            supports_threads: false,
-            max_message_chars: Some(4096),
-        });
+        telegram.summary.channel_presentation =
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                max_message_chars: Some(4096),
+                command_prefix: None,
+            });
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
                 .with_lifecycle_service(Arc::new(ChannelListLifecycleService {
@@ -712,10 +717,11 @@ mod tests {
         // onto the connected-channel summary that prompt construction renders.
         assert_eq!(
             channels[0].presentation,
-            Some(ironclaw_host_api::ChannelPresentation {
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),
+                command_prefix: None,
             }),
             "the channel's declared presentation reaches the connected-channel summary"
         );
@@ -875,14 +881,13 @@ mod tests {
             // Park forever — only an abort interrupts this.
             let never = Notify::new();
             never.notified().await;
-            None::<ironclaw_turns::run_profile::CommunicationRuntimeContext>
+            None::<ironclaw_loop_contracts::CommunicationRuntimeContext>
         });
 
         // Ensure the task is actually running and parked before we drop.
         task_started.notified().await;
 
-        let fetch =
-            ironclaw_turns::run_profile::CommunicationContextFetch::from_handle(handle, false);
+        let fetch = ironclaw_loop_contracts::CommunicationContextFetch::from_handle(handle, false);
         drop(fetch);
 
         // Give tokio's abort machinery time to drop the task future.

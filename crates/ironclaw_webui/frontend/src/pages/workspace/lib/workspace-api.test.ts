@@ -438,3 +438,115 @@ test("memory file preview does not honor raw storage paths for scoped users", as
     harness.restore();
   }
 });
+
+test("thread-scoped workspace roots expose only the authorized project mount", async () => {
+  const harness = installFetch((path) => {
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const result = await listWorkspace("", { threadId: "thread-project-beta" });
+
+    assert.deepEqual(result, {
+      entries: [{ name: "workspace", path: "workspace", is_dir: true }],
+    });
+    assert.deepEqual(harness.calls, []);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("thread-scoped directory listings preserve the source thread", async () => {
+  const harness = installFetch((path) => {
+    assert.equal(
+      path,
+      "/api/webchat/v2/threads/thread-project-beta/files?path=%2Fworkspace%2Freports",
+    );
+    return jsonResponse({
+      entries: [
+        { name: "report.md", path: "/workspace/reports/report.md", kind: "file" },
+        { name: "archive", path: "/workspace/reports/archive", kind: "directory" },
+        { name: "escape", path: "/workspace/../private.md", kind: "file" },
+      ],
+    });
+  });
+
+  try {
+    const result = await listWorkspace("workspace/reports", {
+      threadId: "thread-project-beta",
+    });
+
+    assert.deepEqual(result, {
+      entries: [
+        { name: "report.md", path: "workspace/reports/report.md", is_dir: false },
+        { name: "archive", path: "workspace/reports/archive", is_dir: true },
+      ],
+    });
+    assert.equal(harness.calls.length, 1);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("thread-scoped file reads use the same authorized content endpoint", async () => {
+  const statPath =
+    "/api/webchat/v2/threads/thread-project-beta/files/stat?path=%2Fworkspace%2Freport.txt";
+  const contentPath =
+    "/api/webchat/v2/threads/thread-project-beta/files/content?path=%2Fworkspace%2Freport.txt";
+  const harness = installFetch((path) => {
+    if (path === statPath) {
+      return jsonResponse({
+        stat: { kind: "file", mime_type: "text/plain", size_bytes: 4 },
+      });
+    }
+    if (path === contentPath) {
+      return new Response("test", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const result = await readWorkspaceFile("workspace/report.txt", {
+      threadId: "thread-project-beta",
+    });
+
+    assert.equal(result.kind, "text");
+    assert.equal(result.content, "test");
+    assert.equal(result.download_path, contentPath);
+    assert.deepEqual(
+      harness.calls.map(({ path }) => path),
+      [statPath, contentPath],
+    );
+  } finally {
+    harness.restore();
+  }
+});
+
+test("thread-scoped browsing rejects other mounts instead of falling back", async () => {
+  const harness = installFetch((path) => {
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    await assert.rejects(
+      listWorkspace("memory/private.md", { threadId: "thread-project-beta" }),
+      /limited to the workspace mount/,
+    );
+    await assert.rejects(
+      readWorkspaceFile("memory/private.md", { threadId: "thread-project-beta" }),
+      /limited to the workspace mount/,
+    );
+    await assert.rejects(
+      readWorkspaceFile("workspace/../private.md", {
+        threadId: "thread-project-beta",
+      }),
+      /Invalid thread-scoped workspace path/,
+    );
+    assert.deepEqual(harness.calls, []);
+  } finally {
+    harness.restore();
+  }
+});

@@ -32,13 +32,15 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
-    ProjectRole,
+    ProjectError, ProjectList, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord,
+    ProjectRepository, ProjectRole, ProjectState,
 };
 
 const PROJECTS_ROOT: &str = "/tenant-shared/reborn-projects";
@@ -234,12 +236,11 @@ where
         tenant_id: &TenantId,
         user_id: &UserId,
         limit: usize,
-    ) -> Result<Vec<ProjectRecord>, ProjectError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
+    ) -> Result<ProjectList, ProjectError> {
         let scope = self.scope_for(tenant_id);
         let mut projects = Vec::new();
+        let mut active_projects = 0;
+        let mut archived_projects = 0;
         for path in self
             .child_record_paths(&scope, &records_dir(tenant_id)?)
             .await?
@@ -257,16 +258,26 @@ where
                     Some(member) if member.status == ProjectMemberStatus::Active
                 );
             if accessible {
+                match project.state {
+                    ProjectState::Active => active_projects += 1,
+                    ProjectState::Archived => archived_projects += 1,
+                }
                 projects.push(project);
             }
         }
+        let total_projects = projects.len();
         projects.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
                 .then_with(|| b.project_id.as_str().cmp(a.project_id.as_str()))
         });
         projects.truncate(limit);
-        Ok(projects)
+        Ok(ProjectList::new(
+            projects,
+            total_projects,
+            active_projects,
+            archived_projects,
+        ))
     }
 
     async fn list_members(

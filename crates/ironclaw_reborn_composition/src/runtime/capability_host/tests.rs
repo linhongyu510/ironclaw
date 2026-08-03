@@ -15,11 +15,22 @@ mod tests {
     };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::turn::{
+        AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
+    };
     use ironclaw_host_api::{
-        AgentId, CapabilityId, DispatchInputIssueCode, EffectKind, FailureKind, GrantConstraints,
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-        Principal, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
-        VirtualPath,
+        action::NetworkPolicy,
+        capability::{EffectKind, GrantConstraints},
+        dispatch::DispatchInputIssueCode,
+        ids::{
+            AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
+            UserId,
+        },
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resolution::Resolution,
+        result_meta::FailureKind,
+        scope::Principal,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -27,6 +38,12 @@ mod tests {
         READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    };
+    use ironclaw_loop_contracts::{
+        CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
+        CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
+        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
     };
     use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
@@ -47,23 +64,13 @@ mod tests {
         RedactMessageRequest, SessionThreadService, ThreadHistoryRequest, ThreadScope,
         ToolResultSafeSummary,
     };
-    use ironclaw_turns::{
-        AcceptedMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver,
-        TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
-            CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
-            VisibleCapabilityRequest,
-        },
-    };
 
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
         OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
     };
     use crate::runtime::filesystem_skill_context_source;
-    use ironclaw_extension_host::extension_lifecycle_capabilities::{
+    use ironclaw_extension_manager::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
         EXTENSION_SEARCH_CAPABILITY_ID,
     };
@@ -74,7 +81,7 @@ mod tests {
     /// under is preserved on `refs.origin`. Tests look results up by that
     /// preserved loop ref, exactly as they did with the old
     /// `CapabilityResultMessage::result_ref`.
-    fn completed_loop_result_ref(done: &ironclaw_host_api::Outcome) -> String {
+    fn completed_loop_result_ref(done: &ironclaw_host_api::resolution::Outcome) -> String {
         done.refs
             .origin
             .as_ref()
@@ -153,7 +160,7 @@ mod tests {
         ironclaw_approvals::AutoApproveSettingStorePort::set(
             runtime_surfaces.auto_approve_settings_for_test().as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(user_id.clone()),
+                updated_by: ironclaw_host_api::scope::Principal::User(user_id.clone()),
                 scope,
                 enabled: true,
             },
@@ -674,7 +681,7 @@ mod tests {
     /// requires the manifest-declared credentials to resolve.
     async fn seed_configured_account_and_secret_with_scopes(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
         scopes: &[&str],
     ) {
@@ -694,7 +701,7 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                         .expect("secret handle"),
                 ),
                 refresh_secret: None,
@@ -710,7 +717,7 @@ mod tests {
             .secret_store()
             .put(
                 owner_scope.resource,
-                ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                     .expect("secret handle"),
                 ironclaw_secrets::SecretMaterial::from(format!("{provider}-access-token")),
                 None,
@@ -721,7 +728,7 @@ mod tests {
 
     async fn seed_configured_account_and_secret(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
     ) {
         seed_configured_account_and_secret_with_scopes(services, scope, provider, &[]).await;
@@ -732,7 +739,7 @@ mod tests {
     /// gate for the missing secret.
     async fn seed_configured_account_without_secret_with_scopes(
         services: &crate::factory::RebornRuntimeStores,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         provider: &str,
         scopes: &[&str],
     ) {
@@ -752,7 +759,7 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    ironclaw_host_api::ids::SecretHandle::new(format!("{provider}-test-token"))
                         .expect("secret handle"),
                 ),
                 refresh_secret: None,
@@ -810,7 +817,6 @@ mod tests {
                 extension_management
                     .activate_with_prechecked_credentials_for_user_for_test(
                         package_ref,
-                        ironclaw_extension_host::ExtensionActivationMode::Static,
                         surface_user,
                     )
                     .await
@@ -845,9 +851,9 @@ mod tests {
             Ok(ironclaw_auth::CredentialAccount {
                 id: ironclaw_auth::CredentialAccountId::new(),
                 scope: ironclaw_auth::AuthProductScope::new(
-                    ironclaw_host_api::ResourceScope::local_default(
+                    ironclaw_host_api::resource::ResourceScope::local_default(
                         UserId::new("configured-credential-user").expect("user id"),
-                        ironclaw_host_api::InvocationId::new(),
+                        ironclaw_host_api::ids::InvocationId::new(),
                     )
                     .expect("resource scope"),
                     ironclaw_auth::AuthSurface::Api,
@@ -860,7 +866,8 @@ mod tests {
                 owner_extension: None,
                 granted_extensions: Vec::new(),
                 access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                    ironclaw_host_api::ids::SecretHandle::new("test-secret")
+                        .expect("secret handle"),
                 ),
                 refresh_secret: None,
                 scopes: Vec::new(),
@@ -1398,7 +1405,7 @@ mod tests {
             .as_ref()
             .expect("write result carries a first-look observation");
         match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
                 total_bytes,
                 next_offset,
@@ -1503,7 +1510,7 @@ mod tests {
             .as_ref()
             .expect("write result carries a first-look observation");
         let (preview, next_offset) = match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
                 next_offset: Some(next_offset),
                 item_count: None,
@@ -1703,7 +1710,7 @@ mod tests {
             observation.summary
         );
         match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 item_count: Some(count),
                 next_offset: Some(_),
                 total_bytes: Some(total_bytes),
@@ -1749,7 +1756,7 @@ mod tests {
             singleton_observation.summary
         );
         match &singleton_observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 item_count: Some(count),
                 next_offset: Some(_),
                 ..
@@ -1841,7 +1848,7 @@ mod tests {
             .expect("first-look observation")
             .detail
         {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 next_offset: Some(next_offset),
                 ..
             } => *next_offset,
@@ -2811,7 +2818,7 @@ mod tests {
         // terminal `HostUnavailable` that kills the whole run. Re-run that exact
         // validation here so a summary that interpolated the delimiter-bearing
         // project name (the regression) fails this test.
-        ironclaw_turns::run_profile::LoopSafeSummary::new(done.summary.as_str().to_string())
+        ironclaw_loop_contracts::LoopSafeSummary::new(done.summary.as_str().to_string())
             .expect("capability safe summary must pass result-ref validation");
         let result_ref = completed_loop_result_ref(&done);
         let output = capability_io
@@ -4031,7 +4038,7 @@ mod tests {
             ironclaw_approvals::AutoApproveSettingStorePort::set(
                 runtime_surfaces.auto_approve_settings_for_test().as_ref(),
                 ironclaw_approvals::AutoApproveSettingInput {
-                    updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
+                    updated_by: ironclaw_host_api::scope::Principal::User(owner_user_id.clone()),
                     scope: disable_scope,
                     enabled: false,
                 },
@@ -4088,8 +4095,9 @@ mod tests {
         let missing_invocation_id = InvocationId::parse(missing_resume_token.as_str())
             .expect("missing-target resume token carries invocation id");
         let missing_approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(missing_gate_origin.as_str())
-                .expect("routing gate ref is valid");
+            let routing_ref =
+                ironclaw_host_api::turn::TurnGateRef::new(missing_gate_origin.as_str())
+                    .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
         };
@@ -4234,7 +4242,7 @@ mod tests {
         // durable approval record (correlation id) — see the missing-target
         // reconstruction above; confirm against the post-flip resume contract.
         let approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
@@ -4272,7 +4280,7 @@ mod tests {
             // The routing ref the loop carries is `gate:approval-{id}`; the product
             // read model recovers the approval id from it, agreeing with the id the
             // gate was raised under.
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref");
@@ -4283,7 +4291,7 @@ mod tests {
             // The host persists the GateRecord under `GateRef::for_approval_request`
             // (a host_api::GateRef), the canonical key the read model derives from
             // the recovered id — proving both encodings agree.
-            let record_key = ironclaw_host_api::GateRef::for_approval_request(recovered_id);
+            let record_key = ironclaw_host_api::ids::GateRef::for_approval_request(recovered_id);
             let record_scope = crate::runtime::capability_host::resource_scope_for_run(
                 &run_context,
                 &fallback_user_id,
@@ -4294,7 +4302,10 @@ mod tests {
                 .expect("gate record load succeeds")
                 .expect("standalone approval gate persisted a durable gate record");
             assert!(
-                matches!(persisted, ironclaw_host_api::GateRecord::Approval { .. }),
+                matches!(
+                    persisted,
+                    ironclaw_host_api::gate_record::GateRecord::Approval { .. }
+                ),
                 "persisted gate record is an approval record, got {persisted:?}"
             );
         }
@@ -4989,7 +5000,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -5023,7 +5034,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -5132,7 +5143,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
@@ -5303,7 +5314,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -5351,11 +5362,7 @@ mod tests {
                 .await
                 .expect("install github extension");
             extension_management
-                .activate_with_prechecked_credentials_for_user_for_test(
-                    package_ref,
-                    ironclaw_extension_host::ExtensionActivationMode::Static,
-                    &surface_user,
-                )
+                .activate_with_prechecked_credentials_for_user_for_test(package_ref, &surface_user)
                 .await
                 .expect("activate github extension");
         }
@@ -5454,11 +5461,7 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_user_for_test(
-                package_ref,
-                ironclaw_extension_host::ExtensionActivationMode::Static,
-                &surface_user,
-            )
+            .activate_with_prechecked_credentials_for_user_for_test(package_ref, &surface_user)
             .await
             .expect("activate github extension");
 
@@ -5663,11 +5666,7 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_user_for_test(
-                package_ref,
-                ironclaw_extension_host::ExtensionActivationMode::Static,
-                &surface_user,
-            )
+            .activate_with_prechecked_credentials_for_user_for_test(package_ref, &surface_user)
             .await
             .expect("activate github extension");
 
@@ -5687,7 +5686,7 @@ mod tests {
         );
 
         let batch_result = port
-            .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
                 invocations: vec![
                     invocation_for_candidate(&candidate1),
                     invocation_for_candidate(&candidate2),
@@ -5698,7 +5697,7 @@ mod tests {
         if let Err(ref error) = batch_result {
             assert_ne!(
                 error.kind,
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::StaleSurface,
                 "invoke_capability_batch must not fail with StaleSurface: {error:?}"
             );
         }

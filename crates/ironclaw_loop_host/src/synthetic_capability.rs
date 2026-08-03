@@ -9,22 +9,24 @@ use crate::{
     CapabilityTrajectoryObserver, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind};
-use ironclaw_turns::{
-    CapabilityActivityId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName},
+    resolution::{Resolution, ResolutionBatch},
+    runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
+};
+use ironclaw_turns::CapabilityActivityId;
 
 fn resource_scope_for_run(
     run_context: &LoopRunContext,
-    fallback_user_id: &ironclaw_host_api::UserId,
-) -> ironclaw_host_api::ResourceScope {
+    fallback_user_id: &ironclaw_host_api::ids::UserId,
+) -> ironclaw_host_api::resource::ResourceScope {
     let mut scope = run_context.scope.to_resource_scope();
     scope.user_id = run_context
         .scope
@@ -43,7 +45,7 @@ pub fn wrap_synthetic_capabilities(
     inner: Arc<dyn LoopCapabilityPort>,
     capabilities: Vec<SyntheticCapability>,
     run_context: LoopRunContext,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
@@ -67,9 +69,9 @@ pub fn wrap_synthetic_capabilities(
 /// Recover the original `InvocationId` a synthetic approval-gate resume token
 /// encodes, so the replay-payload store can be keyed by it on resume.
 fn invocation_id_from_resume_token(
-    resume_token: &ironclaw_turns::run_profile::CapabilityResumeToken,
-) -> Result<ironclaw_host_api::InvocationId, AgentLoopHostError> {
-    ironclaw_host_api::InvocationId::parse(resume_token.as_str()).map_err(|error| {
+    resume_token: &ironclaw_loop_contracts::CapabilityResumeToken,
+) -> Result<ironclaw_host_api::ids::InvocationId, AgentLoopHostError> {
+    ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str()).map_err(|error| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             format!("synthetic capability resume token is invalid: {error}"),
@@ -187,7 +189,7 @@ pub trait SyntheticCapabilityHandler: Send + Sync {
 struct SyntheticCapabilityPort {
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     capabilities_by_id: HashMap<CapabilityId, SyntheticCapability>,
@@ -221,7 +223,7 @@ impl SyntheticCapabilityPort {
         inner: Arc<dyn LoopCapabilityPort>,
         capabilities: Vec<SyntheticCapability>,
         run_context: LoopRunContext,
-        fallback_user_id: ironclaw_host_api::UserId,
+        fallback_user_id: ironclaw_host_api::ids::UserId,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
@@ -623,13 +625,13 @@ mod tests {
     use super::*;
 
     use crate::{CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::run_profile::resolution;
-    use ironclaw_turns::{
-        LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
-        TurnScope,
-        run_profile::{InMemoryRunProfileResolver, VisibleCapabilityRequest},
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_loop_contracts::resolution;
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+        VisibleCapabilityRequest,
     };
+    use ironclaw_turns::{LoopResultRef, TurnId, TurnRunId, TurnScope};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_CAPABILITY_ID: &str = "test.synthetic";
@@ -735,7 +737,7 @@ mod tests {
             Ok(resolution::completed(
                 LoopResultRef::new("result:synthetic-handler").expect("valid result ref"),
                 "synthetic handler completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -785,7 +787,7 @@ mod tests {
             Arc::new(EmptyLoopCapabilityPort),
             vec![capability],
             run_context().await,
-            ironclaw_host_api::UserId::new("user-synthetic-test").expect("user id"),
+            ironclaw_host_api::ids::UserId::new("user-synthetic-test").expect("user id"),
             Arc::new(FixedInputResolver {
                 input_ref: CapabilityInputRef::new("input:synthetic-provider-call")
                     .expect("input ref"),
@@ -806,7 +808,10 @@ mod tests {
 
     fn replay_payload_filesystem()
     -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
-        use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+        use ironclaw_host_api::{
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
+        };
 
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/replay-payloads").expect("static valid mount alias"),

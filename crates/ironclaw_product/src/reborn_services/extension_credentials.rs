@@ -3,8 +3,11 @@ use ironclaw_auth::{
     CredentialAccountStatus, ProviderScope,
 };
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ResourceScope,
+    ids::{ExtensionId, InvocationId},
+    resource::ResourceScope,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use uuid::Uuid;
 

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
 };
+use ironclaw_host_api::ids::{AgentId, TenantId};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
@@ -27,6 +27,7 @@ use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
@@ -236,11 +237,12 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
-    pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
+    pub preference_target_codec: Option<
+        std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
+    >,
 }
 
 #[derive(Clone, Debug)]
@@ -696,7 +698,7 @@ impl RebornHostBindings {
 
     pub fn with_required_runtime_backends(
         mut self,
-        backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
+        backends: impl IntoIterator<Item = ironclaw_host_api::runtime::RuntimeKind>,
     ) -> Self {
         self.deployment.required_runtime_backends = backends.into_iter().collect();
         self
@@ -772,7 +774,7 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self

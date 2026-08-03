@@ -22,9 +22,34 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, CapabilitySet,
+        EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligations},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
+    host_port::HostPortCatalog,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
+        ResourceReservationId, SecretHandle, UserId,
+    },
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
     HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, SurfaceKind,
@@ -356,6 +381,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
         registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::InstalledLocal),
         Arc::new(GrantAuthorizer),
     );
+    let user_registered_runtime = runtime_with(
+        registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::UserRegistered),
+        Arc::new(GrantAuthorizer),
+    );
     let request = || {
         visible_request(context_with_grants([(
             capability_id("echo.say"),
@@ -368,6 +397,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
         .await
         .unwrap();
     let local_surface = local_runtime.visible_capabilities(request()).await.unwrap();
+    let user_registered_surface = user_registered_runtime
+        .visible_capabilities(request())
+        .await
+        .unwrap();
 
     assert_eq!(
         registry_surface.capabilities[0].description_trust,
@@ -375,6 +408,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
     );
     assert_eq!(
         local_surface.capabilities[0].description_trust,
+        CapabilityDescriptionTrust::Untrusted
+    );
+    assert_eq!(
+        user_registered_surface.capabilities[0].description_trust,
         CapabilityDescriptionTrust::Untrusted
     );
 }

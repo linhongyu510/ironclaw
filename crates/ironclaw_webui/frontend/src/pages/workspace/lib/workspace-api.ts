@@ -1,15 +1,24 @@
 // Read-only filesystem-viewer API client.
 //
 // Wraps the WebChat v2 `/fs/*` endpoints (backed by the Reborn
-// `FilesystemBrowseReader` port) as the path-oriented surface the workspace
-// tree/viewer consume. A "qualified path" used throughout the UI is
+// `FilesystemBrowseReader` port) and the source-thread `/threads/*/files`
+// endpoints as the path-oriented surface the workspace tree/viewer consume.
+// A "qualified path" used throughout the UI is
 // `"<mount>/<mount-relative-path>"` — the first segment selects the mount
 // (memory/workspace/…), the rest is the path within it. The empty qualified
 // path is the root, which lists the available mounts as top-level directories,
 // so the tree itself doubles as the mount picker. Strictly read-only: there is
 // no write/save path here.
 
-import { apiFetch, fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api";
+import {
+  apiFetch,
+  fetchAttachmentBlob,
+  fetchAttachmentDataUrl,
+  listProjectFiles,
+  projectFileContentUrl,
+  statProjectFile,
+} from "../../../lib/api";
+import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 
 const FS_BASE = "/api/webchat/v2/fs";
 const WORKSPACE_MOUNT = "workspace";
@@ -26,6 +35,7 @@ type WorkspaceCurrentUser =
 type WorkspaceOptions = {
   currentUser?: WorkspaceCurrentUser;
   requireScopedWorkspace?: boolean;
+  threadId?: string | null;
 };
 
 // Largest payload we will inline as text in the viewer. Anything larger is
@@ -305,6 +315,32 @@ function visibleResponseEntries(mount, response) {
   return response?.entries || [];
 }
 
+function projectPathFromQualified(qualifiedPath) {
+  const { mount, path } = splitQualified(qualifiedPath);
+  if (mount !== "workspace") {
+    throw new Error("Thread-scoped browsing is limited to the workspace mount");
+  }
+  const projectPath = path ? `/workspace/${path}` : "/workspace";
+  if (projectPath !== "/workspace" && !isValidWorkspaceFilePath(projectPath)) {
+    throw new Error("Invalid thread-scoped workspace path");
+  }
+  return projectPath;
+}
+
+function qualifiedProjectPath(path) {
+  const normalized = String(path || "").replace(/^\/+/, "");
+  const qualified = normalized.startsWith("workspace/") || normalized === "workspace"
+    ? normalized
+    : `workspace/${normalized}`;
+  if (
+    qualified !== "workspace" &&
+    !isValidWorkspaceFilePath(`/${qualified}`)
+  ) {
+    return null;
+  }
+  return qualified;
+}
+
 function isTextLikeMime(mime) {
   const value = String(mime || "").toLowerCase();
   return (
@@ -371,8 +407,31 @@ export async function listFsMounts() {
 // returned entry's `path` is qualified so the tree can recurse with it directly.
 export async function listWorkspace(
   qualifiedPath = "",
-  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions = {},
+  {
+    currentUser,
+    requireScopedWorkspace = false,
+    threadId,
+  }: WorkspaceOptions = {},
 ) {
+  if (threadId) {
+    if (!qualifiedPath) {
+      return {
+        entries: [{ name: "workspace", path: "workspace", is_dir: true }],
+      };
+    }
+    const response = await listProjectFiles({
+      threadId,
+      path: projectPathFromQualified(qualifiedPath),
+    });
+    return {
+      entries: (response?.entries || []).flatMap((entry) => {
+        const path = qualifiedProjectPath(entry.path);
+        return path
+          ? [{ name: entry.name, path, is_dir: entry.kind === "directory" }]
+          : [];
+      }),
+    };
+  }
   if (!qualifiedPath) {
     // Keep the backend area id in the query cache. Presentation components
     // translate known areas at render time so changing languages updates the
@@ -405,7 +464,11 @@ export async function listWorkspace(
 // `{ kind: "binary", download_path, ... }`, or `{ kind: "directory" }`.
 export async function readWorkspaceFile(
   qualifiedPath,
-  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions = {},
+  {
+    currentUser,
+    requireScopedWorkspace = false,
+    threadId,
+  }: WorkspaceOptions = {},
 ) {
   const { mount, path } = splitQualified(qualifiedPath);
   if (!mount || !path) {
@@ -413,24 +476,33 @@ export async function readWorkspaceFile(
     return { kind: "directory", path: qualifiedPath };
   }
   if (
+    !threadId &&
     (mount === WORKSPACE_MOUNT || mount === MEMORY_MOUNT) &&
     scopedUserUnavailable(currentUser, requireScopedWorkspace)
   ) {
     return { kind: "directory", path: qualifiedPath };
   }
 
-  const actualPath = await resolveFilePath(mount, path, {
-    currentUser,
-    requireScopedWorkspace,
-  });
-  const statUrl = new URL(`${FS_BASE}/stat`, window.location.origin);
-  statUrl.searchParams.set("mount", mount);
-  statUrl.searchParams.set("path", actualPath);
-  const statResponse = await apiFetch(statUrl.pathname + statUrl.search);
+  let statResponse;
+  let download;
+  if (threadId) {
+    const projectPath = projectPathFromQualified(qualifiedPath);
+    statResponse = await statProjectFile({ threadId, path: projectPath });
+    download = projectFileContentUrl({ threadId, path: projectPath });
+  } else {
+    const actualPath = await resolveFilePath(mount, path, {
+      currentUser,
+      requireScopedWorkspace,
+    });
+    const statUrl = new URL(`${FS_BASE}/stat`, window.location.origin);
+    statUrl.searchParams.set("mount", mount);
+    statUrl.searchParams.set("path", actualPath);
+    statResponse = await apiFetch(statUrl.pathname + statUrl.search);
+    download = contentUrl(mount, actualPath);
+  }
   const stat = statResponse?.stat || {};
   const mime = stat.mime_type || "application/octet-stream";
   const sizeBytes = Number(stat.size_bytes || 0);
-  const download = contentUrl(mount, actualPath);
   const base = { path: qualifiedPath, mime, size_bytes: sizeBytes, download_path: download };
 
   if (stat.kind && stat.kind !== "file") {

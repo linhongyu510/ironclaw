@@ -9,21 +9,22 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
-use ironclaw_host_api::{Resolution, ResolutionBatch};
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
 };
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    },
-};
+use ironclaw_turns::LoopGateRef;
 use serde_json::json;
 
 pub(crate) const TEST_CAPABILITY_ID: &str = "test.echo";
@@ -187,9 +188,9 @@ impl RecordingTestCapabilityPort {
     fn completed_result(&self) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
         let progress = if matches!(self.mode, CapabilityMode::NoProgress) {
-            ironclaw_turns::run_profile::CapabilityProgress::NoChange
+            ironclaw_loop_contracts::CapabilityProgress::NoChange
         } else {
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress
         };
         resolution::completed(
             ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
@@ -232,7 +233,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
+        request: ironclaw_loop_contracts::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let call = request.tool_call;
         let capability_id = self.capability_id_for_provider_tool(&call.name)?;
@@ -324,9 +325,9 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
             return Ok(resolution::failed(
-                ironclaw_host_api::FailureKind::InputEncode,
+                ironclaw_host_api::result_meta::FailureKind::InputEncode,
                 "capability input failed validation".to_string(),
-                ironclaw_turns::run_profile::CapabilityFailureDetail::Diagnostic {
+                ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
                     text: "capability input failed validation".to_string(),
                 },
             ));

@@ -1082,6 +1082,31 @@ mod tests {
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
     #[test]
+    fn workspace_projection_scope_follows_deployment_profile() {
+        for profile in [
+            RebornProfile::Standalone,
+            RebornProfile::StandaloneUnrestricted,
+        ] {
+            assert!(
+                !profile_requires_scoped_workspace_projection(profile),
+                "local profile {profile:?} must retain raw workspace fallback"
+            );
+        }
+
+        for profile in [
+            RebornProfile::HostedSingleTenant,
+            RebornProfile::HostedSingleTenantVolume,
+            RebornProfile::Production,
+            RebornProfile::MigrationDryRun,
+        ] {
+            assert!(
+                profile_requires_scoped_workspace_projection(profile),
+                "hosted profile {profile:?} must require caller-scoped workspace projection"
+            );
+        }
+    }
+
+    #[test]
     fn present_unicode_env_var_treats_unset_as_none() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
         const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_ABSENT_VAR";

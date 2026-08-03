@@ -10,15 +10,23 @@ use std::{
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
+    TurnActor,
+};
 use ironclaw_host_api::{
-    CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, TurnGateRef,
-    VirtualPath,
+    error::HostApiError,
+    ids::{CapabilityId, InvocationId, ProcessId, ResourceReservationId, ThreadId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceReservation, ResourceScope},
+    turn::TurnGateRef,
 };
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,
     build_static_provider_chain, resolve_llm_config_from_env,
 };
+use ironclaw_loop_contracts::LoopCheckpointStateRef;
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessJournalStore, ProcessKind,
     ProcessLeaseRequest, ProcessStateTransitionRequest, ProcessSuspension, ProcessSuspensionKind,
@@ -35,10 +43,9 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
-    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
+    DefaultTurnCoordinator, ResumeTurnPrecondition, ResumeTurnRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory,
+    claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -1671,7 +1678,7 @@ where
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
         let is_auth = use_auth_gate;
-        let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
+        let gate_ref = TurnGateRef::new(format!("stress-gate:{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
         let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
@@ -2091,6 +2098,7 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         LlmError::QuotaExceeded { .. } => "model_provider_quota_exceeded",
         LlmError::BadGateway { .. }
         | LlmError::RequestFailed { .. }
+        | LlmError::StreamInterrupted { .. }
         | LlmError::InvalidResponse { .. }
         | LlmError::EmptyResponse { .. }
         | LlmError::Http(_)

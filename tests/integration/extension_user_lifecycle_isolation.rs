@@ -21,10 +21,13 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
-use ironclaw_extensions::{ExtensionInstallation, ExtensionManifestRecord, InstallationOwner};
+use ironclaw_extensions::{
+    ExtensionInstallation, ExtensionManifestRecord, InstallationOwner, PackageRootBinding,
+};
 use ironclaw_filesystem::{Filter, Page};
-use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller, VirtualPath};
+use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+use ironclaw_host_api::path::VirtualPath;
+use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
@@ -374,7 +377,8 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
         .assert_user_phase(fixture.operator(), "active")
         .await;
 
-    let extension_id = ironclaw_host_api::ExtensionId::new(EXTENSION_ID).expect("extension id");
+    let extension_id =
+        ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("extension id");
     let fabricated_root =
         VirtualPath::new(format!("/system/extensions/{EXTENSION_ID}")).expect("fabricated root");
 
@@ -391,8 +395,8 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
         .expect("get manifest")
         .expect("fixture manifest exists");
     assert_eq!(
-        installed_record.resolved().root,
-        Some(fabricated_root.clone()),
+        installed_record.resolved().root_binding,
+        PackageRootBinding::Materialized(fabricated_root.clone()),
         "a normal install must persist the real package root, not leave it None"
     );
 
@@ -429,7 +433,7 @@ async fn persisted_package_root_that_disagrees_with_manifest_id_fails_loudly_ins
         .find(|installation| installation.extension_id().as_str() == EXTENSION_ID)
         .expect("fixture installation exists");
     let mut resolved = record.resolved().clone();
-    resolved.root = Some(planted_root.clone());
+    resolved.root_binding = PackageRootBinding::Materialized(planted_root.clone());
     let planted_record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         record.manifest().source,
@@ -522,7 +526,8 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let extension_id = ironclaw_host_api::ExtensionId::new(EXTENSION_ID).expect("extension id");
+    let extension_id =
+        ironclaw_host_api::ids::ExtensionId::new(EXTENSION_ID).expect("extension id");
     let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
         &storage_root,
     )
@@ -541,7 +546,8 @@ async fn extension_loader_fabricates_root_for_legacy_row_with_no_persisted_root(
         .find(|installation| installation.extension_id().as_str() == EXTENSION_ID)
         .expect("fixture installation exists");
     let mut resolved = record.resolved().clone();
-    resolved.root = None; // simulate a row persisted before `root` existed
+    // Simulate a row persisted before package roots were typed.
+    resolved.root_binding = PackageRootBinding::FabricateOnLoad;
     let legacy_record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         record.manifest().source,

@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ironclaw_auth::{AuthProductScope, CredentialAccountStatus, CredentialAccountUpdateBinding};
-use ironclaw_host_api::{ExtensionId, ProductSurfaceError, ProductSurfaceValidationCode};
+use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceValidationCode};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -254,8 +255,10 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{AuthSurface, CredentialAccountId, CredentialAccountProjection};
     use ironclaw_host_api::{
-        InvocationId, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope, UserId,
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
     };
+    use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 
     use crate::ExtensionCredentialStatusRequest;
 

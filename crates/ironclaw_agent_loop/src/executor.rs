@@ -56,7 +56,7 @@ use mapping::{
     capability_host_error, capability_port_error_is_terminal, checkpoint_kind_to_host,
     honor_capability_retry_alteration, loop_gate_kind, model_error_class,
     model_error_failure_summary, model_preference_to_host, model_recovery_class,
-    sanitized_strategy_summary_or_fallback,
+    sanitized_strategy_summary_or_fallback, transcript_host_error,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
@@ -66,12 +66,9 @@ use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionSt
 use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
 
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopExit,
-    run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind,
-        AgentLoopHostErrorReasonKind, LoopInputAckToken, LoopSafeSummary,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    LoopCancelledReasonKind, LoopExit, LoopInputAckToken, LoopSafeSummary,
 };
 
 use crate::{
@@ -185,8 +182,8 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
 #[derive(Debug)]
 struct CheckpointWrite {
     state: LoopExecutionState,
-    checkpoint_id: ironclaw_turns::TurnCheckpointId,
-    state_ref: ironclaw_turns::run_profile::LoopCheckpointStateRef,
+    checkpoint_id: ironclaw_host_api::turn::TurnCheckpointId,
+    state_ref: ironclaw_loop_contracts::LoopCheckpointStateRef,
 }
 
 #[derive(Debug)]

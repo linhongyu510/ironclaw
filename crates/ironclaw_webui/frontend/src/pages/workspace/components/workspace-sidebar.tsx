@@ -7,12 +7,11 @@ import { WorkspaceTree } from "./workspace-tree";
 // drills into its directories. The filter narrows the loaded tree by name.
 export function WorkspaceSidebar({
   rootEntries,
-  currentUser = null,
-  requireScopedWorkspace = false,
-  workspaceScopeKey = "__unscoped__",
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onFilterChange,
   isLoadingTree,
   onToggleDirectory,
@@ -34,12 +33,11 @@ export function WorkspaceSidebar({
       <div className="min-h-0 flex-1 overflow-y-auto">
         <WorkspaceTree
           entries={rootEntries}
-          currentUser={currentUser}
-          requireScopedWorkspace={requireScopedWorkspace}
-          workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}
+          scopeKey={scopeKey}
+          listDirectory={listDirectory}
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
           isLoading={isLoadingTree}

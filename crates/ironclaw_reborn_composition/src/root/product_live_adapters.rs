@@ -14,11 +14,19 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
-    MountView, RuntimeKind, TrustClass, UserId,
+    capability::{CapabilitySet, EffectKind},
+    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+    LoopRunContext, ProviderToolCall,
 };
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
@@ -32,14 +40,7 @@ use ironclaw_runner::model_routes::{
     ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext, ProviderToolCall,
-    },
-};
+use ironclaw_turns::LoopResultRef;
 
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
@@ -926,13 +927,13 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, InvocationId, ProviderToolName, TenantId, ThreadId,
+        dispatch::CapabilityDisplayOutputPreview,
+        ids::{AgentId, InvocationId, ProviderToolName, TenantId, ThreadId},
     };
+    use ironclaw_loop_contracts::{RunProfileResolutionRequest, RunProfileResolver};
     use ironclaw_loop_host::DurablePersistence;
     use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     #[tokio::test]
     async fn capability_io_records_read_file_display_preview() {

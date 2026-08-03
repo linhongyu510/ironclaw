@@ -33,13 +33,13 @@ use std::sync::Arc;
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_host_api::{CapabilityId, Resolution};
-use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::{ids::CapabilityId, resolution::Resolution};
+use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRequest, LoopRunContext,
     ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
     RunProfileResolver,
 };
+use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
 use ironclaw_turns::{GetRunStateRequest, RunProfileRequest, TurnOriginKind, TurnStatus};
 use serde_json::json;
 
@@ -255,7 +255,8 @@ async fn assert_capability_denied(
         // `Resolution::Denied` channel (not a failed `Done` verdict); pin the
         // redacted reason kind so a different denial class cannot pass.
         Resolution::Denied(denial)
-            if denial.reason_kind == Some(ironclaw_host_api::DenyReason::PolicyDenied) =>
+            if denial.reason_kind
+                == Some(ironclaw_host_api::decision::DenyReason::PolicyDenied) =>
         {
             Ok(())
         }

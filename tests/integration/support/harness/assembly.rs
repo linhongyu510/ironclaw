@@ -14,9 +14,12 @@ use ironclaw_filesystem::{
     DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
-    CapabilityId, CredentialStageError, EffectKind, ExtensionId, HostPath, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
-    SecretHandle, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    dispatch::CredentialStageError,
+    ids::{CapabilityId, ExtensionId, PackageId, SecretHandle},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
@@ -388,10 +391,13 @@ pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    let filesystem =
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?;
+    let scoped_filesystem = ironclaw_reborn_composition::wrap_scoped(Arc::clone(&filesystem));
 
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
-        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
+        filesystem,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -401,10 +407,10 @@ pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
-    .try_with_host_http_egress(PolicyNetworkHttpEgress::new_with_resolver(
-        network_transport,
-        StaticNetworkResolver,
-    ))
+    .try_with_host_http_egress_with_body_store(
+        PolicyNetworkHttpEgress::new_with_resolver(network_transport, StaticNetworkResolver),
+        scoped_filesystem,
+    )
     .map_err(|report| {
         std::io::Error::other(format!(
             "real egress pipeline production wiring failed: {report:?}"

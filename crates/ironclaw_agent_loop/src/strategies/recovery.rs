@@ -11,11 +11,9 @@
 // arch-exempt: large_file, keep recovery policy beside its exhaustive mapping tests until the item-7 conformance-matrix extraction, plan #6284
 
 use async_trait::async_trait;
-use ironclaw_host_api::{FailureFate, FailureKind};
-use ironclaw_turns::{
-    LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
-};
+use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
+use ironclaw_host_api::turn::ModelInvalidOutputDetailReason;
+use ironclaw_loop_contracts::{LoopFailureKind, LoopSafeSummary, ModelVisibleToolObservation};
 
 use crate::state::{
     LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
@@ -171,6 +169,8 @@ pub(crate) enum ModelErrorClass {
 ///   prompt/model hint).
 /// - `ToolErrorResult` — append a model-visible tool error result and continue
 ///   the capability batch.
+/// - `UserVisibleTerminal` — stop without another model call; the typed failure
+///   category drives a host-authored user explanation.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,6 +194,14 @@ pub(crate) enum RecoveryOutcome {
         scope: RetryScope,
         alter: Option<RetryAlteration>,
         observation: ModelErrorRecoveryObservation,
+    },
+    /// A terminal model-stage failure that cannot safely produce a
+    /// model-visible observation. The user-visible explanation is projected
+    /// from the typed failure category; the failed model is never credited
+    /// with seeing it.
+    UserVisibleTerminal {
+        recovery: RecoveryStrategyState,
+        failure_kind: LoopFailureKind,
     },
     Abort {
         recovery: RecoveryStrategyState,
@@ -246,9 +254,11 @@ pub(crate) enum RetryScope {
 ///   then gives the refreshed iteration one typed observation-assisted
 ///   continuation attempt before aborting with the precise
 ///   `model_stale_request` category.
-/// - Aborts immediately on `Unauthorized`, `CheckpointRejected`, and
-///   `TranscriptWriteFailed` — precise, user-actionable terminal categories
-///   that must never be silently retried.
+/// - Returns a user-visible terminal outcome for `Unauthorized` and
+///   `TranscriptWriteFailed`: the host projects the precise actionable
+///   explanation without pretending another model saw it.
+/// - Aborts immediately on `CheckpointRejected`, which is owned by its
+///   separate recovery follow-up.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
     /// Max retries per error class before giving up. Default `2`.
@@ -327,11 +337,18 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     ) -> RecoveryOutcome {
         let kind = model_error_to_failure_kind(err.class);
         match err.class {
-            // Unauthorized/checkpoint/transcript kinds carry precise
-            // user-actionable categories and must not be silently retried.
-            ModelErrorClass::Unauthorized
-            | ModelErrorClass::CheckpointRejected
-            | ModelErrorClass::TranscriptWriteFailed => RecoveryOutcome::Abort {
+            // Unauthorized and transcript failures cannot safely create a
+            // model-visible observation. They terminate with a typed,
+            // host-authored user explanation and no additional model call.
+            ModelErrorClass::Unauthorized | ModelErrorClass::TranscriptWriteFailed => {
+                RecoveryOutcome::UserVisibleTerminal {
+                    recovery: state.recovery_state.cleared_attempts(),
+                    failure_kind: kind,
+                }
+            }
+            // CheckpointRejected remains a plain abort owned by its separate
+            // recovery follow-up.
+            ModelErrorClass::CheckpointRejected => RecoveryOutcome::Abort {
                 recovery: state.recovery_state.cleared_attempts(),
                 failure_kind: kind,
             },
@@ -1046,18 +1063,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_outcome_user_visible_terminal_round_trips_distinctly() {
+        let outcome = RecoveryOutcome::UserVisibleTerminal {
+            recovery: sample_recovery(),
+            failure_kind: LoopFailureKind::TranscriptWriteFailed,
+        };
+        let value = serde_json::to_value(&outcome).expect("serialize");
+        let restored: RecoveryOutcome = serde_json::from_value(value).expect("deserialize");
+
+        assert_eq!(restored, outcome);
+        assert!(matches!(
+            restored,
+            RecoveryOutcome::UserVisibleTerminal {
+                failure_kind: LoopFailureKind::TranscriptWriteFailed,
+                ..
+            }
+        ));
+    }
+
     mod default_recovery_strategy {
-        use ironclaw_host_api::{TenantId, ThreadId};
-        use ironclaw_turns::{
-            AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
-            RunProfileVersion, TurnId, TurnRunId, TurnScope,
-            run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
-                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
-            },
+        use ironclaw_host_api::ids::{TenantId, ThreadId};
+        use ironclaw_host_api::turn::{
+            ModelInvalidOutputDetailReason, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
+            TurnScope,
+        };
+        use ironclaw_loop_contracts::{
+            AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+            LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
         };
 
         use super::super::{
@@ -1070,8 +1106,8 @@ mod tests {
             LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
             RecoveryAttemptClass, RecoveryStrategyState,
         };
-        use ironclaw_host_api::{FailureFate, FailureKind};
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {
             let scope = TurnScope::new(
@@ -1130,8 +1166,7 @@ mod tests {
                     max_model_calls: 32,
                     max_capability_invocations: 64,
                 },
-                personal_context_policy:
-                    ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+                personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
                 runtime_constraints: RuntimeProfileConstraints {
                     allow_raw_runtime_backend_selection: false,
                     allow_broad_capability_surface: false,
@@ -1686,15 +1721,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn model_precise_terminal_classes_abort_immediately() {
+        async fn model_user_visible_terminal_classes_do_not_become_observations() {
             let strategy = DefaultRecoveryStrategy::default();
 
             for (class, expected_kind) in [
                 (ModelErrorClass::Unauthorized, LoopFailureKind::ModelError),
-                (
-                    ModelErrorClass::CheckpointRejected,
-                    LoopFailureKind::CheckpointRejected,
-                ),
                 (
                     ModelErrorClass::TranscriptWriteFailed,
                     LoopFailureKind::TranscriptWriteFailed,
@@ -1703,12 +1734,32 @@ mod tests {
                 let state = state_with_no_attempts();
                 let outcome = strategy.on_model_error(&state, &model_err(class)).await;
                 match outcome {
-                    RecoveryOutcome::Abort { failure_kind, .. } => {
+                    RecoveryOutcome::UserVisibleTerminal { failure_kind, .. } => {
                         assert_eq!(failure_kind, expected_kind, "failure kind for {class:?}");
                     }
-                    other => panic!("{class:?} must abort immediately, got {other:?}"),
+                    other => panic!(
+                        "{class:?} must produce only a user-visible terminal explanation, got {other:?}"
+                    ),
                 }
             }
+        }
+
+        #[tokio::test]
+        async fn checkpoint_rejected_remains_a_plain_abort() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let outcome = strategy
+                .on_model_error(
+                    &state_with_no_attempts(),
+                    &model_err(ModelErrorClass::CheckpointRejected),
+                )
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::CheckpointRejected,
+                    ..
+                }
+            ));
         }
 
         #[tokio::test]

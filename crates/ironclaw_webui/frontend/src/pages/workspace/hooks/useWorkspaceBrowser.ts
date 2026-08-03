@@ -16,8 +16,11 @@ function workspaceScopeKey(currentUser) {
 
 export function useWorkspaceBrowser(
   selectedPath,
-  currentUser = null,
-  requireScopedWorkspace = true
+  {
+    currentUser = null,
+    requireScopedWorkspace = true,
+    threadId = null,
+  } = {},
 ) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -26,13 +29,23 @@ export function useWorkspaceBrowser(
   );
   const [filter, setFilter] = React.useState("");
   const [result, setResult] = React.useState(null);
-  const scopeKey = JSON.stringify([
-    workspaceScopeKey(currentUser),
-    requireScopedWorkspace ? "scoped-workspace" : "raw-workspace-ok",
-  ]);
+  const scopeKey = threadId
+    ? `thread:${threadId}`
+    : JSON.stringify([
+        workspaceScopeKey(currentUser),
+        requireScopedWorkspace ? "scoped-workspace" : "raw-workspace-ok",
+      ]);
   const workspaceOptions = React.useMemo(
-    () => ({ currentUser, requireScopedWorkspace }),
-    [currentUser, requireScopedWorkspace]
+    () => ({ currentUser, requireScopedWorkspace, threadId }),
+    [currentUser, requireScopedWorkspace, threadId]
+  );
+  const listDirectory = React.useCallback(
+    (path) => listWorkspace(path, workspaceOptions),
+    [workspaceOptions],
+  );
+  const readFile = React.useCallback(
+    (path) => readWorkspaceFile(path, workspaceOptions),
+    [workspaceOptions],
   );
 
   React.useEffect(() => {
@@ -41,7 +54,7 @@ export function useWorkspaceBrowser(
 
   const rootQuery = useQuery({
     queryKey: ["workspace-list", scopeKey, ""],
-    queryFn: () => listWorkspace("", workspaceOptions),
+    queryFn: () => listDirectory(""),
   });
 
   // Stat/preview of the current selection. For a directory this resolves to
@@ -49,7 +62,7 @@ export function useWorkspaceBrowser(
   // a directory.
   const fileQuery = useQuery({
     queryKey: ["workspace-file", scopeKey, selectedPath],
-    queryFn: () => readWorkspaceFile(selectedPath, workspaceOptions),
+    queryFn: () => readFile(selectedPath),
     enabled: Boolean(selectedPath),
   });
 
@@ -60,7 +73,7 @@ export function useWorkspaceBrowser(
   // tree's cache key so an already-expanded folder is served from cache.
   const listingQuery = useQuery({
     queryKey: ["workspace-list", scopeKey, selectedPath],
-    queryFn: () => listWorkspace(selectedPath, workspaceOptions),
+    queryFn: () => listDirectory(selectedPath),
     enabled: selectionIsDirectory,
   });
 
@@ -72,9 +85,9 @@ export function useWorkspaceBrowser(
     (path) =>
       queryClient.fetchQuery({
         queryKey: ["workspace-list", scopeKey, path],
-        queryFn: () => listWorkspace(path, workspaceOptions),
+        queryFn: () => listDirectory(path),
       }),
-    [queryClient, scopeKey, workspaceOptions]
+    [listDirectory, queryClient, scopeKey]
   );
 
   const toggleDirectory = React.useCallback(
@@ -100,9 +113,8 @@ export function useWorkspaceBrowser(
   );
 
   return {
+    scopeKey,
     rootEntries: rootQuery.data?.entries || [],
-    currentUser,
-    workspaceScopeKey: scopeKey,
     file: fileQuery.data || null,
     selectionIsDirectory,
     currentEntries: listingQuery.data?.entries || [],
@@ -118,10 +130,13 @@ export function useWorkspaceBrowser(
       rootQuery.isFetching || fileQuery.isFetching || listingQuery.isFetching,
     error: rootQuery.error || fileQuery.error || listingQuery.error || null,
     loadDirectory,
+    listDirectory,
     toggleDirectory,
     refresh: () => {
-      queryClient.invalidateQueries({ queryKey: ["workspace-list"] });
-      queryClient.invalidateQueries({ queryKey: ["workspace-file"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace-list", scopeKey] });
+      queryClient.invalidateQueries({
+        queryKey: ["workspace-file", scopeKey, selectedPath],
+      });
     },
   };
 }
