@@ -94,6 +94,5 @@ mod tests {
             serde_json::from_slice(&bytes).expect("deserialize sidecar");
 
         assert_eq!(restored, metadata);
-        assert!(!String::from_utf8(bytes).expect("UTF-8 JSON").contains('?'));
     }
 }

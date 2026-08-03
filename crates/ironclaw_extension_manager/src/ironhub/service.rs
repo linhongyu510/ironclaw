@@ -318,10 +318,22 @@ impl IronHubService {
                 } else {
                     None
                 };
-                let authority_changes = if update_available == Some(true) {
+                let authority_changes = if name.is_some() && update_available == Some(true) {
                     if let Some(entry) = catalog_entry {
-                        self.tool_authority_changes(entry, &installed.resolved_manifest, None)
-                            .await?
+                        match self
+                            .tool_authority_changes(entry, &installed.resolved_manifest, None)
+                            .await
+                        {
+                            Ok(changes) => changes,
+                            Err(error) => {
+                                tracing::warn!(
+                                    package = %installed.extension_id,
+                                    %error,
+                                    "IronHub status could not compute extension authority changes"
+                                );
+                                Vec::new()
+                            }
+                        }
                     } else {
                         Vec::new()
                     }
@@ -452,6 +464,37 @@ impl IronHubService {
         Ok(authority_changes(installed, candidate.resolved()))
     }
 
+    async fn resolve_manifest_source(
+        &self,
+        private_manifest_url: Option<&str>,
+    ) -> Result<
+        (
+            Arc<IronHubManifest>,
+            IronHubManifestSource,
+            Option<CatalogOrigin>,
+        ),
+        IronHubCommandError,
+    > {
+        let private_origin = private_manifest_url
+            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
+            .transpose()?;
+        match (private_manifest_url, private_origin) {
+            (Some(private_url), Some(origin)) => Ok((
+                Arc::new(self.fetch_private_manifest(private_url, &origin).await?),
+                IronHubManifestSource::Private,
+                Some(origin),
+            )),
+            (None, None) => Ok((
+                self.fetch_manifest_cached().await?,
+                IronHubManifestSource::Public,
+                None,
+            )),
+            _ => Err(catalog(
+                "private manifest source could not be validated against the catalog origin",
+            )),
+        }
+    }
+
     async fn install(
         &self,
         name: &str,
@@ -463,29 +506,9 @@ impl IronHubService {
                 "force replacement is not an update; call ironhub_status and ironhub_update",
             ));
         }
-        let private_origin = options
-            .private_manifest_url
-            .as_deref()
-            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
-            .transpose()?;
-        let (manifest, source) = match (
-            options.private_manifest_url.as_deref(),
-            private_origin.as_ref(),
-        ) {
-            (Some(private_url), Some(origin)) => (
-                Arc::new(self.fetch_private_manifest(private_url, origin).await?),
-                IronHubManifestSource::Private,
-            ),
-            (None, None) => (
-                self.fetch_manifest_cached().await?,
-                IronHubManifestSource::Public,
-            ),
-            _ => {
-                return Err(catalog(
-                    "private manifest source could not be validated against the catalog origin",
-                ));
-            }
-        };
+        let (manifest, source, private_origin) = self
+            .resolve_manifest_source(options.private_manifest_url.as_deref())
+            .await?;
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options, source)?;
         let catalog_origin = private_origin
@@ -645,33 +668,13 @@ impl IronHubService {
             ));
         }
 
-        let private_origin = options
-            .private_manifest_url
-            .as_deref()
-            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
-            .transpose()?;
-        let (manifest, source) = match (
-            options.private_manifest_url.as_deref(),
-            private_origin.as_ref(),
-        ) {
-            (Some(private_url), Some(origin)) => (
-                Arc::new(self.fetch_private_manifest(private_url, origin).await?),
-                IronHubManifestSource::Private,
-            ),
-            (None, None) => (
-                self.fetch_manifest_cached().await?,
-                IronHubManifestSource::Public,
-            ),
-            _ => {
-                return Err(catalog(
-                    "private manifest source could not be validated against the catalog origin",
-                ));
-            }
-        };
+        let (manifest, source, private_origin) = self
+            .resolve_manifest_source(options.private_manifest_url.as_deref())
+            .await?;
         let install_options = IronHubInstallOptions {
             kind: options.kind,
             force: false,
-            acknowledge_unverified: true,
+            acknowledge_unverified: options.acknowledge_authority_change,
             expected_version: Some(options.expected_version.clone()),
             expected_artifact_digest: Some(options.expected_artifact_digest.clone()),
             private_manifest_url: options.private_manifest_url.clone(),
@@ -687,177 +690,24 @@ impl IronHubService {
 
         let (lifecycle, active) = match kind {
             IronHubEntryKind::Tool => {
-                let extension_id = ExtensionId::new(name.to_string())
-                    .map_err(|error| invalid(error.to_string()))?;
-                let installed = self
-                    .extension_management
-                    .registry_installation_status(&extension_id, &self.scope.user_id)
-                    .await?
-                    .ok_or_else(|| invalid(format!("tool '{name}' is not installed")))?;
-                let installed_provenance =
-                    installed.registry_provenance.as_ref().ok_or_else(|| {
-                        invalid(format!(
-                            "tool '{name}' has no durable IronHub receipt; reinstall it before updating"
-                        ))
-                    })?;
-                validate_update_source(
+                self.update_tool(
                     name,
-                    installed_provenance,
+                    &manifest,
+                    private_origin.as_ref(),
                     &target_provenance,
-                    &options.expected_installed_artifact_digest,
-                )?;
-                if !installed.update_allowed {
-                    return Err(invalid(format!(
-                        "tool '{name}' is shared by multiple users; update requires an exclusive installation"
-                    )));
-                }
-                let entry = manifest
-                    .find_tool(name)
-                    .ok_or_else(|| catalog("tool not found"))?;
-                let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
-                    catalog(format!(
-                        "'{}' publishes no extension manifest; update is unavailable",
-                        entry.name
-                    ))
-                })?;
-                let tool_manifest = self
-                    .download_verified(
-                        manifest_artifact,
-                        MAX_METADATA_BYTES,
-                        private_origin.as_ref(),
-                    )
-                    .await?;
-                let wasm = self
-                    .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
-                    .await?;
-                let capabilities = self
-                    .download_verified(
-                        &entry.capabilities,
-                        MAX_METADATA_BYTES,
-                        private_origin.as_ref(),
-                    )
-                    .await?;
-                let mut schemas = Vec::with_capacity(entry.schemas.len());
-                for (path, artifact) in &entry.schemas {
-                    let content = self
-                        .download_verified(artifact, MAX_METADATA_BYTES, private_origin.as_ref())
-                        .await?;
-                    schemas.push((path.clone(), content));
-                }
-                let reserved = self
-                    .extension_management
-                    .reserved_bundled_extension_ids()
-                    .await;
-                let package = ironhub_tool_package(
-                    entry,
-                    tool_manifest,
-                    wasm,
-                    capabilities,
-                    schemas,
-                    &reserved,
-                    target_provenance.clone(),
-                )?;
-                let changes =
-                    authority_changes(&installed.resolved_manifest, &package.resolved_manifest);
-                if !changes.is_empty() && !options.acknowledge_authority_change {
-                    return Err(invalid(format!(
-                        "tool '{name}' changes extension authority: {}; retry only after reviewing the signed target and acknowledging the change",
-                        changes.join(", ")
-                    )));
-                }
-                let lifecycle = self
-                    .extension_management
-                    .update_registry_package(
-                        package,
-                        &options.expected_installed_artifact_digest,
-                        &self.scope.user_id,
-                    )
-                    .await?;
-                let active = lifecycle.phase == InstallationState::Active;
-                (lifecycle, active)
+                    &options,
+                )
+                .await?
             }
             IronHubEntryKind::Skill => {
-                let current = self
-                    .skill_management
-                    .list_for_scope(self.scope.clone())
-                    .await
-                    .map_err(skill_install_error)?
-                    .into_iter()
-                    .find(|skill| skill.name == name)
-                    .ok_or_else(|| invalid(format!("skill '{name}' is not installed")))?;
-                let metadata = self
-                    .skill_management
-                    .install_metadata_for_scope(self.scope.clone(), name)
-                    .await
-                    .map_err(skill_install_error)?
-                    .ok_or_else(|| {
-                        invalid(format!("skill '{name}' has no durable install metadata"))
-                    })?;
-                let installed_provenance =
-                    metadata.registry_provenance.as_ref().ok_or_else(|| {
-                        invalid(format!(
-                            "skill '{name}' has no durable IronHub receipt; reinstall it before updating"
-                        ))
-                    })?;
-                validate_update_source(
+                self.update_skill(
                     name,
-                    installed_provenance,
+                    &manifest,
+                    private_origin.as_ref(),
                     &target_provenance,
-                    &options.expected_installed_artifact_digest,
-                )?;
-                if !options.acknowledge_authority_change {
-                    return Err(invalid(format!(
-                        "skill '{name}' changes model instructions; retry only after reviewing the signed target and acknowledging the change"
-                    )));
-                }
-                let entry = manifest
-                    .find_skill(name)
-                    .ok_or_else(|| catalog("skill not found"))?;
-                let content = self
-                    .download_verified(&entry.skill_md, MAX_METADATA_BYTES, private_origin.as_ref())
-                    .await?;
-                let content =
-                    String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
-                        reason: format!("skill markdown is not UTF-8: {error}"),
-                    })?;
-                let content = set_skill_auto_activate(&content, current.auto_activate);
-                let source_url = private_origin
-                    .as_ref()
-                    .map(CatalogOrigin::redacted_source_url)
-                    .unwrap_or_else(|| entry.skill_md.url.clone());
-                let installed = self
-                    .skill_management
-                    .replace_from_registry_for_scope(
-                        self.scope.clone(),
-                        name,
-                        &content,
-                        &source_url,
-                        &target_provenance,
-                        &options.expected_installed_artifact_digest,
-                    )
-                    .await
-                    .map_err(skill_install_error)?;
-                let active = current.auto_activate;
-                (
-                    LifecycleProductResponse {
-                        package_ref: Some(
-                            LifecyclePackageRef::new(
-                                LifecyclePackageKind::Skill,
-                                installed.name.as_str(),
-                            )
-                            .map_err(|error| invalid(error.to_string()))?,
-                        ),
-                        phase: InstallationState::Installed,
-                        blockers: Vec::new(),
-                        message: None,
-                        payload: Some(LifecycleProductPayload::SkillInstall {
-                            installed: true,
-                            name: LifecyclePackageId::new(installed.name)
-                                .map_err(|error| invalid(error.to_string()))?,
-                        }),
-                    },
-                    active,
+                    &options,
                 )
+                .await?
             }
         };
         let mut entry = match kind {
@@ -898,6 +748,177 @@ impl IronHubService {
             entries: vec![entry],
             lifecycle: Some(lifecycle),
         })
+    }
+
+    async fn update_tool(
+        &self,
+        name: &str,
+        manifest: &IronHubManifest,
+        private_origin: Option<&CatalogOrigin>,
+        target_provenance: &RegistryPackageProvenance,
+        options: &IronHubUpdateOptions,
+    ) -> Result<(LifecycleProductResponse, bool), IronHubCommandError> {
+        let extension_id =
+            ExtensionId::new(name.to_string()).map_err(|error| invalid(error.to_string()))?;
+        let installed = self
+            .extension_management
+            .registry_installation_status(&extension_id, &self.scope.user_id)
+            .await?
+            .ok_or_else(|| invalid(format!("tool '{name}' is not installed")))?;
+        let installed_provenance = installed.registry_provenance.as_ref().ok_or_else(|| {
+            invalid(format!(
+                "tool '{name}' has no durable IronHub receipt; reinstall it before updating"
+            ))
+        })?;
+        validate_update_source(
+            name,
+            installed_provenance,
+            target_provenance,
+            &options.expected_installed_artifact_digest,
+        )?;
+        if !installed.update_allowed {
+            return Err(invalid(format!(
+                "tool '{name}' is shared by multiple users; update requires an exclusive installation"
+            )));
+        }
+        let entry = manifest
+            .find_tool(name)
+            .ok_or_else(|| catalog("tool not found"))?;
+        let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
+            catalog(format!(
+                "'{}' publishes no extension manifest; update is unavailable",
+                entry.name
+            ))
+        })?;
+        let tool_manifest = self
+            .download_verified(manifest_artifact, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let wasm = self
+            .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin)
+            .await?;
+        let capabilities = self
+            .download_verified(&entry.capabilities, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let mut schemas = Vec::with_capacity(entry.schemas.len());
+        for (path, artifact) in &entry.schemas {
+            let content = self
+                .download_verified(artifact, MAX_METADATA_BYTES, private_origin)
+                .await?;
+            schemas.push((path.clone(), content));
+        }
+        let reserved = self
+            .extension_management
+            .reserved_bundled_extension_ids()
+            .await;
+        let package = ironhub_tool_package(
+            entry,
+            tool_manifest,
+            wasm,
+            capabilities,
+            schemas,
+            &reserved,
+            target_provenance.clone(),
+        )?;
+        let changes = authority_changes(&installed.resolved_manifest, &package.resolved_manifest);
+        if !changes.is_empty() && !options.acknowledge_authority_change {
+            return Err(invalid(format!(
+                "tool '{name}' changes extension authority: {}; retry only after reviewing the signed target and acknowledging the change",
+                changes.join(", ")
+            )));
+        }
+        let lifecycle = self
+            .extension_management
+            .update_registry_package(
+                package,
+                &options.expected_installed_artifact_digest,
+                &self.scope.user_id,
+            )
+            .await?;
+        let active = lifecycle.phase == InstallationState::Active;
+        Ok((lifecycle, active))
+    }
+
+    async fn update_skill(
+        &self,
+        name: &str,
+        manifest: &IronHubManifest,
+        private_origin: Option<&CatalogOrigin>,
+        target_provenance: &RegistryPackageProvenance,
+        options: &IronHubUpdateOptions,
+    ) -> Result<(LifecycleProductResponse, bool), IronHubCommandError> {
+        let current = self
+            .skill_management
+            .list_for_scope(self.scope.clone())
+            .await
+            .map_err(skill_install_error)?
+            .into_iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| invalid(format!("skill '{name}' is not installed")))?;
+        let metadata = self
+            .skill_management
+            .install_metadata_for_scope(self.scope.clone(), name)
+            .await
+            .map_err(skill_install_error)?
+            .ok_or_else(|| invalid(format!("skill '{name}' has no durable install metadata")))?;
+        let installed_provenance = metadata.registry_provenance.as_ref().ok_or_else(|| {
+            invalid(format!(
+                "skill '{name}' has no durable IronHub receipt; reinstall it before updating"
+            ))
+        })?;
+        validate_update_source(
+            name,
+            installed_provenance,
+            target_provenance,
+            &options.expected_installed_artifact_digest,
+        )?;
+        if !options.acknowledge_authority_change {
+            return Err(invalid(format!(
+                "skill '{name}' changes model instructions; retry only after reviewing the signed target and acknowledging the change"
+            )));
+        }
+        let entry = manifest
+            .find_skill(name)
+            .ok_or_else(|| catalog("skill not found"))?;
+        let content = self
+            .download_verified(&entry.skill_md, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let content = String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
+            reason: format!("skill markdown is not UTF-8: {error}"),
+        })?;
+        let content = set_skill_auto_activate(&content, current.auto_activate);
+        let source_url = private_origin
+            .map(CatalogOrigin::redacted_source_url)
+            .unwrap_or_else(|| entry.skill_md.url.clone());
+        let installed = self
+            .skill_management
+            .replace_from_registry_for_scope(
+                self.scope.clone(),
+                name,
+                &content,
+                &source_url,
+                target_provenance,
+                &options.expected_installed_artifact_digest,
+            )
+            .await
+            .map_err(skill_install_error)?;
+        let active = current.auto_activate;
+        Ok((
+            LifecycleProductResponse {
+                package_ref: Some(
+                    LifecyclePackageRef::new(LifecyclePackageKind::Skill, installed.name.as_str())
+                        .map_err(|error| invalid(error.to_string()))?,
+                ),
+                phase: InstallationState::Installed,
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::SkillInstall {
+                    installed: true,
+                    name: LifecyclePackageId::new(installed.name)
+                        .map_err(|error| invalid(error.to_string()))?,
+                }),
+            },
+            active,
+        ))
     }
 
     async fn fetch_manifest_cached(&self) -> Result<Arc<IronHubManifest>, IronHubCommandError> {

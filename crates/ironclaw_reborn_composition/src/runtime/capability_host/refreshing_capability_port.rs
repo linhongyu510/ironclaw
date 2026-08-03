@@ -25,7 +25,9 @@ use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, ironhub_lifecycle_mounts};
+use crate::builtin_capability_policy::{
+    BuiltinCapabilityPolicy, ironhub_lifecycle_mounts, ironhub_status_mounts,
+};
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use crate::runtime::capability_host::outbound_delivery::outbound_delivery_capabilities;
@@ -297,6 +299,11 @@ impl RefreshingCapabilityPort {
                 &self.skill_mounts,
                 &self.system_extensions_lifecycle_mounts,
             );
+            factory = factory.with_capability_execution_mount(capability_id.clone(), mounts);
+        }
+        for capability_id in self.policy.ironhub_status_capability_ids() {
+            let mounts =
+                ironhub_status_mounts(&self.skill_mounts, &self.system_extensions_lifecycle_mounts);
             factory = factory.with_capability_execution_mount(capability_id.clone(), mounts);
         }
         // Test-support-only overrides (empty in production, see the config

@@ -252,7 +252,7 @@ network = "ironhub_artifacts"
 [[grants]]
 capability = "builtin.ironhub_status"
 effects = ["dispatch_capability", "network", "read_filesystem"]
-mounts = "ironhub_lifecycle"
+mounts = "ironhub_status"
 network = "ironhub_artifacts"
 
 [[grants]]

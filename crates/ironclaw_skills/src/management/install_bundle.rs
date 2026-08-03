@@ -391,7 +391,9 @@ async fn existing_files_match_expected(
                     let Some(existing_contents) = existing_contents else {
                         return Ok(ExistingRegistryInstallMatch::Conflict);
                     };
-                    if existing_contents != expected_contents.as_ref() {
+                    if existing_contents != expected_contents.as_ref()
+                        && relative_path == INSTALL_METADATA_FILE_NAME
+                    {
                         match install_metadata_match(&existing_contents, expected_contents.as_ref())
                         {
                             ExistingRegistryInstallMatch::Match => {}
@@ -400,6 +402,8 @@ async fn existing_files_match_expected(
                                 return Ok(ExistingRegistryInstallMatch::Conflict);
                             }
                         }
+                    } else if existing_contents != expected_contents.as_ref() {
+                        return Ok(ExistingRegistryInstallMatch::Conflict);
                     }
                 }
                 FileType::Directory => {
@@ -441,30 +445,13 @@ fn install_metadata_match(existing: &[u8], expected: &[u8]) -> ExistingRegistryI
         return ExistingRegistryInstallMatch::Conflict;
     }
     match (&existing.registry_provenance, &expected.registry_provenance) {
-        (Some(existing), Some(expected))
-            if registry_provenance_identity_matches(existing, expected) =>
-        {
+        (Some(existing), Some(expected)) if existing.same_package_identity(expected) => {
             ExistingRegistryInstallMatch::Match
         }
         (None, Some(_)) => ExistingRegistryInstallMatch::AdoptReceipt,
         (None, None) => ExistingRegistryInstallMatch::Match,
         _ => ExistingRegistryInstallMatch::Conflict,
     }
-}
-
-fn registry_provenance_identity_matches(
-    existing: &RegistryPackageProvenance,
-    expected: &RegistryPackageProvenance,
-) -> bool {
-    existing.registry() == expected.registry()
-        && existing.repository() == expected.repository()
-        && existing.package_version() == expected.package_version()
-        && existing.release_tag() == expected.release_tag()
-        && existing.catalog_origin() == expected.catalog_origin()
-        && existing
-            .artifact_digest()
-            .eq_ignore_ascii_case(expected.artifact_digest())
-        && existing.manifest_digest() == expected.manifest_digest()
 }
 
 pub(super) async fn adopt_registry_receipt(
@@ -562,6 +549,30 @@ pub(super) async fn read_install_metadata_bytes(
             );
             Ok(Some(Vec::new()))
         }
+        Err(FilesystemError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(filesystem_error(error)),
+    }
+}
+
+pub(super) async fn read_install_metadata_bytes_strict(
+    context: &SkillManagementContext,
+    skill_path: &ScopedPath,
+) -> Result<Option<Vec<u8>>, SkillManagementError> {
+    let Some(metadata_path) = scoped_sibling(skill_path, INSTALL_METADATA_FILE_NAME)? else {
+        return Ok(None);
+    };
+    match context
+        .filesystem
+        .read_bytes_bounded(&context.scope, &metadata_path, MAX_INSTALL_METADATA_BYTES)
+        .await
+    {
+        Ok(Some(bytes)) => Ok(Some(bytes)),
+        Ok(None) => Err(SkillManagementError::with_reason(
+            SkillManagementErrorKind::Resource,
+            format!(
+                "skill install metadata at {metadata_path} exceeds the {MAX_INSTALL_METADATA_BYTES}-byte limit"
+            ),
+        )),
         Err(FilesystemError::NotFound { .. }) => Ok(None),
         Err(error) => Err(filesystem_error(error)),
     }

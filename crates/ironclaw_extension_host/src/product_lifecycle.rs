@@ -415,14 +415,7 @@ impl ExtensionLifecycleManager {
         extension_id: &ExtensionId,
         caller: &UserId,
     ) -> Result<Option<RegistryExtensionInstallationStatus>, ProductOperationFailure> {
-        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
-            .map_err(map_extension_installation_error)?;
-        let Some(installation) = self
-            .installation_store
-            .get_installation(&installation_id)
-            .await
-            .map_err(map_extension_installation_error)?
-        else {
+        let Some(installation) = self.search_installation(extension_id).await? else {
             return Ok(None);
         };
         if !installation.owner().visible_to(caller) {
@@ -1330,10 +1323,18 @@ impl ExtensionLifecycleManager {
         match previous_installation.owner() {
             InstallationOwner::Users { user_ids }
                 if user_ids.len() == 1 && user_ids.contains(caller) => {}
-            InstallationOwner::Users { .. } | InstallationOwner::Tenant => {
+            InstallationOwner::Users { .. } => {
                 return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} is shared by multiple users; registry update requires an exclusive installation",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            InstallationOwner::Tenant => {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} uses a legacy tenant-wide installation; registry update requires a user-owned exclusive installation",
                         extension_id.as_str()
                     ),
                 });
@@ -1486,11 +1487,9 @@ impl ExtensionLifecycleManager {
         caller: &UserId,
     ) -> Result<(), ProductOperationFailure> {
         let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
         if self.search_installation(&extension_id).await?.is_some() {
-            let response = {
-                let _operation_guard = self.operation_lock.lock().await;
-                self.remove_locked(package_ref.clone(), caller).await?
-            };
+            let response = self.remove_locked(package_ref.clone(), caller).await?;
             if matches!(
                 response.payload,
                 Some(LifecycleProductPayload::ExtensionRemove { removed: false })
@@ -1503,7 +1502,6 @@ impl ExtensionLifecycleManager {
                 });
             }
         } else {
-            let _operation_guard = self.operation_lock.lock().await;
             self.remove_orphaned_runtime_state(&extension_id).await?;
         }
         match self.installation_store.delete_manifest(&extension_id).await {
@@ -1548,7 +1546,10 @@ impl ExtensionLifecycleManager {
                     available.package.id.as_str()
                 ),
             })?;
-        if manifest.registry_provenance() == Some(target_provenance) {
+        if manifest
+            .registry_provenance()
+            .is_some_and(|current| current.same_package_identity(target_provenance))
+        {
             return Ok(());
         }
         self.persist_install_plan(prepare_registry_receipt_adoption(

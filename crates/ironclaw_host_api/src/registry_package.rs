@@ -118,6 +118,22 @@ impl RegistryPackageProvenance {
     pub fn installed_at(&self) -> DateTime<Utc> {
         self.installed_at
     }
+
+    /// Whether two receipts identify the same registry package artifact.
+    ///
+    /// Installation time is lifecycle history, not package identity, so it is
+    /// deliberately excluded from this comparison.
+    pub fn same_package_identity(&self, other: &Self) -> bool {
+        self.registry == other.registry
+            && self.repository == other.repository
+            && self.package_version == other.package_version
+            && self.release_tag == other.release_tag
+            && self.catalog_origin == other.catalog_origin
+            && self
+                .artifact_digest
+                .eq_ignore_ascii_case(&other.artifact_digest)
+            && self.manifest_digest == other.manifest_digest
+    }
 }
 
 fn validate_registry_digest(field: &'static str, value: String) -> Result<String, HostApiError> {
@@ -258,5 +274,24 @@ mod tests {
             serde_json::from_value::<RegistryPackageProvenance>(candidate)
                 .expect_err("hostile persisted receipt must be rejected on deserialize");
         }
+    }
+
+    #[test]
+    fn legacy_receipt_without_manifest_digest_round_trips_with_stable_field_names() {
+        let legacy = serde_json::json!({
+            "registry": "ironhub",
+            "repository": "nearai/ironhub",
+            "package_version": "1.2.3",
+            "release_tag": "v1.2.3",
+            "catalog_origin": "https://hub.ironclaw.com",
+            "artifact_digest": format!("sha256:{}", "a".repeat(64)),
+            "installed_at": "2026-08-03T00:00:00Z",
+        });
+        let receipt: RegistryPackageProvenance =
+            serde_json::from_value(legacy.clone()).expect("legacy receipt is accepted");
+        let serialized = serde_json::to_value(receipt).expect("serialize receipt");
+
+        assert_eq!(serialized, legacy);
+        assert!(serialized.get("manifest_digest").is_none());
     }
 }

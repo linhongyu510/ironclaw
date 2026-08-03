@@ -99,6 +99,13 @@ impl BuiltinCapabilityPolicy {
             .map(|grant| &grant.capability)
     }
 
+    pub(crate) fn ironhub_status_capability_ids(&self) -> impl Iterator<Item = &CapabilityId> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.mounts == CapabilityMountProfile::IronhubStatus)
+            .map(|grant| &grant.capability)
+    }
+
     pub(crate) fn builtin_grants(
         &self,
         grantee: &ExtensionId,
@@ -271,6 +278,7 @@ pub(crate) enum CapabilityMountProfile {
     SkillManagement,
     Memory,
     SystemExtensionsLifecycle,
+    IronhubStatus,
     IronhubLifecycle,
 }
 
@@ -446,6 +454,9 @@ fn constraint_terms(
         CapabilityMountProfile::SkillManagement => skill_mounts.clone(),
         CapabilityMountProfile::Memory => memory_mounts.clone(),
         CapabilityMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
+        CapabilityMountProfile::IronhubStatus => {
+            ironhub_status_mounts(skill_mounts, system_extensions_mounts)
+        }
         CapabilityMountProfile::IronhubLifecycle => {
             ironhub_lifecycle_mounts(skill_mounts, system_extensions_mounts)
         }
@@ -485,6 +496,19 @@ pub(crate) fn ironhub_lifecycle_mounts(
     mounts
 }
 
+pub(crate) fn ironhub_status_mounts(
+    skill_mounts: &MountView,
+    system_extensions_mounts: &MountView,
+) -> MountView {
+    let mut mounts = ironhub_lifecycle_mounts(skill_mounts, system_extensions_mounts);
+    for mount in &mut mounts.mounts {
+        mount.permissions.write = false;
+        mount.permissions.delete = false;
+        mount.permissions.execute = false;
+    }
+    mounts
+}
+
 pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
@@ -503,7 +527,40 @@ pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions},
+        path::{MountAlias, VirtualPath},
+    };
+
     use super::*;
+
+    #[test]
+    fn ironhub_status_attenuates_every_lifecycle_mount_to_read_only() {
+        let skill_mounts = MountView {
+            mounts: vec![MountGrant::new(
+                MountAlias::new("/skills").expect("mount alias"),
+                VirtualPath::new("/projects/skills").expect("mount target"),
+                MountPermissions::read_write_list_delete(),
+            )],
+        };
+        let extension_mounts = MountView {
+            mounts: vec![MountGrant::new(
+                MountAlias::new("/extensions").expect("mount alias"),
+                VirtualPath::new("/system/extensions").expect("mount target"),
+                MountPermissions::read_write_list_delete(),
+            )],
+        };
+
+        let mounts = ironhub_status_mounts(&skill_mounts, &extension_mounts);
+
+        assert_eq!(mounts.mounts.len(), 2);
+        assert!(
+            mounts
+                .mounts
+                .iter()
+                .all(|mount| mount.permissions == MountPermissions::read_only())
+        );
+    }
 
     #[test]
     fn bundled_builtin_capability_policy_parses() {
@@ -645,9 +702,11 @@ mod tests {
                 CapabilityNetworkProfile::IronhubArtifacts,
                 "{capability} must not inherit developer wildcard egress"
             );
-            let expected_mounts = if matches!(
+            let expected_mounts = if capability == "builtin.ironhub_status" {
+                CapabilityMountProfile::IronhubStatus
+            } else if matches!(
                 capability,
-                "builtin.ironhub_status" | "builtin.ironhub_install" | "builtin.ironhub_update"
+                "builtin.ironhub_install" | "builtin.ironhub_update"
             ) {
                 CapabilityMountProfile::IronhubLifecycle
             } else {

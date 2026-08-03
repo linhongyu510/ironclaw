@@ -1152,8 +1152,10 @@ where
         // Production discovery defaults to `InstalledLocal`, but a durable
         // installation manifest may preserve the narrower
         // `RegistryInstalled` source. `HostBundled` remains reserved for
-        // compiled inventory whose ids are skipped above. This prevents both
-        // upload -> restart trust laundering and registry provenance loss.
+        // compiled inventory whose ids are skipped above. This prevents
+        // upload -> restart trust laundering. Registry provenance remains
+        // authoritative in the installation store and must be joined by the
+        // lifecycle caller rather than inferred by discovery.
         source: stamp,
         registry_provenance: None,
         package,

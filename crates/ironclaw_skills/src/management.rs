@@ -35,8 +35,8 @@ pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, resto
 use install_bundle::{
     ExistingRegistryInstallMatch, adopt_registry_receipt, capture_skill_bundle_locked,
     existing_skill_install_matches, install_metadata_source, installed_skill_source,
-    publish_skill_install, read_install_metadata_bytes, restore_skill_bundle_locked,
-    validate_install_bundle_files,
+    publish_skill_install, read_install_metadata_bytes, read_install_metadata_bytes_strict,
+    restore_skill_bundle_locked, validate_install_bundle_files,
 };
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
@@ -447,6 +447,17 @@ pub(crate) async fn replace_registry_skill(
     }
     .await;
     if let Err(original_error) = replacement {
+        match context.filesystem.delete(&context.scope, &skill_dir).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+            Err(cleanup_error) => {
+                return Err(SkillManagementError::with_reason(
+                    original_error.kind(),
+                    format!(
+                        "skill replacement failed with {original_error:?}; target cleanup also failed with {cleanup_error:?}"
+                    ),
+                ));
+            }
+        }
         if let Err(restore_error) =
             restore_skill_bundle_locked(context, &skill_name, previous).await
         {
@@ -747,12 +758,15 @@ pub async fn read_skill_install_metadata(
         ));
     }
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, name, SKILL_FILE_NAME)?;
-    let Some(bytes) = read_install_metadata_bytes(context, &skill_path).await? else {
+    let Some(bytes) = read_install_metadata_bytes_strict(context, &skill_path).await? else {
         return Ok(None);
     };
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidSkill,
+            format!("invalid skill install metadata: {error}"),
+        )
+    })
 }
 
 pub async fn update_skill(
