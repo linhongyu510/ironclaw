@@ -6,7 +6,7 @@ use std::{
 use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, resource::ResourceUsage};
 use serde::Deserialize;
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::skills::{SkillManagementCapabilityError, SkillUrlFetchContext};
 
 use super::{
     MAX_GITHUB_CONTENT_API_REQUESTS, MAX_GITHUB_CONTENT_API_RESPONSE_BYTES,
@@ -69,9 +69,9 @@ struct GitHubApiBudget {
 }
 
 impl GitHubApiBudget {
-    fn consume(&mut self) -> Result<(), FirstPartyCapabilityError> {
+    fn consume(&mut self) -> Result<(), SkillManagementCapabilityError> {
         if self.calls >= MAX_GITHUB_API_REQUESTS {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
@@ -81,10 +81,10 @@ impl GitHubApiBudget {
 }
 
 pub(super) async fn fetch_payload_if_supported(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     parsed: &url::Url,
     usage: &mut ResourceUsage,
-) -> Result<Option<SkillUrlPayload>, FirstPartyCapabilityError> {
+) -> Result<Option<SkillUrlPayload>, SkillManagementCapabilityError> {
     let mut api_budget = GitHubApiBudget::default();
     if let Some(blob) = parse_github_blob_ref(parsed) {
         let raw_url =
@@ -92,7 +92,7 @@ pub(super) async fn fetch_payload_if_supported(
         let bytes = fetch_url_bytes(request, &raw_url, usage).await?;
         return Ok(Some(SkillUrlPayload {
             content: String::from_utf8(bytes).map_err(|_| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                     .with_usage(usage.clone())
             })?,
             files: Vec::new(),
@@ -106,7 +106,7 @@ pub(super) async fn fetch_payload_if_supported(
     }
 
     if parsed.host_str() == Some("github.com") {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -187,11 +187,11 @@ fn is_safe_github_component(component: &str) -> bool {
 fn validate_github_repo_components(
     owner: &str,
     repo: &str,
-) -> Result<(), FirstPartyCapabilityError> {
+) -> Result<(), SkillManagementCapabilityError> {
     if is_safe_github_component(owner) && is_safe_github_component(repo) {
         Ok(())
     } else {
-        Err(FirstPartyCapabilityError::new(
+        Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ))
     }
@@ -200,7 +200,7 @@ fn validate_github_repo_components(
 fn build_github_api_base_url(
     owner: &str,
     repo: &str,
-) -> Result<url::Url, FirstPartyCapabilityError> {
+) -> Result<url::Url, SkillManagementCapabilityError> {
     validate_github_repo_components(owner, repo)?;
     validate_skill_url(&format!("https://api.github.com/repos/{owner}/{repo}"))
 }
@@ -210,7 +210,7 @@ fn build_github_contents_url(
     repo: &str,
     path: Option<&str>,
     git_ref: &str,
-) -> Result<url::Url, FirstPartyCapabilityError> {
+) -> Result<url::Url, SkillManagementCapabilityError> {
     let mut url = build_github_api_base_url(owner, repo)?;
     {
         let mut segments = url.path_segments_mut().map_err(|error| {
@@ -219,7 +219,7 @@ fn build_github_contents_url(
                 url_context = "github_contents",
                 "failed to build GitHub URL path"
             );
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("contents");
         if let Some(path) = path {
@@ -237,7 +237,7 @@ fn build_github_raw_url(
     repo: &str,
     git_ref: &str,
     path: &Path,
-) -> Result<url::Url, FirstPartyCapabilityError> {
+) -> Result<url::Url, SkillManagementCapabilityError> {
     validate_github_repo_components(owner, repo)?;
     let mut url = validate_skill_url("https://raw.githubusercontent.com")?;
     {
@@ -247,14 +247,14 @@ fn build_github_raw_url(
                 url_context = "github_raw",
                 "failed to build GitHub URL path"
             );
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push(owner);
         segments.push(repo);
         segments.push(git_ref);
         for segment in path.iter() {
             let segment = segment.to_str().ok_or_else(|| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
             })?;
             segments.push(segment);
         }
@@ -267,9 +267,9 @@ fn build_github_matching_refs_url(
     repo: &str,
     namespace: &str,
     prefix: &str,
-) -> Result<url::Url, FirstPartyCapabilityError> {
+) -> Result<url::Url, SkillManagementCapabilityError> {
     if !matches!(namespace, "heads" | "tags") || !is_safe_github_component(prefix) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -281,7 +281,7 @@ fn build_github_matching_refs_url(
                 url_context = "github_matching_refs",
                 "failed to build GitHub URL path"
             );
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("git");
         segments.push("matching-refs");
@@ -305,48 +305,48 @@ fn github_api_headers() -> Vec<(String, String)> {
 }
 
 async fn fetch_github_api_json<T: for<'de> Deserialize<'de>>(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<T, FirstPartyCapabilityError> {
+) -> Result<T, SkillManagementCapabilityError> {
     let (value, _) = fetch_github_api_json_with_body_len(request, url, usage, api_budget).await?;
     Ok(value)
 }
 
 async fn fetch_github_api_json_with_body_len<T: for<'de> Deserialize<'de>>(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<(T, u64), FirstPartyCapabilityError> {
+) -> Result<(T, u64), SkillManagementCapabilityError> {
     api_budget.consume()?;
     let response = fetch_url_response(request, url, usage, github_api_headers()).await?;
     if !(200..300).contains(&response.status) {
         return Err(
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage.clone()),
         );
     }
     let body_len = response.body.len() as u64;
     let value = serde_json::from_slice(&response.body).map_err(|_| {
-        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             .with_usage(usage.clone())
     })?;
     Ok((value, body_len))
 }
 
 async fn fetch_github_contents_dir(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<(Vec<GitHubContentFile>, u64), FirstPartyCapabilityError> {
+) -> Result<(Vec<GitHubContentFile>, u64), SkillManagementCapabilityError> {
     api_budget.consume()?;
     let response = fetch_url_response(request, url, usage, github_api_headers()).await?;
     if !(200..300).contains(&response.status) {
         return Err(
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage.clone()),
         );
     }
@@ -357,41 +357,43 @@ async fn fetch_github_contents_dir(
         .find(|byte| !byte.is_ascii_whitespace())
         .is_none_or(|byte| byte != b'[')
     {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
     let body_len = response.body.len() as u64;
     let value = serde_json::from_slice(&response.body).map_err(|_| {
-        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             .with_usage(usage.clone())
     })?;
     Ok((value, body_len))
 }
 
 async fn resolve_github_default_branch(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     owner: &str,
     repo: &str,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<String, FirstPartyCapabilityError> {
+) -> Result<String, SkillManagementCapabilityError> {
     let api_url = build_github_api_base_url(owner, repo)?;
     let meta: GitHubRepoMetadata =
         fetch_github_api_json(request, &api_url, usage, api_budget).await?;
     meta.default_branch
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))
+        .ok_or_else(|| {
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })
 }
 
 async fn resolve_github_ref_commit_sha(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     owner: &str,
     repo: &str,
     git_ref: &str,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<String, FirstPartyCapabilityError> {
+) -> Result<String, SkillManagementCapabilityError> {
     let mut commits_url = build_github_api_base_url(owner, repo)?;
     {
         let mut segments = commits_url.path_segments_mut().map_err(|error| {
@@ -400,7 +402,7 @@ async fn resolve_github_ref_commit_sha(
                 url_context = "github_commits",
                 "failed to build GitHub URL path"
             );
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("commits");
     }
@@ -415,9 +417,11 @@ async fn resolve_github_ref_commit_sha(
         .first()
         .map(|commit| commit.sha.as_str())
         .filter(|sha| !sha.trim().is_empty())
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+        .ok_or_else(|| {
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })?;
     if !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::OperationFailed,
         ));
     }
@@ -425,15 +429,15 @@ async fn resolve_github_ref_commit_sha(
 }
 
 async fn resolve_github_ref_from_segments(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     owner: &str,
     repo: &str,
     segments: &[String],
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<(String, Vec<String>), FirstPartyCapabilityError> {
+) -> Result<(String, Vec<String>), SkillManagementCapabilityError> {
     if segments.is_empty() || segments.len() > MAX_GITHUB_PATH_SEGMENTS {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -465,17 +469,17 @@ async fn resolve_github_ref_from_segments(
             return Ok((git_ref, segments[consumed..].to_vec()));
         }
     }
-    Err(FirstPartyCapabilityError::new(
+    Err(SkillManagementCapabilityError::new(
         RuntimeDispatchErrorKind::OperationFailed,
     ))
 }
 
 async fn resolve_github_tree_request(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     repo: GitHubRepoRequest,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<GitHubRepoRef, FirstPartyCapabilityError> {
+) -> Result<GitHubRepoRef, SkillManagementCapabilityError> {
     validate_github_repo_components(&repo.owner, &repo.repo)?;
     if let Some(segments) = repo.tree_segments {
         let (candidate_ref, remaining) = resolve_github_ref_from_segments(
@@ -508,14 +512,14 @@ async fn resolve_github_tree_request(
 }
 
 async fn resolve_github_blob_download_url(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     blob: GitHubBlobRequest,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<url::Url, FirstPartyCapabilityError> {
+) -> Result<url::Url, SkillManagementCapabilityError> {
     validate_github_repo_components(&blob.owner, &blob.repo)?;
     if blob.blob_segments.len() < 2 || blob.blob_segments.len() > MAX_GITHUB_PATH_SEGMENTS {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -529,7 +533,7 @@ async fn resolve_github_blob_download_url(
     )
     .await?;
     if remaining.is_empty() {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -543,18 +547,18 @@ async fn resolve_github_blob_download_url(
     let metadata: GitHubContentFile =
         fetch_github_api_json(request, &contents_url, usage, api_budget).await?;
     if metadata.entry_type != "file" {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::OperationFailed,
         ));
     }
     let Some(download_url) = metadata.download_url else {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::OperationFailed,
         ));
     };
     let parsed = validate_skill_url(&download_url)?;
     if parsed.host_str() != Some("raw.githubusercontent.com") {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -562,12 +566,12 @@ async fn resolve_github_blob_download_url(
 }
 
 async fn fetch_github_repo_payload(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     source_url: &str,
     repo_request: GitHubRepoRequest,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
+) -> Result<SkillUrlPayload, SkillManagementCapabilityError> {
     let repo = resolve_github_tree_request(request, repo_request, usage, api_budget).await?;
     let commit_sha = resolve_github_ref_commit_sha(
         request,
@@ -608,21 +612,20 @@ async fn fetch_github_repo_payload(
 }
 
 async fn fetch_github_contents_bundle_payload(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     source_url: &str,
     repo: GitHubRepoRef,
     commit_sha: &str,
     usage: &mut ResourceUsage,
     api_budget: &mut GitHubApiBudget,
-) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
-    let root_subdir = repo
-        .subdir
-        .as_deref()
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+) -> Result<SkillUrlPayload, SkillManagementCapabilityError> {
+    let root_subdir = repo.subdir.as_deref().ok_or_else(|| {
+        SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+    })?;
     let root_path = normalize_archive_path(Path::new(root_subdir))?;
     let root_dir = normalized_archive_path_to_string(&root_path)?;
     if !root_dir.split('/').all(is_safe_github_component) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -635,7 +638,7 @@ async fn fetch_github_contents_bundle_payload(
     while let Some(directory) = directories.pop_front() {
         visited_directories += 1;
         if visited_directories > MAX_GITHUB_CONTENT_API_REQUESTS {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
@@ -647,16 +650,16 @@ async fn fetch_github_contents_bundle_payload(
         contents_response_bytes = contents_response_bytes
             .checked_add(response_bytes)
             .ok_or_else(|| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge)
             })?;
         if contents_response_bytes > MAX_GITHUB_CONTENT_API_RESPONSE_BYTES {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
         for entry in entries {
             let entry_path = entry.path.ok_or_else(|| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             })?;
             match entry.entry_type.as_str() {
                 "dir" => {
@@ -670,7 +673,7 @@ async fn fetch_github_contents_bundle_payload(
                         continue;
                     };
                     if !seen_files.insert(relative) {
-                        return Err(FirstPartyCapabilityError::new(
+                        return Err(SkillManagementCapabilityError::new(
                             RuntimeDispatchErrorKind::InputEncode,
                         ));
                     }
@@ -694,15 +697,17 @@ async fn fetch_github_contents_bundle_payload(
     Ok(payload)
 }
 
-fn normalized_archive_path_to_string(path: &Path) -> Result<String, FirstPartyCapabilityError> {
+fn normalized_archive_path_to_string(
+    path: &Path,
+) -> Result<String, SkillManagementCapabilityError> {
     let mut segments = Vec::new();
     for segment in path.iter() {
         segments.push(segment.to_str().ok_or_else(|| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         })?);
     }
     if segments.is_empty() {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }

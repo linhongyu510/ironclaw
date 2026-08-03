@@ -52,6 +52,7 @@
 ## Wave 3 — Kernel + loop narrowing (WS3 + WS4, non-gated parts)
 
 - Sequence: first-party tools → `extensions/ironclaw_extension_support/` (registrar pattern; one tool family per PR) → `sandbox` lane merge (no production behavior — verify at land time) → `mcp` contracts flip → obligations/builder internal splits → secrets direct-consumer tightening ⚠ (port replacements before edge removal) → runner sheds (composition functions out, model gateway → loop_host, tool disclosure) → re-layer runner/hooks/processes → `wit/` move.
+- ✎ **First-party tools, started 2026-08-03.** Family 1 (skill management / url-install) landed and took `host_runtime → ironclaw_skills` with it (exceptions 13 → 12). Two things a later family PR should know before costing itself: only the tool's *executor* moves — its handler, manifest, and registry wiring stay host-side because `extension_support`'s boundary rule forbids `ironclaw_host_runtime` and `ironclaw_extensions` (PROPOSAL §6.8.4, amended with the family); and `host_runtime → ironclaw_extension_support` is **not** divisible family-by-family — it falls only with the last executor, so no intermediate family PR should promise it.
 - **Milestone:** exceptions 12 → 0. The ratchet pins it. `host_runtime` has no Docker/DB-driver cone; runner is the thin loop-hosting adapter.
 
 ## Wave 4 — Composition, app, domains (WS6)

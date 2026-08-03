@@ -1,18 +1,45 @@
-use std::path::PathBuf;
+//! HTTPS/GitHub skill-source fetching for `builtin.skill_install`.
+//!
+//! Moved out of `ironclaw_host_runtime::first_party_tools::skill_url_install`
+//! with WS3 (target-architecture CHECKLIST WS3, PROPOSAL §6.8.4). It reaches
+//! the network only through the host-declared [`RuntimeHttpEgress`] port
+//! supplied per invocation, so it carries no kernel dependency: the host
+//! runtime adapts an already-authorized capability request into
+//! [`SkillUrlFetchContext`], exactly as it does for the gsuite and web-access
+//! executors.
 
+use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
+
+use futures_util::FutureExt as _;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     dispatch::RuntimeDispatchErrorKind,
-    http::{RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest},
-    resource::ResourceUsage,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    },
+    ids::CapabilityId,
+    resource::{ResourceScope, ResourceUsage},
     runtime::RuntimeKind,
 };
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::skills::SkillManagementCapabilityError;
 
 mod bundle;
 mod github;
 mod zip_bundle;
+
+/// The host-runtime-free slice of an already-authorized capability request the
+/// skill-URL fetch path needs: caller scope, the capability being served, and
+/// the mediated egress port. Everything else on the host's dispatch input
+/// (mounts, filesystem, secret staging, process ports) is deliberately absent —
+/// this path never touches it.
+#[derive(Clone)]
+pub struct SkillUrlFetchContext {
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+}
 
 const SKILL_URL_RESPONSE_BODY_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 const SKILL_URL_FETCH_TIMEOUT_MS: u32 = 10_000;
@@ -69,10 +96,10 @@ pub(super) struct FetchedBytes {
 }
 
 pub(super) async fn fetch_skill_url_payload(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &str,
     usage: &mut ResourceUsage,
-) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
+) -> Result<SkillUrlPayload, SkillManagementCapabilityError> {
     let parsed = validate_skill_url(url)?;
     if let Some(payload) = github::fetch_payload_if_supported(request, &parsed, usage).await? {
         return Ok(payload);
@@ -89,7 +116,7 @@ pub(super) async fn fetch_skill_url_payload(
 
     Ok(SkillUrlPayload {
         content: String::from_utf8(bytes).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage.clone())
         })?,
         files: Vec::new(),
@@ -97,23 +124,23 @@ pub(super) async fn fetch_skill_url_payload(
 }
 
 async fn fetch_url_bytes(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
-) -> Result<Vec<u8>, FirstPartyCapabilityError> {
+) -> Result<Vec<u8>, SkillManagementCapabilityError> {
     fetch_url_bytes_with_headers(request, url, usage, Vec::new()).await
 }
 
 async fn fetch_url_bytes_with_headers(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
     headers: Vec<(String, String)>,
-) -> Result<Vec<u8>, FirstPartyCapabilityError> {
+) -> Result<Vec<u8>, SkillManagementCapabilityError> {
     let response = fetch_url_response(request, url, usage, headers).await?;
     if !(200..300).contains(&response.status) {
         return Err(
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage.clone()),
         );
     }
@@ -121,16 +148,17 @@ async fn fetch_url_bytes_with_headers(
 }
 
 pub(super) async fn fetch_url_response(
-    request: &FirstPartyCapabilityRequest,
+    request: &SkillUrlFetchContext,
     url: &url::Url,
     usage: &mut ResourceUsage,
     headers: Vec<(String, String)>,
-) -> Result<FetchedBytes, FirstPartyCapabilityError> {
+) -> Result<FetchedBytes, SkillManagementCapabilityError> {
     let egress = request
-        .services
         .runtime_http_egress
         .as_ref()
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied))?
+        .ok_or_else(|| {
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied)
+        })?
         .clone();
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
@@ -146,11 +174,11 @@ pub(super) async fn fetch_url_response(
         save_body_to: None,
         timeout_ms: Some(SKILL_URL_FETCH_TIMEOUT_MS),
     };
-    let response = super::run_egress_catching_panic(
+    let response = run_egress_catching_panic(
         egress.execute(http_request),
         "skill URL HTTP egress future panicked",
         || {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::Backend)
                 .with_usage(usage.clone())
         },
     )
@@ -165,21 +193,21 @@ pub(super) async fn fetch_url_response(
     })
 }
 
-fn validate_skill_url(url: &str) -> Result<url::Url, FirstPartyCapabilityError> {
+fn validate_skill_url(url: &str) -> Result<url::Url, SkillManagementCapabilityError> {
     let parsed = url::Url::parse(url)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
+        .map_err(|_| SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
     if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
     let Some(host) = parsed.host_str() else {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     };
     if !ALLOWED_SKILL_URL_HOSTS.contains(&host) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
@@ -201,10 +229,30 @@ fn skill_url_network_policy() -> NetworkPolicy {
     }
 }
 
+/// Run a mediated-egress future, converting a panic into a `Backend` dispatch
+/// failure instead of unwinding through the capability boundary. Mirrors the
+/// host runtime's own `run_egress_catching_panic`, which the builtin HTTP tool
+/// still uses; the two are independent because the crates no longer share a
+/// dependency edge.
+async fn run_egress_catching_panic<F, P>(
+    future: F,
+    panic_message: &'static str,
+    on_panic: P,
+) -> Result<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>, SkillManagementCapabilityError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+    P: FnOnce() -> SkillManagementCapabilityError,
+{
+    AssertUnwindSafe(future).catch_unwind().await.map_err(|_| {
+        tracing::error!("{panic_message}");
+        on_panic()
+    })
+}
+
 fn skill_url_fetch_error(
     error: RuntimeHttpEgressError,
     usage: &mut ResourceUsage,
-) -> FirstPartyCapabilityError {
+) -> SkillManagementCapabilityError {
     usage.network_egress_bytes = usage
         .network_egress_bytes
         .saturating_add(error.request_bytes());
@@ -218,7 +266,7 @@ fn skill_url_fetch_error(
             RuntimeDispatchErrorKind::OutputTooLarge
         }
     };
-    FirstPartyCapabilityError::new(kind).with_usage(usage.clone())
+    SkillManagementCapabilityError::new(kind).with_usage(usage.clone())
 }
 
 #[cfg(test)]
@@ -231,7 +279,6 @@ mod tests {
         ids::{CapabilityId, InvocationId, TenantId, UserId},
         resource::ResourceScope,
     };
-    use serde_json::json;
 
     use super::*;
 
@@ -247,12 +294,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_url_response_maps_panicking_runtime_egress_to_backend_failure() {
-        let request = FirstPartyCapabilityRequest::request_for_test(
-            CapabilityId::new("builtin.skill_install").unwrap(),
-            sample_scope(),
-            json!({}),
-            Some(Arc::new(PanickingRuntimeHttpEgress)),
-        );
+        let request = SkillUrlFetchContext {
+            capability_id: CapabilityId::new("builtin.skill_install").unwrap(),
+            scope: sample_scope(),
+            runtime_http_egress: Some(Arc::new(PanickingRuntimeHttpEgress)),
+        };
         let url = validate_skill_url(
             "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md",
         )
@@ -263,7 +309,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
         assert_eq!(error.usage(), Some(&ResourceUsage::default()));
     }
 

@@ -4153,7 +4153,19 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 13;
+///
+/// **13 → 12 (WS3, first-party skill tools move to `extension_support`).**
+/// `host_runtime` reached `ironclaw_skills` for exactly two things, both inside
+/// `first_party_tools/`: `InstalledSkillMetadataSource` when rewriting a
+/// URL install's input, and the `MAX_INSTALL_BUNDLE_*` limits enforced while
+/// unpacking a fetched bundle. Both moved to
+/// `ironclaw_extension_support::skills` (which already owned the executor half
+/// and already depends on `ironclaw_skills`), so the manifest edge is gone
+/// rather than waived. `ironclaw_skills` survives here as a **dev**-dependency
+/// only — the host's own tests still assert against the shared bundle limits,
+/// and dev edges are outside the matrix by construction
+/// (`is_normal_dependency`).
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 12;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4169,13 +4181,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_skills",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
     },
     LayerMatrixException {
         crate_name: "ironclaw_capabilities",

@@ -200,17 +200,15 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "oauth2.googleapis.com",
         "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
     ),
-    (
-        "crates/ironclaw_host_runtime/src/first_party_tools/skill_url_install",
-        "github",
-        "skill installation from GitHub repositories — GitHub as a code host, not the \
-         github extension",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/first_party_tools/skill_url_install.rs",
-        "api.github.com",
-        "GitHub content API allowlist for skill installation",
-    ),
+    // WS3 removed two carve-outs that used to live here — the skill-URL
+    // installer's `github` and `api.github.com` entries. The installer moved to
+    // `ironclaw_extension_support::skills::url_install`, and that crate is in
+    // `SANCTIONED_SCAN_EXEMPT_CRATES` (it is the sanctioned vendor-name home),
+    // so the scanner no longer reaches those files at all. Its two siblings
+    // survive further down because their subjects stayed in `host_runtime`:
+    // `first_party_tools/skill_management.rs` (the tool manifest description)
+    // and `first_party_tools/schemas.rs` (the input schema) are host-owned
+    // capability *declarations*, not the executor.
     (
         "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
         "github",

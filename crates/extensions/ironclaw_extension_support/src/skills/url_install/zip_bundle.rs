@@ -2,7 +2,7 @@ use std::{collections::HashSet, io::Read, path::Path};
 
 use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 
-use crate::FirstPartyCapabilityError;
+use crate::skills::SkillManagementCapabilityError;
 
 use super::{
     MAX_TOTAL_UNZIPPED_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILE_ENTRIES, SkillUrlPayloadFile,
@@ -12,26 +12,27 @@ use super::{
 pub(super) async fn extract_skill_bundle_blocking(
     data: Vec<u8>,
     requested_subdir: Option<String>,
-) -> Result<SkillBundle, FirstPartyCapabilityError> {
+) -> Result<SkillBundle, SkillManagementCapabilityError> {
     tokio::task::spawn_blocking(move || extract_skill_bundle(&data, requested_subdir.as_deref()))
         .await
         .map_err(|error| {
             if error.is_panic() {
                 tracing::error!("skill URL ZIP extraction worker panicked");
             }
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         })?
 }
 
 pub(super) fn extract_skill_bundle(
     data: &[u8],
     requested_subdir: Option<&str>,
-) -> Result<SkillBundle, FirstPartyCapabilityError> {
+) -> Result<SkillBundle, SkillManagementCapabilityError> {
     let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|_| {
+        SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+    })?;
     if archive.len() > MAX_ZIP_FILE_ENTRIES {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::OutputTooLarge,
         ));
     }
@@ -39,11 +40,11 @@ pub(super) fn extract_skill_bundle(
     let mut raw_paths = Vec::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         if !file.is_dir() {
             if raw_paths.len() >= MAX_ZIP_FILE_ENTRIES {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(SkillManagementCapabilityError::new(
                     RuntimeDispatchErrorKind::OutputTooLarge,
                 ));
             }
@@ -58,13 +59,13 @@ pub(super) fn extract_skill_bundle(
 
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         if file.is_dir() {
             continue;
         }
         if file.size() > MAX_ZIP_ENTRY_BYTES {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
@@ -79,7 +80,7 @@ pub(super) fn extract_skill_bundle(
             continue;
         }
         if !seen_paths.insert(path.clone()) {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::InputEncode,
             ));
         }
@@ -89,20 +90,20 @@ pub(super) fn extract_skill_bundle(
             .take(MAX_ZIP_ENTRY_BYTES + 1)
             .read_to_end(&mut contents)
             .map_err(|_| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             })?;
         if contents.len() as u64 > MAX_ZIP_ENTRY_BYTES {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
         total_unzipped_bytes = total_unzipped_bytes
             .checked_add(contents.len() as u64)
             .ok_or_else(|| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge)
             })?;
         if total_unzipped_bytes > MAX_TOTAL_UNZIPPED_BYTES {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
@@ -115,7 +116,7 @@ pub(super) fn extract_skill_bundle(
     let requested_dir = if let Some(subdir) = requested_subdir {
         let normalized = normalize_archive_path(Path::new(subdir))?;
         if !skill_dirs.contains(&normalized) {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OperationFailed,
             ));
         }
@@ -123,13 +124,13 @@ pub(super) fn extract_skill_bundle(
     } else {
         match skill_dirs.len() {
             0 => {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(SkillManagementCapabilityError::new(
                     RuntimeDispatchErrorKind::OperationFailed,
                 ));
             }
             1 => skill_dirs.into_iter().next().unwrap_or_default(),
             _ => {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(SkillManagementCapabilityError::new(
                     RuntimeDispatchErrorKind::InputEncode,
                 ));
             }
@@ -147,17 +148,17 @@ pub(super) fn extract_skill_bundle(
         }
         if relative == Path::new("SKILL.md") {
             if contents.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(SkillManagementCapabilityError::new(
                     RuntimeDispatchErrorKind::OutputTooLarge,
                 ));
             }
             skill_md = Some(String::from_utf8(contents).map_err(|_| {
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             })?);
             continue;
         }
         if extra_files.len() >= ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
-            return Err(FirstPartyCapabilityError::new(
+            return Err(SkillManagementCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
@@ -167,8 +168,9 @@ pub(super) fn extract_skill_bundle(
         });
     }
 
-    let skill_md = skill_md
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    let skill_md = skill_md.ok_or_else(|| {
+        SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+    })?;
     Ok(SkillBundle {
         skill_md,
         files: extra_files,
