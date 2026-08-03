@@ -21,6 +21,15 @@
   that some `EffectiveRuntimePolicy` value is present.
 - First-party runtime tools belong under `first_party_tools/`; do not append new
   built-ins to broad runtime files.
+- What belongs there is the **host half**: the `CapabilityManifest`, the
+  registry wiring, and a thin `FirstPartyCapabilityHandler` that translates this
+  crate's dispatch types into the executor's own request/error pair. The
+  **executor half** — parsing, network fetching through `RuntimeHttpEgress`,
+  extraction, domain calls — belongs in `ironclaw_extension_support`, which may
+  not name this crate (its `BoundaryRule` forbids it). WS3 is moving the
+  existing families across that seam one at a time; the skill-install family
+  (`extension_support::skills::{url_install, resolve_install_input}`) is the
+  worked example.
 
 ## Adding code
 
