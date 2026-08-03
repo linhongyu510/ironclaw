@@ -120,6 +120,7 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
@@ -180,6 +181,10 @@ pub use fs_browse::{
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
     ProductView,
+};
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkService,
 };
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
@@ -2208,6 +2213,7 @@ pub struct RebornServices<
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    ironhub_link: Option<Arc<dyn IronhubLinkService>>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2288,6 +2294,7 @@ where
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -2355,6 +2362,26 @@ where
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
         self
+    }
+
+    pub fn with_ironhub_link_service(mut self, ironhub_link: Arc<dyn IronhubLinkService>) -> Self {
+        self.ironhub_link = Some(ironhub_link);
+        self
+    }
+
+    pub async fn ironhub_deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, ProductSurfaceError> {
+        let service = self
+            .ironhub_link
+            .as_ref()
+            .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
+        service
+            .deliver_install(caller, request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
     }
 
     /// Wire the read-only port exposing the runtime's live active/default model
@@ -6643,12 +6670,22 @@ fn map_timeline_probe_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::InvalidMessageTimestamp { .. }
-        | SessionThreadError::Backend(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Unavailable,
-            ProductSurfaceErrorKind::TimelineUnavailable,
-            503,
-            true,
-        ),
+        | SessionThreadError::Backend(_) => {
+            // The boundary error is sanitized to a retryable 503; the failure
+            // still has to be visible server-side or it is undiagnosable. Log
+            // the detail-free kind rather than the Display, whose Backend
+            // variant carries virtual tenant/user paths and raw backend text.
+            tracing::warn!(
+                error_kind = error.kind_name(),
+                "timeline probe failed; returning retryable TimelineUnavailable"
+            );
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::Unavailable,
+                ProductSurfaceErrorKind::TimelineUnavailable,
+                503,
+                true,
+            )
+        }
         _ => map_ownership_probe_error(error),
     }
 }
