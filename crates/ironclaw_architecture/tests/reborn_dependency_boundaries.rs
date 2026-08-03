@@ -1014,10 +1014,18 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let host_runtime_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
-    let scripts = std::fs::read_to_string(root.join("crates/ironclaw_scripts/src/lib.rs"))
-        .expect("script runtime lib.rs must be readable");
-    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_scripts/Cargo.toml"))
-        .expect("script runtime Cargo.toml must be readable");
+    // WS3 re-point: the script lane merged into `ironclaw_sandbox` and no longer
+    // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
+    // non-vacuous across that move (and the family `git mv` still to come) —
+    // reading one hardcoded file would have gone silently green.
+    let scripts = concatenated_crate_sources(&root.join("crates/ironclaw_sandbox/src"));
+    assert!(
+        scripts.contains("pub struct ScriptRuntime"),
+        "sandbox lane scan is vacuous: it found no script-lane source under \
+         crates/ironclaw_sandbox/src (did the lane move again?)"
+    );
+    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_sandbox/Cargo.toml"))
+        .expect("sandbox lane Cargo.toml must be readable");
     let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
         .expect("MCP runtime lib.rs must be readable");
     let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
@@ -1133,7 +1141,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     for pattern in forbidden_script_lane_surface {
         assert!(
             !scripts.contains(pattern),
-            "ironclaw_scripts must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
+            "ironclaw_sandbox must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
         );
     }
 
@@ -1142,7 +1150,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // now names the crate that actually owns `RuntimeDispatcher`.
     assert!(
         !scripts_manifest.contains("ironclaw_capabilities"),
-        "ironclaw_scripts must not depend on ironclaw_capabilities; script dispatcher adapters are host-runtime-private composition"
+        "ironclaw_sandbox must not depend on ironclaw_capabilities; script dispatcher adapters are host-runtime-private composition"
     );
 
     let forbidden_mcp_lane_surface = [
@@ -2374,7 +2382,7 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     let root = workspace_root();
     let runtime_src_roots = [
         "crates/ironclaw_wasm/src",
-        "crates/ironclaw_scripts/src",
+        "crates/ironclaw_sandbox/src",
         "crates/ironclaw_mcp/src",
         "crates/ironclaw_host_runtime/src",
     ];
@@ -2988,7 +2996,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
@@ -3031,7 +3039,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_skills",
                 "ironclaw_storage",
                 "ironclaw_threads",
@@ -3086,7 +3094,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
@@ -3131,7 +3139,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_threads",
                 "ironclaw_tui",
@@ -3171,7 +3179,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_tui",
                 "ironclaw_wasm",
@@ -3205,7 +3213,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -3280,7 +3288,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -3312,7 +3320,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_product",
                 "ironclaw_reborn_composition",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3350,7 +3358,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_openai_compat",
                 "ironclaw_runner",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3380,7 +3388,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // machinery (`ironclaw_extension_host`, `ironclaw_extensions`,
             // `ironclaw_extension_support`), no lanes
             // (`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`,
-            // `ironclaw_scripts`) and no turn kernel (`ironclaw_turns`,
+            // `ironclaw_sandbox`) and no turn kernel (`ironclaw_turns`,
             // `ironclaw_runner`, `ironclaw_loop_host`). Operator administers
             // LLM providers, rings logs, and controls an OS service; none of
             // that needs to see a turn.
@@ -3403,7 +3411,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_openai_compat",
                 "ironclaw_runner",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3455,7 +3463,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_slack_extension",
@@ -3533,7 +3541,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_triggers",
                 "ironclaw_turns",
@@ -3555,7 +3563,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3577,7 +3585,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3597,7 +3605,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3617,7 +3625,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3635,7 +3643,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3662,7 +3670,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3695,7 +3703,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_telegram_extension",
@@ -3747,7 +3755,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_telegram_extension",
@@ -3780,7 +3788,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_tui",
@@ -3820,7 +3828,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -3846,7 +3854,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3868,7 +3876,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3886,7 +3894,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -3904,7 +3912,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3933,7 +3941,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // ironclaw_safety is permitted: thread/transcript storage
                 // validates provider-originated replay metadata before it can
                 // be persisted or exposed back to a model-visible context.
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_tui",
@@ -3951,7 +3959,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3967,7 +3975,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3991,7 +3999,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // kernel migration: turns adapts its existing turn-run store
                 // to the canonical process lifecycle vocabulary owned there.
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -4015,7 +4023,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_runner",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -4062,7 +4070,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -4078,7 +4086,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -4198,7 +4206,7 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "re-verified during WS3: the lane needs the ResourceGovernor authority port (reserve/reconcile/release) and the ResourceError denial cone (ResourceDenial/ResourceApprovalNeeded/BudgetWarning/ResourceDimension/ResourceAccount/ResourceValue) - NOT the estimate/usage vocabulary, which already lives in host_api::resource and which this lane already imports from there. PROPOSAL 6.6.3's \"moving the shapes it needs into host_api::resource\" is refuted as written: moving a 10-method kernel budget-authority trait plus its account/limit cone into the zero-internal-dep contracts crate is a kernel carve-out, not a vocabulary move. It clears when the lane takes a narrow reserve/reconcile/release port instead of the governor - a design change owed its own slice",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_scripts",
+        crate_name: "ironclaw_sandbox",
         dependency_name: "ironclaw_resources",
         introduced: "2026-07-09",
         removes_in: "WS3",
@@ -4868,4 +4876,42 @@ fn collect_forbidden_uses_detects_violation() {
         "violation should report the forbidden-use reason: {:?}",
         violations
     );
+}
+
+/// Concatenate every `.rs` file under a crate's `src/` for substring scanning.
+///
+/// Every read is fatal: a scanner that silently skips an unreadable file
+/// reports success while measuring nothing (WS10's guardrail rule).
+fn concatenated_crate_sources(src_root: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+        let mut paths: Vec<_> = entries
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()))
+                    .path()
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push_str(
+                    &std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                );
+                out.push('\n');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(src_root, &mut out);
+    assert!(
+        !out.is_empty(),
+        "no Rust sources found under {}",
+        src_root.display()
+    );
+    out
 }

@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_scripts::ScriptRuntimeHttpAdapter;
+use ironclaw_sandbox::ScriptRuntimeHttpAdapter;
 
 #[tokio::test]
 async fn script_host_http_adapter_uses_shared_runtime_egress() {

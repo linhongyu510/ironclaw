@@ -59,7 +59,6 @@ mod process_aliases;
 mod process_output;
 mod process_port;
 mod production;
-mod sandbox_process;
 mod services;
 mod surface;
 mod user_profile_source;
@@ -131,21 +130,11 @@ pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
     PostEditCheckConfigError, PostEditCheckService,
 };
-pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
-pub use process_port::{
-    CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
-    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
-};
+pub use process_port::{HostProcessPort, RuntimeProcessPort, TenantSandboxProcessPort};
 pub use production::DefaultHostRuntime;
-pub use sandbox_process::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RebornSandboxConfig,
-    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
-    RebornSandboxSecretBroker, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
-    connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
-    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
-};
+// The sandbox lane (`sandbox_process`) moved to `ironclaw_sandbox` with the
+// WS3 merge; its Docker/CA cone is a runtimes-layer concern, and nothing
+// outside this crate ever consumed these re-exports.
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain
 /// private; `reborn_host_runtime_services_do_not_expose_lower_substrate_handles`

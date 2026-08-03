@@ -1,4 +1,4 @@
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 use super::reject_nul;
 

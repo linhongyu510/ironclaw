@@ -104,20 +104,20 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/ca.rs",
         count: 4,
     },
     // Same W6 retirement trigger as the `ca.rs` entry above.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/credential_firewall.rs",
         count: 5,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/attribution.rs",
         count: 4,
     },
     FrozenPathCount {
@@ -291,13 +291,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/ca.rs",
         count: 2,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/credential_firewall.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -309,7 +309,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {

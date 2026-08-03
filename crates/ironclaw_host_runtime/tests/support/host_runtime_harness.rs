@@ -34,6 +34,9 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
     Timestamp,
@@ -70,10 +73,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime, HostRuntime,
-    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeInvocation,
-    RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport, builtin_first_party_package,
+    DefaultHostRuntime, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
+    RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeProcessPort, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -89,7 +91,7 @@ use ironclaw_processes::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_scripts::{
+use ironclaw_sandbox::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -746,7 +748,7 @@ impl ScriptExecutor for RecordingScriptExecutor {
         &self,
         governor: &dyn ResourceGovernor,
         request: ScriptExecutionRequest<'_>,
-    ) -> Result<ScriptExecutionResult, ironclaw_scripts::ScriptError> {
+    ) -> Result<ScriptExecutionResult, ironclaw_sandbox::ScriptError> {
         self.mounts.lock().unwrap().push(request.mounts.clone());
         let reservation = match request.resource_reservation.clone() {
             Some(reservation) => reservation,

@@ -25,7 +25,7 @@ pub(crate) fn docker_tests_required() -> bool {
 
 /// True iff the `docker` CLI can reach a live daemon (`docker version`
 /// succeeds only against a running daemon). Mirrors the gate
-/// `ironclaw_process_sandbox/tests/docker_security.rs` already uses.
+/// `ironclaw_sandbox/tests/docker_security.rs` already uses.
 ///
 /// When `IRONCLAW_REQUIRE_DOCKER_TESTS=1` and no daemon is reachable, this
 /// panics rather than returning `false` — callers gate on this function

@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_resources::*;
-use ironclaw_scripts::*;
+use ironclaw_sandbox::*;
 use serde_json::json;
 
 #[test]

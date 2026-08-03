@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use ironclaw_process_sandbox::DEFAULT_PROCESS_SANDBOX_IMAGE;
+use ironclaw_sandbox::DEFAULT_PROCESS_SANDBOX_IMAGE;
 
 #[test]
 fn docker_image_enforces_basic_security_boundary_when_available() {

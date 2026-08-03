@@ -1,6 +1,6 @@
 //! Script runner contracts for IronClaw Reborn.
 //!
-//! `ironclaw_scripts` executes declared script/CLI capabilities through a
+//! `ironclaw_sandbox` executes declared script/CLI capabilities through a
 //! host-selected backend. Extension manifests describe the command metadata, but
 //! extensions do not receive raw Docker flags, host paths, ambient environment,
 //! secrets, or network by default.
@@ -75,7 +75,7 @@ pub struct ScriptExecutionRequest<'a> {
     /// The lane deliberately does **not** receive the `ExtensionPackage`: it
     /// read only the id, the capability descriptors, and the runtime stanza,
     /// and taking the package forced a `runtimes -> loops` dependency on the
-    /// registry crate (the W7 `ironclaw_scripts -> ironclaw_extensions` exception).
+    /// registry crate (the W7 `ironclaw_sandbox -> ironclaw_extensions` exception).
     /// The caller, which owns the package, projects those three.
     pub extension: &'a ExtensionId,
     pub capabilities: &'a [CapabilityDescriptor],

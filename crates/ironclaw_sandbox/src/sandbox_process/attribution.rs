@@ -57,7 +57,7 @@ use async_trait::async_trait;
 use bollard::{Docker, container::ListContainersOptions, models::ContainerSummary};
 use ironclaw_host_api::ids::{TenantId, UserId};
 
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 use crate::sandbox_process::registry::{label_tenant, label_user};
 

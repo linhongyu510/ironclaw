@@ -34,7 +34,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_memory",
     "ironclaw_host_runtime",
     "ironclaw_mcp",
-    "ironclaw_scripts",
+    "ironclaw_sandbox",
     "ironclaw_wasm",
     "ironclaw_turns",
     "ironclaw_threads",

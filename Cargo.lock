@@ -4026,7 +4026,6 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "base64 0.23.0",
- "bollard",
  "chrono",
  "chrono-tz",
  "deadpool-postgres",
@@ -4053,7 +4052,6 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_observability",
  "ironclaw_outbound",
- "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
@@ -4061,7 +4059,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
- "ironclaw_scripts",
+ "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_triggers",
@@ -4071,7 +4069,6 @@ dependencies = [
  "jsonschema",
  "libc",
  "libsql",
- "rcgen",
  "rust_decimal",
  "secrecy",
  "serde",
@@ -4080,7 +4077,6 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror 2.0.19",
- "time",
  "tokio",
  "tokio-postgres",
  "tokio-util",
@@ -4092,7 +4088,6 @@ dependencies = [
  "wat",
  "wit-component 0.254.0",
  "wit-parser 0.254.0",
- "x509-parser",
  "zeroize",
  "zip",
 ]
@@ -4188,10 +4183,10 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_observability",
  "ironclaw_outbound",
- "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_safety",
+ "ironclaw_sandbox",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_trust",
@@ -4359,15 +4354,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_process_sandbox"
-version = "0.1.0"
-dependencies = [
- "ironclaw_host_api",
- "serde",
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -4857,7 +4843,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runner",
  "ironclaw_safety",
- "ironclaw_scripts",
+ "ironclaw_sandbox",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_trust",
@@ -4905,20 +4891,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_scripts"
+name = "ironclaw_sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bollard",
+ "chrono",
  "futures-util",
+ "hex",
+ "ironclaw_common",
  "ironclaw_extension_contracts",
  "ironclaw_extensions",
  "ironclaw_host_api",
+ "ironclaw_network",
  "ironclaw_resources",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "libc",
+ "rcgen",
  "rust_decimal_macros",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
+ "time",
  "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]

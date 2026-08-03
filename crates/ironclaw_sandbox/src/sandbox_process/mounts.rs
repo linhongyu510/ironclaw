@@ -5,7 +5,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
 };
 
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 use super::CONTAINER_WORKSPACE_ROOT;
 
