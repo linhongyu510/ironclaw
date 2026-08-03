@@ -17,8 +17,8 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     error::HostApiError,
     mount::MountView,
-    package_lifecycle::RegistryPackageProvenance,
     path::{ScopedPath, VirtualPath},
+    registry_package::RegistryPackageProvenance,
     resource::ResourceScope,
 };
 

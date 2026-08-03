@@ -22,7 +22,7 @@ use crate::{
     read_skill_content, read_skill_install_metadata, remove_skill, replace_registry_skill,
     search_skills, update_skill,
 };
-use ironclaw_host_api::package_lifecycle::RegistryPackageProvenance;
+use ironclaw_host_api::registry_package::RegistryPackageProvenance;
 
 pub type ScopedSkillManagementMountResolver =
     dyn Fn(&ResourceScope) -> Result<MountView, HostApiError> + Send + Sync;

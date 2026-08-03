@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::{package_lifecycle::RegistryPackageProvenance, path::ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, registry_package::RegistryPackageProvenance};
 
 use crate::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
@@ -127,9 +127,7 @@ pub(super) async fn capture_skill_bundle_locked(
                         .ok_or_else(|| {
                             SkillManagementError::new(SkillManagementErrorKind::Resource)
                         })?;
-                    total_bytes = total_bytes.checked_add(contents.len()).ok_or_else(|| {
-                        SkillManagementError::new(SkillManagementErrorKind::Resource)
-                    })?;
+                    total_bytes = total_bytes.saturating_add(contents.len());
                     if total_bytes > MAX_SKILL_SNAPSHOT_TOTAL_BYTES {
                         return Err(SkillManagementError::new(
                             SkillManagementErrorKind::Resource,

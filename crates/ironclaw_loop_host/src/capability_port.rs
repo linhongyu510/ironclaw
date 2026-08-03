@@ -30,20 +30,18 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
 };
-use ironclaw_turns::{
-    CapabilityActivityId, LoopGateRef, LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-        CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ConcurrencyHint,
-        ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopSafeSummary, ModelVisibleToolObservation, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution::{self, GatedResolution},
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+    CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ConcurrencyHint,
+    ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopSafeSummary, ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    resolution::{self, GatedResolution},
 };
+use ironclaw_turns::{CapabilityActivityId, LoopGateRef, LoopResultRef};
 use serde_json::Value;
 use tokio::sync::Notify;
 
@@ -720,7 +718,7 @@ impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
 }
 
 struct PreparedProviderToolCall {
-    surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
+    surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
@@ -1227,7 +1225,7 @@ impl HostRuntimeLoopCapabilityPort {
 
     fn snapshot_for(
         &self,
-        version: &ironclaw_turns::run_profile::CapabilitySurfaceVersion,
+        version: &ironclaw_loop_contracts::CapabilitySurfaceVersion,
     ) -> Result<SurfaceSnapshot, AgentLoopHostError> {
         let snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.get(version.as_str()).cloned().ok_or_else(|| {
@@ -1646,7 +1644,7 @@ impl HostRuntimeLoopCapabilityPort {
         Ok(GatedResolution::bare(resolution::completed(
             write_result.result_ref,
             "capability info returned".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             write_result.byte_len,
             write_result.output_digest,
@@ -1689,7 +1687,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
         activity_id: Option<CapabilityActivityId>,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(&tool_call)?;
         let mut normalized_tool_call = tool_call.clone();
         normalized_tool_call.arguments = prepared.normalized_arguments;
@@ -1716,7 +1714,7 @@ impl HostRuntimeLoopCapabilityPort {
             activity_id,
             registered_effective_capability_ids,
         )?;
-        Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+        Ok(ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id,
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
@@ -1783,7 +1781,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     async fn register_provider_tool_call(
         &self,
         request: RegisterProviderToolCallRequest,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
         self.register_provider_tool_call_with_activity(request.tool_call, request.activity_id)
             .await
     }
@@ -3041,26 +3039,14 @@ fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
     capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
-fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    if schema_contains_external_ref(schema, 0) {
-        return false;
-    }
-    if object
-        .get("$ref")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|reference| reference.starts_with('#'))
-    {
-        return true;
-    }
-    matches!(
-        object.get("type").and_then(serde_json::Value::as_str),
-        Some("object")
-    ) && object
-        .get("properties")
-        .is_none_or(serde_json::Value::is_object)
+fn provider_schema_is_resolved(schema: &serde_json::Value) -> bool {
+    // The hot capability catalog owns canonical JSON Schema validation and the
+    // selected LLM provider owns wire-format shaping (including top-level
+    // `oneOf` flattening). The loop must not maintain a second, narrower schema
+    // dialect: doing so silently delists valid, versioned extension schemas
+    // before they reach the provider adapter. It only enforces the boundary the
+    // provider cannot resolve safely on its own.
+    !schema_contains_external_ref(schema, 0)
 }
 
 fn provider_tool_name(
@@ -3512,8 +3498,8 @@ fn is_provider_tool_call_input_ref(input_ref: &CapabilityInputRef) -> bool {
 
 fn loop_surface_version(
     version: &str,
-) -> Result<ironclaw_turns::run_profile::CapabilitySurfaceVersion, AgentLoopHostError> {
-    ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(version).map_err(|_| {
+) -> Result<ironclaw_loop_contracts::CapabilitySurfaceVersion, AgentLoopHostError> {
+    ironclaw_loop_contracts::CapabilitySurfaceVersion::new(version).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "host runtime capability surface version could not be represented",
@@ -3543,7 +3529,7 @@ async fn runtime_outcome_to_loop(
             GatedResolution::bare(resolution::completed(
                 write_result.result_ref,
                 "capability completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 write_result.byte_len,
                 write_result.output_digest,
@@ -3558,7 +3544,7 @@ async fn runtime_outcome_to_loop(
             resolution::approval_required(
                 loop_gate_ref("approval", gate.approval_request_id.to_string())?,
                 blocked_summary(gate.reason).to_string(),
-                Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
+                Some(ironclaw_loop_contracts::CapabilityApprovalResume {
                     approval_request_id: gate.approval_request_id,
                     resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
                     correlation_id: conversion.correlation_id,
@@ -3570,7 +3556,7 @@ async fn runtime_outcome_to_loop(
             loop_gate_ref("auth", gate.gate_id.to_string())?,
             gate.credential_requirements,
             blocked_summary(gate.reason).to_string(),
-            Some(ironclaw_turns::run_profile::CapabilityAuthResume::resolved(
+            Some(ironclaw_loop_contracts::CapabilityAuthResume::resolved(
                 resume_token_from_invocation_id(conversion.invocation_id)?,
                 None,
             )),
@@ -4127,12 +4113,12 @@ mod tests {
         RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
         VisibleCapabilitySurface,
     };
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
+    };
     use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-    use ironclaw_turns::{
-        InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
-        TurnActor, TurnId, TurnRunId, TurnScope,
-    };
+    use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
 
@@ -4760,17 +4746,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_schema_accepts_zero_arg_object_tools() {
-        assert!(provider_schema_is_usable(
+    fn provider_schema_requires_resolved_refs_without_restricting_canonical_shape() {
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object"})
         ));
-        assert!(provider_schema_is_usable(
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object","properties":{}})
         ));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
         })));
-        assert!(provider_schema_is_usable(&serde_json::json!({
+        assert!(provider_schema_is_resolved(&serde_json::json!({
             "$ref": "#/$defs/input",
             "$defs": {
                 "input": {
@@ -4781,7 +4767,7 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "type": "object",
             "properties": {
                 "payload": {
@@ -4789,9 +4775,12 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(
-            &serde_json::json!({"type":"string"})
-        ));
+        assert!(provider_schema_is_resolved(&serde_json::json!({
+            "oneOf": [
+                {"type":"object","properties":{"action":{"const":"first"}}},
+                {"type":"object","properties":{"action":{"const":"second"}}}
+            ]
+        })));
     }
 
     #[test]
@@ -5132,9 +5121,7 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
-        assert!(
-            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
-        );
+        assert!(ironclaw_loop_contracts::LoopSafeSummary::new(error.safe_summary.clone()).is_ok());
     }
 
     #[test]
@@ -5507,9 +5494,7 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
-        assert!(
-            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
-        );
+        assert!(ironclaw_loop_contracts::LoopSafeSummary::new(error.safe_summary.clone()).is_ok());
     }
 
     #[test]
@@ -5845,7 +5830,7 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let port = runtime_capability_port(
             &capability_id,
             &provider_id,
@@ -5867,14 +5852,14 @@ mod tests {
         let milestones = milestone_sink.milestones();
         assert!(matches!(
             &milestones[0].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityInvoked {
                 capability_id: actual,
                 ..
             } if actual == &capability_id
         ));
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
                 capability_id: actual,
                 provider,
                 runtime: RuntimeKind::FirstParty,
@@ -5889,7 +5874,7 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let result_writer = Arc::new(FailOnceResultWriter::default());
         let port = runtime_capability_port(
             &capability_id,
@@ -5925,7 +5910,7 @@ mod tests {
         assert_eq!(milestones.len(), 2);
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
                 capability_id: actual,
                 provider,
                 runtime: RuntimeKind::FirstParty,
@@ -5976,7 +5961,7 @@ mod tests {
         assert_eq!(milestones.len(), 2);
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
                 capability_id: actual,
                 provider,
                 runtime: RuntimeKind::FirstParty,
@@ -6048,7 +6033,7 @@ mod tests {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
-                Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+                Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
             let port = runtime_capability_port(
                 &capability_id,
                 &provider_id,
@@ -6091,7 +6076,7 @@ mod tests {
             assert_eq!(milestones.len(), 2);
             assert!(matches!(
                 &milestones[1].kind,
-                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
                     capability_id: actual,
                     provider: Some(provider),
                     runtime: Some(RuntimeKind::FirstParty),
@@ -6100,7 +6085,7 @@ mod tests {
                 } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
             ));
             let actual_summary = match &milestones[1].kind {
-                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
                     safe_summary,
                     ..
                 } => safe_summary.as_ref().map(|summary| summary.as_str()),
@@ -6196,7 +6181,7 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let port = runtime_capability_port(
             &capability_id,
             &provider_id,
@@ -6226,7 +6211,7 @@ mod tests {
         assert_eq!(milestones.len(), 2);
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
                 capability_id: actual,
                 provider: Some(provider),
                 runtime: Some(RuntimeKind::FirstParty),
@@ -6243,7 +6228,7 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let port = runtime_capability_port(
             &capability_id,
             &provider_id,
@@ -6269,7 +6254,7 @@ mod tests {
         assert_eq!(milestones.len(), 2);
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
                 capability_id: actual,
                 provider: Some(provider),
                 runtime: Some(RuntimeKind::FirstParty),
@@ -6396,6 +6381,100 @@ mod tests {
             runtime.take_requests().is_empty(),
             "capability_info must be served by the loop port without dispatching to the host runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn versioned_union_schema_is_advertised_and_dispatches_through_runtime_port() {
+        let capability_id = CapabilityId::new("evm-rpc.invoke").expect("valid capability id");
+        let provider_id = ExtensionId::new("evm-rpc").expect("valid provider id");
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "EvmRpcAction",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_block_number" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_get_balance" },
+                        "address": { "type": "string" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action", "address"]
+                }
+            ]
+        });
+        let arguments = serde_json::json!({
+            "action": "eth_get_balance",
+            "address": "0x0000000000000000000000000000000000000000",
+            "chain": "ethereum"
+        });
+        let mut capability = visible_capability(capability_id.clone(), provider_id.clone());
+        capability.descriptor.parameters_schema = schema.clone();
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![capability]));
+        let mut context = execution_context("thread-versioned-union-schema");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(arguments.clone())),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("versioned union schema capability must be advertised");
+        assert_eq!(definition.name.as_str(), "evm-rpc__invoke");
+        assert_eq!(definition.parameters, schema);
+
+        let mut call = provider_tool_call();
+        call.name = definition.name;
+        call.arguments = arguments.clone();
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .expect("union-valid provider call should register");
+        assert_eq!(candidate.capability_id, capability_id);
+
+        let outcome = port
+            .invoke_capability(LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("union-valid capability call should dispatch");
+        assert!(matches!(&outcome, Resolution::Done(done) if done.verdict.is_success()));
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].3, arguments);
     }
 
     #[tokio::test]
@@ -9017,7 +9096,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_capability_rejects_both_resume_modes_set() {
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::{CapabilityApprovalResume, CapabilityAuthResume};
+        use ironclaw_loop_contracts::{CapabilityApprovalResume, CapabilityAuthResume};
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9080,7 +9159,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_capability_rejects_approval_resume_activity_mismatch() {
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+        use ironclaw_loop_contracts::CapabilityApprovalResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9129,7 +9208,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_capability_checks_registered_activity_on_approval_resume_input_ref() {
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+        use ironclaw_loop_contracts::CapabilityApprovalResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9214,7 +9293,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_capability_rejects_cached_approval_resume_activity_mismatch() {
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+        use ironclaw_loop_contracts::CapabilityApprovalResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9304,7 +9383,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_capability_rejects_auth_resume_activity_mismatch() {
-        use ironclaw_turns::run_profile::CapabilityAuthResume;
+        use ironclaw_loop_contracts::CapabilityAuthResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9357,7 +9436,7 @@ mod tests {
         // drive a matching approval resume: the resume-read path fails CLOSED
         // before any runtime dispatch.
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+        use ironclaw_loop_contracts::CapabilityApprovalResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9427,7 +9506,7 @@ mod tests {
         // idempotency key, so it REPLAYS the cached outcome instead of
         // re-dispatching — the key is byte-stable regardless of the loop value.
         use ironclaw_host_api::ids::ApprovalRequestId;
-        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+        use ironclaw_loop_contracts::CapabilityApprovalResume;
 
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -9579,8 +9658,7 @@ mod tests {
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
-        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_loop_contracts::VisibleCapabilitySurface, AgentLoopHostError> {
             self.log.lock().expect("log lock").push(self.label);
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -9639,8 +9717,7 @@ mod tests {
         async fn visible_capabilities(
             &self,
             request: VisibleCapabilityRequest,
-        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_loop_contracts::VisibleCapabilitySurface, AgentLoopHostError> {
             self.log.lock().expect("log lock").push(self.label);
             self.inner.visible_capabilities(request).await
         }
@@ -9790,7 +9867,7 @@ mod tests {
     }
 
     fn dummy_milestone_sink() -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default())
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default())
     }
 
     /// Deterministic in-memory [`GateRecordStorePort`] fake for seam tests: records
@@ -10779,11 +10856,11 @@ mod tests {
     #[derive(Default)]
     struct FailOnceTerminalMilestoneSink {
         failures: AtomicUsize,
-        milestones: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+        milestones: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
     }
 
     impl FailOnceTerminalMilestoneSink {
-        fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+        fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
             self.milestones.lock().expect("milestones lock").clone()
         }
     }
@@ -10792,12 +10869,12 @@ mod tests {
     impl LoopHostMilestoneSink for FailOnceTerminalMilestoneSink {
         async fn publish_loop_milestone(
             &self,
-            milestone: ironclaw_turns::run_profile::LoopHostMilestone,
+            milestone: ironclaw_loop_contracts::LoopHostMilestone,
         ) -> Result<(), AgentLoopHostError> {
             let is_terminal = matches!(
                 &milestone.kind,
-                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted { .. }
-                    | ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed { .. }
+                ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted { .. }
+                    | ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed { .. }
             );
             if is_terminal && self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
