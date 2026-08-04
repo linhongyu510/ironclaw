@@ -1618,8 +1618,13 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("result_read should complete, got {other:?}"),
         };
-        let continuation_output = capability_io
-            .result_output(&completed_loop_result_ref(&done))
+        assert_eq!(
+            completed_loop_result_ref(&done),
+            write_result.result_ref.as_str(),
+            "result_read must surface the original pageable result reference"
+        );
+        let (_, continuation_output) = capability_io
+            .latest_result_output()
             .expect("continuation result output lookup succeeds")
             .expect("continuation result output exists");
         let continuation_content = continuation_output["content"]
@@ -1930,6 +1935,21 @@ mod tests {
             other => panic!("result_read should complete, got {other:?}"),
         };
 
+        assert_eq!(
+            completed_loop_result_ref(&done),
+            write_result.result_ref.as_str(),
+            "result_read must surface the original pageable result reference"
+        );
+        let (inline_result_ref, _) = capability_io
+            .latest_result_output()
+            .expect("inline result lookup succeeds")
+            .expect("result_read stages inline output evidence");
+        assert_ne!(
+            inline_result_ref,
+            write_result.result_ref.as_str(),
+            "the inline write reference remains distinct from continuation authority"
+        );
+
         // RED before the fix: `result_read`'s chunk write went through the
         // same durable path as every other capability result, so this read
         // would find a durable record for the chunk's own (freshly minted)
@@ -1939,7 +1959,7 @@ mod tests {
             .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
-                result_ref: completed_loop_result_ref(&done),
+                result_ref: inline_result_ref,
                 offset: 0,
                 max_bytes: 64,
             })
@@ -3075,8 +3095,9 @@ mod tests {
         // structured fields are dropped from the loop-visible channel and can no
         // longer be asserted here. Re-express against the durable observation or
         // the preview summary.
-        let output = capability_io
-            .result_output(&completed_loop_result_ref(&done))
+        assert_eq!(completed_loop_result_ref(&done), original_result_ref);
+        let (_, output) = capability_io
+            .latest_result_output()
             .expect("result output lookup succeeds")
             .expect("result_read output exists");
         assert_eq!(output["content"], "abcdefgh");
@@ -3108,8 +3129,9 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("adjacent result_read should complete, got {other:?}"),
         };
-        let adjacent_output = capability_io
-            .result_output(&completed_loop_result_ref(&adjacent))
+        assert_eq!(completed_loop_result_ref(&adjacent), original_result_ref);
+        let (_, adjacent_output) = capability_io
+            .latest_result_output()
             .expect("adjacent result output lookup succeeds")
             .expect("adjacent result_read output exists");
         assert_eq!(adjacent_output["content"], "ijklmnop");
@@ -3140,8 +3162,9 @@ mod tests {
             Resolution::Done(done) => done,
             other => panic!("final result_read should complete, got {other:?}"),
         };
-        let final_output = capability_io
-            .result_output(&completed_loop_result_ref(&final_chunk))
+        assert_eq!(completed_loop_result_ref(&final_chunk), original_result_ref);
+        let (_, final_output) = capability_io
+            .latest_result_output()
             .expect("final result output lookup succeeds")
             .expect("final result_read output exists");
         assert_eq!(final_output["content"], "qrstuvwxyz");

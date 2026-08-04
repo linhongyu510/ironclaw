@@ -1035,9 +1035,9 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             let observation: serde_json::Value =
                 serde_json::from_str(&tool_result.content).expect("result_read observation");
             let detail = &observation["model_observation"]["detail"];
-            assert_ne!(
+            assert_eq!(
                 detail["result_ref"], observation["result_ref"],
-                "result_read replay must retain the original result reference, not its own output ref"
+                "result_read replay must expose only the original pageable result reference"
             );
             assert!(
                 detail["total_bytes"]
