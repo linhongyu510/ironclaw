@@ -931,8 +931,17 @@ mod tests {
         // Both extension registries normalize with `to_ascii_lowercase`, not
         // `to_lowercase` (`.claude/rules/types.md`): ASCII case must still
         // match, and Unicode case folding must not be able to fold a foreign
-        // codepoint into an ASCII key. The keys are all ASCII, so this pins
-        // the normalization rather than a behaviour difference.
+        // codepoint into an ASCII key.
+        //
+        // The `markdown` case below is a live regression, not a hypothetical.
+        // `try_extract_by_extension`'s key set includes `markdown`, and
+        // `"MAR\u{212A}DOWN".to_lowercase()` is exactly `"markdown"` (U+212A
+        // KELVIN SIGN folds to `k`) — so before the `to_ascii_lowercase`
+        // switch, a file named `notes.MAR<U+212A>DOWN` with an unrecognized
+        // MIME type was UTF-8-decoded and handed to the model as markdown
+        // instead of rejected as an unsupported type. The eight keys of
+        // `extract_document_text_by_filename` happen to have no such fold,
+        // which is why the two registries need separate cases here.
         let pdf = include_bytes!("../../../tests/fixtures/hello.pdf");
         assert!(
             extract_document_text_by_filename(pdf, Some("HELLO.PDF"))
@@ -945,12 +954,27 @@ mod tests {
             "a non-ASCII extension must not be folded into an ASCII key"
         );
         assert_eq!(
-            try_extract_by_extension(b"content", Some("notes.TXT")),
-            Some("content".to_string())
+            try_extract_by_extension(b"content", Some("notes.MARKDOWN")),
+            Some("content".to_string()),
+            "ASCII case-insensitivity must survive the switch"
         );
         assert_eq!(
-            try_extract_by_extension(b"content", Some("notes.T\u{0130}T")),
-            None
+            try_extract_by_extension(b"content", Some("notes.MAR\u{212A}DOWN")),
+            None,
+            "U+212A must not fold into the `markdown` key"
+        );
+        // Same shape through the public MIME entry point, which is how the
+        // fallback is actually reached in production.
+        assert_eq!(
+            extract_document(
+                b"content",
+                "application/octet-stream",
+                Some("n.MAR\u{212A}DOWN")
+            ),
+            DocumentExtraction::Failed(ExtractionError::UnsupportedType {
+                mime: "application/octet-stream".to_string()
+            }),
+            "the filename fallback must not decode a Unicode-folded extension"
         );
     }
 
