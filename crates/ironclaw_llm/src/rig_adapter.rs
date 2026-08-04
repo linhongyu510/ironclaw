@@ -63,6 +63,7 @@ pub struct RigAdapter<M: CompletionModel> {
     /// `CompletionModel` does not expose model discovery, so this is wired
     /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
+    tool_schema_policy: ToolSchemaPolicy,
 }
 
 /// Auth scheme applied to a model-discovery request.
@@ -257,6 +258,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             models_endpoint: None,
+            tool_schema_policy: ToolSchemaPolicy::StrictOpenAi,
         }
     }
 
@@ -267,6 +269,11 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// its provider.
     pub(crate) fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
         self.provider_id = provider_id.into();
+        self
+    }
+
+    pub(crate) fn with_tool_schema_policy(mut self, policy: ToolSchemaPolicy) -> Self {
+        self.tool_schema_policy = policy;
         self
     }
 
@@ -639,24 +646,22 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     super::provider::generate_tool_call_id(seed, 0)
 }
 
-/// Convert IronClaw tool definitions to rig-core format.
-///
-/// Applies `normalize_schema_strict` at the boundary, which both
-/// strict-normalizes nested objects AND flattens any top-level
-/// `oneOf`/`anyOf`/`allOf`/`enum`/`not` (OpenAI's tool API rejects those at
-/// the top level even when the rest of the schema is valid). The flatten may
-/// append an advisory hint to the tool description, so we pass an owned
-/// clone through and read it back.
+#[cfg(test)]
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+    convert_tools_with_policy(tools, ToolSchemaPolicy::StrictOpenAi)
+}
+
+/// Convert IronClaw tool definitions to rig-core format using the selected
+/// provider-boundary schema policy.
+fn convert_tools_with_policy(
+    tools: &[IronToolDefinition],
+    policy: ToolSchemaPolicy,
+) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| {
             let mut description = t.description.clone();
-            let parameters = shape_tool_schema(
-                ToolSchemaPolicy::StrictOpenAi,
-                &t.parameters,
-                &mut description,
-            );
+            let parameters = shape_tool_schema(policy, &t.parameters, &mut description);
             RigToolDefinition {
                 name: t.name.clone(),
                 description,
@@ -1289,7 +1294,7 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools_with_policy(&request.tools, self.tool_schema_policy);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -1379,7 +1384,7 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools_with_policy(&request.tools, self.tool_schema_policy);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -2813,6 +2818,38 @@ mod tests {
             tool.description.contains("create_issue") && tool.description.contains("list_issues"),
             "variant info must be retained in the hint"
         );
+    }
+
+    #[test]
+    fn test_convert_tools_uses_gemini_schema_policy_for_native_provider() {
+        let tools = vec![IronToolDefinition {
+            name: "http".to_string(),
+            description: "Make an HTTP request".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "headers": { "type": ["string", "object", "null"] },
+                    "method": { "const": "GET" }
+                },
+                "allOf": [{
+                    "if": { "properties": { "method": { "const": "POST" } } },
+                    "then": { "required": ["body"] }
+                }]
+            }),
+        }];
+
+        let converted = convert_tools_with_policy(&tools, ToolSchemaPolicy::Gemini);
+        let parameters = &converted[0].parameters;
+        let encoded = parameters.to_string();
+
+        for keyword in ["\"if\"", "\"then\"", "\"const\"", "\"allOf\""] {
+            assert!(
+                !encoded.contains(keyword),
+                "unsupported keyword survived: {encoded}"
+            );
+        }
+        assert_eq!(parameters["properties"]["headers"]["type"], "object");
+        assert_eq!(parameters["properties"]["method"]["type"], "string");
     }
 
     /// End-to-end regression test using the google_docs_tool's actual schema

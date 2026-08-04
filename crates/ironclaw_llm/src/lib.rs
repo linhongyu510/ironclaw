@@ -821,6 +821,7 @@ fn create_gemini_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
+            .with_tool_schema_policy(crate::tool_schema::ToolSchemaPolicy::Gemini)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
