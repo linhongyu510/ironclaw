@@ -453,6 +453,8 @@ fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    const DEFAULT_MAX_TOKENS: u32 = 8192;
+
     // Route to OAuth provider when an OAuth token is present and no real API
     // key was provided. When both are set, the API key takes priority (standard
     // x-api-key auth via rig-core).
@@ -549,6 +551,7 @@ fn create_anthropic_from_registry(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
             .with_cache_retention(cache_retention)
+            .with_default_max_tokens(DEFAULT_MAX_TOKENS)
             .with_unsupported_params(config.unsupported_params.clone())
             .with_model_listing(models_endpoint),
     ))
