@@ -1502,7 +1502,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// to 0 and let the ratchet report the length — giving **127**, identical on
 /// `origin/main`, on each consolidated slice, and on the union, so this is a
 /// pre-existing drift and not something this PR introduced.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 127;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 126;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]
