@@ -140,6 +140,9 @@ use crate::outbound::{
 };
 use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+pub use ironclaw_auth::product_prompt::{
+    blocked_auth_flow_canceller, product_auth_challenge_provider,
+};
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
@@ -149,7 +152,6 @@ use ironclaw_extension_manager::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
-pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
@@ -605,7 +607,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) channel_facade_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_config_service: Arc<ComposedExtensionAdminConfigurationResolver>,
@@ -1702,7 +1704,7 @@ impl RebornRuntime {
     /// channel-identity storage.
     pub(crate) fn generic_channel_connection_facade(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionService>> {
+    ) -> Option<Arc<dyn ironclaw_auth::ChannelConnectionService>> {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
         let credential_cleanup = Some(Arc::clone(&self.product_auth)
