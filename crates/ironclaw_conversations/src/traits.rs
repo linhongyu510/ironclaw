@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey};
+use ironclaw_turns::SubmitTurnResponse;
 
 use crate::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,

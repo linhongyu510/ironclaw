@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::turn::{RunOriginAdapter, RunProfileId, RunProfileRequest, TurnSurfaceType};
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -8,10 +9,12 @@ use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
     TrustedTriggerSubmitRequest,
 };
-use ironclaw_turns::{
-    AdmissionRejectionReason, RunOriginAdapter, RunProfileId, RunProfileRequest, SubmitTurnRequest,
-    TurnCoordinator, TurnError, TurnSurfaceType,
-};
+// The names left on `ironclaw_turns` here are the ones this crate does NOT own
+// vocabulary-wise and cannot reach through `host_api`: the coordinator
+// authority (`TurnCoordinator`, `SubmitTurnRequest`) and the submit failure
+// cone (`TurnError`, `AdmissionRejectionReason`). They are the whole residual
+// of the `conversations -> turns` layer-matrix exception — see CHECKLIST WS5.
+use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 

@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::{
-    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    SubmitTurnResponse, TurnActor, TurnScope,
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef, TurnActor,
+    TurnScope,
 };
+use ironclaw_turns::SubmitTurnResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::{AdapterInstallationId, AdapterKind, ExternalEventId, InboundMessageContentRef};
