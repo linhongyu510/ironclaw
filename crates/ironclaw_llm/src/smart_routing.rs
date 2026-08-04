@@ -1094,6 +1094,8 @@ mod tests {
     use super::*;
     use crate::ChatMessage;
     use crate::testing::StubLlm;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
 
     fn default_config() -> SmartRoutingConfig {
         SmartRoutingConfig::default()
@@ -1727,6 +1729,155 @@ mod tests {
         ToolCompletionRequest::new(vec![ChatMessage::user("implement a search")], vec![])
     }
 
+    struct StreamingStubLlm {
+        model_name: &'static str,
+        response: &'static str,
+        deltas: Vec<&'static str>,
+        fail_after_deltas: bool,
+        calls: AtomicU32,
+    }
+
+    impl StreamingStubLlm {
+        fn new(
+            model_name: &'static str,
+            response: &'static str,
+            deltas: Vec<&'static str>,
+        ) -> Self {
+            Self {
+                model_name,
+                response,
+                deltas,
+                fail_after_deltas: false,
+                calls: AtomicU32::new(0),
+            }
+        }
+
+        fn failing_after_deltas(mut self) -> Self {
+            self.fail_after_deltas = true;
+            self
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn response(&self) -> CompletionResponse {
+            CompletionResponse {
+                content: self.response.to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: crate::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingStubLlm {
+        fn model_name(&self) -> &str {
+            self.model_name
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("streaming routing test must use complete_streaming()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            for delta in &self.deltas {
+                sink.text_delta((*delta).to_string()).await;
+            }
+            if self.fail_after_deltas {
+                return Err(LlmError::RequestFailed {
+                    provider: self.model_name.to_string(),
+                    reason: "stream failed after text".to_string(),
+                });
+            }
+            Ok(self.response())
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("streaming routing test must not use complete_with_tools()")
+        }
+    }
+
+    #[derive(Default)]
+    struct AppendOnlyStreamSink {
+        text: Mutex<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for AppendOnlyStreamSink {
+        async fn text_delta(&self, delta: String) {
+            self.text
+                .lock()
+                .expect("append-only sink lock")
+                .push_str(&delta);
+        }
+    }
+
+    #[derive(Default)]
+    struct ReplacingStreamSink {
+        text: Mutex<String>,
+        updates: Mutex<Vec<String>>,
+        replace_on_next_delta: AtomicBool,
+        replacements: AtomicU32,
+        finishes: AtomicU32,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for ReplacingStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let update = {
+                let mut text = self.text.lock().expect("replacement sink text lock");
+                if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                    text.clear();
+                }
+                text.push_str(&delta);
+                text.clone()
+            };
+            self.updates
+                .lock()
+                .expect("replacement sink updates lock")
+                .push(update);
+        }
+
+        fn supports_text_replacement(&self) -> bool {
+            true
+        }
+
+        async fn replace_on_next_text_delta(&self) {
+            self.replacements.fetch_add(1, Ordering::Relaxed);
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
+
+        async fn finish_text_replacement(&self) {
+            self.finishes.fetch_add(1, Ordering::Relaxed);
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                self.text
+                    .lock()
+                    .expect("replacement sink text lock")
+                    .clear();
+            }
+        }
+    }
+
     #[tokio::test]
     async fn simple_task_routes_to_cheap() {
         let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
@@ -1873,6 +2024,115 @@ mod tests {
 
         let stats = router.stats();
         assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_cascade_routes_append_only_sink_directly_to_primary() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary ", "response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "I'm not sure.",
+            vec!["I'm not sure."],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let sink = Arc::new(AppendOnlyStreamSink::default());
+
+        let response = router
+            .complete_streaming(make_request("Deploy this to production"), sink.clone())
+            .await
+            .expect("primary stream should succeed");
+
+        assert_eq!(response.content, "primary response");
+        assert_eq!(
+            sink.text.lock().expect("append-only sink lock").as_str(),
+            "primary response"
+        );
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(cheap.calls(), 0);
+        let stats = router.stats();
+        assert_eq!(stats.primary_requests, 1);
+        assert_eq!(stats.cheap_requests, 0);
+        assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_cascade_replaces_uncertain_cheap_output_with_primary() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "I'm not sure.",
+            vec!["I'm not sure."],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let sink = Arc::new(ReplacingStreamSink::default());
+
+        let response = router
+            .complete_streaming(make_request("Deploy this to production"), sink.clone())
+            .await
+            .expect("primary escalation should succeed");
+
+        assert_eq!(response.content, "primary response");
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "primary response"
+        );
+        assert_eq!(
+            sink.updates
+                .lock()
+                .expect("replacement sink updates lock")
+                .as_slice(),
+            ["I'm not sure.", "primary response"]
+        );
+        assert_eq!(sink.replacements.load(Ordering::Relaxed), 1);
+        assert_eq!(sink.finishes.load(Ordering::Relaxed), 1);
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(primary.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_cascade_does_not_finalize_failed_primary_replacement() {
+        let primary = Arc::new(
+            StreamingStubLlm::new("primary", "unused", vec!["partial primary"])
+                .failing_after_deltas(),
+        );
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "I'm not sure.",
+            vec!["I'm not sure."],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let sink = Arc::new(ReplacingStreamSink::default());
+
+        let result = router
+            .complete_streaming(make_request("Deploy this to production"), sink.clone())
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestFailed { provider, .. }) if provider == "primary"
+        ));
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "partial primary"
+        );
+        assert_eq!(sink.replacements.load(Ordering::Relaxed), 1);
+        assert_eq!(sink.finishes.load(Ordering::Relaxed), 0);
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(primary.calls(), 1);
     }
 
     #[tokio::test]

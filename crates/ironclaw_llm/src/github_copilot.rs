@@ -29,6 +29,7 @@ use crate::provider::{
     FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition, strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
+use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
 
@@ -579,7 +580,7 @@ impl LlmProvider for GithubCopilotProvider {
             }),
         };
         let response = self.send_streaming_request(&request, sink).await?;
-        let tool_calls = response.tool_calls();
+        let tool_calls = response.tool_calls()?;
         Ok(ToolCompletionResponse {
             content: (!response.content.is_empty()).then_some(response.content),
             tool_calls,
@@ -835,19 +836,35 @@ struct OpenAiStreamingResponse {
 }
 
 impl OpenAiStreamingResponse {
-    fn tool_calls(&self) -> Vec<ToolCall> {
+    fn tool_calls(&self) -> Result<Vec<ToolCall>, LlmError> {
         let mut calls = self.tool_calls.iter().collect::<Vec<_>>();
         calls.sort_by_key(|(index, _)| **index);
         calls
             .into_iter()
-            .map(|(_, state)| ToolCall {
-                id: state.id.clone(),
-                name: state.name.clone(),
-                arguments: serde_json::from_str(&state.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-                reasoning: None,
-                signature: None,
-                arguments_parse_error: None,
+            .map(|(_, state)| {
+                if state.id.is_empty() || state.name.is_empty() {
+                    return Err(LlmError::InvalidResponse {
+                        provider: "github_copilot".to_string(),
+                        reason: "streamed tool call is missing its id or name".to_string(),
+                    });
+                }
+                let raw_arguments = &state.arguments;
+                let (arguments, arguments_parse_error) =
+                    parse_tool_call_args_allow_trailing_lossy(raw_arguments);
+                let arguments_parse_error = arguments_parse_error.map(|parse_error| {
+                    format!(
+                        "{parse_error}\nRaw malformed tool-call arguments (verbatim, {} bytes):\n{raw_arguments}",
+                        raw_arguments.len()
+                    )
+                });
+                Ok(ToolCall {
+                    id: state.id.clone(),
+                    name: state.name.clone(),
+                    arguments,
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error,
+                })
             })
             .collect()
     }
@@ -1071,11 +1088,60 @@ mod tests {
         assert_eq!(response.content, "Hello");
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
         assert_eq!((response.input_tokens, response.output_tokens), (12, 7));
-        let calls = response.tool_calls();
+        let calls = response.tool_calls().expect("valid streamed tool call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "search");
         assert_eq!(calls[0].arguments, serde_json::json!({"q": "rust"}));
+    }
+
+    #[test]
+    fn streaming_tool_reconstruction_preserves_malformed_arguments_for_repair() {
+        let mut response = OpenAiStreamingResponse::default();
+        response.tool_calls.insert(
+            0,
+            OpenAiStreamingToolState {
+                id: "call_1".to_string(),
+                name: "search".to_string(),
+                arguments: r#"{"q":"#.to_string(),
+            },
+        );
+
+        let calls = response
+            .tool_calls()
+            .expect("malformed arguments should remain a repairable tool call");
+
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
+        let parse_error = calls[0]
+            .arguments_parse_error
+            .as_deref()
+            .expect("parse error should retain the malformed arguments for repair");
+        assert!(parse_error.starts_with("failed to parse tool-call arguments JSON:"));
+        assert!(
+            parse_error.contains("Raw malformed tool-call arguments (verbatim, 5 bytes):\n{\"q\":")
+        );
+    }
+
+    #[test]
+    fn streaming_tool_reconstruction_rejects_missing_id_or_name() {
+        for (id, name) in [("", "search"), ("call_1", "")] {
+            let mut response = OpenAiStreamingResponse::default();
+            response.tool_calls.insert(
+                0,
+                OpenAiStreamingToolState {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            );
+
+            assert!(matches!(
+                response.tool_calls(),
+                Err(LlmError::InvalidResponse { provider, reason })
+                    if provider == "github_copilot"
+                        && reason == "streamed tool call is missing its id or name"
+            ));
+        }
     }
 
     #[test]

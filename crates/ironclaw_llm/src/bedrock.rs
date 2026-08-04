@@ -109,13 +109,8 @@ impl BedrockProvider {
             builder = builder.inference_config(config);
         }
 
-        let mut output = builder.send().await.map_err(|error| {
-            tracing::warn!(error = %error, "Bedrock ConverseStream request failed");
-            LlmError::RequestFailed {
-                provider: "bedrock".to_string(),
-                reason: "Bedrock ConverseStream request failed".to_string(),
-            }
-        })?;
+        let mut output =
+            await_bedrock_stream_headers(self.stream_idle_timeout, builder.send()).await?;
         let mut parsed = BedrockStreamingResponse::default();
         loop {
             let received = tokio::time::timeout(self.stream_idle_timeout, output.stream.recv())
@@ -360,7 +355,7 @@ impl LlmProvider for BedrockProvider {
                 sink,
             )
             .await?;
-        let tool_calls = response.tool_calls();
+        let tool_calls = response.tool_calls()?;
         Ok(ToolCompletionResponse {
             content: (!response.text.is_empty()).then_some(response.text),
             tool_calls,
@@ -424,19 +419,35 @@ struct BedrockStreamingResponse {
 }
 
 impl BedrockStreamingResponse {
-    fn tool_calls(&self) -> Vec<ToolCall> {
+    fn tool_calls(&self) -> Result<Vec<ToolCall>, LlmError> {
         let mut states = self.tool_states.iter().collect::<Vec<_>>();
         states.sort_by_key(|(index, _)| **index);
         states
             .into_iter()
-            .map(|(_, state)| ToolCall {
-                id: state.id.clone(),
-                name: state.name.clone(),
-                arguments: serde_json::from_str(&state.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-                reasoning: None,
-                signature: None,
-                arguments_parse_error: None,
+            .map(|(_, state)| {
+                if state.id.is_empty() || state.name.is_empty() {
+                    return Err(LlmError::InvalidResponse {
+                        provider: "bedrock".to_string(),
+                        reason: "streamed tool_use block is missing its id or name".to_string(),
+                    });
+                }
+                let (arguments, arguments_parse_error) =
+                    crate::tool_args::parse_tool_call_args_allow_trailing_lossy(&state.arguments);
+                let arguments_parse_error = arguments_parse_error.map(|parse_error| {
+                    format!(
+                        "{parse_error}\nRaw malformed tool-call arguments (verbatim, {} bytes):\n{}",
+                        state.arguments.len(),
+                        state.arguments
+                    )
+                });
+                Ok(ToolCall {
+                    id: state.id.clone(),
+                    name: state.name.clone(),
+                    arguments,
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error,
+                })
             })
             .collect()
     }
@@ -454,6 +465,32 @@ fn bedrock_stream_idle_timeout(timeout: Duration) -> LlmError {
         "event stream was idle for {} seconds",
         timeout.as_secs()
     ))
+}
+
+async fn await_bedrock_stream_headers<T, E>(
+    timeout: Duration,
+    send: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, LlmError>
+where
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout, send).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "Bedrock ConverseStream request failed");
+            Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock ConverseStream request failed".to_string(),
+            })
+        }
+        Err(_) => Err(LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                timeout.as_secs()
+            ),
+        }),
+    }
 }
 
 async fn process_bedrock_stream_event(
@@ -1190,11 +1227,103 @@ mod tests {
         assert_eq!((response.input_tokens, response.output_tokens), (11, 5));
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
         assert!(response.completed);
-        let calls = response.tool_calls();
+        let calls = response.tool_calls().expect("finalize tool calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "tool_1");
         assert_eq!(calls[0].name, "search");
         assert_eq!(calls[0].arguments, serde_json::json!({"q": "rust"}));
+        assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn malformed_streamed_tool_arguments_preserve_raw_input_and_parse_error() {
+        let mut response = BedrockStreamingResponse::default();
+        response.tool_states.insert(
+            0,
+            BedrockStreamingToolState {
+                id: "tool_1".to_string(),
+                name: "search".to_string(),
+                arguments: r#"{"q":"rust""#.to_string(),
+            },
+        );
+
+        let calls = response.tool_calls().expect("finalize tool calls");
+
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
+        let parse_error = calls[0]
+            .arguments_parse_error
+            .as_deref()
+            .expect("malformed arguments should retain parse evidence");
+        assert!(parse_error.starts_with("failed to parse tool-call arguments JSON: "));
+        assert!(
+            parse_error.contains(
+                "Raw malformed tool-call arguments (verbatim, 11 bytes):\n{\"q\":\"rust\""
+            )
+        );
+    }
+
+    #[test]
+    fn streamed_tool_arguments_salvage_valid_json_before_trailing_junk() {
+        let mut response = BedrockStreamingResponse::default();
+        response.tool_states.insert(
+            0,
+            BedrockStreamingToolState {
+                id: "tool_1".to_string(),
+                name: "search".to_string(),
+                arguments: r#"{"q":"rust"}trailing"#.to_string(),
+            },
+        );
+
+        let calls = response.tool_calls().expect("finalize tool calls");
+
+        assert_eq!(calls[0].arguments, serde_json::json!({"q": "rust"}));
+        assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn streamed_tool_call_requires_id_and_name() {
+        let mut response = BedrockStreamingResponse::default();
+        response.tool_states.insert(
+            0,
+            BedrockStreamingToolState {
+                id: String::new(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            response.tool_calls(),
+            Err(LlmError::InvalidResponse { provider, reason })
+                if provider == "bedrock"
+                    && reason == "streamed tool_use block is missing its id or name"
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_delta_before_start_is_rejected() {
+        let sink = RecordingSink::default();
+        let mut response = BedrockStreamingResponse::default();
+        let delta = aws_sdk_bedrockruntime::types::ToolUseBlockDelta::builder()
+            .input(r#"{"q":"rust"}"#)
+            .build()
+            .expect("tool delta");
+        let event = aws_sdk_bedrockruntime::types::ContentBlockDeltaEvent::builder()
+            .content_block_index(0)
+            .delta(ContentBlockDelta::ToolUse(delta))
+            .build()
+            .expect("delta event");
+
+        assert!(matches!(
+            process_bedrock_stream_event(
+                &mut response,
+                ConverseStreamOutput::ContentBlockDelta(event),
+                &sink,
+            )
+            .await,
+            Err(LlmError::InvalidResponse { provider, reason })
+                if provider == "bedrock" && reason == "tool input delta arrived before tool start"
+        ));
     }
 
     #[test]
@@ -1213,6 +1342,22 @@ mod tests {
                 assert_eq!(reason, "event stream was idle for 60 seconds");
             }
             other => panic!("expected stream interruption, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_header_wait_is_bounded_as_request_failure() {
+        let pending_send = std::future::pending::<Result<(), std::io::Error>>();
+
+        match await_bedrock_stream_headers(Duration::ZERO, pending_send).await {
+            Err(LlmError::RequestFailed { provider, reason }) => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(
+                    reason,
+                    "timed out waiting 0s for streaming response headers"
+                );
+            }
+            other => panic!("expected request failure, got {other:?}"),
         }
     }
 

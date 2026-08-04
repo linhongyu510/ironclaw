@@ -1319,6 +1319,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn anthropic_stream_rejects_tool_state_missing_id_or_name() {
+        for (id, name) in [("", "weather"), ("call-1", "")] {
+            let mut response = AnthropicStreamingResponse::default();
+            response.tool_call_parts.insert(
+                0,
+                AnthropicStreamingToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input_json: "{}".to_string(),
+                },
+            );
+
+            assert!(matches!(
+                response.finish(),
+                Err(LlmError::InvalidResponse { provider, reason })
+                    if provider == "anthropic_oauth"
+                        && reason == "streamed tool_use block is missing its id or name"
+            ));
+        }
+    }
+
+    #[test]
+    fn anthropic_stream_rejects_malformed_accumulated_tool_arguments() {
+        let mut response = AnthropicStreamingResponse::default();
+        response.tool_call_parts.insert(
+            0,
+            AnthropicStreamingToolCall {
+                id: "call-1".to_string(),
+                name: "weather".to_string(),
+                input_json: r#"{"city":"Istanbul""#.to_string(),
+            },
+        );
+
+        match response.finish() {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "anthropic_oauth");
+                assert!(reason.starts_with("streamed tool arguments are invalid JSON: "));
+            }
+            other => panic!("expected invalid streamed tool arguments, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn complete_preserves_missing_retry_after_on_headerless_502() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
