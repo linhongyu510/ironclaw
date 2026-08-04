@@ -308,9 +308,18 @@ assert_contains "T3 partial move keeps measuring"  "${CAP_OUT}" "30.00% (3000 bp
 
 # T4: NEGATIVE — the composition crate is absent (renamed). Must be a loud
 #     repoint, not a 0.00% pass.
+#
+#     The destination MUST NOT be the crate's real name. This case renames the
+#     fixture's composition crate *away* so the gate cannot find it; if both
+#     sides of the `mv` are the same name it degenerates to `mv X X`, which
+#     fails as "Invalid argument" (mv nests a directory inside itself) and the
+#     negative case never runs. That is exactly what the WS6 rename produced:
+#     the crate became `ironclaw_composition`, which was already this line's
+#     hard-coded destination. Kept deliberately synthetic so no future crate
+#     rename can collide with it again.
 rm -rf "${tmp}/renamed"
 make_fixture "${tmp}/renamed/crates" 3000 7000
-mv "${tmp}/renamed/crates/ironclaw_composition" "${tmp}/renamed/crates/ironclaw_composition"
+mv "${tmp}/renamed/crates/ironclaw_composition" "${tmp}/renamed/crates/composition_renamed_away"
 budget true 3000 30; run_discovered "${tmp}/renamed/crates"
 assert_rc       "T4 renamed crate exits 1"         1 "${CAP_RC}"
 assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_composition'"
