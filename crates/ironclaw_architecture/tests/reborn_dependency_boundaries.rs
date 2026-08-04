@@ -4260,7 +4260,21 @@ struct LayerMatrixException {
 /// Recomputed as `len()` of the merged list on the pushed ref, per the union
 /// rule the CHECKLIST §11.2.2 row records. Each slice's own figure (8 and 9,
 /// both computed against a 10-entry list) is superseded by WS2 landing first.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 5;
+///
+/// **5 → 4 (WS3, `ironclaw_processes` re-layered `runtimes` → kernel).** Not a
+/// waiver removal and not a code move: the edge became *legal*. `processes`
+/// held `ironclaw_resources` (kernel) from `runtimes`, an upward edge, which
+/// is the only reason it needed an exception. CHECKLIST WS3 already called for
+/// the re-layer and `families/kernel.md` already listed `ironclaw_processes`
+/// among the kernel crates — only `Cargo.toml`'s `layer =` still said
+/// `runtimes`. With that corrected the pair is kernel → kernel and the
+/// exception went **stale**, which is how the ratchet reported it
+/// (`reborn_workspace_crates_declare_layers_and_follow_layer_matrix` fails on
+/// a stale entry, not just a new one) — so this deletion is the gate's own
+/// verdict rather than a judgement call. Every one of the nine crates that
+/// depends on `processes` is kernel or above, so the move legalizes an edge
+/// without forbidding any existing one.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 4;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4269,13 +4283,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_processes",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
         crate_name: "ironclaw_conversations",
