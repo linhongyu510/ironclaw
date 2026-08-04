@@ -1,5 +1,11 @@
 # IronClaw E2E Tests
 
+> **Adding or removing a scenario here? Update `tests/CLAUDE.md`** — the repo-wide
+> scenario coverage map (what each scenario proves, in plain English, and where the
+> gaps are). Its maintenance rule is binding: the row goes in the same commit.
+> §6 of that map is the exhaustive, current inventory of this directory; the
+> representative table under "Test Scenarios" below is older and partly stale.
+
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
 **The live surface is the Reborn `ironclaw serve` WebChat v2 SPA** (`/`,
