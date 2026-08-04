@@ -135,35 +135,98 @@ fn event_store_names_the_driver_only_inside_its_private_backend_module() {
     );
 }
 
+/// The token that declares the module the scan exempts.
+const MODULE_HEADER: &str = "mod postgres_backed {";
+
+/// The visibility written in front of [`MODULE_HEADER`] on `line`, if this line
+/// *declares* the module: `Some("")` for a private `mod`, `Some("pub")` or
+/// `Some("pub(crate)")` for a visible one.
+///
+/// `None` when the line merely mentions the name — a comment, a string — so
+/// widening the match from "the line starts with `mod`" to "the line contains
+/// the token" cannot be fooled by prose into picking a header that is not one.
+fn module_visibility(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let prefix = trimmed[..trimmed.find(MODULE_HEADER)?].trim_end();
+    (prefix.is_empty() || prefix.starts_with("pub")).then_some(prefix)
+}
+
+/// Offset just past the `"##…` that closes a raw string opened with `hashes`
+/// hashes. Searched over bytes rather than `&str`, so a multi-byte character
+/// inside the literal cannot leave the index off a char boundary — `&str`
+/// slicing panics there.
+fn raw_string_end(bytes: &[u8], hashes: usize) -> Option<usize> {
+    let terminator = 1 + hashes;
+    bytes
+        .windows(terminator)
+        .position(|window| window[0] == b'"' && window[1..].iter().all(|byte| *byte == b'#'))
+        .map(|start| start + terminator)
+}
+
 /// Line range of the private `postgres_backed` module *body*, if `source`
 /// declares one. `None` when the file has no such module.
 ///
 /// Brace-matched rather than delimited by the next `}` at some indentation, and
 /// trivia-aware (line comments, nestable block comments, strings, raw strings,
-/// char literals) so a brace inside a literal cannot end the body early — which
-/// would silently re-expose part of the module to the scan, or hide part of the
-/// file from it.
+/// char literals) so a brace inside a literal cannot move the body boundary —
+/// which would silently re-expose part of the module to the scan, or hide part
+/// of the file from it.
+///
+/// String state is carried **across** lines, like the block-comment state. An
+/// earlier revision reset it at every newline, so the continuation lines of a
+/// multi-line literal were scanned as code: a `}` there truncated the body, and
+/// a `{` there stretched it past the real closing brace and swallowed the
+/// driver mentions that followed. That second direction is fail-open, and it is
+/// pinned by a fixture in both directions.
 fn private_backend_module_body(
     source: &str,
     path: &std::path::Path,
 ) -> Option<std::ops::Range<usize>> {
     let lines: Vec<&str> = source.lines().collect();
-    let header = lines
+    // Keyed on the token, not the start of the line, so a *visible* module is
+    // found rather than missed. Missing it would leave `exempt` empty and blame
+    // whichever driver mention happened to be reported first, instead of naming
+    // the visibility change that actually broke the containment.
+    let (header, visibility) = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("mod postgres_backed {"))?;
+        .enumerate()
+        .find_map(|(index, line)| module_visibility(line).map(|vis| (index, vis)))?;
     assert!(
-        !lines[header].trim_start().starts_with("pub "),
-        "{path:?}: `postgres_backed` must stay private; a `pub mod` re-exports the \
-         driver cone it exists to contain"
+        visibility.is_empty(),
+        "{path:?}: `postgres_backed` must stay private; `{visibility} mod postgres_backed` \
+         re-exports the driver cone it exists to contain"
     );
 
     let mut depth = 0usize;
     let mut in_block_comment = 0usize;
+    let mut in_string = false;
+    let mut in_raw_string: Option<usize> = None;
     for (offset, line) in lines.iter().enumerate().skip(header) {
         let bytes = line.as_bytes();
         let mut i = 0usize;
         while i < bytes.len() {
             let rest = &bytes[i..];
+            if let Some(hashes) = in_raw_string {
+                match raw_string_end(rest, hashes) {
+                    Some(end) => {
+                        i += end;
+                        in_raw_string = None;
+                    }
+                    // The literal runs past this line; stay in it.
+                    None => break,
+                }
+                continue;
+            }
+            if in_string {
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                if i < bytes.len() {
+                    in_string = false;
+                    i += 1;
+                }
+                continue;
+            }
             if in_block_comment > 0 {
                 if rest.starts_with(b"/*") {
                     in_block_comment += 1;
@@ -190,20 +253,14 @@ fn private_backend_module_body(
                     hashes += 1;
                 }
                 if bytes.get(i + 1 + hashes) == Some(&b'"') {
-                    let terminator = format!("\"{}", "#".repeat(hashes));
-                    let body = i + 2 + hashes;
-                    match line[body..].find(&terminator) {
-                        Some(n) => i = body + n + terminator.len(),
-                        None => break,
-                    }
+                    // Opened only; the loop above closes it, this line or a later one.
+                    in_raw_string = Some(hashes);
+                    i += 2 + hashes;
                     continue;
                 }
             }
             if bytes[i] == b'"' {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
+                in_string = true;
                 i += 1;
                 continue;
             }
@@ -312,5 +369,64 @@ mod backend_module_body_tests {
     #[test]
     fn a_file_without_the_module_has_no_exempt_range() {
         assert!(body("pub fn a() {}\n").is_none());
+    }
+
+    /// A brace inside a *multi-line* literal must not move the boundary either.
+    /// The scan used to drop string state at every newline, so the continuation
+    /// lines of a literal were read as code: a `}` there truncated the body
+    /// (noisy), and a `{` there extended it past the real closing brace and
+    /// **swallowed a driver mention that should have failed the gate** —
+    /// fail-open, which is why this is pinned in both directions.
+    #[test]
+    fn a_brace_in_a_multi_line_literal_does_not_move_the_body_boundary() {
+        // `}` on a continuation line used to close the body two lines early.
+        let early = "mod postgres_backed {\n    const SQL: &str = \"first\n} second\";\n    fn inner() {}\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        assert_eq!(body(early).expect("module found"), 0..5);
+
+        // `{` on a continuation line used to extend the body past the closing
+        // brace, exempting the driver mention on the line after it.
+        let late = "mod postgres_backed {\n    const SQL: &str = \"first\n{ second\";\n    fn inner() {}\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n}\n";
+        let range = body(late).expect("module found");
+        assert_eq!(range, 0..5);
+        assert!(
+            !range.contains(&5),
+            "the driver mention after the body must stay outside the exempt range"
+        );
+
+        // Raw strings span lines far more often than regular ones (SQL).
+        let raw = "mod postgres_backed {\n    const SQL: &str = r#\"first\n} second\"#;\n    fn inner() {}\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        assert_eq!(body(raw).expect("module found"), 0..5);
+    }
+
+    /// `pub mod postgres_backed` re-exports the very driver cone the module
+    /// exists to contain. The header match used to require the line to *start*
+    /// with `mod`, so a visible module was simply never found and the
+    /// visibility assertion below it could not run.
+    #[test]
+    #[should_panic(expected = "must stay private")]
+    fn a_public_module_header_is_rejected() {
+        let _ = body("pub mod postgres_backed {\n    use deadpool_postgres::Pool;\n}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "must stay private")]
+    fn a_crate_visible_module_header_is_rejected() {
+        let _ = body("pub(crate) mod postgres_backed {\n    use deadpool_postgres::Pool;\n}\n");
+    }
+
+    /// The header match keys on the `mod postgres_backed {` token rather than
+    /// the start of the line, so it must not mistake a comment or a string that
+    /// names the module for the declaration itself.
+    #[test]
+    fn a_mention_of_the_module_name_is_not_mistaken_for_the_declaration() {
+        let source = "// mod postgres_backed {\nlet s = \"mod postgres_backed {\";\nmod postgres_backed {\n    use deadpool_postgres::Pool;\n}\n";
+        assert_eq!(body(source).expect("module found"), 2..5);
+    }
+
+    /// An unterminated body must not silently exempt the rest of the file.
+    #[test]
+    #[should_panic(expected = "unterminated")]
+    fn an_unterminated_body_panics_instead_of_exempting_the_rest_of_the_file() {
+        let _ = body("mod postgres_backed {\n    fn inner() {}\n");
     }
 }

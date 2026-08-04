@@ -24,6 +24,15 @@
   `reborn_persistence_driver_boundary.rs::event_store_names_the_driver_only_inside_its_private_backend_module`
   scans **every** `.rs` file in `src/` minus that brace-matched body, so a
   mention in a sibling module, or after the body in `lib.rs`, fails it too.
+  Keep the module **private**: `pub mod postgres_backed` (or `pub(crate)`)
+  re-exports the cone the module exists to contain, and the gate rejects it by
+  name. Keep the brace match honest too — it tracks line comments, nestable
+  block comments, char literals, and strings **including ones that span lines**,
+  because a `{` on the continuation line of a literal used to stretch the exempt
+  range past the module's real end and hide every driver mention after it
+  (fail-open; found 2026-08-04, see the `event_store` row in
+  `docs/reborn/target-architecture/CHECKLIST.md`). An unterminated body panics
+  rather than exempting the rest of the file.
 
 ## Do Not Move In Here
 
