@@ -47,6 +47,10 @@ use super::service::{
 };
 
 const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
+const CANONICAL_TOOL_PACKAGE_DIGEST: &str =
+    "sha256:af9d22f30a99eadbd63956a18f7277b950d2917de0746eb3eebcf7247bef0f38";
+const CANONICAL_SKILL_PACKAGE_DIGEST: &str =
+    "sha256:62d94ebeb712be5ee09d460c7b7674637444bad8c44cfd470f720031a9203add";
 
 fn test_link_state() -> Arc<IronhubLinkStateStore> {
     Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new())))
@@ -439,22 +443,9 @@ fn signed_catalog_verification_rejects_bad_signature() {
 
 #[test]
 fn package_digest_binds_manifest_and_catalog_metadata() {
-    let artifact = |name: &str, sha: char| IronHubArtifact {
-        url: format!("https://hub.ironclaw.com/{name}"),
-        size_bytes: 10,
-        sha256: sha.to_string().repeat(64),
-    };
-    let tool = IronHubToolEntry {
-        name: "example-tool".to_string(),
-        version: "1.0.0".to_string(),
-        description: "Example tool".to_string(),
-        provenance: IronHubProvenance::Official,
-        wasm: artifact("tool.wasm", 'a'),
-        capabilities: artifact("capabilities.json", 'b'),
-        manifest: Some(artifact("manifest.toml", 'c')),
-        schemas: Default::default(),
-    };
+    let tool = canonical_tool_entry();
     let original = tool_artifact_digest(&tool);
+    assert_eq!(original, CANONICAL_TOOL_PACKAGE_DIGEST);
 
     for mutated in [
         IronHubToolEntry {
@@ -470,13 +461,13 @@ fn package_digest_binds_manifest_and_catalog_metadata() {
             ..tool.clone()
         },
         IronHubToolEntry {
-            manifest: Some(artifact("manifest.toml", 'd')),
+            manifest: Some(canonical_artifact("manifest.toml", 'd')),
             ..tool.clone()
         },
         IronHubToolEntry {
             schemas: [(
                 "schemas/example.input.json".to_string(),
-                artifact("example.input.json", 'e'),
+                canonical_artifact("example.input.json", 'e'),
             )]
             .into_iter()
             .collect(),
@@ -490,20 +481,49 @@ fn package_digest_binds_manifest_and_catalog_metadata() {
         );
     }
 
-    let skill = IronHubSkillEntry {
-        name: "example-skill".to_string(),
-        trunk: "main".to_string(),
-        version: "1.0.0".to_string(),
-        description: "Example skill".to_string(),
-        provenance: IronHubProvenance::Verified,
-        skill_md: artifact("SKILL.md", 'e'),
-    };
+    let skill = canonical_skill_entry();
+    assert_eq!(
+        skill_artifact_digest(&skill),
+        CANONICAL_SKILL_PACKAGE_DIGEST
+    );
     let mut changed_skill = skill.clone();
     changed_skill.skill_md.sha256 = "f".repeat(64);
     assert_ne!(
         skill_artifact_digest(&skill),
         skill_artifact_digest(&changed_skill)
     );
+}
+
+fn canonical_artifact(name: &str, sha: char) -> IronHubArtifact {
+    IronHubArtifact {
+        url: format!("https://hub.ironclaw.com/{name}"),
+        size_bytes: 10,
+        sha256: sha.to_string().repeat(64),
+    }
+}
+
+fn canonical_tool_entry() -> IronHubToolEntry {
+    IronHubToolEntry {
+        name: "example-tool".to_string(),
+        version: "1.0.0".to_string(),
+        description: "Example tool".to_string(),
+        provenance: IronHubProvenance::Official,
+        wasm: canonical_artifact("tool.wasm", 'a'),
+        capabilities: canonical_artifact("capabilities.json", 'b'),
+        manifest: Some(canonical_artifact("manifest.toml", 'c')),
+        schemas: Default::default(),
+    }
+}
+
+fn canonical_skill_entry() -> IronHubSkillEntry {
+    IronHubSkillEntry {
+        name: "example-skill".to_string(),
+        trunk: "main".to_string(),
+        version: "1.0.0".to_string(),
+        description: "Example skill".to_string(),
+        provenance: IronHubProvenance::Verified,
+        skill_md: canonical_artifact("SKILL.md", 'e'),
+    }
 }
 
 #[test]
@@ -522,6 +542,104 @@ fn signed_manifest_freshness_rejects_stale_and_future_catalogs() {
             .is_err(),
         "far-future timestamps must not freeze the replay watermark"
     );
+}
+
+#[tokio::test]
+async fn signed_manifest_freshness_fails_before_replay_state_or_artifact_downloads() {
+    let now = Utc::now();
+    let cases = [
+        (
+            "public-stale",
+            false,
+            now - Duration::days(30) - Duration::seconds(1),
+        ),
+        (
+            "public-future",
+            false,
+            now + Duration::minutes(5) + Duration::seconds(1),
+        ),
+        (
+            "private-stale",
+            true,
+            now - Duration::days(30) - Duration::seconds(1),
+        ),
+        (
+            "private-future",
+            true,
+            now + Duration::minutes(5) + Duration::seconds(1),
+        ),
+    ];
+
+    for (fixture, private, generated_at) in cases {
+        let services =
+            crate::lifecycle_test_support::build_lifecycle_test_services(fixture, None, false)
+                .await;
+        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(fixture);
+        let catalog_url = format!("https://hub.ironclaw.com/tests/{fixture}/catalog.json");
+        let private_url = format!("https://hub.ironclaw.com/tests/{fixture}/private.json");
+        let requested_manifest_url = if private {
+            private_url.as_str()
+        } else {
+            catalog_url.as_str()
+        };
+        let artifact_url = format!("https://hub.ironclaw.com/tests/{fixture}/SKILL.md");
+        let artifact = b"freshness must fail before this artifact is requested";
+        let manifest = skill_manifest(
+            "freshness-skill",
+            &artifact_url,
+            artifact,
+            &generated_at.to_rfc3339(),
+        );
+        let signed = signed_manifest(
+            serde_json::to_string(&manifest).expect("manifest JSON"),
+            &test_signing_key(),
+        );
+        let egress = Arc::new(RecordingEgress::new([(requested_manifest_url, signed)]));
+        let state = Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new())));
+        let service = configure_test_catalog(
+            IronHubService::new_with_runtime_egress(
+                services.skill_management,
+                services.extension_management,
+                egress.clone(),
+                scope,
+                CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+                Arc::clone(&state),
+            ),
+            &catalog_url,
+            test_manifest_verify_keys(),
+        );
+
+        let error = service
+            .execute(IronHubCommand::Install {
+                name: "freshness-skill".to_string(),
+                options: IronHubInstallOptions {
+                    kind: Some(IronHubEntryKind::Skill),
+                    private_manifest_url: private.then(|| private_url.clone()),
+                    ..IronHubInstallOptions::default()
+                },
+            })
+            .await
+            .expect_err("out-of-window signed manifest must fail closed");
+        assert!(matches!(error, IronHubCommandError::Catalog { .. }));
+        assert_eq!(
+            egress.requests().len(),
+            1,
+            "{fixture} must stop after the signed manifest fetch"
+        );
+
+        let earlier = generated_at - Duration::seconds(1);
+        if private {
+            state
+                .record_private_manifest("hub.ironclaw.com", &manifest.repo, earlier, "sentinel")
+                .await
+                .expect("rejected private manifest must not advance replay state");
+        } else {
+            state
+                .record_public_manifest(&catalog_url, earlier, "sentinel")
+                .await
+                .expect("rejected public manifest must not advance replay state");
+        }
+    }
 }
 
 #[test]
@@ -989,7 +1107,7 @@ async fn install_rejects_a_stale_package_digest_before_artifact_download() {
             options: IronHubInstallOptions {
                 kind: Some(IronHubEntryKind::Skill),
                 expected_version: Some("1.0.0".to_string()),
-                expected_artifact_digest: Some(format!("sha256:{}", "0".repeat(64))),
+                expected_artifact_digest: Some(CANONICAL_SKILL_PACKAGE_DIGEST.to_string()),
                 ..IronHubInstallOptions::default()
             },
         })
@@ -1004,6 +1122,59 @@ async fn install_rejects_a_stale_package_digest_before_artifact_download() {
         egress.requests().len(),
         1,
         "only the signed catalog may be fetched before the package pin is checked"
+    );
+}
+
+#[tokio::test]
+async fn install_accepts_the_canonical_skill_digest_before_artifact_download() {
+    let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-canonical-digest-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+        "ironhub-canonical-digest-owner",
+    );
+    let manifest_url = "https://hub.ironclaw.com/tests/canonical-digest/manifest.json";
+    let manifest = IronHubManifest {
+        version: "1".to_string(),
+        generated_at: recent_timestamp(0),
+        release_tag: "test".to_string(),
+        repo: "nearai/ironhub".to_string(),
+        tools: Vec::new(),
+        skills: vec![canonical_skill_entry()],
+    };
+    let signed = signed_manifest(
+        serde_json::to_string(&manifest).expect("canonical manifest JSON"),
+        &test_signing_key(),
+    );
+    let egress = Arc::new(RecordingEgress::new([(manifest_url, signed)]));
+    let service = configured_service(
+        services.skill_management,
+        services.extension_management,
+        egress.clone(),
+        scope,
+        manifest_url,
+    );
+
+    service
+        .execute(IronHubCommand::Install {
+            name: "example-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                expected_version: Some("1.0.0".to_string()),
+                expected_artifact_digest: Some(CANONICAL_SKILL_PACKAGE_DIGEST.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("the canonical pin is accepted before the absent artifact fetch fails");
+
+    assert_eq!(
+        egress.requests().len(),
+        2,
+        "the canonical wire digest must pass pin validation and reach artifact download"
     );
 }
 
