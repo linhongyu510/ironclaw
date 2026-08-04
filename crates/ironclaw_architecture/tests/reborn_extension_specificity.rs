@@ -1494,7 +1494,15 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+/// ✎ **129 → 127 (2026-08-04, WS3/WS4 consolidation).** The constant had
+/// drifted ABOVE the real list length: the ratchet is shrink-only, so a
+/// baseline larger than `ALLOWLIST.len()` passes silently and quietly buys
+/// back two slots that a future PR could fill without tripping anything.
+/// Measured off the compiler rather than counted by eye — set the baseline
+/// to 0 and let the ratchet report the length — giving **127**, identical on
+/// `origin/main`, on each consolidated slice, and on the union, so this is a
+/// pre-existing drift and not something this PR introduced.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 127;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]
