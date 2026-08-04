@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -15,6 +17,89 @@ assert SPEC is not None and SPEC.loader is not None
 planner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = planner
 SPEC.loader.exec_module(planner)
+
+sys.path.insert(0, str(ROOT / "scripts/ci/lib"))
+
+from crate_tree import crate_directories, owning_crate_directory  # noqa: E402
+
+# A literal `include_str!`/`include_bytes!` target. `concat!` forms are not
+# matched and do not need to be: this resolves *whether* a crate reaches into
+# an asset tree, and every tree in the table has literal sites.
+INCLUDE_LITERAL = re.compile(r"include_(?:str|bytes)!\s*\(\s*\"([^\"]+)\"")
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _workspace_crate_directories() -> dict[str, Path]:
+    """Package name -> crate directory, from the repo's own crate inventory.
+
+    `crate_tree` rather than a `crates/**/Cargo.toml` glob so the workspace-
+    excluded `wasm-src/` guests stay out: they declare their own `[workspace]`,
+    no lane of this workspace compiles them, and counting them would make a
+    guest's include of its own sibling file look like a cross-tree reach-in.
+    """
+    directories: dict[str, Path] = {}
+    for relative in crate_directories(ROOT):
+        directory = ROOT / relative
+        manifest = tomllib.loads(
+            (directory / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        name = manifest.get("package", {}).get("name")
+        if name:
+            directories[name] = directory
+    return directories
+
+
+def _crates_embedding(prefix: str, crate_dirs: dict[str, Path]) -> set[str]:
+    """Crates with an include of a *table-routed* file under `prefix`.
+
+    Table-routed means "owned by no crate": the planner resolves package
+    directories first, so `crates/extensions/packages/telegram/manifest.toml`
+    is its own crate's file and never reaches `EMBEDDED_ASSET_OWNERS`.
+    """
+    embedders: set[str] = set()
+    for name, directory in crate_dirs.items():
+        for source in directory.rglob("*.rs"):
+            if "target" in source.parts or name in embedders:
+                continue
+            text = source.read_text(encoding="utf-8", errors="replace")
+            for literal in INCLUDE_LITERAL.findall(text):
+                try:
+                    target = (
+                        (source.parent / literal).resolve().relative_to(ROOT).as_posix()
+                    )
+                except ValueError:
+                    continue
+                if target.startswith(prefix) and (
+                    owning_crate_directory(target, ROOT) is None
+                ):
+                    embedders.add(name)
+                    break
+    return embedders
+
+
+def _depends_on(package: str, target: str, crate_dirs: dict[str, Path]) -> bool:
+    """True when `package` reaches `target` through workspace dependencies."""
+    seen = {package}
+    pending = [package]
+    while pending:
+        directory = crate_dirs.get(pending.pop())
+        if directory is None:
+            continue
+        manifest = tomllib.loads(
+            (directory / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        tables = [manifest.get(table, {}) for table in DEPENDENCY_TABLES]
+        for platform in manifest.get("target", {}).values():
+            tables.extend(platform.get(table, {}) for table in DEPENDENCY_TABLES)
+        for table in tables:
+            for key, value in table.items():
+                name = value.get("package", key) if isinstance(value, dict) else key
+                if name == target:
+                    return True
+                if name in crate_dirs and name not in seen:
+                    seen.add(name)
+                    pending.append(name)
+    return False
 
 
 def metadata() -> dict:
@@ -36,6 +121,62 @@ def metadata() -> dict:
                 {"id": "alpha", "deps": []},
                 {"id": "beta", "deps": [{"pkg": "alpha"}]},
                 {"id": "gamma", "deps": [{"pkg": "beta"}]},
+            ]
+        },
+    }
+
+
+def real_owner_metadata() -> dict:
+    """A workspace named after the crates `EMBEDDED_ASSET_OWNERS` routes to.
+
+    The rest of this file uses `metadata()`'s `alpha`/`beta`/`gamma`, which
+    cannot carry the real table: the planner rejects a changed package outside
+    the canonical set, so the real owners have to exist here to be routed to
+    at all. Manifest paths are the real ones, so `_workspace_packages` derives
+    the same package directories it does in CI — which is what makes
+    `crates/extensions/packages/slack/` resolve to its own crate rather than
+    to the asset table.
+
+    `ironclaw_extension_host` depends on `ironclaw_extension_support` (an
+    optional dependency plus a dev-dependency, both in its real manifest),
+    which is why routing a package asset to the support crate also schedules
+    the host that embeds three of those manifests itself.
+    """
+
+    def package(name: str, manifest: str, deps: tuple[str, ...] = ()) -> dict:
+        return {
+            "id": name,
+            "name": name,
+            "manifest_path": str(ROOT / manifest),
+            "deps": deps,
+        }
+
+    packages = [
+        package("ironclaw_reborn_integration_tests", "Cargo.toml"),
+        package(
+            "ironclaw_extension_support",
+            "crates/extensions/ironclaw_extension_support/Cargo.toml",
+        ),
+        package(
+            "ironclaw_extension_host",
+            "crates/ironclaw_extension_host/Cargo.toml",
+            ("ironclaw_extension_support",),
+        ),
+        package(
+            "ironclaw_slack_extension",
+            "crates/extensions/packages/slack/Cargo.toml",
+        ),
+    ]
+    return {
+        "workspace_members": [entry["id"] for entry in packages],
+        "packages": [
+            {key: value for key, value in entry.items() if key != "deps"}
+            for entry in packages
+        ],
+        "resolve": {
+            "nodes": [
+                {"id": entry["id"], "deps": [{"pkg": dep} for dep in entry["deps"]]}
+                for entry in packages
             ]
         },
     }
@@ -65,6 +206,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             metadata=metadata(),
             canonical_packages=self.canonical,
             lockfile_manifest_owned=lockfile_manifest_owned,
+        )
+
+    def plan_real_owners(self, paths: list[str]) -> dict:
+        """Plan a pull request through the real `EMBEDDED_ASSET_OWNERS`."""
+        metadata = real_owner_metadata()
+        return planner.build_plan(
+            event="pull_request",
+            changed_paths=paths,
+            metadata=metadata,
+            canonical_packages=[
+                package["name"]
+                for package in metadata["packages"]
+                if package["name"] != "ironclaw_reborn_integration_tests"
+            ],
         )
 
     def test_merge_queue_is_always_exhaustive(self) -> None:
@@ -552,50 +707,61 @@ class RebornPrTestPlanTests(unittest.TestCase):
         under-schedule of a change to production output. Hence the assertion
         below is that the path *selects a lane*, not merely that it is
         accepted — the inverse of the `.claude/` prose test.
+
+        Driven through the REAL `EMBEDDED_ASSET_OWNERS`, against a workspace
+        whose packages carry the real owners' names and real manifest paths.
+        The first cut substituted `alpha`/`beta` owners so it could reuse the
+        synthetic workspace, which exercised the prefix strings but left the
+        prefix→owner *pairing* — the table's entire semantic content —
+        asserted nowhere: swapping the two owners passed. Review caught it
+        (#7084). `test_embedded_asset_owner_mapping_is_not_stale` supplies the
+        other half, deriving the same pairing from the real `include_*!` sites
+        so agreeing with a wrong constant is not enough.
         """
-        original = planner.EMBEDDED_ASSET_OWNERS
-        # Real prefixes, synthetic owners: the synthetic workspace in
-        # `metadata()` has no `ironclaw_*` packages, and pointing the real
-        # prefixes at `alpha`/`beta` exercises the real prefix strings through
-        # the real routing. `test_embedded_asset_owner_mapping_is_not_stale`
-        # below pins the real owners against the real workspace.
-        planner.EMBEDDED_ASSET_OWNERS = (
-            ("crates/extensions/packages/", "alpha"),
-            ("test-tools/", "beta"),
-        )
-        planner.CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
-            prefix for prefix, _ in planner.EMBEDDED_ASSET_OWNERS
-        )
-        try:
-            for path, owner in (
-                ("crates/extensions/packages/github/wasm/github_tool.wasm", "alpha"),
-                ("crates/extensions/packages/github/wasm-src/src/lib.rs", "alpha"),
-                ("crates/extensions/packages/gmail/manifest.toml", "alpha"),
-                ("test-tools/market-data/manifest.toml", "beta"),
-                ("test-tools/hacker-news/wasm-src/src/lib.rs", "beta"),
-            ):
-                with self.subTest(path=path):
-                    plan = self.plan("pull_request", [path])
-                    self.assertEqual(plan["mode"], "selected", path)
-                    self.assertEqual(plan["changed_packages"], [owner], path)
-                    # Routed as a *production* change, so the crates that
-                    # consume the embedded artifact run too.
-                    self.assertIn(owner, plan["affected_packages"], path)
-                    self.assertNotEqual(plan["crate_buckets"], [], path)
+        for path, owner in (
+            (
+                "crates/extensions/packages/github/wasm/github_tool.wasm",
+                "ironclaw_extension_support",
+            ),
+            (
+                "crates/extensions/packages/github/wasm-src/src/lib.rs",
+                "ironclaw_extension_support",
+            ),
+            (
+                "crates/extensions/packages/gmail/manifest.toml",
+                "ironclaw_extension_support",
+            ),
+            ("test-tools/market-data/manifest.toml", "ironclaw_extension_host"),
+            (
+                "test-tools/hacker-news/wasm-src/src/lib.rs",
+                "ironclaw_extension_host",
+            ),
+        ):
+            with self.subTest(path=path):
+                plan = self.plan_real_owners([path])
+                self.assertEqual(plan["mode"], "selected", path)
+                self.assertEqual(plan["changed_packages"], [owner], path)
+                # Routed as a *production* change, so the crates that
+                # consume the embedded artifact run too.
+                self.assertIn(owner, plan["affected_packages"], path)
+                self.assertNotEqual(plan["crate_buckets"], [], path)
 
-            # A package that *is* a workspace crate still resolves to itself
-            # rather than falling through to the asset table.
-            plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
-            self.assertEqual(plan["changed_packages"], ["alpha"])
+        # `ironclaw_extension_host` embeds package manifests too, and is
+        # covered because it depends on the routed owner — the property
+        # `test_embedded_asset_owner_mapping_is_not_stale` derives from the
+        # tree rather than assuming.
+        plan = self.plan_real_owners(["crates/extensions/packages/gmail/manifest.toml"])
+        self.assertIn("ironclaw_extension_host", plan["affected_packages"])
 
-            # The arm stays fail-closed for an asset tree with no owner.
-            with self.assertRaisesRegex(ValueError, "unmapped crate path"):
-                self.plan("pull_request", ["crates/extensions/nowhere/thing.bin"])
-        finally:
-            planner.EMBEDDED_ASSET_OWNERS = original
-            planner.CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
-                prefix for prefix, _ in original
-            )
+        # A package that *is* a workspace crate still resolves to itself
+        # rather than falling through to the asset table, even though its
+        # path sits under a table prefix.
+        plan = self.plan_real_owners(["crates/extensions/packages/slack/src/lib.rs"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_slack_extension"])
+
+        # The arm stays fail-closed for an asset tree with no owner.
+        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
+            self.plan_real_owners(["crates/extensions/nowhere/thing.bin"])
 
     def test_markdown_owned_by_no_crate_is_prose(self) -> None:
         """`crates/AGENTS.md` and `test-tools/README.md` select no lane.
@@ -616,24 +782,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["crate_buckets"], [], path)
 
     def test_embedded_asset_owner_mapping_is_not_stale(self) -> None:
-        """Every prefix and owner in the real table still exists.
+        """Every prefix routes to a crate that really compiles the tree in.
 
         The mapping is a hand-written bridge across a boundary cargo cannot
         see, so it is exactly the kind of path-keyed constant CHECKLIST WS10
         found silently rotting: if an asset tree or its owning crate moves,
         the planner would resume failing closed (loud) or, worse, route to a
         crate that no longer exists. Fail here first instead.
+
+        Existence is necessary and nowhere near sufficient, which is what
+        review caught on #7084: "the prefix is a directory and the owner is a
+        crate" also holds for a *wrong* owner, so the pairing has to come out
+        of the tree. It does, from the `include_str!`/`include_bytes!` sites
+        themselves. Routing a path to a package schedules that package and
+        everything that depends on it, so the invariant the planner needs is:
+
+          every crate that compiles a table-routed file under `prefix` into
+          itself is either the routed owner or a dependent of it.
+
+        Both halves of that bite. `crates/extensions/packages/` is embedded by
+        four crates, not one — `ironclaw_extension_host`,
+        `ironclaw_extension_manager` and `ironclaw_reborn_composition` reach
+        into it alongside `ironclaw_extension_support` — and they are covered
+        only because each depends on the support crate. Drop that edge and a
+        shipped-artifact change stops scheduling a crate that embeds it, which
+        is the silent under-schedule this table exists to prevent.
         """
-        crate_manifests = {
-            manifest.parent.name: manifest
-            for manifest in ROOT.glob("crates/**/Cargo.toml")
-        }
-        owner_names = set()
-        for manifest in crate_manifests.values():
-            for line in manifest.read_text(encoding="utf-8").splitlines():
-                if line.startswith("name ="):
-                    owner_names.add(line.split("=", 1)[1].strip().strip('"'))
-                    break
+        crate_dirs = _workspace_crate_directories()
+        self.assertGreater(len(crate_dirs), 20, "crate inventory looks truncated")
 
         self.assertNotEqual(planner.EMBEDDED_ASSET_OWNERS, ())
         for prefix, owner in planner.EMBEDDED_ASSET_OWNERS:
@@ -644,9 +820,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 )
                 self.assertIn(
                     owner,
-                    owner_names,
+                    crate_dirs,
                     f"{prefix} routes to {owner}, which is no longer a crate",
                 )
+                embedders = _crates_embedding(prefix, crate_dirs)
+                self.assertIn(
+                    owner,
+                    embedders,
+                    f"{prefix} routes to {owner}, which embeds nothing from it; "
+                    f"the crates that do are {sorted(embedders)}",
+                )
+                for embedder in sorted(embedders - {owner}):
+                    self.assertTrue(
+                        _depends_on(embedder, owner, crate_dirs),
+                        f"{embedder} compiles files from {prefix} but does not "
+                        f"depend on {owner}, so routing there never schedules it",
+                    )
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.
