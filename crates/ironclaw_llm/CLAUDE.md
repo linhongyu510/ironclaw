@@ -119,10 +119,11 @@ ID, migrate to it immediately. Advanced users can override headers via
 **Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal is `LlmError::StreamInterrupted` even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics. Completed malformed or empty responses use `InvalidResponse` / `EmptyResponse`; those are invalid model output, not provider availability.
 
 **Streaming rollout:** Native streaming is enabled only on provider paths that
-have been live-validated: NEAR AI, OpenAI-compatible, Anthropic API key/OAuth,
-and Codex Responses. Other providers retain the buffered trait fallback until
-their upstream request paths can be tested, including Gemini OAuth, GitHub
-Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
+have been live-validated: NEAR AI, the built-in OpenAI provider, Anthropic API
+key/OAuth, and Codex Responses. Other providers retain the buffered trait
+fallback until their upstream request paths can be tested, including custom
+OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and
+Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
 Text deltas are advisory UI progress;
 the returned response remains authoritative for text, tool calls, finish reason,
 reasoning artifacts, and usage. Provider decorators must forward both streaming

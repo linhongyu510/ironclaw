@@ -442,12 +442,18 @@ fn create_openai_compat_from_registry(
         shape: rig_adapter::ModelsShape::OpenAiData,
         extra_headers,
     };
-    let adapter = RigAdapter::new(model, &config.model)
+    let mut adapter = RigAdapter::new(model, &config.model)
         .with_provider_id(config.provider_id.clone())
-        .with_native_streaming()
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
+    if native_streaming_enabled_for_openai_provider(&config.provider_id) {
+        adapter = adapter.with_native_streaming();
+    }
     Ok(Arc::new(adapter))
+}
+
+fn native_streaming_enabled_for_openai_provider(provider_id: &str) -> bool {
+    provider_id.eq_ignore_ascii_case("openai")
 }
 
 fn create_anthropic_from_registry(
@@ -1699,6 +1705,15 @@ mod tests {
             normalize_openai_base_url("https://my-server.example.com"),
             "https://my-server.example.com/v1"
         );
+    }
+
+    #[test]
+    fn native_openai_streaming_is_limited_to_the_validated_builtin_provider() {
+        assert!(native_streaming_enabled_for_openai_provider("openai"));
+        assert!(native_streaming_enabled_for_openai_provider("OpenAI"));
+        assert!(!native_streaming_enabled_for_openai_provider("custom"));
+        assert!(!native_streaming_enabled_for_openai_provider("groq"));
+        assert!(!native_streaming_enabled_for_openai_provider("tinfoil"));
     }
 
     #[test]
