@@ -132,12 +132,12 @@ fn composition_root_embeds_no_prompt_content() {
     let crate_root = workspace_root().join("crates/ironclaw_reborn_composition");
 
     let sources = rust_sources(&crate_root.join("src"));
-    // `rust_sources` now panics on an unreadable directory or entry, so an
+    // `rust_sources` panics on an unreadable directory or entry, so an
     // *incomplete* walk is already loud. This floor covers the case that stays
     // silent: a walk that reads a perfectly good directory which is no longer
     // the crate — after the WS7 family move relocates `crates/…` under a family
-    // directory, a stale path could resolve to something small and empty rather
-    // than erroring.
+    // directory, a stale path can resolve to something small and readable
+    // rather than erroring.
     assert!(
         sources.len() >= 50,
         "expected the composition source walk to reach at least 50 files, saw {} — \
@@ -189,21 +189,356 @@ fn composition_root_embeds_no_prompt_content() {
     );
 }
 
+#[test]
+fn composition_public_pub_use_surface_matches_snapshot() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
+        .expect("composition lib.rs readable");
+    let snapshot = std::fs::read_to_string(root.join("docs/plans/composition-pubuse.snapshot"))
+        .expect("composition pub-use snapshot readable");
+
+    let actual = extract_pub_use_surface(&lib);
+    assert_eq!(
+        snapshot, actual,
+        "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
+         update the snapshot only for intentional public service changes"
+    );
+}
+
+#[test]
+fn extension_host_cluster_stays_internal() {
+    let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
+        .expect("composition lib.rs readable");
+
+    assert!(
+        !has_module_decl(&lib, "mod extension_host;"),
+        "extension_host compatibility facade must stay removed from composition"
+    );
+    assert!(
+        !has_module_decl(&lib, "pub mod extension_host;"),
+        "extension_host must not become public"
+    );
+    assert!(
+        !composition_src_path().join("extension_host").exists(),
+        "composition must not grow a replacement extension_host module directory"
+    );
+    assert!(
+        has_module_decl(&lib, "mod builtin_capability_policy;"),
+        "builtin_capability_policy is runtime-profile policy and must stay at the crate root"
+    );
+
+    for module in EXTENSION_HOST_MOVED_MODULES
+        .iter()
+        .chain(EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES.iter())
+    {
+        let root_decl = format!("mod {module};");
+        let public_root_decl = format!("pub mod {module};");
+        assert!(
+            !has_module_decl(&lib, &root_decl) && !has_module_decl(&lib, &public_root_decl),
+            "{module} must not be reintroduced as a crate-root module"
+        );
+    }
+}
+
+#[test]
+fn reborn_binary_main_is_thin_bootstrap() {
+    let root = workspace_root();
+    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/main.rs"))
+        .expect("reborn cli main.rs readable");
+
+    assert!(
+        reborn_main.contains("cli::run()"),
+        "ironclaw-reborn main.rs should delegate to the clap command root"
+    );
+    for forbidden in [
+        "build_reborn_runtime",
+        "build_runtime",
+        "axum::serve",
+        "TcpListener::bind",
+        "src/channels/web",
+        "ironclaw::channels::web",
+    ] {
+        assert!(
+            !reborn_main.contains(forbidden),
+            "ironclaw-reborn main.rs must stay a thin bootstrap over Reborn-owned command \
+             modules and factories; found `{forbidden}`"
+        );
+    }
+}
+
+/// The third-party hook-projection path MUST install installed-tier bindings
+/// EXCLUSIVELY through `HookRegistrar::install`, never any lower-level
+/// `HookDispatcherBuilder` primitive that could mint an `Installed`-tier binding
+/// with a caller-chosen `owning_extension`. The registrar is the single seam
+/// that (a) enforces the Installed-tier ceiling and the per-extension caps, and
+/// (b) derives `owning_extension` from the installer argument (spoof-blocked).
+///
+/// # Why scan the WHOLE composition crate, not just `hooks.rs`
+///
+/// A substring scan limited to `hooks.rs` is evadable by a future refactor that
+/// moves a bypass into a sibling helper module, or that hand-builds a
+/// `HookBinding { trust_class: Installed, .. }` and calls `insert_binding`, or
+/// that calls the generic `install_observer(.. HookTrustClass::Installed ..)`.
+/// This test therefore scans EVERY non-test source line of
+/// `ironclaw_reborn_composition` (the crate that owns the untrusted projection
+/// path) and forbids ALL of those Installed-tier-minting primitives crate-wide.
+/// The only sanctioned way for this crate to install an installed-tier binding
+/// is `HookRegistrar::install`.
+#[test]
+fn composition_crate_installs_installed_tier_only_through_registrar() {
+    let crate_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let sources = rust_sources(&crate_src);
+    assert!(
+        !sources.is_empty(),
+        "expected to find composition crate source files under {crate_src:?}"
+    );
+
+    // Direct builder/dispatcher primitives that can mint an Installed-tier
+    // binding while accepting `owning_extension` (or a hand-built trust class)
+    // as a free parameter — every one of these bypasses the registrar's
+    // ceiling + spoof-blocked attribution.
+    const FORBIDDEN_INSTALLED_PRIMITIVES: &[&str] = &[
+        "install_installed_before_capability",
+        "install_installed_before_prompt",
+        "install_installed_observer",
+        "install_installed_event_triggered",
+        "install_installed_wasm_before_capability",
+        "install_installed_wasm_before_prompt",
+        "install_installed_wasm_observer",
+        // Generic, trust-class-parameterized installer + the raw binding
+        // insertion path: either could carry `HookTrustClass::Installed`.
+        "install_observer(",
+        "insert_binding(",
+        // A hand-constructed installed-tier binding is the lowest-level bypass.
+        "HookTrustClass::Installed",
+    ];
+
+    let mut saw_registrar_install = false;
+    for (path, contents) in &sources {
+        // Dedicated unit-test module files (e.g. `hooks/tests.rs`, declared via
+        // `#[cfg(test)] mod tests;`) legitimately exercise builder APIs directly
+        // and are not production code. Skip them wholesale — the inline
+        // `#[cfg(test)] mod tests { .. }` stripping below covers same-file test
+        // modules. This keeps the invariant robust across the #3951 finding-#4
+        // decomposition (which moved the test matrix into its own file).
+        if is_test_module_file(path) {
+            continue;
+        }
+        let production = strip_test_module(contents);
+        if production.contains("registrar.install(") {
+            saw_registrar_install = true;
+        }
+        for forbidden in FORBIDDEN_INSTALLED_PRIMITIVES {
+            assert!(
+                !production.contains(forbidden),
+                "{path:?}: third-party hook projection must install installed-tier \
+                 bindings ONLY through HookRegistrar::install, never the direct \
+                 primitive `{forbidden}` (registrar-only invariant: ceiling + \
+                 spoof-blocked owning_extension). Move this into the registrar or \
+                 use HookRegistrar::install."
+            );
+        }
+    }
+
+    // Positive anchor: the projection path DOES route through the registrar, so
+    // the negative assertions above are not vacuously true.
+    assert!(
+        saw_registrar_install,
+        "the projection path must install through HookRegistrar::install \
+         somewhere in the composition crate"
+    );
+}
+
+/// Strip trailing `#[cfg(test)] mod <name> { .. }` unit-test module(s) so the
+/// architecture invariant applies to production code only (tests legitimately
+/// exercise builder APIs directly). Matches the `#[cfg(test)]` attribute line
+/// immediately followed by a `mod ` declaration of ANY name (so a refactor that
+/// renames `mod tests` or adds a second `#[cfg(test)] mod` block is still fully
+/// stripped), and cuts from the FIRST such occurrence onward — a bare
+/// `#[cfg(test)]` substring also appears in doc comments, hence the `\nmod `
+/// anchor rather than a bare match.
+fn strip_test_module(contents: &str) -> &str {
+    match contents.find("#[cfg(test)]\nmod ") {
+        Some(idx) => &contents[..idx],
+        None => contents,
+    }
+}
+
+const EXTENSION_HOST_MOVED_MODULES: &[&str] = &[
+    "bundled_skills",
+    "extension_activation_credentials",
+    "extension_lifecycle",
+    "extension_lifecycle_capabilities",
+    "extension_lifecycle_capabilities_auth_tests",
+    "lifecycle",
+    "skill_learning",
+    "skill_listing",
+    "webui_extension_credentials",
+];
+
+const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
+    "active_publication",
+    "available_extension_import",
+    "available_extensions",
+    "channel_lifecycle",
+    "channel_delivery",
+    "channel_dm_targets",
+    "extension_credential_requirements",
+    "first_party_package",
+    "host_api_contracts",
+    "install_policy",
+    "lifecycle_restore",
+    "lifecycle_vocabulary",
+    "mcp",
+    "mcp_discovery",
+    "nearai_mcp",
+    "provider_instance_readiness",
+    "product_lifecycle",
+    "reply_contexts",
+];
+
+fn composition_src_path() -> PathBuf {
+    workspace_root().join("crates/ironclaw_reborn_composition/src")
+}
+
+fn extract_pub_use_surface(contents: &str) -> String {
+    let mut out = Vec::new();
+    let mut attrs = Vec::new();
+    let mut in_pub_use = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if in_pub_use {
+            out.push(line);
+            if trimmed.contains(';') {
+                in_pub_use = false;
+            }
+            continue;
+        }
+
+        if line.starts_with("#[") {
+            attrs.push(line);
+            continue;
+        }
+
+        if line.starts_with("pub use") {
+            out.append(&mut attrs);
+            out.push(line);
+            if !trimmed.contains(';') {
+                in_pub_use = true;
+            }
+            continue;
+        }
+
+        attrs.clear();
+    }
+
+    assert!(
+        !out.is_empty(),
+        "expected at least one public pub-use in composition lib.rs"
+    );
+
+    let mut extracted = out.join("\n");
+    extracted.push('\n');
+    extracted
+}
+
+fn has_module_decl(contents: &str, declaration: &str) -> bool {
+    contents
+        .lines()
+        .any(|line| line.trim_start() == declaration)
+}
+
+/// A dedicated unit-test module file: a `tests.rs` module file, or any source
+/// under a `tests/` directory. These are test-only and may use builder APIs
+/// directly, so the production-only invariant scan skips them.
+fn is_test_module_file(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("tests.rs")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "tests")
+}
+
+/// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
+fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        // Fail closed: this walk feeds ownership gates, and a skipped directory
+        // makes "could not look" indistinguishable from "nothing there". The
+        // file-contents read below has always panicked on failure; the
+        // directory read now matches it.
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("readable rust source {path:?}: {error}"));
+                out.push((path, contents));
+            }
+        }
+    }
+    out
+}
+
+fn workspace_dependencies() -> HashMap<String, Vec<String>> {
+    cargo_metadata()["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .filter_map(package_dependencies)
+        .collect()
+}
+
+fn cargo_metadata() -> Value {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("metadata json")
+}
+
+fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
+    let name = package["name"].as_str()?.to_string();
+    let dependencies = package["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|dependency| {
+            dependency
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_none_or(|kind| kind == "normal")
+        })
+        .filter_map(|dependency| dependency["name"].as_str())
+        .filter(|name| name.starts_with("ironclaw_"))
+        .map(ToString::to_string)
+        .collect();
+    Some((name, dependencies))
+}
+
 /// Every `include_str!` / `include_bytes!` invocation in `contents` whose
 /// argument names a markdown file, rendered as a normalized single line.
 ///
 /// Scans from each macro-name occurrence to the end of its **statement** (the
 /// next `;`) rather than to the first `)`. Parsing the argument is what makes
-/// this class of gate leaky, and every leak is silent:
-///   * `rustfmt` wraps a long argument onto its own line, so a per-line scan
-///     misses it;
-///   * `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prompt.md"))` closes
-///     its *first* `)` before the path is ever seen, so a first-paren scan
-///     misses it;
-///   * `include_str !(…)` and a comment between the argument and the delimiter
-///     are both legal and defeat naive tokenizing.
-/// A statement-bounded span is immune to all three: whatever the nesting,
-/// spacing, or line breaks, the path literal is inside it.
+/// this class of gate leaky, and every leak is silent: `rustfmt` wraps a long
+/// argument onto its own line, so a per-line scan misses it;
+/// `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prompt.md"))` closes its
+/// *first* `)` before the path is ever seen, so a first-paren scan misses it;
+/// and `include_str !(…)` plus comments inside the argument are both legal and
+/// defeat naive tokenizing. A statement-bounded span is immune to all three:
+/// whatever the nesting, spacing or line breaks, the path literal is inside it.
 ///
 /// It errs toward **over**-reporting — a comment mentioning `.md` inside an
 /// include statement is flagged. That direction is deliberate: a false positive
@@ -225,8 +560,8 @@ fn markdown_include_sites(contents: &str) -> Vec<String> {
                     continue;
                 }
             }
-            // `include_str` must actually be invoked as a macro; whitespace
-            // between the name and `!` is legal Rust.
+            // It must actually be invoked as a macro; whitespace between the
+            // name and `!` is legal Rust.
             let mut probe = cursor;
             while probe < bytes.len() && bytes[probe].is_ascii_whitespace() {
                 probe += 1;
@@ -246,6 +581,43 @@ fn markdown_include_sites(contents: &str) -> Vec<String> {
             cursor = statement_end;
         }
     }
+    out
+}
+
+/// Recursively collect every markdown file under `dir`, skipping build output.
+///
+/// Fails closed: an unreadable directory or entry panics rather than being
+/// skipped, because "the walk could not see it" and "there is nothing there"
+/// must not look the same to an ownership gate. Extensions are compared
+/// case-insensitively so a `.MD` asset cannot slip past.
+fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            if file_type.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
     out
 }
 
@@ -331,109 +703,4 @@ mod markdown_include_scan_tests {
         assert!(markdown_include_sites("let my_include_str = \"a.md\";").is_empty());
         assert!(markdown_include_sites("let include_str_path = \"a.md\";").is_empty());
     }
-}
-
-/// Recursively collect every markdown file under `dir`, skipping build output.
-///
-/// Fails closed: an unreadable directory or entry panics rather than being
-/// skipped, because "the walk could not see it" and "there is nothing there"
-/// must not look the same to an ownership gate. Extensions are compared
-/// case-insensitively so a `.MD` asset cannot slip past.
-fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let read = std::fs::read_dir(&current)
-            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
-        for entry in read {
-            let entry =
-                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
-            if file_type.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) == Some("target") {
-                    continue;
-                }
-                stack.push(path);
-            } else if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-            {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
-fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        // Fail closed: this walk feeds ownership gates, and a skipped directory
-        // makes "could not look" indistinguishable from "nothing there". The
-        // file-contents read below has always panicked on failure; the
-        // directory read now matches it.
-        let read = std::fs::read_dir(&current)
-            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
-        for entry in read {
-            let entry =
-                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                let contents = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|error| panic!("readable rust source {path:?}: {error}"));
-                out.push((path, contents));
-            }
-        }
-    }
-    out
-}
-
-fn workspace_dependencies() -> HashMap<String, Vec<String>> {
-    cargo_metadata()["packages"]
-        .as_array()
-        .expect("packages")
-        .iter()
-        .filter_map(package_dependencies)
-        .collect()
-}
-
-fn cargo_metadata() -> Value {
-    let output = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()
-        .expect("cargo metadata");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("metadata json")
-}
-
-fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
-    let name = package["name"].as_str()?.to_string();
-    let dependencies = package["dependencies"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|dependency| {
-            dependency
-                .get("kind")
-                .and_then(Value::as_str)
-                .is_none_or(|kind| kind == "normal")
-        })
-        .filter_map(|dependency| dependency["name"].as_str())
-        .filter(|name| name.starts_with("ironclaw_"))
-        .map(ToString::to_string)
-        .collect();
-    Some((name, dependencies))
 }
