@@ -27,6 +27,10 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # not a policy anyone chose. Classifying it is the fix; loosening the
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
+IGNORED_GUIDANCE_PATHS = {
+    "tests/CLAUDE.md",
+    "tests/integration/CLAUDE.md",
+}
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.
 #
@@ -381,7 +385,8 @@ def build_plan(
             reasons.append("changed-coverage policy is statically validated")
             continue
         if (
-            path.startswith(IGNORED_PREFIXES)
+            path in IGNORED_GUIDANCE_PATHS
+            or path.startswith(IGNORED_PREFIXES)
             or path in IGNORED_ROOT_FILES
             or (path.endswith(".md") and "/" not in path)
         ):

@@ -468,6 +468,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
 
+    def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
+        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
     def test_repo_root_example_env_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.env.example` is documentation, like a repo-root `*.md`.
 
