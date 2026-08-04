@@ -50,15 +50,15 @@ use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_req
 use crate::factory::RebornRuntimeStores;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime_mounts::{
-    sandbox_user_workspace_mount_view, scoped_skill_management_mount_view,
-};
+use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod workspace_scoping_tests;
 
 #[cfg(test)]
 pub(crate) use crate::outbound::{
@@ -217,7 +217,9 @@ struct RefreshingLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
-    workspace_mounts: MountView,
+    /// Resolved per run, not once per runtime: under a per-caller policy the
+    /// `mounts = "workspace"` grants must point at the caller's own subtree.
+    workspace_mounts: WorkspaceMountPolicy,
     sandbox_workspaces_root: Option<PathBuf>,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
@@ -252,27 +254,26 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let scope = resource_scope_for_run(run_context, &self.fallback_user_id);
-        let skill_mounts =
-            scoped_skill_management_mount_view(&scope).map_err(host_api_agent_loop_error)?;
-        let workspace_mounts = match &self.sandbox_workspaces_root {
-            Some(root) => {
-                let workspace = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&scope)
+        let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
+        let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
+        if let Some(root) = &self.sandbox_workspaces_root {
+            let workspace =
+                ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&resource_scope)
                     .workspace_path(root);
-                std::fs::create_dir_all(workspace).map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Unavailable,
-                        "sandbox workspace could not be initialized",
-                    )
-                })?;
-                sandbox_user_workspace_mount_view(
-                    &scope,
-                    ironclaw_host_api::mount::MountPermissions::read_write(),
+            std::fs::create_dir_all(workspace).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "sandbox workspace could not be initialized",
                 )
-                .map_err(host_api_agent_loop_error)?
-            }
-            None => self.workspace_mounts.clone(),
-        };
+            })?;
+        }
+        // Same scope the skill mounts key off, so a run's workspace grants and
+        // its skill mounts can never resolve to different callers.
+        let workspace_mounts = self
+            .workspace_mounts
+            .capability_grant_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),

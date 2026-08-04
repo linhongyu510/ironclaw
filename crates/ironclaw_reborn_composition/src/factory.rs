@@ -46,8 +46,8 @@ use crate::outbound::{
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, sandbox_user_workspace_mount_view,
-    scoped_skill_context_mount_view, skill_management_mount_view, workspace_mount_view,
+    memory_mount_view, sandbox_user_workspace_mount_view, scoped_skill_context_mount_view,
+    skill_management_mount_view, workspace_mount_view,
 };
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
@@ -82,12 +82,15 @@ use ironclaw_capabilities::{
     CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
-};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
+use ironclaw_extension_host::extension_lifecycle::{
+    ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
+    RebornProductAuthCredentialCleanup,
+};
 use ironclaw_extension_host::{
     ActiveExtensionPublisher, AdminConfigurationCatalogUse, AdminConfigurationService,
     AvailableExtensionCatalog, ChannelConfigService, ExtensionRemovalCleanupAdapter,
@@ -96,7 +99,11 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
-use ironclaw_extension_host::{
+use ironclaw_extension_manager::ironhub::{
+    extend_builtin_first_party_package as extend_builtin_ironhub_package,
+    insert_handlers as insert_ironhub_handlers,
+};
+use ironclaw_extension_manager::{
     admin_configuration::{
         ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
     },
@@ -104,16 +111,8 @@ use ironclaw_extension_host::{
         extend_builtin_first_party_package as extend_builtin_admin_configuration_package,
         insert_handler as insert_admin_configuration_handler,
     },
-    extension_lifecycle::{
-        ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        RebornProductAuthCredentialCleanup,
-    },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
-    },
-    ironhub::{
-        extend_builtin_first_party_package as extend_builtin_ironhub_package,
-        insert_handlers as insert_ironhub_handlers,
     },
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
@@ -333,7 +332,8 @@ pub(crate) struct RebornRuntimeStores {
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -348,7 +348,9 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
-    pub(crate) workspace_mounts: MountView,
+    /// The deployment's single workspace scoping decision, read by every
+    /// workspace write lane (grants, approval leases, attachment handles).
+    pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) sandbox_workspaces_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
@@ -715,12 +717,18 @@ fn open_postgres_pool_from_source(
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
     match source {
         PostgresPoolSource::Prebuilt(pool) => Ok(pool),
+        // The event store hands back the workspace's `PostgresConnectionPool`
+        // carrier; composition is the one app-layer crate chartered to hold the
+        // driver itself (PROPOSAL §11.2.6), and it needs the driver pool to
+        // build `PostgresRootFilesystem` and the auth refresh lock. Unwrap once,
+        // here, rather than letting the driver type back into a signature.
         PostgresPoolSource::Config(connection) => Ok(
             ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
                 connection.url,
                 connection.pool_max_size,
                 connection.tls_options,
-            )?,
+            )?
+            .into_driver(),
         ),
     }
 }
@@ -1275,7 +1283,7 @@ fn manifest_channel_account_setup_descriptors(
 /// neutral bundle set (extension-runtime DEL-7). The provider entry comes from
 /// `builtin_capability_policy` (no first-party dependency); each package's host
 /// authority grant is sourced from its injected `trust_effects` instead of a
-/// direct `ironclaw_first_party_extensions` call. Every entry is byte-identical
+/// direct `ironclaw_extension_support` call. Every entry is byte-identical
 /// to the one the inventory-driven builder produced — same id, local-manifest
 /// path, manifest digest, and effect list — so behavior is preserved exactly.
 pub fn production_first_party_trust_policy(
@@ -1339,7 +1347,7 @@ pub fn production_first_party_trust_policy(
 /// Inventory-driven trust policy for composition's own unit tests (mirrors the
 /// production builder, sourcing the neutral bundle set from the concrete
 /// inventory). Gated `#[cfg(test)]` because it names
-/// `ironclaw_first_party_extensions`, a dev-dependency; integration tests build
+/// `ironclaw_extension_support`, a dev-dependency; integration tests build
 /// their trust policy from `production_first_party_trust_policy` plus bundles
 /// they convert themselves (see `tests/support/first_party.rs`).
 #[cfg(test)]

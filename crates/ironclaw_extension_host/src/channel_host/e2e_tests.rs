@@ -129,7 +129,7 @@ use e2e_auth_challenge::FakeAuthChallengeProvider;
 struct InertAttachmentLander;
 
 #[async_trait::async_trait]
-impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
+impl ironclaw_attachments::InboundAttachmentLander for InertAttachmentLander {
     async fn land(
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
@@ -155,10 +155,10 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         _thread_scope: &ironclaw_threads::ThreadScope,
         _referenced_storage_keys: &[String],
     ) -> Result<
-        ironclaw_product::AttachmentCleanupReport,
+        ironclaw_attachments::AttachmentCleanupReport,
         ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
-        Ok(ironclaw_product::AttachmentCleanupReport::default())
+        Ok(ironclaw_attachments::AttachmentCleanupReport::default())
     }
 }
 
@@ -180,7 +180,7 @@ const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
 
 fn slack_manifest_from_bundled_inventory() -> String {
-    ironclaw_first_party_extensions::packages::bundled_packages()
+    ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
         .expect("Slack is in the bundled package inventory") // safety: Slack is a compile-time bundled test fixture.
@@ -558,6 +558,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
         inbound_attachments: Arc::new(InertAttachmentLander),
+        input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
@@ -890,7 +891,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 ///
 /// `length_prefixed_fingerprint(["T-A", "D123", ""])` = `"3:T-A|4:D123|0:|"`.
 fn dm_conversation_fingerprint() -> String {
-    ironclaw_conversations::ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
+    ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
         .expect("DM conversation ref") // safety: static test DM ref is valid.
         .conversation_fingerprint()
 }
@@ -3147,6 +3148,7 @@ fn turn_state(
         reply_target_binding_ref,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: chrono::Utc::now(),

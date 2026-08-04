@@ -29,8 +29,7 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
         .local_runtime_for_test()
         .expect("standalone runtime substrate");
 
-    let host_mount = runtime_surfaces
-        .workspace_mounts_for_test()
+    let host_mount = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -43,12 +42,12 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
         .expect("canonical host home")
         .to_string_lossy()
         .into_owned();
-    let raw_host_home_mount = runtime_surfaces
-        .workspace_mounts_for_test()
-        .mounts
-        .iter()
-        .find(|mount| mount.alias.as_str() == raw_host_home_alias)
-        .expect("raw host home mount exists");
+    let raw_host_home_mount =
+        crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == raw_host_home_alias)
+            .expect("raw host home mount exists");
     assert_eq!(raw_host_home_mount.target.as_str(), "/projects/host");
     assert_eq!(
         raw_host_home_mount.permissions,
@@ -80,8 +79,7 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
         .local_runtime_for_test()
         .expect("standalone runtime substrate");
 
-    let workspace_mount = runtime_surfaces
-        .workspace_mounts_for_test()
+    let workspace_mount = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/workspace")
@@ -89,8 +87,7 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     assert_eq!(workspace_mount.target.as_str(), "/projects/workspace");
     assert_eq!(workspace_mount.permissions, MountPermissions::read_write());
 
-    let host_mount = runtime_surfaces
-        .workspace_mounts_for_test()
+    let host_mount = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -124,8 +121,7 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
         .local_runtime_for_test()
         .expect("standalone runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
 
-    let raw_aliases = runtime_surfaces
-        .workspace_mounts_for_test()
+    let raw_aliases = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
         .mounts
         .iter()
         .map(|mount| mount.alias.as_str())

@@ -134,6 +134,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// `.with_sandboxed_shell()`; every other harness stays byte-identical.
     /// Only `profiles::sandbox_shell` sets this.
     pub(crate) sandboxed_shell: bool,
+    /// Raise the deployment's workspace scoping to per-caller, exactly as
+    /// `serve` does unconditionally
+    /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
+    /// which the harness applies in `new_with_options`). `false` (the
+    /// default) keeps the Standalone profile's shared workspace root that
+    /// every pre-existing harness assertion (`workspace_file_path`) assumes.
+    pub(crate) workspace_scoped_per_caller: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -160,6 +167,7 @@ impl HostRuntimeHarnessOptions {
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
             sandboxed_shell: false,
+            workspace_scoped_per_caller: false,
         }
     }
 
@@ -307,6 +315,13 @@ impl HostRuntimeHarnessOptions {
     /// path. See [`Self::sandboxed_shell`]'s doc.
     pub(crate) fn with_sandboxed_shell(mut self) -> Self {
         self.sandboxed_shell = true;
+        self
+    }
+
+    /// Raise workspace scoping to per-caller. See
+    /// `workspace_scoped_per_caller`'s doc.
+    pub(crate) fn with_workspace_scoped_per_caller(mut self) -> Self {
+        self.workspace_scoped_per_caller = true;
         self
     }
 }

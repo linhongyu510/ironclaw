@@ -9,9 +9,7 @@ use std::{
 };
 
 use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
-use ironclaw_conversations::{
-    ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
-};
+use ironclaw_conversations::{ConditionalUnpairOutcome, InboundTurnError};
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
@@ -22,8 +20,8 @@ use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, In
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_product::RebornChannelConnectStrategy;
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use ironclaw_product_contracts::prompt_source::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource,
@@ -268,7 +266,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
     ) -> Result<(), InboundTurnError> {
         Ok(())
@@ -279,7 +277,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
         _epoch: ironclaw_conversations::ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
@@ -291,7 +289,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
     ) -> Result<(), InboundTurnError> {
         Ok(())
     }
@@ -301,7 +299,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: &TenantId,
         _adapter_kind: &AdapterKind,
         adapter_installation_id: &ironclaw_conversations::AdapterInstallationId,
-        external_actor_ref: &ConversationActorRef,
+        external_actor_ref: &ExternalActorRef,
         expected: &ExpectedExternalActorOwner,
     ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
         self.unpairs.lock().expect("unpairs lock").push((
@@ -583,12 +581,14 @@ async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe()
         },
     ];
 
+    let gate_ref =
+        ironclaw_host_api::turn::TurnGateRef::new("gate:pairing-prompt").expect("valid gate ref");
     let first = source
         .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {
             fallback_owner_user_id: &owner,
             scope: &scope,
             run_id,
-            gate_ref: "gate:pairing-prompt",
+            gate_ref: &gate_ref,
             invocation_id: None,
             body: "Pair the channel to continue.".to_string(),
             credential_requirements: &requirements,
@@ -600,7 +600,7 @@ async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe()
             fallback_owner_user_id: &owner,
             scope: &scope,
             run_id,
-            gate_ref: "gate:pairing-prompt",
+            gate_ref: &gate_ref,
             invocation_id: None,
             body: "Pair the channel to continue.".to_string(),
             credential_requirements: &requirements,

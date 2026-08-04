@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
@@ -46,10 +47,10 @@ use ironclaw_product::ProjectFilesystemReader;
 use ironclaw_product::{
     ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductInstallationKey,
-    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
-    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    DeliveryCoordinator, IdempotencyLedger, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
@@ -352,6 +353,10 @@ pub struct GenericChannelHostDeps {
     /// Lands inbound attachment bytes into the project filesystem before the
     /// turn starts, so the turn itself begins byte-free with workspace refs.
     pub inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    /// Enqueues a message arriving on a busy thread as steering input for the
+    /// active run instead of rejecting it. Compositions without a host input
+    /// queue pass `RejectingInputEnqueue` to keep the reject-busy behavior.
+    pub input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelHostIdentity,
@@ -765,6 +770,7 @@ impl GenericChannelHostAssembly {
                 Arc::clone(&binding),
                 Arc::clone(&self.deps.thread_service),
                 Arc::clone(&self.deps.turn_coordinator),
+                Arc::clone(&self.deps.input_enqueue),
             )
             .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments)),
         );
@@ -1111,7 +1117,7 @@ impl GenericChannelHostAssembly {
 pub mod test_support {
     use std::sync::Arc;
 
-    use ironclaw_product::InboundAttachmentLander;
+    use ironclaw_attachments::InboundAttachmentLander;
 
     use super::GenericChannelHostAssembly;
 
