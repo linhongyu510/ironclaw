@@ -688,12 +688,11 @@ impl RebornIntegrationGroupBuilder {
             thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
-        let scoped_view =
-            ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
-                &caller_scope,
-                ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            )
-            .map_err(|error| format!("scoped workspace mount view: {error}"))?;
+        let scoped_view = ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
+            &caller_scope,
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+        )
+        .map_err(|error| format!("scoped workspace mount view: {error}"))?;
         let mut profile =
             super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
         profile.capability_ids.extend([

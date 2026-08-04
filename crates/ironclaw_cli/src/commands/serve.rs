@@ -440,9 +440,9 @@ impl ServeCommand {
             // SSO left `POST /admin/users` as an open door onto the same
             // mismatch.
             runtime_input = runtime_input.with_workspace_scoped_per_caller_services(true);
-            let effective_workspace_scoping = runtime_input
-                .config()
-                .is_some_and(ironclaw_composition::deployment::DeploymentConfig::workspace_scoped_per_caller);
+            let effective_workspace_scoping = runtime_input.config().is_some_and(
+                ironclaw_composition::deployment::DeploymentConfig::workspace_scoped_per_caller,
+            );
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
