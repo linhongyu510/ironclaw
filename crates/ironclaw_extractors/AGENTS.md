@@ -34,8 +34,14 @@ entry name, an offset — any of which can echo the document's own content.
 - **`Display` renders the classification and nothing else.** Interpolating an
   `ExtractionError` into model-facing text with `{error}` is safe by
   construction. That is the entire reason the type exists.
-- **`Debug` renders the payload.** Log it (`tracing::debug!(?error, …)`);
-  never render it.
+- **`Debug` renders the payload**, so it belongs in an **operator log** and
+  nowhere else — never a model result, capability output, projected event,
+  snapshot, or user-visible error. What it carries is container/parser
+  *structure* (`lopdf` object ids, byte offsets, dictionary keys; `zip`
+  archive diagnostics; the fixed OOXML entry paths this crate reads), not
+  document text — but a consumer under a stricter redaction charter, notably
+  `ironclaw_host_runtime` (see its `AGENTS.md`), owns that ceiling and should
+  re-check it before widening where the payload goes.
 
 A new variant must keep that property: its `#[error("…")]` string may not
 interpolate a field. `every_extraction_failure_display_is_content_free` drives

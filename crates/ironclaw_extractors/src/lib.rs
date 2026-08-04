@@ -34,17 +34,26 @@ const MAX_DECOMPRESSED_TOTAL: u64 = 100 * 1024 * 1024;
 ///
 /// **This type carries diagnostic detail that must not reach a model.** The
 /// payload of [`NotExtractable`](Self::NotExtractable) is whatever the
-/// underlying parser said — a `pdf-extract` message, a ZIP entry name, an
-/// offset into the document — and any of it can echo the document's own
-/// content. So the safety property is built into the type rather than asked
-/// for in a comment:
+/// underlying parser said about bytes the *user* supplied — a `pdf-extract`
+/// message, a ZIP entry name, an offset into the document. It is untrusted
+/// text of unbounded shape from a third-party parser, which is reason enough
+/// never to render it. So the safety property is built into the type rather
+/// than asked for in a comment:
 ///
 /// - **`Display` renders the classification and nothing else.** It names no
 ///   MIME type, no filename, no parser output. Interpolating an
 ///   `ExtractionError` into model-facing text with `{error}` is safe by
 ///   construction, which is the whole point of the type.
-/// - **`Debug` renders everything**, so it is the right thing to log
-///   (`tracing::debug!(?error, …)`) and the wrong thing to render.
+/// - **`Debug` renders everything**, so it is the wrong thing to render and
+///   belongs only in an **operator log** (`tracing::debug!(?error, …)`) —
+///   never in a model result, a capability output, a projected event, a
+///   snapshot, or a user-visible error. Consumers bound by a stricter
+///   redaction charter than a debug log (see
+///   `crates/ironclaw_host_runtime/AGENTS.md`) should re-check that ceiling
+///   before widening where the payload goes; what it carries today is
+///   container/parser *structure* — `lopdf`'s object ids, byte offsets and
+///   dictionary keys, `zip`'s archive diagnostics and the fixed OOXML entry
+///   paths this crate reads — not document text.
 ///
 /// Before this was a type the same rule lived as a doc comment on
 /// `DocumentExtraction::Failed(String)` — and the *other* boundary site,
@@ -223,7 +232,7 @@ pub fn extract_document_text_by_filename(
 ) -> Result<Option<String>, ExtractionError> {
     let ext = filename
         .and_then(|filename| filename.rsplit('.').next())
-        .map(str::to_lowercase);
+        .map(str::to_ascii_lowercase);
     let Some(ext) = ext else {
         return Ok(None);
     };
@@ -704,7 +713,7 @@ fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<Strin
     if let Ok(Some(text)) = extract_document_text_by_filename(data, filename) {
         return Some(text);
     }
-    let ext = filename?.rsplit('.').next()?.to_lowercase();
+    let ext = filename?.rsplit('.').next()?.to_ascii_lowercase();
 
     match ext.as_str() {
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
@@ -915,6 +924,34 @@ mod tests {
     fn extract_document_text_by_filename_ignores_text_extensions() {
         let result = extract_document_text_by_filename(b"content", Some("notes.txt")).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extension_matching_is_ascii_case_insensitive_and_nothing_more() {
+        // Both extension registries normalize with `to_ascii_lowercase`, not
+        // `to_lowercase` (`.claude/rules/types.md`): ASCII case must still
+        // match, and Unicode case folding must not be able to fold a foreign
+        // codepoint into an ASCII key. The keys are all ASCII, so this pins
+        // the normalization rather than a behaviour difference.
+        let pdf = include_bytes!("../../../tests/fixtures/hello.pdf");
+        assert!(
+            extract_document_text_by_filename(pdf, Some("HELLO.PDF"))
+                .expect("uppercase .PDF must still route to the PDF extractor")
+                .is_some()
+        );
+        assert_eq!(
+            extract_document_text_by_filename(pdf, Some("hello.pd\u{212A}")).unwrap(),
+            None,
+            "a non-ASCII extension must not be folded into an ASCII key"
+        );
+        assert_eq!(
+            try_extract_by_extension(b"content", Some("notes.TXT")),
+            Some("content".to_string())
+        );
+        assert_eq!(
+            try_extract_by_extension(b"content", Some("notes.T\u{0130}T")),
+            None
+        );
     }
 
     #[test]
