@@ -248,7 +248,7 @@ is_docs_only_path() {
 is_shared_test_path() {
   local path="$1"
   case "$path" in
-    Cargo.toml|Cargo.lock|providers.json|Dockerfile)
+    Cargo.toml|Cargo.lock|crates/ironclaw_llm/assets/providers.json|Dockerfile)
       return 0
       ;;
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
@@ -322,7 +322,7 @@ is_code_path() {
     crates/*|tests/*|migrations/*)
       return 0
       ;;
-    Cargo.toml|Cargo.lock|Dockerfile|providers.json)
+    Cargo.toml|Cargo.lock|Dockerfile)
       return 0
       ;;
     scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)

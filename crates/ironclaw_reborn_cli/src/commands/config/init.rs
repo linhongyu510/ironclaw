@@ -298,40 +298,18 @@ mod tests {
     use super::*;
     use crate::context::RebornCliContext;
 
-    /// `DEFAULT_LLM_*` are hand-maintained mirrors of `providers.json`'s
-    /// `nearai` entry (see each const's doc) rather than derived from it —
-    /// `ironclaw_reborn_cli` is excluded from depending on `ironclaw_llm`
-    /// directly (per `reborn_dependency_boundaries`), so there's no shared
-    /// type to read the catalog through here. Parses the real
-    /// `providers.json` as raw JSON instead, so a future catalog edit that
-    /// forgets to update these consts fails this test rather than silently
-    /// drifting.
-    #[test]
-    fn default_llm_consts_match_the_real_providers_json_nearai_entry() {
-        const PROVIDERS_JSON: &str = include_str!("../../../../../providers.json");
-        let providers: serde_json::Value =
-            serde_json::from_str(PROVIDERS_JSON).expect("providers.json must parse as JSON");
-        let nearai = providers
-            .as_array()
-            .expect("providers.json is a JSON array")
-            .iter()
-            .find(|entry| {
-                entry.get("id").and_then(|id| id.as_str()) == Some(DEFAULT_LLM_PROVIDER_ID)
-            })
-            .unwrap_or_else(|| panic!("providers.json has no `{DEFAULT_LLM_PROVIDER_ID}` entry"));
-        assert_eq!(
-            nearai.get("default_model").and_then(|v| v.as_str()),
-            Some(DEFAULT_LLM_MODEL),
-            "DEFAULT_LLM_MODEL has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
-             entry's default_model"
-        );
-        assert_eq!(
-            nearai.get("api_key_env").and_then(|v| v.as_str()),
-            Some(DEFAULT_LLM_API_KEY_ENV),
-            "DEFAULT_LLM_API_KEY_ENV has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
-             entry's api_key_env"
-        );
-    }
+    // The `DEFAULT_LLM_*`-vs-catalog drift check that used to live here moved
+    // to `ironclaw_architecture`'s
+    // `reborn_provider_catalog_is_owned_by_its_crate`. It asserted these
+    // consts against the catalog by embedding it from five directories up —
+    // a repo-root reach-in. The catalog is now `ironclaw_llm`'s own asset
+    // (`crates/ironclaw_llm/assets/providers.json`, CHECKLIST WS6), so the
+    // same `include_str!` would have become a *cross-crate* reach-in — the
+    // category §11.2.7's scanner turns into a hard failure. A cross-crate
+    // consistency rule belongs in the cross-crate suite, which reads both
+    // files from disk at runtime and needs no compile-time coupling at all.
+    // The assertions are unchanged and strictly stronger there (it also pins
+    // the base-url env and the catalog's location).
 
     /// The config stub written by `onboard`/`config init` must carry NO
     /// `[llm.default]` selection at all — `default_llm_slot()` must return

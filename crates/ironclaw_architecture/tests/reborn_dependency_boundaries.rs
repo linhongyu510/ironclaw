@@ -2270,6 +2270,192 @@ fn reborn_boot_config_file_layout_is_pinned() {
     );
 }
 
+/// Does this source text compile the provider catalog into itself?
+///
+/// Looks for an `include_str!` / `include_bytes!` whose *argument* names
+/// `providers.json`, rather than for the two tokens anywhere in the same file
+/// — many CLI tests legitimately name the runtime
+/// `$IRONCLAW_REBORN_HOME/providers.json` and separately embed some other
+/// asset, and a file-level conjunction reports those as boundary breaches.
+fn embeds_provider_catalog(source: &str) -> bool {
+    for macro_name in ["include_str!", "include_bytes!"] {
+        let mut rest = source;
+        while let Some(index) = rest.find(macro_name) {
+            rest = &rest[index + macro_name.len()..];
+            // The argument is the next parenthesised string literal; stop at
+            // the closing paren so a later, unrelated mention cannot match.
+            let Some(open) = rest.find('(') else { continue };
+            let Some(close) = rest[open..].find(')') else {
+                continue;
+            };
+            if rest[open..open + close].contains("providers.json") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The provider catalog is an asset of the crate that compiles it in, and no
+/// other crate reaches across a package boundary to embed it.
+///
+/// CHECKLIST WS6: *"`llm` `providers.json` becomes a crate asset/composition
+/// input + boundary rule added"*. Before that row landed, `providers.json` sat
+/// at the **repository root** and was embedded from `ironclaw_llm` (20 sites)
+/// and from the CLI's tests, five directories up — the "repo-root asset
+/// reach-in" shape §11.2.7's scanner inventories. A root-level data file has no
+/// owning crate, so nothing could say who was allowed to change it, and every
+/// consumer compiled it in behind Cargo's back (a catalog edit did not
+/// invalidate dependents the way a source edit does).
+///
+/// This rule pins the fix in both directions: the asset lives with its owner,
+/// and the owner is the only crate that embeds it. Consumers that need the
+/// catalog take it through `ProviderRegistry` (in-process) or
+/// `ProviderRegistry::load_from_path` (deployment-selected file) — both pinned
+/// by `reborn_boot_config_file_layout_is_pinned` above.
+///
+/// It also carries the `DEFAULT_LLM_*` drift assertions relocated out of
+/// `ironclaw_reborn_cli`'s `commands::config::init` tests: the CLI is excluded
+/// from depending on `ironclaw_llm` (see
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root`), so it mirrors three
+/// catalog values as string constants and used to compare them by embedding the
+/// catalog. Reading both files from disk here keeps the invariant without
+/// giving the CLI a compile-time reach into another crate's tree.
+#[test]
+fn reborn_provider_catalog_is_owned_by_its_crate() {
+    let root = workspace_root();
+
+    // 1. The catalog lives with the crate that compiles it in.
+    let catalog_path = root.join("crates/ironclaw_llm/assets/providers.json");
+    assert!(
+        catalog_path.exists(),
+        "the provider catalog must be `ironclaw_llm`'s own asset at {} (CHECKLIST WS6)",
+        catalog_path.display()
+    );
+    assert!(
+        !root.join("providers.json").exists(),
+        "`providers.json` must not sit at the repository root: a root-level data file has no \
+         owning crate, so no boundary rule can govern who edits it, and every consumer embeds \
+         it with an escaping `include_str!`. It belongs at crates/ironclaw_llm/assets/."
+    );
+
+    // 2. `ironclaw_llm` is the only crate that embeds it. Scanning source text
+    //    (rather than trusting the manifest) is what makes this catch the
+    //    reach-in shape — an `include_str!` needs no dependency edge at all,
+    //    which is exactly why it can cross a boundary unnoticed.
+    let mut embedders: Vec<String> = Vec::new();
+    let mut scanned_files = 0usize;
+    let mut collect = |dir: std::path::PathBuf| {
+        let mut stack = vec![dir];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|n| n.to_str()) != Some("target") {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                scanned_files += 1;
+                // Match the *call site*, not the file: plenty of tests mention
+                // the runtime `$IRONCLAW_REBORN_HOME/providers.json` and also
+                // happen to `include_str!` something unrelated. A file-level
+                // conjunction reports those as boundary breaches.
+                if !embeds_provider_catalog(&source) {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !relative.starts_with("crates/ironclaw_llm/")
+                    && !relative.starts_with("crates/ironclaw_architecture/")
+                {
+                    embedders.push(relative);
+                }
+            }
+        }
+    };
+    collect(root.join("crates"));
+    collect(root.join("tests"));
+
+    // A path-keyed walker that silently walks nothing is the failure mode this
+    // program has hit nine times; prove it saw the tree.
+    assert!(
+        scanned_files > 500,
+        "the catalog-embedder scan walked only {scanned_files} Rust files — it is not \
+         reaching the workspace and would pass no matter what the tree contained"
+    );
+    assert!(
+        embedders.is_empty(),
+        "only `ironclaw_llm` may embed its own provider catalog; these crates reach across a \
+         package boundary to `include_str!` it, which compiles another crate's asset into \
+         their own tree (§11.2.7): {embedders:#?}. Take the catalog through \
+         `ProviderRegistry` / `ProviderRegistry::load_from_path` instead."
+    );
+
+    // 3. The CLI's mirrored default-LLM constants still match the catalog.
+    let catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&catalog_path).expect("catalog readable"))
+            .expect("providers.json must parse as JSON");
+    let init_rs = std::fs::read_to_string(
+        root.join("crates/ironclaw_reborn_cli/src/commands/config/init.rs"),
+    )
+    .expect("CLI config init.rs must be readable");
+
+    // Pull each `const NAME: &str = "value";` out of the CLI source. If the
+    // constant is renamed or restructured the extraction fails loudly rather
+    // than vacuously passing on zero matches.
+    let const_value = |name: &str| -> String {
+        let needle = format!("const {name}: &str = \"");
+        let start = init_rs.split(&needle).nth(1).unwrap_or_else(|| {
+            panic!(
+                "`{name}` is no longer declared as a plain `const {name}: &str = \"…\";` in the \
+                 CLI's config init module. This test extracts it textually — update the \
+                 extraction rather than deleting the drift check."
+            )
+        });
+        start
+            .split('"')
+            .next()
+            .expect("constant literal must terminate")
+            .to_string()
+    };
+
+    let provider_id = const_value("DEFAULT_LLM_PROVIDER_ID");
+    let entry = catalog
+        .as_array()
+        .expect("providers.json is a JSON array")
+        .iter()
+        .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some(provider_id.as_str()))
+        .unwrap_or_else(|| panic!("providers.json has no `{provider_id}` entry"));
+
+    for (const_name, catalog_field) in [
+        ("DEFAULT_LLM_MODEL", "default_model"),
+        ("DEFAULT_LLM_API_KEY_ENV", "api_key_env"),
+    ] {
+        assert_eq!(
+            entry.get(catalog_field).and_then(|v| v.as_str()),
+            Some(const_value(const_name).as_str()),
+            "`{const_name}` in crates/ironclaw_reborn_cli/src/commands/config/init.rs has \
+             drifted from the `{provider_id}` entry's `{catalog_field}` in \
+             crates/ironclaw_llm/assets/providers.json. The CLI mirrors these values as \
+             constants because it may not depend on `ironclaw_llm`; when the catalog changes, \
+             the mirror must change with it."
+        );
+    }
+}
+
 #[test]
 fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
     let root = workspace_root();
