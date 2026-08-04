@@ -39,9 +39,8 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey};
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
-use ironclaw_turns::SubmitTurnResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::{
