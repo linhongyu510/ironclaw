@@ -131,16 +131,22 @@ fn composition_public_api_is_service_shaped() {
 fn composition_root_embeds_no_prompt_content() {
     let crate_root = workspace_root().join("crates/ironclaw_reborn_composition");
 
-    let embedded_markdown: Vec<String> = rust_sources(&crate_root.join("src"))
-        .into_iter()
+    let sources = rust_sources(&crate_root.join("src"));
+    // A scan that walked nothing reports clean. Composition is a ~68k-line crate;
+    // this floor turns "the walk broke" into a failure instead of a pass.
+    assert!(
+        sources.len() >= 50,
+        "expected the composition source walk to reach at least 50 files, saw {} — \
+         the scan below cannot be trusted",
+        sources.len()
+    );
+
+    let embedded_markdown: Vec<String> = sources
+        .iter()
         .flat_map(|(path, contents)| {
-            contents
-                .lines()
-                .filter(|line| {
-                    (line.contains("include_str!") || line.contains("include_bytes!"))
-                        && line.contains(".md")
-                })
-                .map(|line| format!("{}: {}", path.display(), line.trim()))
+            markdown_include_sites(contents)
+                .into_iter()
+                .map(|site| format!("{}: {site}", path.display()))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -154,15 +160,20 @@ fn composition_root_embeds_no_prompt_content() {
 
     // A prompt asset that is *shipped* but not yet embedded is the same debt one
     // commit earlier, so the directory itself is pinned rather than only its
-    // `include_str!` call sites. Crate guides (`AGENTS.md` / `CLAUDE.md`) and the
-    // pub-use snapshot are documentation, not prompt content.
+    // `include_str!` call sites. Crate guides (`AGENTS.md` / `CLAUDE.md`) are
+    // documentation, not prompt content.
     let shipped_markdown: Vec<String> = markdown_assets(&crate_root)
         .into_iter()
         .filter(|path| {
-            !matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("AGENTS.md") | Some("CLAUDE.md") | Some("README.md")
-            )
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    matches!(
+                        name.to_ascii_uppercase().as_str(),
+                        "AGENTS.MD" | "CLAUDE.MD" | "README.MD"
+                    )
+                })
         })
         .map(|path| path.display().to_string())
         .collect();
@@ -172,6 +183,77 @@ fn composition_root_embeds_no_prompt_content() {
          prompt content belongs to its owning crate's `prompts/` directory. Found:\n{}",
         shipped_markdown.join("\n")
     );
+}
+
+/// Every `include_str!` / `include_bytes!` invocation in `contents` whose
+/// argument names a markdown file, returned as a normalized single-line
+/// rendering of the invocation.
+///
+/// Deliberately **not** line-based: `rustfmt` wraps a long macro argument onto
+/// its own line, so `include_str!(\n    "…/some-prompt.md"\n)` is ordinary
+/// formatted output and a per-line `contains` scan would miss it entirely.
+fn markdown_include_sites(contents: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for macro_name in ["include_str!", "include_bytes!"] {
+        let mut rest = contents;
+        while let Some(start) = rest.find(macro_name) {
+            let after = &rest[start + macro_name.len()..];
+            // Take the invocation up to its closing delimiter; the argument is a
+            // string literal, so the first `)` after it ends the call.
+            let end = after.find(')').map(|i| i + 1).unwrap_or(after.len());
+            let invocation = &after[..end];
+            if invocation.to_ascii_lowercase().contains(".md") {
+                let flattened = format!("{macro_name}{invocation}")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push(flattened);
+            }
+            rest = &after[end.min(after.len())..];
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod markdown_include_scan_tests {
+    use super::markdown_include_sites;
+
+    #[test]
+    fn single_line_markdown_include_is_detected() {
+        let found = markdown_include_sites("const A: &str = include_str!(\"../a/prompt.md\");");
+        assert_eq!(found, vec!["include_str!(\"../a/prompt.md\")".to_string()]);
+    }
+
+    /// The regression this scan exists for: `rustfmt` wrapping a long path onto
+    /// its own line used to make the site invisible to a per-line scan.
+    #[test]
+    fn multiline_markdown_include_is_detected() {
+        let found = markdown_include_sites(
+            "const A: &str = include_str!(\n    \"../../assets/prompts/a-very-long-name.md\"\n);",
+        );
+        assert_eq!(
+            found,
+            vec!["include_str!( \"../../assets/prompts/a-very-long-name.md\" )".to_string()]
+        );
+    }
+
+    #[test]
+    fn uppercase_markdown_extension_is_detected() {
+        assert_eq!(
+            markdown_include_sites("include_bytes!(\"../PROMPT.MD\")").len(),
+            1
+        );
+    }
+
+    /// Config-as-data stays composition's charter, so a non-markdown include is
+    /// not a finding.
+    #[test]
+    fn non_markdown_include_is_not_a_finding() {
+        assert!(
+            markdown_include_sites("include_str!(\"builtin_capability_policy.toml\")").is_empty()
+        );
+    }
 }
 
 #[test]
@@ -444,22 +526,35 @@ fn is_test_module_file(path: &Path) -> bool {
             .any(|component| component.as_os_str() == "tests")
 }
 
-/// Recursively collect every `.md` file under `dir`, skipping build output.
+/// Recursively collect every markdown file under `dir`, skipping build output.
+///
+/// Fails closed: an unreadable directory or entry panics rather than being
+/// skipped, because "the walk could not see it" and "there is nothing there"
+/// must not look the same to an ownership gate. Extensions are compared
+/// case-insensitively so a `.MD` asset cannot slip past.
 fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in read.flatten() {
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            if file_type.is_dir() {
                 if path.file_name().and_then(|name| name.to_str()) == Some("target") {
                     continue;
                 }
                 stack.push(path);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
                 out.push(path);
             }
         }
