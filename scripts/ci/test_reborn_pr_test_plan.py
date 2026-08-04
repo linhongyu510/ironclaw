@@ -9,6 +9,7 @@ import sys
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts/ci/reborn_pr_test_plan.py"
@@ -323,14 +324,68 @@ class RebornPrTestPlanTests(unittest.TestCase):
             )
 
     def test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay(self) -> None:
-        plan = self.plan(
-            "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
-        )
+        # The frontend prefix is resolved through the crate inventory
+        # (scripts/ci/lib/crate_tree.py), not a hardcoded literal — deriving
+        # the test input from the same resolver keeps this correct regardless
+        # of whether ironclaw_webui sits flat or has already moved into a
+        # family directory (PROPOSAL §5). Sibling tests below pin the
+        # resolution mechanism itself (nested + fail-closed) against a mocked
+        # crate_directory rather than the live tree.
+        frontend_prefix = planner._webui_frontend_prefix()
+        plan = self.plan("pull_request", [f"{frontend_prefix}src/app.tsx"])
         self.assertEqual(plan["mode"], "none")
         self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
+
+    def test_frontend_prefix_resolves_through_crate_inventory_when_nested(self) -> None:
+        """WS10: a family-moved ironclaw_webui still routes to Code Style.
+
+        Mocks `crate_directory` (rather than relying on the live repo's
+        current crate layout, which the target-architecture restructure is
+        actively changing) to pin that the frontend-prefix resolution follows
+        the crate wherever it lives.
+        """
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                return_value="crates/substrates/ironclaw_webui",
+            ) as resolver:
+                plan = self.plan(
+                    "pull_request",
+                    ["crates/substrates/ironclaw_webui/frontend/src/app.tsx"],
+                )
+            resolver.assert_called_once_with("ironclaw_webui", planner.ROOT)
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["crate_buckets"], [])
+            self.assertEqual(plan["integration_lanes"], [])
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
+
+    def test_frontend_prefix_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable ironclaw_webui crate must raise, never fall back
+        to the literal — a silent fallback is exactly the WS10 failure mode
+        (a moved crate makes the prefix match nothing and the planner reports
+        "no Reborn test surface changed" for a real WebUI diff)."""
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                side_effect=planner.CrateTreeError("boom"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "cannot resolve the ironclaw_webui crate"
+                ):
+                    self.plan(
+                        "pull_request",
+                        ["crates/ironclaw_webui/frontend/src/app.tsx"],
+                    )
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
 
     def test_nested_crate_markdown_remains_package_owned(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/README.md"])
@@ -394,6 +449,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/live-canary/README.md",
             "scripts/live-canary/notify_slack.py",
             "scripts/reborn_webui_v2_live_qa/run_live_qa.py",
+            # WS10 (2026-08-04): the QA surface-inventory auditor and its
+            # self-test are the same class of offline QA tooling, and were
+            # raising `unmapped test or CI path` until they were classified.
+            "scripts/reborn_qa_matrix/audit_surface_inventory.py",
+            "scripts/reborn_qa_matrix/test_audit_surface_inventory.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -692,15 +752,24 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         The `unmapped test or CI path` arm deliberately refuses `scripts/**`
         outside `scripts/ci/` so each file gets a decision rather than a
-        blanket prefix. These two have one, recorded beside the constant: the
-        panic baseline belongs to Code Style, and the E2E selector script
-        belongs to the `Reborn E2E` workflow's own scope detector. Neither
-        selects a lane in *this* planner — but the sibling that has no
+        blanket prefix. Each of these has one, recorded beside the constant:
+        the panic baseline belongs to Code Style, the E2E selector script
+        belongs to the `Reborn E2E` workflow's own scope detector,
+        `check-version-bumps.sh` is invoked only by `platform-and-compat.yml`,
+        and `run-reborn-webui.sh` is a local launcher no workflow references.
+        None selects a lane in *this* planner — but the sibling that has no
         decision must still refuse, which the second half asserts.
+
+        The last two were added by WS10 (2026-08-04) after editing
+        `check-version-bumps.sh` failed `Detect Reborn test scope` outright and
+        skipped every downstream Reborn lane — the same fail-closed-with-no-rule
+        shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            "scripts/check-version-bumps.sh",
+            "scripts/run-reborn-webui.sh",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

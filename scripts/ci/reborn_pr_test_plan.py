@@ -8,6 +8,7 @@ Merge-queue, main, and manual runs remain exhaustive.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import subprocess
 import sys
@@ -17,6 +18,30 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The WebUI frontend path prefix is resolved by crate NAME through the shared
+# inventory (scripts/ci/lib/crate_tree.py), not a literal `crates/ironclaw_webui`
+# prefix. Under the target-architecture family move
+# (crates/<family>/ironclaw_*, PROPOSAL §5) a literal prefix stops matching,
+# frontend diffs stop routing to the Code Style lane, and the planner reports
+# "no Reborn test surface changed" for a WebUI change — silently, since
+# nothing else covers that lane. See
+# docs/reborn/target-architecture/CHECKLIST.md WS10.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
+
+@functools.lru_cache(maxsize=None)
+def _webui_frontend_prefix() -> str:
+    """`<ironclaw_webui crate dir>/frontend/`, resolved once per process."""
+    try:
+        directory = crate_directory("ironclaw_webui", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_webui crate, so "
+            f"the frontend path prefix used to route Code Style is unknown: {error}"
+        ) from error
+    return f"{directory}/frontend/"
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -46,6 +71,14 @@ DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
     "scripts/reborn_webui_v2_live_qa/",
+    # The QA surface-inventory auditor and its self-test. Same footing as the
+    # two above: an offline reporting tool over the WebUI/OpenAI-compat route
+    # descriptors, run by hand and by the QA matrix, never by a `Tests (Reborn)`
+    # lane. Added 2026-08-04 (WS10) — before this, editing it raised
+    # `unmapped test or CI path` and failed `Detect Reborn test scope`, skipping
+    # every downstream Reborn lane. Same class as the `.claude/` gap this row
+    # already records.
+    "scripts/reborn_qa_matrix/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
@@ -117,7 +150,7 @@ PR_STATIC_CONTROL_PATHS = {
     "tests/integration/coverage-floor.toml",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
-    # These two are decided:
+    # These are decided:
     #   * the panic baseline is enforced by Code Style
     #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
     #     owns the whole check; no Reborn lane reads it.
@@ -125,16 +158,26 @@ PR_STATIC_CONTROL_PATHS = {
     #     its own scope detector (`Detect Reborn E2E scope`). This planner
     #     selects lanes for `Tests (Reborn)` only, and that workflow does not
     #     invoke the script.
-    #   * the two WASM build/ABI scripts are named in
-    #     `platform-and-compat.yml`'s `has_direct_wasm_abi_risk` classifier,
-    #     which both scopes and *runs* them (`./scripts/check-version-bumps.sh`);
-    #     `build-wasm-extensions.sh` additionally has a Code Style self-test
+    #   * `check-version-bumps.sh` is the WIT/package version-parity gate, run
+    #     only by `platform-and-compat.yml` (`run: ./scripts/check-version-bumps.sh`,
+    #     behind that workflow's own `has_direct_wasm_abi_risk` filter, which
+    #     already names the script). No `Tests (Reborn)` lane invokes it.
+    #     Decided 2026-08-04 (WS10): editing it previously raised
+    #     `unmapped test or CI path`, failing `Detect Reborn test scope` and
+    #     skipping every downstream Reborn lane.
+    #   * `run-reborn-webui.sh` is a local developer launcher for the WebUI dev
+    #     server. It is referenced by no workflow at all (a search over
+    #     `.github/` finds nothing), so no lane can be selected for it.
+    #   * `build-wasm-extensions.sh` is named in the same
+    #     `has_direct_wasm_abi_risk` classifier, which both scopes and runs it,
+    #     and additionally has a Code Style self-test
     #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
-    #     executes either.
+    #     executes it.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
+    "scripts/run-reborn-webui.sh",
     # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
     # off exactly this pair and owns the image build; Code Style additionally
     # proves every `include_str!` target is inside each build context
@@ -467,7 +510,7 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
-        if path.startswith("crates/ironclaw_webui/frontend/"):
+        if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
         if path in root_inventory:
@@ -742,7 +785,13 @@ def main() -> int:
             canonical_packages=canonical_packages,
             lockfile_manifest_owned=lockfile_manifest_owned,
         )
-    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
+    except (
+        OSError,
+        KeyError,
+        ValueError,
+        RuntimeError,
+        subprocess.CalledProcessError,
+    ) as error:
         print(f"Reborn PR test planner failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(plan, separators=(",", ":"), sort_keys=True))

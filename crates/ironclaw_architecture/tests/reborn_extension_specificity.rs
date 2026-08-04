@@ -66,7 +66,26 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints the
+// ~215 literals below without a lockstep edit. On today's tree resolution is
+// the identity - pinned by `reborn_crate_inventory.rs`.
+use ratchet_support::{
+    crate_dir, crate_directories, crate_path, try_resolve_crate_relative, workspace_root,
+};
+
+/// Resolve a listed path through the crate inventory, falling back to the
+/// literal when it names no crate that exists.
+///
+/// A crate that MOVED resolves, which is the point: the ~215 entries below keep
+/// their readable flat spelling across the family move (PROPOSAL section 5). A
+/// crate that was DELETED or RENAMED does not resolve, and keeping its literal
+/// spelling makes it match nothing - which each list's own stale-entry
+/// detection already reports, with a better message than a panic and with
+/// exactly the behavior this gate had before.
+fn resolve_listed_path(root: &Path, logical: &str) -> String {
+    try_resolve_crate_relative(root, logical).unwrap_or_else(|_| logical.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Inventory-derived forbidden terms
@@ -101,10 +120,29 @@ const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0"];
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
 fn inventory_dirs(root: &Path) -> Vec<PathBuf> {
-    vec![
-        root.join("crates/extensions/packages"),
-        root.join("tests/fixtures/extensions"),
-    ]
+    vec![packages_root(root), root.join("tests/fixtures/extensions")]
+}
+
+/// The shipped package inventory, anchored on the crate that owns it rather
+/// than on the literal `crates/extensions/packages`. A package directory is
+/// owned by no crate (PROPOSAL section 5), so it cannot be resolved by name -
+/// but its owning support crate can be, and `packages/` is that crate's
+/// sibling. This is the hop `scripts/build-wasm-extensions.sh` and
+/// `scripts/ci/ws12_workflow_contracts.py` already use.
+fn packages_root(root: &Path) -> PathBuf {
+    let support = crate_dir(root, "ironclaw_extension_support");
+    let packages = support
+        .parent()
+        .expect("the package-support crate must have a parent directory")
+        .join("packages");
+    assert!(
+        packages.is_dir(),
+        "package inventory root {} does not exist - the specificity vocabulary would derive \
+         from nothing. `packages/` is resolved as a sibling of the ironclaw_extension_support \
+         crate; if the packages moved elsewhere, repoint this hop.",
+        packages.display()
+    );
+    packages
 }
 
 /// Bare terms carved out of the derived set because they collide with a
@@ -1024,14 +1062,30 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
         }
     }
     // The WebUI frontend ships from a non-src directory of a generic crate.
-    let frontend = root.join("crates/ironclaw_webui/frontend/src");
+    // `scan_dir` returns quietly on an unreadable directory, so a frontend that
+    // moved out from under this literal would drop the whole SPA out of the
+    // scan while the gate still passed - assert the root before scanning it.
+    let frontend = crate_path(root, "crates/ironclaw_webui/frontend/src");
+    assert!(
+        frontend.is_dir(),
+        "WebUI frontend scan root {} does not exist; the SPA would go unscanned while this \
+         gate still reported success (docs/reborn/target-architecture/CHECKLIST.md WS10)",
+        frontend.display()
+    );
     scan_dir(root, &frontend, terms, &mut hits);
 
+    // Resolved through the inventory: these fragments are matched against
+    // paths discovered on disk, so a crate that moved makes every fragment
+    // naming it stop carving - in the direction that ADDS violations.
+    let sanctioned: Vec<String> = SANCTIONED_PATHS
+        .iter()
+        .map(|fragment| resolve_listed_path(root, fragment))
+        .collect();
     hits.into_iter()
         .filter(|(path, _)| {
-            !SANCTIONED_PATHS
+            !sanctioned
                 .iter()
-                .any(|fragment| path.contains(fragment))
+                .any(|fragment| path.contains(fragment.as_str()))
         })
         .flat_map(|(path, terms)| {
             terms
@@ -1045,26 +1099,35 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
 /// Split raw hits into (permanently carved-out, policed). Carve-outs that no
 /// longer match anything are returned as stale so the list cannot rot.
 fn apply_path_term_collisions(
+    root: &Path,
     hits: BTreeSet<(String, String)>,
 ) -> (BTreeSet<(String, String)>, Vec<String>) {
+    // The path fragments are matched against paths discovered on disk, so each
+    // is resolved through the crate inventory first. The reported staleness
+    // still names the LOGICAL spelling, which is what a reader would edit.
+    let carve_outs: Vec<(String, &str, &str)> = PATH_TERM_COLLISIONS
+        .iter()
+        .map(|(fragment, term, reason)| (resolve_listed_path(root, fragment), *term, *reason))
+        .collect();
     let mut used: BTreeSet<(&str, &str)> = BTreeSet::new();
     let policed: BTreeSet<(String, String)> = hits
         .into_iter()
         .filter(|(path, term)| {
-            let carved = PATH_TERM_COLLISIONS
-                .iter()
-                .find(|(fragment, carved_term, _)| path.contains(fragment) && term == carved_term);
+            let carved = carve_outs.iter().find(|(fragment, carved_term, _)| {
+                path.contains(fragment.as_str()) && term == carved_term
+            });
             if let Some((fragment, carved_term, _)) = carved {
-                used.insert((fragment, carved_term));
+                used.insert((fragment.as_str(), carved_term));
                 return false;
             }
             true
         })
         .collect();
-    let stale = PATH_TERM_COLLISIONS
+    let stale = carve_outs
         .iter()
-        .filter(|(fragment, term, _)| !used.contains(&(fragment, term)))
-        .map(|(fragment, term, _)| format!("{fragment} :: {term}"))
+        .zip(PATH_TERM_COLLISIONS.iter())
+        .filter(|((fragment, term, _), _)| !used.contains(&(fragment.as_str(), *term)))
+        .map(|(_, (fragment, term, _))| format!("{fragment} :: {term}"))
         .collect();
     (policed, stale)
 }
@@ -1594,12 +1657,15 @@ fn reborn_extension_specificity_allowlist_ratchets_down_only() {
 type HitEntry = (String, String);
 
 fn classify_hits(
+    root: &Path,
     hits: &BTreeSet<HitEntry>,
     allowlist: &[(&str, &str)],
 ) -> (Vec<HitEntry>, Vec<HitEntry>) {
+    // Resolved through the inventory: a moved crate would otherwise turn every
+    // entry naming it into BOTH a stale entry and a new violation at once.
     let allowed: BTreeSet<HitEntry> = allowlist
         .iter()
-        .map(|(path, term)| (path.to_string(), term.to_string()))
+        .map(|(path, term)| (resolve_listed_path(root, path), term.to_string()))
         .collect();
     let new_violations = hits.difference(&allowed).cloned().collect();
     let stale_entries = allowed.difference(hits).cloned().collect();
@@ -1615,13 +1681,7 @@ fn classify_hits(
 /// two provider package directories so a rename has to come here.
 #[test]
 fn the_non_vendor_provider_carve_out_names_real_packages() {
-    let packages = workspace_root().join("crates/extensions/packages");
-    assert!(
-        packages.is_dir(),
-        "package inventory root {} does not exist — the specificity vocabulary would derive \
-         from nothing",
-        packages.display()
-    );
+    let packages = packages_root(&workspace_root());
     for name in NON_VENDOR_PROVIDER_PACKAGE_DIRS {
         let dir = packages.join(name);
         assert!(
@@ -1643,8 +1703,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
         "inventory-derived term set must not be empty — is the package inventory readable?"
     );
     let raw_hits = collect_workspace_hits(&root, &terms);
-    let (hits, stale_carve_outs) = apply_path_term_collisions(raw_hits);
-    let (new_violations, stale_entries) = classify_hits(&hits, ALLOWLIST);
+    let (hits, stale_carve_outs) = apply_path_term_collisions(&root, raw_hits);
+    let (new_violations, stale_entries) = classify_hits(&root, &hits, ALLOWLIST);
 
     let mut failures = Vec::new();
     if !stale_carve_outs.is_empty() {
@@ -1708,16 +1768,51 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         .iter()
         .filter_map(|package| package["name"].as_str())
         .collect();
-    for concrete in CONCRETE_EXTENSION_CRATES {
-        let manifest = root.join("crates").join(concrete).join("Cargo.toml");
-        if manifest.exists() {
-            assert!(
-                registered.contains(concrete),
-                "{concrete} has a Cargo.toml but is not in cargo metadata; register it as a \
-                 workspace member so this gate actually checks its dependents"
-            );
-        }
+    // Resolved by PACKAGE NAME across the crate inventory, not by joining
+    // `crates/<package name>/Cargo.toml`.
+    //
+    // The old join assumed directory == package name. WS2 colocation made the
+    // directories `extensions/packages/{slack,telegram}` while the packages
+    // kept their `ironclaw_*_extension` names, so the join has been resolving
+    // to a path that does not exist and this fail-open guard has been checking
+    // **zero** crates ever since — green, and measuring nothing. Walking the
+    // inventory and reading each manifest's declared name fixes that and is
+    // also what survives the family move (WS10).
+    let mut resolved_concrete: Vec<&str> = Vec::new();
+    for directory in crate_directories(&root) {
+        let manifest = root.join(&directory).join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let Some(package_name) = text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("name = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        }) else {
+            continue;
+        };
+        let Some(concrete) = CONCRETE_EXTENSION_CRATES
+            .iter()
+            .find(|concrete| **concrete == package_name)
+        else {
+            continue;
+        };
+        resolved_concrete.push(concrete);
+        assert!(
+            registered.contains(concrete),
+            "{concrete} has a Cargo.toml at {} but is not in cargo metadata; register it as \
+             a workspace member so this gate actually checks its dependents",
+            manifest.display()
+        );
     }
+    // A planned-but-absent concrete crate is tolerated by design, but ALL of
+    // them being absent means the guard resolved nothing and checked nothing.
+    assert!(
+        !resolved_concrete.is_empty(),
+        "no concrete extension package resolved to a manifest, so the registration guard \
+         checked nothing. CONCRETE_EXTENSION_CRATES is {CONCRETE_EXTENSION_CRATES:?} \
+         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+    );
 
     let mut violations = Vec::new();
     let mut used_exceptions = BTreeSet::new();
@@ -1892,7 +1987,7 @@ fn scanner_allowlist_is_shrink_only() {
         ("crates/a/src/lib.rs", "slack"),
         ("crates/gone/src/lib.rs", "gmail"),
     ];
-    let (new_violations, stale_entries) = classify_hits(&hits, &allowlist);
+    let (new_violations, stale_entries) = classify_hits(&workspace_root(), &hits, &allowlist);
     assert_eq!(
         new_violations,
         vec![("crates/b/src/lib.rs".to_string(), "github".to_string())],
@@ -1902,6 +1997,56 @@ fn scanner_allowlist_is_shrink_only() {
         stale_entries,
         vec![("crates/gone/src/lib.rs".to_string(), "gmail".to_string())],
         "an allowlist entry with no matching hit must be reported stale"
+    );
+}
+
+/// WS10: the allowlist keys on the crate NAME, not on the crate's directory.
+///
+/// A family move (PROPOSAL section 5) changes every discovered path at once. If
+/// the listed paths were compared literally, every entry naming a moved crate
+/// would be reported BOTH stale and as a new violation in the same run — ~215
+/// of them, which is the lockstep sweep this row exists to remove. Resolution
+/// makes the same entry keep matching; an entry naming a crate that is really
+/// gone still falls through to `stale`.
+#[test]
+fn reborn_allowlist_entries_follow_a_crate_into_its_family_directory() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let root = temporary.path();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("root manifest");
+    for index in 0..24 {
+        let filler = root.join(format!("crates/ironclaw_filler_{index}"));
+        std::fs::create_dir_all(&filler).expect("filler crate");
+        std::fs::write(filler.join("Cargo.toml"), "[package]\n").expect("filler manifest");
+    }
+    let moved = root.join("crates/substrates/ironclaw_llm");
+    std::fs::create_dir_all(moved.join("src")).expect("moved crate");
+    std::fs::write(moved.join("Cargo.toml"), "[package]\n").expect("moved manifest");
+
+    // What the scanner would discover on the moved tree.
+    let hits: BTreeSet<HitEntry> = [(
+        "crates/substrates/ironclaw_llm/src/registry.rs".to_string(),
+        "nearai".to_string(),
+    )]
+    .into_iter()
+    .collect();
+    // What the allowlist still says, unedited.
+    let allowlist = [
+        ("crates/ironclaw_llm/src/registry.rs", "nearai"),
+        ("crates/ironclaw_deleted/src/lib.rs", "slack"),
+    ];
+
+    let (new_violations, stale_entries) = classify_hits(root, &hits, &allowlist);
+    assert!(
+        new_violations.is_empty(),
+        "an allowlisted hit must stay allowlisted after its crate moves: {new_violations:?}"
+    );
+    assert_eq!(
+        stale_entries,
+        vec![(
+            "crates/ironclaw_deleted/src/lib.rs".to_string(),
+            "slack".to_string()
+        )],
+        "an entry naming a crate that no longer exists must still be reported stale"
     );
 }
 

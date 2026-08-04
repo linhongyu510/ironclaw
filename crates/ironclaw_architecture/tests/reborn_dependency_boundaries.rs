@@ -10,7 +10,11 @@ use std::{
 
 use serde_json::Value;
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/…`) and RESOLVED through the
+// crate inventory, so the family move (PROPOSAL §5) repoints them without a
+// lockstep edit of the ~100 literals below. On today's tree resolution is the
+// identity — pinned by `reborn_crate_inventory.rs`.
+use ratchet_support::{crate_path, resolve_crate_relative, try_crate_directory, workspace_root};
 
 #[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
@@ -30,15 +34,26 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
         .collect::<std::collections::HashSet<_>>();
 
     let root = workspace_root();
+    // Resolved through the crate inventory, not `crates/<name>/`: a family move
+    // (PROPOSAL §5) makes the flat join miss every crate at once, and the
+    // `continue` below then skips the whole check while the test still passes.
+    // That fail-open is the WS10 dark-verdict shape, so the scan is counted.
+    let mut checked = 0usize;
     for rule in boundary_rules() {
         let manifest = if rule.crate_name == "ironclaw" {
-            root.join("crates/ironclaw_reborn_cli/Cargo.toml")
+            crate_path(&root, "crates/ironclaw_reborn_cli/Cargo.toml")
         } else {
-            root.join("crates").join(rule.crate_name).join("Cargo.toml")
+            match try_crate_directory(&root, rule.crate_name) {
+                Ok(directory) => root.join(directory).join("Cargo.toml"),
+                // A rule naming a crate with no directory (a retired-crate
+                // reintroduction pin) is legitimate and tolerated.
+                Err(_) => continue,
+            }
         };
         if !manifest.exists() {
             continue;
         }
+        checked += 1;
         assert!(
             registered.contains(rule.crate_name),
             "{} has a Cargo.toml at {} but is not registered as a workspace member; \
@@ -48,6 +63,13 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
             manifest.display()
         );
     }
+
+    assert!(
+        checked >= 30,
+        "expected every active boundary rule's crate to resolve to a real manifest; only \
+         {checked} did. A rule set that resolves to nothing checks nothing while passing \
+         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+    );
 }
 
 /// A `forbidden` entry must name a **package**, never a crate *directory*.
@@ -86,9 +108,16 @@ fn boundary_rule_names_are_package_names_not_crate_directories() {
             if registered.contains(forbidden) {
                 continue;
             }
-            let manifest = root.join("crates").join(forbidden).join("Cargo.toml");
-            if !manifest.exists() {
+            // Inventory-resolved, not `crates/<name>/`: under a family move the
+            // flat join misses every directory, every entry looks like a
+            // reintroduction pin, and the directory-vs-package confusion this
+            // test exists to catch goes unchecked (WS10).
+            let Ok(directory) = try_crate_directory(&root, forbidden) else {
                 // A reintroduction pin for a crate that no longer exists.
+                continue;
+            };
+            let manifest = root.join(directory).join("Cargo.toml");
+            if !manifest.exists() {
                 continue;
             }
             let declared = std::fs::read_to_string(&manifest)
@@ -270,8 +299,9 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
 #[test]
 fn reborn_virtual_roots_match_storage_placement_contract() {
     let root = workspace_root();
-    let path_source = std::fs::read_to_string(root.join("crates/ironclaw_host_api/src/path.rs"))
-        .expect("host API path source must be readable");
+    let path_source =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_api/src/path.rs"))
+            .expect("host API path source must be readable");
     let storage_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/storage-placement.md"))
             .expect("storage placement contract must be readable");
@@ -695,10 +725,13 @@ fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owne
         &root,
         &mut uses,
     );
-    let allowed = BTreeSet::from([
+    let allowed: BTreeSet<String> = [
         "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
         "crates/ironclaw_conversations/src/inbound.rs",
-    ]);
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let violations = uses
         .into_iter()
         .filter(|path| !allowed.contains(path.as_str()))
@@ -716,8 +749,11 @@ fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owne
 #[test]
 fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
     let root = workspace_root();
-    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
-        .expect("conversation lib source must be readable");
+    let lib_source = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_conversations/src/lib.rs",
+    ))
+    .expect("conversation lib source must be readable");
 
     assert!(
         !lib_source.contains("ConversationTrustedTriggerSubmitter"),
@@ -729,8 +765,11 @@ fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
 #[test]
 fn conversation_trusted_trigger_classifier_stays_out_of_root_exports() {
     let root = workspace_root();
-    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
-        .expect("conversation lib source must be readable");
+    let lib_source = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_conversations/src/lib.rs",
+    ))
+    .expect("conversation lib source must be readable");
 
     assert!(
         !lib_source.contains("classify_trusted_trigger_inbound_error"),
@@ -765,10 +804,13 @@ fn trusted_trigger_submit_request_minting_stays_worker_owned() {
         &root,
         &mut struct_literal_uses,
     );
-    let allowed_struct_literals = BTreeSet::from([
+    let allowed_struct_literals: BTreeSet<String> = [
         "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
         "crates/ironclaw_triggers/src/worker/ports.rs",
-    ]);
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let struct_literal_violations = struct_literal_uses
         .into_iter()
         .filter(|path| !allowed_struct_literals.contains(path.as_str()))
@@ -877,7 +919,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
 
     let mut violations = Vec::new();
     for relative_root in untrusted_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         // A missing root is a stale entry, not a pass: silently skipping it is
         // exactly how a crate rename would drop a whole tree out of this guard
         // while the list still reads as covering it.
@@ -914,7 +956,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         .collect::<HashMap<_, _>>();
 
     let root = workspace_root();
-    let manifest_path = root.join("crates/ironclaw_reborn_cli/Cargo.toml");
+    let manifest_path = crate_path(&root, "crates/ironclaw_reborn_cli/Cargo.toml");
     assert!(
         manifest_path.exists(),
         "Reborn should ship as a separate binary crate at {}",
@@ -944,13 +986,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     ];
     for path in command_module_paths {
         assert!(
-            root.join(path).exists(),
+            crate_path(&root, path).exists(),
             "Reborn CLI commands should use an agent-friendly one-command-per-file layout; missing {path}"
         );
     }
 
-    let agent_contract = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/AGENTS.md"))
-        .expect("Reborn CLI crate-local AGENTS.md must be readable");
+    let agent_contract =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_reborn_cli/AGENTS.md"))
+            .expect("Reborn CLI crate-local AGENTS.md must be readable");
     for required_phrase in [
         "one command per file",
         "RebornCliContext",
@@ -1007,7 +1050,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let runtime_dir = crate_path(&root, "crates/ironclaw_reborn_cli/src/runtime");
     let mut cli_runtime_source = String::new();
     let cli_runtime_files = collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
     assert!(
@@ -1038,11 +1081,13 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
 #[test]
 fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_runtime/src/lib.rs"))
         .expect("host runtime lib.rs must be readable");
-    let services =
-        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
-            .expect("host runtime services.rs must be readable");
+    let services = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_host_runtime/src/services.rs",
+    ))
+    .expect("host runtime services.rs must be readable");
     // WS3 split `obligations.rs` into `obligations/{mod,handler,staged_handoffs,
     // process_store,tests}.rs` (one module per chartered owner). This gate is
     // about the *escape hatches* the obligation code may not make public, and
@@ -1050,7 +1095,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // directory rather than one file. The file count is asserted so a future
     // move that empties the directory fails here instead of scanning nothing
     // and reporting success (the loud-vs-silent distinction WS10 tracks).
-    let obligations_dir = root.join("crates/ironclaw_host_runtime/src/obligations");
+    let obligations_dir = crate_path(&root, "crates/ironclaw_host_runtime/src/obligations");
     let mut obligations = String::new();
     let obligations_files = collect_runtime_rs(&obligations_dir, &mut obligations);
     assert!(
@@ -1067,17 +1112,18 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
     // non-vacuous across that move (and the family `git mv` still to come) —
     // reading one hardcoded file would have gone silently green.
-    let scripts = concatenated_crate_sources(&root.join("crates/ironclaw_sandbox/src"));
+    let scripts = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_sandbox/src"));
     assert!(
         scripts.contains("pub struct ScriptRuntime"),
         "sandbox lane scan is vacuous: it found no script-lane source under \
          crates/ironclaw_sandbox/src (did the lane move again?)"
     );
-    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_sandbox/Cargo.toml"))
-        .expect("sandbox lane Cargo.toml must be readable");
-    let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
+    let scripts_manifest =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_sandbox/Cargo.toml"))
+            .expect("sandbox lane Cargo.toml must be readable");
+    let mcp = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/src/lib.rs"))
         .expect("MCP runtime lib.rs must be readable");
-    let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
+    let mcp_manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/Cargo.toml"))
         .expect("MCP runtime Cargo.toml must be readable");
 
     let forbidden_lib_exports = [
@@ -1234,7 +1280,7 @@ fn extract_pub_use_block<'a>(contents: &'a str, start_marker: &str) -> &'a str {
 #[test]
 fn reborn_turns_public_surface_keeps_runner_api_explicit() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_turns/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_turns/src/lib.rs"))
         .expect("turns lib.rs must be readable");
 
     let forbidden_public_exports = [
@@ -1259,7 +1305,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
     // adapter"). The pin moved with it, and gained its other half: the adapter
     // must be at the new home AND absent from the old one, so a half-finished
     // move fails here instead of leaving two gateways.
-    let reborn_gateway = root.join("crates/ironclaw_loop_host/src/model_gateway.rs");
+    let reborn_gateway = crate_path(&root, "crates/ironclaw_loop_host/src/model_gateway.rs");
     assert!(
         reborn_gateway.exists(),
         "expected Reborn LLM gateway wiring at {}",
@@ -1273,9 +1319,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
          crates/ironclaw_loop_host"
     );
     assert!(
-        !root
-            .join("crates/ironclaw_runner/src/model_gateway.rs")
-            .exists(),
+        !crate_path(&root, "crates/ironclaw_runner/src/model_gateway.rs").exists(),
         "the model gateway moved to ironclaw_loop_host (WS3 runner sheds); a file back at \
          crates/ironclaw_runner/src/model_gateway.rs is a re-import, not a fix"
     );
@@ -1292,7 +1336,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
         "crates/ironclaw_loop_host/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
     ] {
-        let manifest = std::fs::read_to_string(root.join(manifest_path))
+        let manifest = std::fs::read_to_string(crate_path(&root, manifest_path))
             .unwrap_or_else(|_| panic!("{manifest_path} must be readable"));
         let llm_dep = manifest
             .lines()
@@ -1313,7 +1357,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
     let mut uses = Vec::new();
     collect_provider_tool_name_boundary_uses(&root.join("crates"), &root, &mut uses);
 
-    let allowed = BTreeSet::from([
+    let allowed: BTreeSet<String> = [
         // Type definition and provider-wire validation.
         "crates/ironclaw_host_api/src/ids.rs",
         "crates/ironclaw_safety/src/lib.rs",
@@ -1348,7 +1392,10 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_loop_host/src/synthetic_capability.rs",
         "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
-    ]);
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let violations = uses
         .into_iter()
         .filter(|use_site| !allowed.contains(use_site.path.as_str()))
@@ -1388,7 +1435,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
 #[test]
 fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_runner/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_runner/src/lib.rs"))
         .expect("ironclaw_runner lib.rs must be readable");
 
     // The forbidden re-export prefixes correspond to the original noisy
@@ -1416,9 +1463,12 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // module paths. Confirm the run-state assembly is wired there (it would
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
-    let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
-    let composition_capability_host =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/capability_host.rs");
+    let composition_runtime =
+        crate_path(&root, "crates/ironclaw_reborn_composition/src/runtime.rs");
+    let composition_capability_host = crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/runtime/capability_host.rs",
+    );
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
@@ -1686,8 +1736,10 @@ fn composition_runtime_has_no_slack_output_policy() {
         violations.join("\n")
     );
 
-    let slack_policy_module =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs");
+    let slack_policy_module = crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs",
+    );
     assert!(
         !slack_policy_module.exists(),
         "Reborn composition must not own the Slack-specific output policy module at {}",
@@ -1696,7 +1748,7 @@ fn composition_runtime_has_no_slack_output_policy() {
 }
 
 fn production_composition_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
-    let composition_src = root.join("crates/ironclaw_reborn_composition/src");
+    let composition_src = crate_path(root, "crates/ironclaw_reborn_composition/src");
     let mut paths = Vec::new();
     let mut pending = vec![composition_src];
 
@@ -2237,8 +2289,11 @@ fn slack_import_segment(suffix: &str) -> &str {
 fn reborn_boot_config_file_layout_is_pinned() {
     let root = workspace_root();
 
-    let config_lib = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/lib.rs"))
-        .expect("reborn config lib.rs must be readable");
+    let config_lib = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/lib.rs",
+    ))
+    .expect("reborn config lib.rs must be readable");
     for required_export in [
         "pub use config_file::",
         "RebornConfigFile",
@@ -2252,8 +2307,11 @@ fn reborn_boot_config_file_layout_is_pinned() {
         );
     }
 
-    let home_src = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/home.rs"))
-        .expect("reborn config home.rs must be readable");
+    let home_src = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/home.rs",
+    ))
+    .expect("reborn config home.rs must be readable");
     for required_method in ["pub fn config_file_path", "pub fn providers_file_path"] {
         assert!(
             home_src.contains(required_method),
@@ -2278,9 +2336,11 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // regression that bypasses it (e.g. a future contributor adds a
     // new section and forgets to call `reject_inline_secret`) would
     // silently allow pasted credentials through.
-    let config_file_src =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/config_file.rs"))
-            .expect("reborn config_file.rs must be readable");
+    let config_file_src = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/config_file.rs",
+    ))
+    .expect("reborn config_file.rs must be readable");
     assert!(
         config_file_src.contains("reject_inline_secret"),
         "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
@@ -2292,7 +2352,10 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // control-plane without forcing `ironclaw_reborn_config` to depend on
     // `ironclaw_llm` (which would violate _config's standalone boundary).
     // The composition crate only re-exports this surface for compatibility.
-    let llm_catalog = root.join("crates/ironclaw_operator/src/llm_admin/llm_catalog.rs");
+    let llm_catalog = crate_path(
+        &root,
+        "crates/ironclaw_operator/src/llm_admin/llm_catalog.rs",
+    );
     assert!(
         llm_catalog.exists(),
         "operator must expose a catalog resolver at {} so the CLI can stitch \
@@ -2317,8 +2380,9 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // catalog file location is selectable per-deployment (the
     // standalone Reborn binary points at $IRONCLAW_REBORN_HOME/providers.json,
     // not v1's ~/.ironclaw/providers.json).
-    let llm_registry = std::fs::read_to_string(root.join("crates/ironclaw_llm/src/registry.rs"))
-        .expect("ironclaw_llm registry.rs must be readable");
+    let llm_registry =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_llm/src/registry.rs"))
+            .expect("ironclaw_llm registry.rs must be readable");
     assert!(
         llm_registry.contains("pub fn load_from_path"),
         "ironclaw_llm::ProviderRegistry must expose `load_from_path` so callers can \
@@ -2330,7 +2394,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
 #[test]
 fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
     let root = workspace_root();
-    let turns_src = root.join("crates/ironclaw_turns/src");
+    let turns_src = crate_path(&root, "crates/ironclaw_turns/src");
     let mut violations = Vec::new();
     collect_forbidden_turns_identifier_uses(&turns_src, &root, &mut violations);
 
@@ -2344,13 +2408,14 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
 #[test]
 fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
     let workspace = workspace_root();
-    let module = workspace.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs");
+    let module = crate_path(&workspace, "crates/ironclaw_wasm/src/wasm_sandbox_core.rs");
     assert!(
         module.exists(),
         "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
-    let guardrails = std::fs::read_to_string(workspace.join("crates/ironclaw_wasm/CLAUDE.md"))
-        .expect("ironclaw_wasm guardrails must be readable");
+    let guardrails =
+        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/CLAUDE.md"))
+            .expect("ironclaw_wasm guardrails must be readable");
     assert!(
         guardrails.contains("wasm_sandbox_core")
             && guardrails.contains("Do not put ProductAdapter"),
@@ -2452,7 +2517,7 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 
     let mut violations = Vec::new();
     for relative_root in runtime_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         if !dir.exists() {
             continue;
         }
@@ -2469,12 +2534,15 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 #[test]
 fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
     let root = workspace_root();
-    let factory =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
-            .expect("composition factory source must be readable");
-    let owner_transaction = std::fs::read_to_string(
-        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
-    )
+    let factory = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+    ))
+    .expect("composition factory source must be readable");
+    let owner_transaction = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_extension_host/src/activation_transaction.rs",
+    ))
     .expect("extension-host activation transaction source must be readable");
 
     for forbidden in [
@@ -2574,7 +2642,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let missing: Vec<&str> = reborn_product_api_src_roots
         .iter()
         .copied()
-        .filter(|relative_root| !root.join(relative_root).is_dir())
+        .filter(|relative_root| !crate_path(&root, relative_root).is_dir())
         .collect();
     assert!(
         missing.is_empty(),
@@ -2585,7 +2653,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
 
     let mut violations = Vec::new();
     for relative_root in reborn_product_api_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 
@@ -2647,7 +2715,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
     ];
 
     let root = workspace_root();
-    let compat_src = root.join("crates/ironclaw_reborn_openai_compat/src");
+    let compat_src = crate_path(&root, "crates/ironclaw_reborn_openai_compat/src");
     let mut violations = Vec::new();
     collect_forbidden_uses(&compat_src, &root, &forbidden, &mut violations);
 
@@ -2759,14 +2827,14 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     ];
 
     let root = workspace_root();
-    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_auth/Cargo.toml"))
+    let manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_auth/Cargo.toml"))
         .expect("ironclaw_auth manifest must be readable");
     assert!(
         !manifest.contains("reqwest"),
         "ironclaw_auth must not depend on reqwest directly; provider transport belongs behind Reborn-native composition"
     );
 
-    let auth_src = root.join("crates/ironclaw_auth/src");
+    let auth_src = crate_path(&root, "crates/ironclaw_auth/src");
     assert!(
         auth_src.exists(),
         "Reborn product auth contract crate must have a src directory at {}",
@@ -2776,8 +2844,8 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_webui/src/product_auth"),
-        &root.join("crates/ironclaw_webui/src/product_auth.rs"),
+        &crate_path(&root, "crates/ironclaw_webui/src/product_auth"),
+        &crate_path(&root, "crates/ironclaw_webui/src/product_auth.rs"),
         &root,
         &forbidden,
         &mut violations,
