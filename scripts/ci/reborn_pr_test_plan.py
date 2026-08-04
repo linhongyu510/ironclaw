@@ -69,10 +69,28 @@ EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
     # letting a fixture change select nothing at all.
     ("test-tools/", "ironclaw_extension_host"),
 )
+EMBEDDED_ASSET_PREFIXES: tuple[str, ...] = tuple(
+    prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
+)
 # Everything the crate/asset arm owns: crate roots plus the asset trees above.
 CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
     prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
 )
+
+
+def _is_package_prompt(path: str) -> bool:
+    """True for a shipped prompt inside an asset tree owned by the table above.
+
+    Prompts are the one Markdown *asset* kind: the table owns "manifests,
+    prompts, schemas and built `wasm/*.wasm`", and the other three are `.toml`,
+    `.json` and `.wasm`. Everything else ending in `.md` under those trees is
+    documentation — `test-tools/README.md`, a package `AGENTS.md` — and stays
+    prose. Keyed on the directory segment so it holds at any depth
+    (`<pkg>/prompts/<tool>/<name>.md` today, deeper tomorrow).
+    """
+    if not path.startswith(EMBEDDED_ASSET_PREFIXES):
+        return False
+    return "prompts" in Path(path).parts[:-1]
 INTEGRATION_SUPPORT_OWNERS = {
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
@@ -494,11 +512,31 @@ def build_plan(
             # `crates/AGENTS.md` and for a future `crates/<family>/AGENTS.md`
             # after the WS7 family move. A crate-resident doc still resolves to
             # its package below and keeps selecting that package's lane.
-            if Path(path).suffix == ".md" and not any(
-                path.startswith(f"{directory}/") for directory in package_directories
-            ):
-                reasons.append(f"crate-tree guidance changed: {path}")
-                continue
+            #
+            # The carve-out yields to a shipped *prompt*, and must. The asset
+            # table declares it owns "manifests, prompts, schemas and built
+            # `wasm/*.wasm`"; of those kinds only a prompt is Markdown
+            # (manifests are `.toml`, schemas `.json`, wasm `.wasm`), so
+            # `.md` under a `prompts/` directory is an asset and every other
+            # `.md` is prose. Without this clause the prose arm fired first and
+            # a change to a shipped prompt — production output that
+            # `ironclaw_extension_support` compiles in — planned `mode=none`,
+            # selecting no lane at all, while its sibling `manifest.toml` in the
+            # same package correctly selected two. That is exactly the "silent
+            # under-schedule of a change to production output" the comment above
+            # `EMBEDDED_ASSET_OWNERS` forbids.
+            #
+            # Keyed on the `prompts/` segment rather than on the asset prefixes
+            # themselves, because those prefixes also cover genuine prose:
+            # `test-tools/README.md` is documentation of the fixture bundles and
+            # stays prose, as its own test pins.
+            if Path(path).suffix == ".md" and not _is_package_prompt(path):
+                if not any(
+                    path.startswith(f"{directory}/")
+                    for directory in package_directories
+                ):
+                    reasons.append(f"crate-tree guidance changed: {path}")
+                    continue
             package = next(
                 (
                     name

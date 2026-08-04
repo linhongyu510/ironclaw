@@ -786,6 +786,59 @@ class RebornPrTestPlanTests(unittest.TestCase):
         unowned = self.plan_real_owners(["crates/extensions/nowhere/thing.bin"])
         self.assertEqual(unowned["mode"], "full")
 
+    def test_package_prompt_markdown_routes_to_its_compiler_not_to_prose(self) -> None:
+        """A shipped `.md` asset is owned by the asset table, not prose.
+
+        Regression for the ordering defect found in review of #7141. The
+        Markdown prose carve-out ran *before* `EMBEDDED_ASSET_OWNERS`, and a
+        prompt is a `.md` file that no package *directory* owns — so a change
+        to `packages/*/prompts/**.md`, which the asset table explicitly claims
+        ("manifests, prompts, schemas and built `wasm/*.wasm`") and which
+        `ironclaw_extension_support` compiles in, planned `mode=none` and
+        selected no lane at all. Its sibling `manifest.toml` in the same
+        package selected two. That is the exact "silent under-schedule of a
+        change to production output" the comment above the table forbids.
+
+        Both halves are pinned, because fixing this by making *all* crate-tree
+        `.md` route somewhere would be the opposite error.
+        """
+        prompt = "crates/extensions/packages/github/prompts/github/create_issue.md"
+        plan = self.plan_real_owners([prompt])
+        self.assertEqual(plan["mode"], "selected", prompt)
+        self.assertIn("ironclaw_extension_support", plan["affected_packages"])
+        self.assertIn(
+            f"asset compiled into ironclaw_extension_support changed: {prompt}",
+            plan["reasons"],
+        )
+
+        # The prompt and the manifest beside it must agree — the defect was
+        # that they disagreed.
+        manifest = self.plan_real_owners(
+            ["crates/extensions/packages/github/manifest.toml"]
+        )
+        self.assertEqual(manifest["mode"], plan["mode"])
+
+        # The `test-tools/` prompts are assets on the same rule, routed to the
+        # crate that embeds that tree.
+        fixture_prompt = "test-tools/hacker-news/prompts/hacker-news/top_stories.md"
+        fixture = self.plan_real_owners([fixture_prompt])
+        self.assertEqual(fixture["mode"], "selected", fixture_prompt)
+        self.assertIn("ironclaw_extension_host", fixture["affected_packages"])
+
+        # And the carve-out still carves. Markdown that is *not* a prompt stays
+        # prose even inside an asset tree — this is why the rule is keyed on the
+        # `prompts/` segment and not on the asset prefixes, which also cover
+        # documentation.
+        for prose in (
+            "crates/AGENTS.md",
+            "crates/extensions/AGENTS.md",
+            "test-tools/README.md",
+        ):
+            with self.subTest(prose=prose):
+                quiet = self.plan_real_owners([prose])
+                self.assertEqual(quiet["mode"], "none", prose)
+                self.assertEqual(quiet["crate_buckets"], [], prose)
+
     def test_markdown_owned_by_no_crate_is_prose(self) -> None:
         """`crates/AGENTS.md` and `test-tools/README.md` select no lane.
 
