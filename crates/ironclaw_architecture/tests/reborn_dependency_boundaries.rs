@@ -4175,7 +4175,44 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 8;
+///
+/// **10 → 8 (WS3, sandbox lane merge + `ironclaw_mcp` contracts flip).**
+/// `ironclaw_mcp → ironclaw_extensions` and `ironclaw_scripts →
+/// ironclaw_extensions` are deleted, not waived: the registry DTOs both lanes
+/// named now come from `ironclaw_extension_contracts`, and `ironclaw_scripts`
+/// no longer exists — the sandbox merge absorbed it into `ironclaw_sandbox`,
+/// which never takes the edge. `ironclaw_scripts → ironclaw_resources`
+/// survives as `ironclaw_sandbox → ironclaw_resources`: the same edge renamed
+/// with the crate, which is why the list gains an entry while shrinking by
+/// three. Both surviving `→ ironclaw_resources` rows point at #7067, which
+/// owns the narrow reserve/reconcile/release port that dissolves them.
+///
+/// **10 → 9 (WS3, first-party skill tools move to `extension_support`).**
+/// `host_runtime` reached `ironclaw_skills` for exactly two things, both inside
+/// `first_party_tools/`: `InstalledSkillMetadataSource` when rewriting a
+/// URL install's input, and the `MAX_INSTALL_BUNDLE_*` limits enforced while
+/// unpacking a fetched bundle. Both moved to
+/// `ironclaw_extension_support::skills` (which already owned the executor half
+/// and already depends on `ironclaw_skills`), so the manifest edge is gone
+/// rather than waived. `ironclaw_skills` survives here as a **dev**-dependency
+/// only — the host's own tests still assert against the shared bundle limits,
+/// and dev edges are outside the matrix by construction
+/// (`is_normal_dependency`).
+///
+/// This slice was authored off 13 and computed `13 → 12` in isolation; #7064
+/// (the WS4 re-layer) landed first and took the list to 10, so the constant is
+/// recomputed here as `len()` of the **merged** list — the union rule the
+/// CHECKLIST §11.2.2 row records. The edge this slice deletes is the same one
+/// either way; only the total moved.
+///
+/// **Consolidated to 7.** The two WS3 slices above were authored as separate
+/// branches and each computed its constant in isolation against main's 10 — 8
+/// and 9 respectively. Their edits to this list are disjoint: the sandbox/mcp
+/// slice removes three entries and adds one, the skill-tools slice removes a
+/// fourth. Neither slice's stored number is correct for the union, so this is
+/// recomputed as `len()` of the merged list — `10 − 4 + 1 = 7` — on the pushed
+/// ref, per the union rule the CHECKLIST §11.2.2 row records.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 7;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4191,13 +4228,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_skills",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
     },
     LayerMatrixException {
         crate_name: "ironclaw_capabilities",

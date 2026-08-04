@@ -50,7 +50,6 @@ ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
@@ -76,11 +75,18 @@ tokio-util = { version = "0.7" }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
 hex = "0.4"
+# Test-only since WS3: the skill-install bundle limits these tests exercise are
+# owned by `ironclaw_skills`, but the executor that enforces them now lives in
+# `ironclaw_extension_support::skills` — a normal dep here would re-open the
+# kernel→domain edge the move closed.
+ironclaw_skills = { path = "../ironclaw_skills" }
+# Test-only since WS3: the ZIP-bundle fixtures these tests build stay here; the
+# extractor moved to `ironclaw_extension_support::skills::url_install`.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.

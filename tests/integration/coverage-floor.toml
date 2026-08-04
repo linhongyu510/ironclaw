@@ -339,9 +339,42 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_host_runtime"
-floor_percent = 88.65
-floor_covered_lines = 18854
-captured_total_lines = 21267
-captured_date = "2026-08-03"
-rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured for the WS3 sandbox-lane merge (#7065): sandbox_process/** moved to ironclaw_sandbox, so the denominator fell 23277 -> 21267 (-2010 instrumented lines) and covered lines fell with it. This is a code move, not a coverage regression - the percentage floor RISES 88.23 -> 88.65, and the lines that left are now floored in their new home (see the ironclaw_sandbox entry below)."
+# Re-captured for TWO composed WS3 moves. This entry is the reason the wave's
+# slices were consolidated rather than landed serially: they both rewrite it
+# from the same 2026-07-30 base (88.23 / 20538 / 23277), and neither branch's
+# stored triple is correct once the other lands.
+#
+#   * sandbox-lane merge (#7065): `sandbox_process/**` left for
+#     `ironclaw_sandbox`.            denominator -2010, covered -1684
+#   * first-party-tool move (#7080): the skill-install executor left for
+#     `ironclaw_extension_support`.  denominator  -153, covered   -53
+#
+# The two moves are disjoint (different source trees, different destinations),
+# so they compose: 23277-2010-153 = 21114 total, 20538-1684-53 = 18801 covered.
+#
+# ⚠ Watch `floor_covered_lines` SEPARATELY from the percentage. #7080's dispatch
+# run showed the failure mode this file exists to catch: the percentage went UP
+# (88.23 -> 88.59) while the absolute count went DOWN through the effective
+# floor (20538 -> 20485 against 20518). A percentage-only floor passes that.
+#
+# Measured, not estimated — the ratchet does not run on `pull_request`
+# (`scripts/ci/reborn_pr_test_plan.py:21`, issue #7036), so the numbers below
+# come from a full-plan `workflow_dispatch` run on the consolidated head; the
+# per-branch runs (30861453332 for #7065's lane, 30858257594 for #7080's) each
+# measured only their own half and are superseded here.
+#
+# ⚠ `ironclaw_extension_support` is deliberately NOT floored, and cannot be:
+# every crate under `crates/extensions/` is invisible to the coverage tooling
+# because `scripts/ci/lib/reborn_coverage_lcov.py:19`'s `CRATE_RE` still
+# requires a crate directory *directly* under `crates/`. Pre-existing since
+# #7037 colocated the family; filed as #7083. The lines #7080 moved are
+# therefore not merely unfloored, they are unmeasured — which is also why the
+# global denominator sits below its capture and why the global floor is left
+# alone here rather than raised onto a hole. #7065's destination
+# (`ironclaw_sandbox`) sits directly under `crates/` and IS floored, below.
+floor_percent = 89.05
+floor_covered_lines = 18801
+captured_total_lines = 21114
+captured_date = "2026-08-04"
+rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured once for two composed WS3 moves (#7065 sandbox_process/** -> ironclaw_sandbox, #7080 skill-install executor -> ironclaw_extension_support). Both are code moves, not coverage regressions: the percentage floor RISES 88.23 -> 89.05 and only the absolute count falls, because those lines are no longer in this crate. #7065's lines are floored in their new home (see the ironclaw_sandbox entry); #7080's cannot be floored until #7083 is fixed."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
