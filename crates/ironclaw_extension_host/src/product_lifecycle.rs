@@ -466,13 +466,9 @@ impl ExtensionLifecycleManager {
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package.id.as_str())?;
                 let available = self.catalog.read().await.resolve(&package_ref)?;
-                let host_ports =
-                    ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-                        ProductOperationFailure::InvalidBindingRequest {
-                            reason: format!(
-                                "host port catalog rejected bundled extension: {error}"
-                            ),
-                        }
+                let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                    .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+                        reason: format!("host port catalog rejected bundled extension: {error}"),
                     })?;
                 let contracts =
                     crate::product_extension_host_api_contract_registry().map_err(|error| {
@@ -3689,7 +3685,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -3781,7 +3777,7 @@ mod tests {
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4107,7 +4103,7 @@ output_schema_ref = "schemas/run.output.json"
         let inner_store = ExtensionInstallationStore::load_at(
             filesystem.clone(),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
             crate::product_extension_host_api_contract_registry().expect("host contracts"),
         )
         .await
@@ -4233,7 +4229,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4316,7 +4312,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await
@@ -4423,7 +4419,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionInstallationStore::load_at(
                 filesystem.clone(),
                 VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
                 crate::product_extension_host_api_contract_registry().expect("host contracts"),
             )
             .await

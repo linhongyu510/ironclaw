@@ -208,6 +208,7 @@ pub use admin_configuration::{
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
 };
+pub use host_api::default_host_api_contract_registry;
 // `HostedMcpDiscoveredTool`/`HostedMcpDiscoveredToolAnnotations` are NOT
 // re-exported here: they now live in
 // `ironclaw_extension_contracts::hosted_mcp`, and §11.2.4's one-import-path

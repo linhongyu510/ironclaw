@@ -186,11 +186,12 @@ pub fn parse_imported_manifest(
     manifest_toml: &str,
     source: ManifestSource,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected imported extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected imported extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected imported extension: {error}"),
@@ -791,8 +792,8 @@ setup_url = "{expected_url}"
                 include_str!("../../../test-tools/ascii-renderer/manifest.toml"),
             ),
         ] {
-            let host_ports =
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+            let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                .expect("host port catalog");
             let contracts =
                 product_extension_host_api_contract_registry().expect("host API contracts");
             let record = ExtensionManifestRecord::from_toml(

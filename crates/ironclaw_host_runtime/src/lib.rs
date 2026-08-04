@@ -77,7 +77,6 @@ pub use egress::{
     HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
 };
 pub use extension_contracts::{
-    default_host_api_contract_registry, default_host_port_catalog,
     discover_extensions_tolerant_bounded, discover_extensions_tolerant_bounded_with_contracts,
     discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
