@@ -1496,11 +1496,39 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+///
+/// ✎ **129 → 126 (2026-08-04, #7147), and the gate below is now an equality.**
+/// "Lower it in the same PR that deletes entries" was honour-system: a `<=`
+/// ratchet says nothing when the constant sits *above* the list, so three
+/// earlier deletions banked no floor and left **three untracked vendor
+/// carve-out slots** that could be filled green. Recounted on `origin/main`
+/// @ `676d86ce02`: the list holds **126** pairs. The number was read off the
+/// compiler — set the constant to `0`, run the gate, and the panic prints
+/// `ALLOWLIST.len()` — never by counting parens or `grep`-ing the file, both
+/// of which also match the entry comments and the prose above.
+///
+/// ⚠ **Concurrent branches touch this list.** Whichever of #7139 / #7141 /
+/// #7143 merges after this one must **recount on the merged tree** and set
+/// this constant to that number in the merge commit — the equality below turns
+/// a stale union into a red build rather than into new silent slack, which is
+/// the whole point, but it means the recount is mandatory rather than optional.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 126;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+///
+/// **Equality, not `<=`.** Growth past the baseline is new vendor debt;
+/// *slack* (a baseline above the live list) is an unclaimed budget for exactly
+/// that debt, and a one-directional ratchet cannot see it. Both directions
+/// fail, with distinct messages, so the constant tracks the list on every
+/// commit.
 #[test]
 fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        !ALLOWLIST.is_empty(),
+        "extension-specificity ALLOWLIST is empty — the ratchet below would pass having \
+         measured nothing. Either the list really reached §11.2.8's target (delete this gate \
+         and the baseline together, and say so in the PR) or the const was truncated."
+    );
     assert!(
         ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
         "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
@@ -1511,6 +1539,18 @@ fn reborn_extension_specificity_allowlist_ratchets_down_only() {
          PR body.",
         ALLOWLIST.len(),
         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+    assert!(
+        ALLOWLIST.len() >= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST holds {} entries but \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE is {} — {} entries of UNTRACKED SLACK. \
+         A ceiling above the live list is an unclaimed budget: that many new vendor carve-outs \
+         can be added and every gate stays green. Lower the constant to {} in the PR that \
+         deleted the entries, which is what the doc comment on it already required (#7147).",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE - ALLOWLIST.len(),
+        ALLOWLIST.len()
     );
 }
 

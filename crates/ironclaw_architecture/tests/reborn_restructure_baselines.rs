@@ -8,9 +8,16 @@
 //!
 //! | baseline | recorded in |
 //! |---|---|
-//! | `LAYER_MATRIX_EXCEPTIONS` count (WS0 20, now 15) | `reborn_dependency_boundaries.rs` |
-//! | extension-specificity allowlist size (130) | `reborn_extension_specificity.rs` |
-//! | production-struct dead-code inventory (82 paths / 283 members) | `reborn_struct_test_support_ratchet.rs` |
+//! | `LAYER_MATRIX_EXCEPTIONS` count (WS0 20, now 6) | `reborn_dependency_boundaries.rs` |
+//! | extension-specificity allowlist size (WS0 130, now 126) | `reborn_extension_specificity.rs` |
+//! | production-struct dead-code inventory (WS0 82/283, now 79 paths / 276 members) | `reborn_struct_test_support_ratchet.rs` |
+//!
+//! ✎ **Table refreshed 2026-08-04 (#7147).** All three parenthesised numbers
+//! were the WS0 capture and none had moved since, while every one of the
+//! constants they describe had — 15→6, 130→126, 82/283→79/276. A summary that
+//! quietly ages into fiction is how a reader concludes a ratchet is tighter (or
+//! looser) than it is; the "now" column is the live constant, and each owning
+//! file's doc comment carries the counting method.
 //!
 //! The remaining two — composition mass and the integration-coverage floor —
 //! are enforced by shell gates over committed manifests, wired into CI
