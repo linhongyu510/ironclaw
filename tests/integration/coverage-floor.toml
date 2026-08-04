@@ -473,6 +473,37 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 # The follow-up this earns, recorded rather than performed: raise the executor's
 # own coverage in its new home. Lowering a floor is the correct bookkeeping for a
 # move, but it is not a substitute for that work.
+#
+# ✅ INDEPENDENTLY VERIFIED 2026-08-04 (second pass, not inherited). The claim
+# above was recorded but explicitly left unverified, so it was re-derived from
+# scratch between the two capture refs — `f946a93fae` (#7094's 82.64% capture)
+# and `939af4847d` (this recapture). Four measurements, all agreeing:
+#
+#   1. Test names lost in this crate:      0   (158 -> 160 test fns; the 2 new
+#      names are the arriving executor's own: `code_artifact_hosts_cover_
+#      release_and_raw_downloads_only`, `fetch_url_response_maps_panicking_
+#      runtime_egress_to_backend_failure`).
+#   2. Test names lost WORKSPACE-WIDE:     0   (13836 -> 13843 test fns,
+#      13752 -> 13759 unique; 7 gained, none lost). This is the check that
+#      distinguishes a relocation from a deletion: host_runtime's roster drops
+#      156 names over this range, but every one of them reappears in another
+#      crate, so nothing was deleted anywhere in the tree.
+#   3. What actually arrived: exactly four files, 1367 source lines, all of them
+#      the family-1 skill-install executor — `src/skills/url_install.rs` (340)
+#      plus `url_install/{github.rs (715), zip_bundle.rs (180), bundle.rs (132)}`.
+#      No pre-existing file left the crate.
+#   4. The arithmetic closes exactly. Holding the pre-existing crate at its old
+#      6826/8260 and appending the arriving block reproduces the new number to
+#      the decimal: (6826+316)/(8260+1224) = 75.31%. The arriving block's own
+#      coverage is 316/1224 = 25.82%. Because the identity closes with the
+#      pre-existing numerator held CONSTANT, the pre-existing code lost zero
+#      covered lines — the entire 7.33pp fall is the low-coverage arrival
+#      diluting the ratio.
+#
+# Conclusion: composition, not lost tests — confirmed, not assumed. The 25.82%
+# arrival is what earns the follow-up recorded above; it is a real coverage gap
+# in the executor, but it is a gap that moved in with the code, not one this
+# recapture created.
 [[crate]]
 name = "ironclaw_extension_support"
 floor_percent = 75.31
