@@ -30,7 +30,7 @@ use rcgen::{
 };
 use time::{Duration as CertValidityDuration, OffsetDateTime};
 
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 /// Default validity window for a leaf certificate, and the default cache
 /// TTL — short by design so a leaked leaf key (a mounted-into-container

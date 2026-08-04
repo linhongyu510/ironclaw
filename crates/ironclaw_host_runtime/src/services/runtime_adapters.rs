@@ -383,7 +383,9 @@ where
             .execute_extension_json(
                 request.governor,
                 ScriptExecutionRequest {
-                    package: request.package,
+                    extension: &request.package.id,
+                    capabilities: &request.package.capabilities,
+                    runtime: &request.package.manifest.runtime,
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
@@ -435,7 +437,9 @@ where
             .execute_extension_json(
                 request.governor,
                 McpExecutionRequest {
-                    package: request.package,
+                    extension: &request.package.id,
+                    capabilities: &request.package.capabilities,
+                    runtime: &request.package.manifest.runtime,
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
@@ -972,17 +976,20 @@ where
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => module
-                .resolve_under(request.package.materialized_root().map_err(|error| {
-                    DispatchError::Wasm {
+            ExtensionRuntime::Wasm { module } => ironclaw_extensions::resolve_asset_under(
+                module,
+                request
+                    .package
+                    .materialized_root()
+                    .map_err(|error| DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Manifest,
                         model_visible_cause: Some(error.to_string()),
-                    }
-                })?)
-                .map_err(|error| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Manifest,
-                    model_visible_cause: Some(error.to_string()),
-                })?,
+                    })?,
+            )
+            .map_err(|error| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Manifest,
+                model_visible_cause: Some(error.to_string()),
+            })?,
             other => {
                 return Err(DispatchError::Wasm {
                     kind: if other.kind() == RuntimeKind::Wasm {

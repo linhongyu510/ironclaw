@@ -24,8 +24,10 @@ pub(crate) fn docker_tests_required() -> bool {
 }
 
 /// True iff the `docker` CLI can reach a live daemon (`docker version`
-/// succeeds only against a running daemon). Mirrors the gate
-/// `ironclaw_process_sandbox/tests/docker_security.rs` already uses.
+/// succeeds only against a running daemon). This is the daemon gate
+/// `ironclaw_sandbox/tests/docker_security.rs` uses; it open-coded an
+/// equivalent check until 2026-08-03, which left it outside the fail-closed
+/// switch below.
 ///
 /// When `IRONCLAW_REQUIRE_DOCKER_TESTS=1` and no daemon is reachable, this
 /// panics rather than returning `false` — callers gate on this function
@@ -55,10 +57,12 @@ pub(crate) fn docker_available() -> bool {
 ///
 /// Same "fail instead of skip" behavior as [`docker_available`] under
 /// `IRONCLAW_REQUIRE_DOCKER_TESTS=1`.
-// Unused by this PR's sole consumer (`attribution`'s real-Docker test, which
-// only needs `docker_available`) — the real consumers,
-// `sandbox_cross_tenant_escape.rs` and `exec_transport`'s docker-gated
-// tests, are out of scope here (see this PR's description).
+// Used by `tests/docker_security.rs`, which needs the locally-built worker
+// image. Still `allow(dead_code)` because this file is loaded into a second
+// module location — `attribution`'s real-Docker test, which needs
+// `docker_available` only. The remaining consumers
+// (`sandbox_cross_tenant_escape.rs`, `exec_transport`'s docker-gated tests)
+// are out of scope here (see this PR's description).
 #[allow(dead_code)]
 pub(crate) fn docker_image_available(image: &str) -> bool {
     let available = Command::new("docker")
@@ -78,7 +82,8 @@ pub(crate) fn docker_image_available(image: &str) -> bool {
 /// Resolve the sandbox worker image name the same way
 /// `RebornSandboxConfig::new` does, so the gate checks the image the test
 /// will actually launch.
-// Unused by this PR's sole consumer — see `docker_image_available` above.
+// Unused by either consumer in this PR — `docker_security.rs` launches
+// `DEFAULT_PROCESS_SANDBOX_IMAGE` directly. See `docker_image_available` above.
 #[allow(dead_code)]
 pub(crate) fn configured_sandbox_image() -> String {
     std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")

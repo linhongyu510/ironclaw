@@ -32,7 +32,7 @@ use std::time::Duration;
 use bollard::Docker;
 use ironclaw_common::env_helpers::env_or_override;
 
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 /// Env var that, when set, short-circuits Docker daemon discovery to a
 /// direct connect against the given endpoint instead of probing local

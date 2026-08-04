@@ -431,6 +431,16 @@ def build_plan(
             reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
         if path.startswith("crates/"):
+            # Family-level prose that belongs to no package: `crates/AGENTS.md`,
+            # `crates/README.md`, `crates/Architecture.md`, and the family
+            # `AGENTS.md` files the target-architecture tree move adds. Matched
+            # by "Markdown that no package directory owns", checked below, so a
+            # genuinely unmapped *crate* path still fails closed.
+            if Path(path).suffix == ".md" and not any(
+                path.startswith(f"{directory}/") for directory in package_directories
+            ):
+                reasons.append(f"crate-tree guidance changed: {path}")
+                continue
             package = next(
                 (
                     name
@@ -440,7 +450,22 @@ def build_plan(
                 None,
             )
             if package is None:
-                raise ValueError(f"unmapped crate path: {path}")
+                # The path is under `crates/` but belongs to no workspace
+                # package. The normal cause is a crate this PR **deletes or
+                # renames** — `git diff` reports its old paths, and the merge
+                # or rename is exactly the change shape the target-architecture
+                # restructure ships (PROPOSAL §2 plans six crate deletions).
+                #
+                # Refusing to plan is the wrong resolution: it blocks the PR
+                # outright. Widening is the safe one — the exhaustive plan is a
+                # superset of any narrowing, so an unattributable path can never
+                # cause under-selection. Malformed input is still rejected: a
+                # path outside every classified prefix raises below.
+                return _full_plan(
+                    "a crate path maps to no workspace package (deletion or "
+                    f"rename): {path}; this PR runs the exhaustive plan",
+                    canonical_packages,
+                )
             directory = next(
                 directory
                 for directory, name in package_directories.items()

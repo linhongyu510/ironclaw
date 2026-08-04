@@ -2,14 +2,14 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_scripts`
+**Crate:** `crates/ironclaw_sandbox`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_scripts` provides the native CLI/software execution lane without requiring every useful tool to be rebuilt in WASM.
+`ironclaw_sandbox` provides the native CLI/software execution lane without requiring every useful tool to be rebuilt in WASM.
 
 The public runtime kind is:
 

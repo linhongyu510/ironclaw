@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_safety::params_contain_manual_credentials;
 
-use crate::RuntimeProcessError;
+use ironclaw_host_api::process::RuntimeProcessError;
 
 use super::reject_nul;
 

@@ -1676,3 +1676,62 @@ owner = "@nearai/runtime"
 reason = "Composition wiring for the requester-scoped recipe resolver; runs only in a fully composed runtime, which the integration lane does not build."
 issue = "https://github.com/nearai/ironclaw/issues/7069"
 review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
+# WS3 sandbox-lane merge + mcp-onto-contracts flip (PR #7065).
+#
+# Every line below was derived by replaying scripts/ci/reborn_changed_coverage.py
+# locally against this PR's OWN merged lcov (artifact
+# `reborn-integration-coverage-merged`, run 30831658659, job 91758914957) with
+# the same base lcov the gate resolved (run 30828540055 @ b89fcd3575). The
+# replay reproduced the CI verdict byte-identically before a single line was
+# added here, and each entry below is the gate's own
+# `candidate_lines - mechanically_uninstrumentable_lines()` output — not
+# transcribed from a log and not estimated.
+#
+# The gate's percentage floors were never the problem: changed-line coverage is
+# 95.35% (123/129) against a 90% floor. All four entries clear one of the two
+# fail-closed structural assertions ("absent from coverage or contains no DA
+# records" / "contributed no instrumented lines"), which fire on *declaration
+# and continuation lines that LLVM never emits a region for* — the same
+# restructure-vs-gate collision #6963 tracks, now in its fifth wave.
+#
+# Nothing here waives an executable path that a test could reach. Three of the
+# four sites are proven to EXECUTE by the hit counts on the region-start line
+# that owns them, quoted per entry.
+
+[[exemption]]
+path = "crates/ironclaw_host_api/src/process.rs"
+lines = [
+  25, 26, 27, 28, 29, 30, 35, 36, 37, 38,
+  43, 44, 45, 46, 47, 48, 49, 54, 55, 56, 57, 58, 59,
+  64, 66, 68, 81, 82, 83, 84, 85,
+]
+owner = "@nearai/reborn"
+reason = "New placement-neutral process vocabulary (PROPOSAL §6.6.4): five struct/enum declarations and one trait signature, with no function body anywhere in the file. rustc emits no LCOV record for it at all, so the gate reports it as 'absent from coverage or contains no DA records' — the same shape already exempted for ironclaw_product_contracts/src/lib.rs and ironclaw_loop_contracts/src/lib.rs. 55 of its 86 lines are already classified mechanically uninstrumentable; these 31 (struct fields, enum variants, and the trait method signature) are the only ones the classifier does not recognise, and exempting them lets the uninstrumentable-file escape apply as intended. The behavior these shapes describe stays in ironclaw_host_runtime and ironclaw_sandbox and is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_contracts/src/hosted_mcp.rs"
+lines = [232, 233, 234, 235, 236, 241, 242, 243, 244, 245, 246, 247]
+owner = "@nearai/reborn"
+reason = "Field declarations of HostedMcpDiscoveredTool and HostedMcpDiscoveredToolAnnotations, the tools/list descriptor the mcp lane now parses into instead of keeping a lane-local mirror. Data-only structs with no methods: every added line (219-249) carries no DA record in this PR's lcov, while the file itself is plainly instrumented (191 DA records, 164 hit), so this is a no-region artifact and not an instrumentation-scope gap. The conversion that consumes the descriptor lives in the mcp lane and the extension domain, and is covered there."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs"
+lines = [386, 387, 388, 440, 441, 442, 979, 980, 981, 982, 983, 984, 989]
+owner = "@nearai/reborn"
+reason = "Continuation lines of three call expressions the WS3 flip rewrote, all of them PROVEN EXECUTING by the region-start line that owns them in this PR's own lcov: the ScriptExecutionRequest literal continues line 380 (24 hits), the McpExecutionRequest literal continues line 434 (16 hits), and the ironclaw_extensions::resolve_asset_under call continues line 977 (63 hits). None of the 13 lines carries a DA record of its own because LLVM anchors the region at the statement head, which is what trips the empty-denominator assertion. The four genuinely-uncovered lines in the same rewrite (987, 990, 991, 992) are NOT exempted here — the gate already subtracts them as pre-existing debt inherited from base."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/capability_host_tests/approval_gates.rs"
+lines = [741, 745, 748, 750, 751, 755]
+owner = "@nearai/reborn"
+reason = "Type positions in the RecordingSandboxTransport test double, repointed from ironclaw_host_runtime::* to ironclaw_host_api::process::* by the WS3 seam move: a struct field type, an impl header, a parameter type, two return-type fragments, and the Ok(...) constructor path. A type position carries no LLVM coverage region, and the transport itself demonstrably runs — the fn body region at line 752 scores 1 hit in this PR's lcov. FINDING (#6963): this file is 100% test code behind `#[cfg(test)] mod capability_host_tests;` (crates/ironclaw_reborn_composition/src/factory.rs:1389), but the gate's test_only_path() only recognises `/tests/`, `/test_support/`, `*/tests.rs` and `*_tests.rs` — it does not recognise a `#[cfg(test)]` module DIRECTORY, so it classifies this as production. It is the only such directory in crates/ today, which is why the gap has stayed latent; teaching the classifier to resolve cfg(test) module declarations is tracked with the other gate-vs-restructure collisions rather than done inside a restructure PR."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

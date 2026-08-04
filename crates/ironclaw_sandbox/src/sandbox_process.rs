@@ -8,7 +8,6 @@
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -24,9 +23,8 @@ use bollard::{
 use futures_util::StreamExt;
 use ironclaw_host_api::resource::ResourceScope;
 
-use crate::{
+use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort,
 };
 
 mod broker;
@@ -273,9 +271,11 @@ impl RebornScopedSandboxCommandTransport {
         Self { docker, config }
     }
 
-    pub fn into_process_port(self) -> TenantSandboxProcessPort {
-        TenantSandboxProcessPort::new(Arc::new(self))
-    }
+    // `into_process_port` was deleted with the lane merge: it returned
+    // `ironclaw_host_runtime::TenantSandboxProcessPort`, a kernel type this
+    // runtimes-layer crate may not name. It had zero callers workspace-wide;
+    // the kernel wraps the transport (`TenantSandboxProcessPort::new`), which
+    // is the direction the port inversion requires.
 
     async fn prepare_workspace(
         &self,

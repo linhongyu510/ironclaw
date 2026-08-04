@@ -120,6 +120,15 @@ pub struct OriginGateMatrix {
 /// `AskDestructive` effect gate, i.e. their effects are a subset of
 /// `{read_filesystem, dispatch_capability}` or they are exempt from approval).
 /// Additions require security review (S5 ratchet).
+/// Capability id of the sandboxed-process lane.
+///
+/// Lives here rather than beside the lane's plan types because both the kernel
+/// spawn path (`ironclaw_host_runtime`) and the loop tier
+/// (`ironclaw_loop_host`) compare against it, and a `loops`-layer crate must
+/// not take the lane's Docker/CA dependency cone for a string constant
+/// (PROPOSAL §6.6.4, CHECKLIST WS10).
+pub const PROCESS_SANDBOX_CAPABILITY_ID: &str = "system.process_sandbox.run";
+
 pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.echo",
     "builtin.time",

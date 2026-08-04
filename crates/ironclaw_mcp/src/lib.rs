@@ -18,12 +18,15 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
-use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
-    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    capability::{
+        CapabilityDescriptor, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
     decision::RuntimeCredentialAuthRequirement,
     http::{
         CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
@@ -31,11 +34,12 @@ use ironclaw_host_api::{
     },
     ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle},
     resource::{
-        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -87,7 +91,32 @@ pub struct McpInvocation {
 /// Full resource-governed MCP execution request.
 #[derive(Debug)]
 pub struct McpExecutionRequest<'a> {
-    pub package: &'a ExtensionPackage,
+    /// The extension whose manifest declares this lane.
+    ///
+    /// The lane deliberately does **not** receive the `ExtensionPackage`: it
+    /// read only the id, the capability descriptors, and the runtime stanza,
+    /// and taking the package forced a `runtimes -> loops` dependency on the
+    /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extensions` exception).
+    /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** `extension`,
+    /// `capabilities`, and `runtime` are three independent borrows, so the type
+    /// no longer *structurally* guarantees they came from one package the way
+    /// `&ExtensionPackage` did. `execute_extension_json` re-checks the
+    /// descriptor half (`descriptor.provider == extension`), but nothing in an
+    /// `&ExtensionRuntime` identifies its owning extension, so the runtime half
+    /// cannot be re-derived here — a caller that paired extension A's
+    /// descriptors with extension B's runtime stanza would authenticate as A
+    /// and dial B. **Always project all three from the same `ExtensionPackage`
+    /// in one expression.** The single production caller
+    /// (`ironclaw_host_runtime::services::runtime_adapters`) does exactly that.
+    /// Restoring the compile-time binding needs a sealed projection minted by
+    /// the package owner — it cannot be a check inside this lane, and it must
+    /// not be a re-addition of the registry edge; tracked with the WS3 lane
+    /// work.
+    pub extension: &'a ExtensionId,
+    pub capabilities: &'a [CapabilityDescriptor],
+    pub runtime: &'a ExtensionRuntime,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -1870,7 +1899,6 @@ where
         request: &McpExecutionRequest<'_>,
     ) -> Result<PreparedMcpClientRequest, McpError> {
         let descriptor = request
-            .package
             .capabilities
             .iter()
             .find(|descriptor| &descriptor.id == request.capability_id)
@@ -1881,20 +1909,20 @@ where
 
         if descriptor.runtime != RuntimeKind::Mcp {
             return Err(McpError::ExtensionRuntimeMismatch {
-                extension: request.package.id.clone(),
+                extension: request.extension.clone(),
                 actual: descriptor.runtime,
             });
         }
-        if descriptor.provider != request.package.id {
+        if descriptor.provider != *request.extension {
             return Err(McpError::DescriptorMismatch {
                 reason: format!(
                     "descriptor {} provider {} does not match package {}",
-                    descriptor.id, descriptor.provider, request.package.id
+                    descriptor.id, descriptor.provider, *request.extension
                 ),
             });
         }
 
-        let (transport, command, args, url) = match &request.package.manifest.runtime {
+        let (transport, command, args, url) = match request.runtime {
             ExtensionRuntime::Mcp {
                 transport,
                 command,
@@ -1903,7 +1931,7 @@ where
             } => (transport, command, args, url),
             other => {
                 return Err(McpError::ExtensionRuntimeMismatch {
-                    extension: request.package.id.clone(),
+                    extension: request.extension.clone(),
                     actual: other.kind(),
                 });
             }
@@ -1927,7 +1955,7 @@ where
 
         Ok(PreparedMcpClientRequest {
             request: McpClientRequest {
-                provider: request.package.id.clone(),
+                provider: request.extension.clone(),
                 capability_id: request.capability_id.clone(),
                 scope: request.scope.clone(),
                 transport: transport.clone(),

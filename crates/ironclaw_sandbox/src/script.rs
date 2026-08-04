@@ -1,6 +1,6 @@
 //! Script runner contracts for IronClaw Reborn.
 //!
-//! `ironclaw_scripts` executes declared script/CLI capabilities through a
+//! `ironclaw_sandbox` executes declared script/CLI capabilities through a
 //! host-selected backend. Extension manifests describe the command metadata, but
 //! extensions do not receive raw Docker flags, host paths, ambient environment,
 //! secrets, or network by default.
@@ -14,8 +14,9 @@ use std::{
 };
 
 use futures_util::FutureExt as _;
-use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
+    capability::CapabilityDescriptor,
     http::{
         CapabilityHostHttpRequest, RuntimeHttpEgress, RuntimeHttpEgressError,
         RuntimeHttpEgressResponse,
@@ -23,11 +24,12 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, ResourceReservationId},
     mount::MountView,
     resource::{
-        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -68,7 +70,25 @@ pub struct ScriptInvocation {
 /// Full resource-governed script execution request.
 #[derive(Debug)]
 pub struct ScriptExecutionRequest<'a> {
-    pub package: &'a ExtensionPackage,
+    /// The extension whose manifest declares this lane.
+    ///
+    /// The lane deliberately does **not** receive the `ExtensionPackage`: it
+    /// read only the id, the capability descriptors, and the runtime stanza,
+    /// and taking the package forced a `runtimes -> loops` dependency on the
+    /// registry crate (the W7 `ironclaw_sandbox -> ironclaw_extensions` exception).
+    /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** These three are
+    /// independent borrows, so the type no longer *structurally* guarantees
+    /// they came from one package the way `&ExtensionPackage` did, and nothing
+    /// in an `&ExtensionRuntime` identifies its owning extension. **Always
+    /// project all three from the same `ExtensionPackage` in one expression.**
+    /// Identical shape and identical obligation to
+    /// `ironclaw_mcp::McpExecutionRequest`, whose field doc carries the full
+    /// rationale.
+    pub extension: &'a ExtensionId,
+    pub capabilities: &'a [CapabilityDescriptor],
+    pub runtime: &'a ExtensionRuntime,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -335,7 +355,6 @@ where
         request: &ScriptExecutionRequest<'_>,
     ) -> Result<ScriptBackendRequest, ScriptError> {
         let descriptor = request
-            .package
             .capabilities
             .iter()
             .find(|descriptor| &descriptor.id == request.capability_id)
@@ -346,20 +365,20 @@ where
 
         if descriptor.runtime != RuntimeKind::Script {
             return Err(ScriptError::ExtensionRuntimeMismatch {
-                extension: request.package.id.clone(),
+                extension: request.extension.clone(),
                 actual: descriptor.runtime,
             });
         }
-        if descriptor.provider != request.package.id {
+        if descriptor.provider != *request.extension {
             return Err(ScriptError::DescriptorMismatch {
                 reason: format!(
                     "descriptor {} provider {} does not match package {}",
-                    descriptor.id, descriptor.provider, request.package.id
+                    descriptor.id, descriptor.provider, *request.extension
                 ),
             });
         }
 
-        let (runner, image, command, args) = match &request.package.manifest.runtime {
+        let (runner, image, command, args) = match request.runtime {
             ExtensionRuntime::Script {
                 runner,
                 image,
@@ -368,7 +387,7 @@ where
             } => (runner, image, command, args),
             other => {
                 return Err(ScriptError::ExtensionRuntimeMismatch {
-                    extension: request.package.id.clone(),
+                    extension: request.extension.clone(),
                     actual: other.kind(),
                 });
             }
@@ -386,7 +405,7 @@ where
         })?;
 
         Ok(ScriptBackendRequest {
-            provider: request.package.id.clone(),
+            provider: request.extension.clone(),
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
             runner: runner.clone(),

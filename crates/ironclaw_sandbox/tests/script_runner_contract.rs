@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_resources::*;
-use ironclaw_scripts::*;
+use ironclaw_sandbox::*;
 use serde_json::json;
 
 #[test]
@@ -41,7 +41,9 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default()
@@ -105,7 +107,9 @@ fn script_runtime_denies_budget_before_backend_execution() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default().set_output_bytes(10_000),
@@ -146,7 +150,9 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -173,7 +179,9 @@ fn script_runtime_preserves_backend_error_when_release_cleanup_fails() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -217,7 +225,9 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -252,7 +262,9 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &wasm_package(),
+                extension: &wasm_package().id,
+                capabilities: &wasm_package().capabilities,
+                runtime: &wasm_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -287,7 +299,9 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
         .execute_extension_json(
             &governor,
             ScriptExecutionRequest {
-                package: &script_package(),
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
                 capability_id: &capability_id,
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
