@@ -536,13 +536,14 @@ mod tests {
     use super::*;
     use crate::reborn_services::StaticChannelConnectionService;
     use crate::{
-        ChannelConnectionRequirement, ChannelConnectionService, ExtensionCredentialStatusRequest,
+        ChannelConnectionRequirement, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
+    use ironclaw_auth::ChannelConnectionService;
     use ironclaw_product_contracts::surface::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };

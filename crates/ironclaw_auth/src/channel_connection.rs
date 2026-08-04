@@ -40,8 +40,8 @@ pub struct ChannelAuthAccountState {
 }
 
 /// Per-user channel connection state. Returns, for the calling user, which
-/// channel extensions they have personally connected (for example, Slack OAuth).
-/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// channel extensions they have personally connected — a per-user vendor OAuth
+/// grant, typically. Keyed by channel package id -> `true` when connected.
 /// Only channels that have a per-user connection concept appear in the map;
 /// absence means "no per-user connection concept for this channel".
 #[async_trait]

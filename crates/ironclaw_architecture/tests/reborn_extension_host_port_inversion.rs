@@ -196,9 +196,10 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
     ),
     (
         "channel_host.rs",
-        "port: implements ConversationBindingService and ProductActorUserResolver \
-         (their DTOs are product-declared) + assembly: inline-constructs product's \
-         concrete stack — the §12.11 D-A factory-port scope",
+        "port: implements ConversationBindingService (its DTOs are \
+         product-declared) + assembly: inline-constructs product's concrete \
+         stack — the §12.11 D-A factory-port scope. The ProductActorUserResolver \
+         half of this row fell to WS2.5's inversion",
     ),
     (
         "channel_lifecycle.rs",
