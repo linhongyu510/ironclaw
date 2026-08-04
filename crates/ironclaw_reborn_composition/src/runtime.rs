@@ -636,7 +636,7 @@ pub struct RebornRuntime {
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
-    trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
+    trace_flush_worker: ironclaw_reborn_traces::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
         Option<Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -3437,12 +3437,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_scope.tenant_id.as_str(),
         actor_user_id.as_str(),
     );
-    let trace_capture_scopes: crate::observability::trace_capture::ObservedTraceScopes =
+    let trace_capture_scopes: ironclaw_reborn_traces::capture::ObservedTraceScopes =
         Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
             runtime_owner_trace_scope,
         ])));
     let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        crate::observability::trace_capture::TraceCaptureTurnEventSink::new(
+        ironclaw_runner::trace_capture::TraceCaptureTurnEventSink::new(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ),
@@ -4073,7 +4073,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
     let trace_flush_worker =
-        crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+        ironclaw_reborn_traces::capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
