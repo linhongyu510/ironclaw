@@ -6,15 +6,17 @@
 //! transparently by the AWS SDK credential chain.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::{
-    AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, ImageBlock, ImageFormat,
-    ImageSource, InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool, ToolChoice,
+    AnyToolChoice, AutoToolChoice, ContentBlock, ContentBlockDelta, ContentBlockStart,
+    ConversationRole, ConverseStreamOutput, ImageBlock, ImageFormat, ImageSource,
+    InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool, ToolChoice,
     ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus,
     ToolSpecification, ToolUseBlock,
 };
@@ -24,8 +26,8 @@ use rust_decimal::Decimal;
 use crate::config::BedrockConfig;
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmProvider,
+    ModelMetadata, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 /// AWS Bedrock provider using the native Converse API.
@@ -37,6 +39,9 @@ pub(crate) struct BedrockProvider {
     cross_region_prefix: String,
     /// Active model ID (with cross-region prefix), switchable at runtime via `set_model()`.
     active_model: RwLock<String>,
+    /// Maximum silence between event-stream frames. This is not a total
+    /// response deadline; active long-running generations remain valid.
+    stream_idle_timeout: Duration,
 }
 
 impl BedrockProvider {
@@ -67,6 +72,7 @@ impl BedrockProvider {
             display_model: config.model.clone(),
             cross_region_prefix,
             active_model: RwLock::new(model_id),
+            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
         })
     }
 
@@ -79,6 +85,60 @@ impl BedrockProvider {
                 poisoned.into_inner().clone()
             }
         }
+    }
+
+    async fn send_streaming_request(
+        &self,
+        model_id: &str,
+        system_blocks: Vec<SystemContentBlock>,
+        messages: Vec<Message>,
+        tool_config: Option<ToolConfiguration>,
+        inference_config: Option<InferenceConfiguration>,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<BedrockStreamingResponse, LlmError> {
+        let mut builder = self
+            .client
+            .converse_stream()
+            .model_id(model_id)
+            .set_system((!system_blocks.is_empty()).then_some(system_blocks))
+            .set_messages(Some(messages));
+        if let Some(config) = tool_config {
+            builder = builder.tool_config(config);
+        }
+        if let Some(config) = inference_config {
+            builder = builder.inference_config(config);
+        }
+
+        let mut output = builder.send().await.map_err(|error| {
+            tracing::warn!(error = %error, "Bedrock ConverseStream request failed");
+            LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock ConverseStream request failed".to_string(),
+            }
+        })?;
+        let mut parsed = BedrockStreamingResponse::default();
+        loop {
+            let received = tokio::time::timeout(self.stream_idle_timeout, output.stream.recv())
+                .await
+                .map_err(|_| bedrock_stream_idle_timeout(self.stream_idle_timeout))?;
+            let event = match received {
+                Ok(event) => event,
+                Err(_) if parsed.completed => break,
+                Err(error) => {
+                    return Err(bedrock_stream_interrupted(format!(
+                        "failed to read event stream: {error}"
+                    )));
+                }
+            };
+            let Some(event) = event else { break };
+            process_bedrock_stream_event(&mut parsed, event, sink.as_ref()).await?;
+        }
+        if !parsed.completed {
+            return Err(bedrock_stream_interrupted(
+                "stream ended before MessageStop terminal event",
+            ));
+        }
+        Ok(parsed)
     }
 }
 
@@ -148,6 +208,48 @@ impl LlmProvider for BedrockProvider {
             input_tokens,
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+        })
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model_id = self.current_model_id();
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        strip_tool_blocks(&mut messages);
+        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        if bedrock_messages.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock requires at least one user or assistant message".to_string(),
+            });
+        }
+        let inference = build_inference_config(
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+        );
+        let response = self
+            .send_streaming_request(
+                &model_id,
+                system_blocks,
+                bedrock_messages,
+                None,
+                inference,
+                sink,
+            )
+            .await?;
+        Ok(CompletionResponse {
+            content: response.text,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            finish_reason: response.finish_reason,
             cache_creation_input_tokens: 0,
             reasoning: None,
             cache_read_input_tokens: 0,
@@ -224,6 +326,54 @@ impl LlmProvider for BedrockProvider {
         })
     }
 
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let model_id = self.current_model_id();
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let tool_config = build_tool_config(&request.tools, request.tool_choice.as_deref())?;
+        if tool_config.is_none() {
+            strip_tool_blocks(&mut messages);
+        }
+        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        if bedrock_messages.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock requires at least one user or assistant message".to_string(),
+            });
+        }
+        let inference = build_inference_config(
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+        );
+        let response = self
+            .send_streaming_request(
+                &model_id,
+                system_blocks,
+                bedrock_messages,
+                tool_config,
+                inference,
+                sink,
+            )
+            .await?;
+        let tool_calls = response.tool_calls();
+        Ok(ToolCompletionResponse {
+            content: (!response.text.is_empty()).then_some(response.text),
+            tool_calls,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            finish_reason: response.finish_reason,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
+            cache_read_input_tokens: 0,
+        })
+    }
+
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         Ok(ModelMetadata {
             id: self.current_model_id(),
@@ -254,6 +404,102 @@ impl LlmProvider for BedrockProvider {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+struct BedrockStreamingToolState {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Default)]
+struct BedrockStreamingResponse {
+    text: String,
+    tool_states: HashMap<i32, BedrockStreamingToolState>,
+    finish_reason: FinishReason,
+    input_tokens: u32,
+    output_tokens: u32,
+    completed: bool,
+}
+
+impl BedrockStreamingResponse {
+    fn tool_calls(&self) -> Vec<ToolCall> {
+        let mut states = self.tool_states.iter().collect::<Vec<_>>();
+        states.sort_by_key(|(index, _)| **index);
+        states
+            .into_iter()
+            .map(|(_, state)| ToolCall {
+                id: state.id.clone(),
+                name: state.name.clone(),
+                arguments: serde_json::from_str(&state.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+                reasoning: None,
+                signature: None,
+                arguments_parse_error: None,
+            })
+            .collect()
+    }
+}
+
+fn bedrock_stream_interrupted(reason: impl Into<String>) -> LlmError {
+    LlmError::StreamInterrupted {
+        provider: "bedrock".to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn bedrock_stream_idle_timeout(timeout: Duration) -> LlmError {
+    bedrock_stream_interrupted(format!(
+        "event stream was idle for {} seconds",
+        timeout.as_secs()
+    ))
+}
+
+async fn process_bedrock_stream_event(
+    response: &mut BedrockStreamingResponse,
+    event: ConverseStreamOutput,
+    sink: &dyn CompletionStreamSink,
+) -> Result<(), LlmError> {
+    match event {
+        ConverseStreamOutput::ContentBlockStart(event) => {
+            if let Some(ContentBlockStart::ToolUse(start)) = event.start() {
+                response.tool_states.insert(
+                    event.content_block_index(),
+                    BedrockStreamingToolState {
+                        id: start.tool_use_id().to_string(),
+                        name: start.name().to_string(),
+                        arguments: String::new(),
+                    },
+                );
+            }
+        }
+        ConverseStreamOutput::ContentBlockDelta(event) => match event.delta() {
+            Some(ContentBlockDelta::Text(delta)) if !delta.is_empty() => {
+                response.text.push_str(delta);
+                sink.text_delta(delta.clone()).await;
+            }
+            Some(ContentBlockDelta::ToolUse(delta)) => {
+                let Some(state) = response.tool_states.get_mut(&event.content_block_index()) else {
+                    return Err(LlmError::InvalidResponse {
+                        provider: "bedrock".to_string(),
+                        reason: "tool input delta arrived before tool start".to_string(),
+                    });
+                };
+                state.arguments.push_str(delta.input());
+            }
+            _ => {}
+        },
+        ConverseStreamOutput::MessageStop(event) => {
+            response.finish_reason = map_stop_reason(event.stop_reason());
+            response.completed = true;
+        }
+        ConverseStreamOutput::Metadata(event) => {
+            (response.input_tokens, response.output_tokens) = extract_token_usage(event.usage());
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -849,8 +1095,126 @@ mod tests {
         ModelNotReadyException, ModelTimeoutException, ResourceNotFoundException,
         ServiceUnavailableException, ThrottlingException, ValidationException,
     };
+    use tokio::sync::Mutex;
 
     const TEST_MODEL_ID: &str = "us.anthropic.claude-test-v1";
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            self.0.lock().await.push(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_events_preserve_text_tools_usage_and_finish_reason() {
+        let sink = RecordingSink::default();
+        let mut response = BedrockStreamingResponse::default();
+        let tool_start = aws_sdk_bedrockruntime::types::ToolUseBlockStart::builder()
+            .tool_use_id("tool_1")
+            .name("search")
+            .build()
+            .expect("tool start");
+        let start_event = aws_sdk_bedrockruntime::types::ContentBlockStartEvent::builder()
+            .content_block_index(1)
+            .start(ContentBlockStart::ToolUse(tool_start))
+            .build()
+            .expect("start event");
+        process_bedrock_stream_event(
+            &mut response,
+            ConverseStreamOutput::ContentBlockStart(start_event),
+            &sink,
+        )
+        .await
+        .expect("process tool start");
+
+        for (index, delta) in [
+            (0, ContentBlockDelta::Text("Hello".to_string())),
+            (
+                1,
+                ContentBlockDelta::ToolUse(
+                    aws_sdk_bedrockruntime::types::ToolUseBlockDelta::builder()
+                        .input(r#"{"q":"rust"}"#)
+                        .build()
+                        .expect("tool delta"),
+                ),
+            ),
+        ] {
+            let event = aws_sdk_bedrockruntime::types::ContentBlockDeltaEvent::builder()
+                .content_block_index(index)
+                .delta(delta)
+                .build()
+                .expect("delta event");
+            process_bedrock_stream_event(
+                &mut response,
+                ConverseStreamOutput::ContentBlockDelta(event),
+                &sink,
+            )
+            .await
+            .expect("process delta");
+        }
+
+        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
+            .input_tokens(11)
+            .output_tokens(5)
+            .total_tokens(16)
+            .build()
+            .expect("usage");
+        let metadata = aws_sdk_bedrockruntime::types::ConverseStreamMetadataEvent::builder()
+            .usage(usage)
+            .build();
+        process_bedrock_stream_event(
+            &mut response,
+            ConverseStreamOutput::Metadata(metadata),
+            &sink,
+        )
+        .await
+        .expect("process metadata");
+        let stop = aws_sdk_bedrockruntime::types::MessageStopEvent::builder()
+            .stop_reason(StopReason::ToolUse)
+            .build()
+            .expect("message stop");
+        process_bedrock_stream_event(
+            &mut response,
+            ConverseStreamOutput::MessageStop(stop),
+            &sink,
+        )
+        .await
+        .expect("process stop");
+
+        assert_eq!(sink.0.lock().await.as_slice(), ["Hello"]);
+        assert_eq!(response.text, "Hello");
+        assert_eq!((response.input_tokens, response.output_tokens), (11, 5));
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
+        assert!(response.completed);
+        let calls = response.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tool_1");
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"q": "rust"}));
+    }
+
+    #[test]
+    fn incomplete_event_stream_is_retryable_interruption() {
+        assert!(matches!(
+            bedrock_stream_interrupted("stream ended before MessageStop terminal event"),
+            LlmError::StreamInterrupted { provider, .. } if provider == "bedrock"
+        ));
+    }
+
+    #[test]
+    fn idle_event_stream_is_retryable_interruption_without_partial_success() {
+        match bedrock_stream_idle_timeout(Duration::from_secs(60)) {
+            LlmError::StreamInterrupted { provider, reason } => {
+                assert_eq!(provider, "bedrock");
+                assert_eq!(reason, "event stream was idle for 60 seconds");
+            }
+            other => panic!("expected stream interruption, got {other:?}"),
+        }
+    }
 
     #[test]
     fn model_timeout_preserves_bedrock_identity_and_cause() {

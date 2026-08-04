@@ -26,8 +26,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata, Role,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -975,6 +975,61 @@ impl LlmProvider for SmartRoutingProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+        match self.classify(&request) {
+            TaskComplexity::Simple => {
+                self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+                self.cheap.complete_streaming(request, sink).await
+            }
+            TaskComplexity::Complex => {
+                self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                self.primary.complete_streaming(request, sink).await
+            }
+            TaskComplexity::Moderate if self.config.cascade_enabled => {
+                if !sink.supports_text_replacement() {
+                    // A visible cheap-model stream cannot be retracted safely if
+                    // the cascade escalates. Use the primary route so append-only
+                    // callers still receive one coherent response.
+                    self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                    return self.primary.complete_streaming(request, sink).await;
+                }
+
+                self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+                let response = self
+                    .cheap
+                    .complete_streaming(request.clone(), Arc::clone(&sink))
+                    .await?;
+                if !Self::response_is_uncertain(&response) {
+                    return Ok(response);
+                }
+
+                self.stats
+                    .cascade_escalations
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                sink.replace_on_next_text_delta().await;
+                let response = self
+                    .primary
+                    .complete_streaming(request, Arc::clone(&sink))
+                    .await;
+                if response.is_ok() {
+                    sink.finish_text_replacement().await;
+                }
+                response
+            }
+            TaskComplexity::Moderate => {
+                self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+                self.cheap.complete_streaming(request, sink).await
+            }
+        }
+    }
+
     /// Tool use always goes to the primary model for reliable structured output.
     async fn complete_with_tools(
         &self,
@@ -987,6 +1042,18 @@ impl LlmProvider for SmartRoutingProvider {
             "Smart routing: Tool use -> primary model (always)"
         );
         self.primary.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+        self.primary
+            .complete_with_tools_streaming(request, sink)
+            .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

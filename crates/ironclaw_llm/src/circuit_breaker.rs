@@ -21,8 +21,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the circuit breaker.
@@ -329,12 +329,52 @@ impl LlmProvider for CircuitBreakerProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let admission = self.check_allowed().await?;
+        match self.inner.complete_streaming(request, sink).await {
+            Ok(resp) => {
+                self.record_success(admission).await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(admission, &err).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let admission = self.check_allowed().await?;
         match self.inner.complete_with_tools(request).await {
+            Ok(resp) => {
+                self.record_success(admission).await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(admission, &err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let admission = self.check_allowed().await?;
+        match self
+            .inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+        {
             Ok(resp) => {
                 self.record_success(admission).await;
                 Ok(resp)

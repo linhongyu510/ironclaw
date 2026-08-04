@@ -16,8 +16,8 @@ use crate::error::LlmError;
 use crate::openai_codex_provider::OpenAiCodexProvider;
 use crate::openai_codex_session::OpenAiCodexSessionManager;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Decorator that refreshes OAuth tokens before API calls and reports zero cost.
@@ -94,6 +94,27 @@ impl LlmProvider for TokenRefreshingProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        match self
+            .inner
+            .complete_streaming(request.clone(), Arc::clone(&sink))
+            .await
+        {
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner.complete_streaming(request, sink).await
+            }
+            other => other,
+        }
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
@@ -108,6 +129,29 @@ impl LlmProvider for TokenRefreshingProvider {
                 self.session.handle_auth_failure().await?;
                 self.update_inner_token().await?;
                 self.inner.complete_with_tools(request).await
+            }
+            other => other,
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+
+        match self
+            .inner
+            .complete_with_tools_streaming(request.clone(), Arc::clone(&sink))
+            .await
+        {
+            Err(LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.update_inner_token().await?;
+                self.inner
+                    .complete_with_tools_streaming(request, sink)
+                    .await
             }
             other => other,
         }

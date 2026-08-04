@@ -1291,6 +1291,83 @@ fn normalize_openai_base_url(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::NearAiConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StreamingProbe {
+        streaming_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StreamingProbe {
+        fn model_name(&self) -> &str {
+            "streaming-probe"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            panic!("decorator chain downgraded a streaming call to complete()")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("live".to_string()).await;
+            Ok(CompletionResponse {
+                content: "live".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            panic!("decorator chain downgraded a tool streaming call")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+            sink.text_delta("tool-live".to_string()).await;
+            Ok(ToolCompletionResponse {
+                content: Some("tool-live".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
+    }
+
+    struct RecordingSink(tokio::sync::mpsc::UnboundedSender<String>);
+
+    #[async_trait::async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.0.send(delta);
+        }
+    }
 
     fn test_nearai_config() -> NearAiConfig {
         NearAiConfig {
@@ -1330,6 +1407,50 @@ mod tests {
             response_cache_ttl_secs: 3600,
             response_cache_max_entries: 1000,
         }
+    }
+
+    #[tokio::test]
+    async fn configured_decorator_chain_preserves_native_streaming() {
+        let raw = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+        });
+        let fallback: Arc<dyn LlmProvider> = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+        });
+        let mut config = test_llm_config();
+        config.max_retries = 1;
+        config.nearai.fallback_model = Some("fallback-probe".to_string());
+        config.circuit_breaker_threshold = Some(2);
+        config.response_cache_enabled = true;
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let provider =
+            apply_decorator_chain_with_fallback(raw.clone(), Some(fallback), &config, session)
+                .await
+                .expect("decorator chain");
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                Arc::new(RecordingSink(sender)),
+            )
+            .await
+            .expect("streaming response");
+
+        assert_eq!(receiver.recv().await.as_deref(), Some("live"));
+        assert_eq!(response.content, "live");
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let response = provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(vec![ChatMessage::user("use a tool")], Vec::new()),
+                Arc::new(RecordingSink(sender)),
+            )
+            .await
+            .expect("tool streaming response");
+        assert_eq!(receiver.recv().await.as_deref(), Some("tool-live"));
+        assert_eq!(response.content.as_deref(), Some("tool-live"));
+        assert_eq!(raw.streaming_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

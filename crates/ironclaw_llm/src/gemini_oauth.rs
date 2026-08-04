@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -14,8 +16,9 @@ use url::Url;
 use crate::config::GeminiOauthConfig;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    ModelMetadata, Role, ToolCall, ToolDefinition, map_provider_finish_token,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition, map_provider_finish_token,
 };
 
 // Official Gemini CLI OAuth credentials (public, from google/gemini-cli).
@@ -196,6 +199,81 @@ struct CloudCodeSseAggregate {
     response: Option<serde_json::Value>,
     /// Per-response metadata collected in the same pass.
     meta: GeminiResponseMeta,
+}
+
+#[derive(Debug, Default)]
+struct GeminiStreamingState {
+    normalized_sse: String,
+    terminal: bool,
+    done_marker: bool,
+}
+
+async fn ingest_gemini_event(
+    state: &mut GeminiStreamingState,
+    data: &str,
+    sink: &dyn CompletionStreamSink,
+) -> Result<(), LlmError> {
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data == "[DONE]" {
+        state.terminal = true;
+        state.done_marker = true;
+        return Ok(());
+    }
+    let event: serde_json::Value =
+        serde_json::from_str(data).map_err(|error| LlmError::InvalidResponse {
+            provider: "gemini_oauth".to_string(),
+            reason: format!(
+                "stream JSON parse error: {error}. Raw: {}",
+                ironclaw_common::truncate_for_preview(data, 512)
+            ),
+        })?;
+    let response = event.get("response").unwrap_or(&event);
+    if let Some(candidates) = response
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        && let Some(candidate) = candidates.first()
+    {
+        if let Some(parts) = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(|value| value.as_array())
+        {
+            for part in parts {
+                let is_thought = part
+                    .get("thought")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if !is_thought
+                    && let Some(text) = part.get("text").and_then(|value| value.as_str())
+                    && !text.is_empty()
+                {
+                    sink.text_delta(text.to_string()).await;
+                }
+            }
+        }
+        if candidate.get("finishReason").is_some() {
+            state.terminal = true;
+        }
+    }
+    if response
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .is_some()
+    {
+        state.terminal = true;
+    }
+    let normalized = if event.get("response").is_some() {
+        event
+    } else {
+        serde_json::json!({ "response": event })
+    };
+    state.normalized_sse.push_str("data: ");
+    state.normalized_sse.push_str(&normalized.to_string());
+    state.normalized_sse.push_str("\n\n");
+    Ok(())
 }
 
 /// Extended response metadata parsed from Gemini API responses.
@@ -930,6 +1008,8 @@ pub(crate) struct GeminiOauthProvider {
     config: GeminiOauthConfig,
     cred_manager: CredentialManager,
     http_client: Client,
+    streaming_client: Client,
+    stream_idle_timeout: Duration,
     /// Latest response metadata (updated after each request).
     last_response_meta: std::sync::Mutex<GeminiResponseMeta>,
     /// Captured thought signatures keyed by tool-call ID. Gemini 3.x models
@@ -951,11 +1031,19 @@ impl GeminiOauthProvider {
                     provider: "gemini_oauth".to_string(),
                     reason: format!("Failed to create HTTP client for GeminiOauthProvider: {e}"),
                 })?;
+        let streaming_client = crate::config::hardened_streaming_client_builder()
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: format!("Failed to create streaming HTTP client: {e}"),
+            })?;
 
         Ok(Self {
             config,
             cred_manager,
             http_client,
+            streaming_client,
+            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             last_response_meta: std::sync::Mutex::new(GeminiResponseMeta::default()),
             thought_signatures: std::sync::Mutex::new(HashMap::new()),
         })
@@ -1148,6 +1236,215 @@ impl GeminiOauthProvider {
             major >= 2
         } else {
             false
+        }
+    }
+
+    fn build_streaming_http_request(
+        &self,
+        original_request: &serde_json::Value,
+        credential: &OAuthCredential,
+    ) -> Result<(String, serde_json::Value, reqwest::header::HeaderMap), LlmError> {
+        let (url, request_body, mut headers) = if self.uses_cloud_code_api() {
+            let mut request_body = serde_json::json!({
+                "model": self.config.model,
+                "request": original_request,
+            });
+            if let Some(project_id) = credential.project_id.as_ref() {
+                request_body["project"] = serde_json::Value::String(project_id.clone());
+            }
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "Content-Type",
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                "User-Agent",
+                reqwest::header::HeaderValue::from_str(&format!(
+                    "GeminiCLI-ironclaw/{}/{} ({}; {}; cli)",
+                    env!("CARGO_PKG_VERSION"),
+                    self.config.model,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                ))
+                .map_err(|_| LlmError::RequestFailed {
+                    provider: "gemini_oauth".to_string(),
+                    reason: "invalid User-Agent header value".to_string(),
+                })?,
+            );
+            headers.insert(
+                "X-Goog-Api-Client",
+                reqwest::header::HeaderValue::from_static(GOOG_API_CLIENT),
+            );
+            headers.insert(
+                "Client-Metadata",
+                reqwest::header::HeaderValue::from_static(
+                    "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}",
+                ),
+            );
+            headers.insert(
+                "Authorization",
+                reqwest::header::HeaderValue::from_str(&format!(
+                    "Bearer {}",
+                    credential.access_token
+                ))
+                .map_err(|_| LlmError::AuthFailed {
+                    provider: "gemini_oauth".to_string(),
+                })?,
+            );
+            (
+                "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+                    .to_string(),
+                request_body,
+                headers,
+            )
+        } else {
+            let api_version =
+                std::env::var("GOOGLE_GENAI_API_VERSION").unwrap_or_else(|_| "v1beta".to_string());
+            let url = format!(
+                "https://generativelanguage.googleapis.com/{api_version}/models/{}:streamGenerateContent?alt=sse",
+                self.config.model
+            );
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "Content-Type",
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            let api_key = std::env::var("GEMINI_API_KEY").ok();
+            let auth_mechanism = std::env::var("GEMINI_API_KEY_AUTH_MECHANISM")
+                .unwrap_or_else(|_| "x-goog-api-key".to_string());
+            let (header_name, header_value) = if let Some(api_key) = api_key {
+                if auth_mechanism == "bearer" {
+                    ("Authorization".to_string(), format!("Bearer {api_key}"))
+                } else {
+                    ("x-goog-api-key".to_string(), api_key)
+                }
+            } else {
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {}", credential.access_token),
+                )
+            };
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| {
+                    LlmError::RequestFailed {
+                        provider: "gemini_oauth".to_string(),
+                        reason: "invalid auth header name".to_string(),
+                    }
+                })?,
+                reqwest::header::HeaderValue::from_str(&header_value).map_err(|_| {
+                    LlmError::AuthFailed {
+                        provider: "gemini_oauth".to_string(),
+                    }
+                })?,
+            );
+            (url, original_request.clone(), headers)
+        };
+
+        for (name, value) in parse_custom_headers() {
+            if let (Ok(name), Ok(value)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        Ok((url, request_body, headers))
+    }
+
+    async fn send_streaming_request(
+        &self,
+        request: &serde_json::Value,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<GeminiParsedResponse, LlmError> {
+        let mut allow_retry = true;
+        loop {
+            let credential = self
+                .cred_manager
+                .get_valid_credential()
+                .await
+                .map_err(|_| LlmError::AuthFailed {
+                    provider: "gemini_oauth".to_string(),
+                })?;
+            let (url, request_body, headers) =
+                self.build_streaming_http_request(request, &credential)?;
+            let response = tokio::time::timeout(
+                self.stream_idle_timeout,
+                self.streaming_client
+                    .post(url)
+                    .headers(headers)
+                    .json(&request_body)
+                    .send(),
+            )
+            .await
+            .map_err(|_| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: format!(
+                    "timed out waiting {}s for streaming response headers",
+                    self.stream_idle_timeout.as_secs()
+                ),
+            })?
+            .map_err(|error| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: error.to_string(),
+            })?;
+            if response.status().as_u16() == 401 && allow_retry {
+                self.cred_manager.force_refresh().await.map_err(|error| {
+                    LlmError::SessionRenewalFailed {
+                        provider: "gemini_oauth".to_string(),
+                        reason: format!("OAuth refresh after HTTP 401 failed: {error}"),
+                    }
+                })?;
+                allow_retry = false;
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(self.error_from_http_response(response).await?);
+            }
+
+            let mut events = response
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(|error| error.to_string()))
+                .eventsource();
+            let mut state = GeminiStreamingState::default();
+            loop {
+                let next = tokio::time::timeout(self.stream_idle_timeout, events.next())
+                    .await
+                    .map_err(|_| LlmError::StreamInterrupted {
+                        provider: "gemini_oauth".to_string(),
+                        reason: format!(
+                            "SSE stream was idle for {} seconds",
+                            self.stream_idle_timeout.as_secs()
+                        ),
+                    })?;
+                let Some(event) = next else {
+                    break;
+                };
+                let event = event.map_err(|error| LlmError::StreamInterrupted {
+                    provider: "gemini_oauth".to_string(),
+                    reason: format!("Failed to read SSE stream: {error}"),
+                })?;
+                ingest_gemini_event(&mut state, &event.data, sink.as_ref()).await?;
+                if state.done_marker {
+                    break;
+                }
+            }
+            if !state.terminal {
+                return Err(LlmError::StreamInterrupted {
+                    provider: "gemini_oauth".to_string(),
+                    reason: "stream ended before a finish reason or [DONE] marker".to_string(),
+                });
+            }
+            let aggregate = Self::aggregate_cloud_code_sse(&state.normalized_sse);
+            if let Ok(mut meta) = self.last_response_meta.lock() {
+                *meta = aggregate.meta;
+            }
+            let body = aggregate
+                .response
+                .ok_or_else(|| LlmError::InvalidResponse {
+                    provider: "gemini_oauth".to_string(),
+                    reason: "stream completed without a usable response".to_string(),
+                })?;
+            return Self::from_gemini_response(body);
         }
     }
 
@@ -1787,10 +2084,8 @@ impl GeminiOauthProvider {
                                 combined_text.push_str(text);
                             }
                         }
-                        if let Some(fc) = part.get("functionCall") {
-                            tool_calls_parts.push(serde_json::json!({
-                                "functionCall": fc
-                            }));
+                        if part.get("functionCall").is_some() {
+                            tool_calls_parts.push(part.clone());
                         }
                     }
                 }
@@ -1907,13 +2202,18 @@ impl GeminiOauthProvider {
                 if let Some(finish_reason) = finish_reason.or(prompt_block_reason) {
                     candidate["finishReason"] = serde_json::Value::String(finish_reason);
                 }
-                serde_json::json!({
+                let mut response = serde_json::json!({
                     "candidates": [candidate],
                     "usageMetadata": {
                         "promptTokenCount": prompt_tokens,
                         "candidatesTokenCount": candidates_tokens
                     }
-                })
+                });
+                if let Some(cached_tokens) = cached_content_token_count {
+                    response["usageMetadata"]["cachedContentTokenCount"] =
+                        serde_json::Value::from(cached_tokens);
+                }
+                response
             });
 
         CloudCodeSseAggregate { response, meta }
@@ -2158,10 +2458,34 @@ impl LlmProvider for GeminiOauthProvider {
         Ok(response)
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let request_json = Self::to_gemini_request(
+            &request.messages,
+            None,
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+            None,
+            &self.config.model,
+            &sigs,
+        );
+        let (response, _, _) = self.send_streaming_request(&request_json, sink).await?;
+        Ok(response)
+    }
+
     async fn complete_with_tools(
         &self,
-        request: crate::provider::ToolCompletionRequest,
-    ) -> Result<crate::provider::ToolCompletionResponse, LlmError> {
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
         let tool_defs = if request.tools.is_empty() {
             None
         } else {
@@ -2205,7 +2529,7 @@ impl LlmProvider for GeminiOauthProvider {
             sigs.retain(|id, _| live_ids.contains(id.as_str()));
         }
 
-        Ok(crate::provider::ToolCompletionResponse {
+        Ok(ToolCompletionResponse {
             content: if response.content.is_empty() {
                 None
             } else {
@@ -2221,11 +2545,119 @@ impl LlmProvider for GeminiOauthProvider {
             reasoning_details: None,
         })
     }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let tool_defs = (!request.tools.is_empty()).then_some(request.tools.as_slice());
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let request_json = Self::to_gemini_request(
+            &request.messages,
+            tool_defs,
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+            request.tool_choice.as_deref(),
+            &self.config.model,
+            &sigs,
+        );
+        let (response, tool_calls, new_signatures) =
+            self.send_streaming_request(&request_json, sink).await?;
+        {
+            let mut signatures = self
+                .thought_signatures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            signatures.extend(new_signatures);
+            let live_ids = request
+                .messages
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flatten()
+                .map(|call| call.id.as_str())
+                .chain(tool_calls.iter().map(|call| call.id.as_str()))
+                .collect::<std::collections::HashSet<_>>();
+            signatures.retain(|id, _| live_ids.contains(id.as_str()));
+        }
+        Ok(ToolCompletionResponse {
+            content: (!response.content.is_empty()).then_some(response.content),
+            tool_calls,
+            finish_reason: response.finish_reason,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+            reasoning: response.reasoning,
+            reasoning_details: None,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_stream_emits_deltas_and_preserves_terminal_tools_usage_and_signature() {
+        let sink = RecordingSink::default();
+        let mut state = GeminiStreamingState::default();
+        ingest_gemini_event(
+            &mut state,
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}],"usageMetadata":{"promptTokenCount":13}}}"#,
+            &sink,
+        )
+        .await
+        .expect("first chunk");
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["Hel"]
+        );
+        assert!(!state.terminal, "text must arrive before completion");
+        ingest_gemini_event(
+            &mut state,
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"lo"},{"functionCall":{"id":"call-1","name":"weather","args":{"city":"Istanbul"}},"thoughtSignature":"signed"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":13,"candidatesTokenCount":5,"cachedContentTokenCount":2}}}"#,
+            &sink,
+        )
+        .await
+        .expect("terminal chunk");
+        assert!(state.terminal);
+
+        let aggregate = GeminiOauthProvider::aggregate_cloud_code_sse(&state.normalized_sse);
+        let (response, tool_calls, signatures) = GeminiOauthProvider::from_gemini_response(
+            aggregate.response.expect("aggregated response"),
+        )
+        .expect("parsed response");
+        assert_eq!(response.content, "Hello");
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
+        assert_eq!(response.input_tokens, 13);
+        assert_eq!(response.output_tokens, 5);
+        assert_eq!(response.cache_read_input_tokens, 2);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "weather");
+        assert_eq!(signatures.get("call-1").map(String::as_str), Some("signed"));
+    }
 
     #[tokio::test]
     async fn adapter_response_path_maps_oauth_http_413_to_context_overflow() {
