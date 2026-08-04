@@ -122,7 +122,7 @@ impl RebornIntegrationHarness {
         ))?;
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
 
         let conversations = self.trigger_conversations_with_paired_actor().await?;
 
@@ -210,7 +210,7 @@ impl RebornIntegrationHarness {
             .register(turn_scope.clone(), gateway);
 
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,

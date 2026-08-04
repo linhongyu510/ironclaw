@@ -4007,6 +4007,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // Durable storage, poller lifecycle, capability registration,
             // product adapters, and outbound delivery are wired by later
             // owners, not by reaching upward from this crate.
+            //
+            // `ironclaw_safety` is deliberately NOT forbidden (2026-08-04,
+            // PROPOSAL §6.4.2/§6.4.3). This crate's boundary role is
+            // host-trusted ingress minting, and a mint that does not validate
+            // what it seals is not a mint. `ironclaw_safety` is a same-layer
+            // `substrates` leaf with no I/O and no ironclaw dependencies, so
+            // the edge is a peer edge, not a reach upward. The matching
+            // narrowing is on `ironclaw_conversations` below, which must not
+            // re-acquire the scan.
             crate_name: "ironclaw_triggers",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -4034,13 +4043,64 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
-                "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // External<->canonical binding, actor pairing, and accepted-message
+            // / turn-submission idempotency (PROPOSAL §6.4.2). Its one legal
+            // upward edge is `ironclaw_turns` (turn admission authority — the
+            // tracked LAYER_MATRIX_EXCEPTION below); everything else above or
+            // beside it belongs to another owner.
+            //
+            // `ironclaw_safety` is listed because the crate *used* to hold it
+            // (2026-08-04): the trusted-trigger prompt scan lived inside this
+            // crate's `TrustedTriggerFireSubmitter` impl, where swapping or
+            // adding a submitter silently dropped the guard. §6.4.2 moved the
+            // scan behind the seam into `ironclaw_triggers`' mint of the
+            // sealed request. Re-adding the dependency here would re-open that
+            // fail-open, so it is pinned rather than merely absent.
+            //
+            // `ironclaw_threads` is listed for the sibling reason: §6.4.2 says
+            // "Never: payload parsing, transcript content" — recording prompt
+            // and transcript content is the thread service's job, reached by
+            // composition, never from inside binding/idempotency.
+            crate_name: "ironclaw_conversations",
+            forbidden: vec![
+                "ironclaw_legacy",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_storage",
+                "ironclaw_tui",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_resources",
+                "ironclaw_runner",
+                "ironclaw",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
                 "ironclaw_wasm",
             ],
         },
