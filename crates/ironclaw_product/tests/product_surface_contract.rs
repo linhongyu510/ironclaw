@@ -4764,7 +4764,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
 }
 
 #[tokio::test]
-async fn shared_route_without_configured_subject_requires_binding() {
+async fn unrouted_shared_route_does_not_fallback_to_default_subject() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4790,7 +4790,8 @@ async fn shared_route_without_configured_subject_requires_binding() {
             tenant_id,
             AgentId::new("agent:alpha").expect("agent"),
             Some(ProjectId::new("project:alpha").expect("project")),
-        ),
+        )
+        .with_default_subject_user_id(UserId::new("user:operator").expect("operator subject")),
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_payload(
