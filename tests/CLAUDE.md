@@ -241,13 +241,112 @@ One thread, whole real turn. Grouped by what the user experiences.
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
 |---|---|
-| "connect to <service>" and completes the auth flow | `reborn_qa_connect_flows.rs` (8) |
-| "every 30 minutes email me a summary…" and gets a routine | `reborn_qa_routines.rs` (7) |
-| a question in a Slack DM / a keyword-prefixed message, and gets a Slack reply | `reborn_qa_channel_delivery.rs` (2) |
+| "connect to <service>" and completes the auth flow | `reborn_qa_connect_flows.rs` (8) — gmail, calendar, drive, sheets, slack, slack-channel, github, telegram |
+| "every 30 minutes email me a summary…" and gets a routine | `reborn_qa_routines.rs` (10) — meeting-prep email, endpoint health ping, GitHub release watch, CRM inbox sweep, HN monitor, BTC news→Telegram, BTC technical analysis→Telegram; several coexisting variations keeping their own cadence/target; plus the poller actually firing one and running its action |
+| a question in a Slack or Telegram DM, or a keyword-prefixed message, and gets a reply in that same thread — then a follow-up question in the same thread | `reborn_qa_channel_delivery.rs` (5) |
 | "use this Google Drive doc as your knowledge base" | `reborn_qa_doc_grounding.rs` (2) |
-| "does api.github.com return 200 / summarize this release page" | `reborn_qa_web_fetch.rs` (3) |
+| "does api.github.com return 200 / summarize this release page / summarize the latest BTC news / list my repos / file my near.ai inbound into a sheet" | `reborn_qa_web_fetch.rs` (6) |
 | any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (25) |
 | a broad smoke set of whole turns on a full runtime | `reborn_qa_smoke_scenarios_e2e.rs` (10) |
+
+### 5.1 QA use-case matrix
+
+The manual-QA script is 11 numbered use cases, each a sequence of typed asks.
+This maps every row to its evidence. `—` means no test exists yet; see §7.
+
+**UC1 — Daily news digest** (Telegram, web search, routines)
+| Row | Evidence |
+|---|---|
+| WebUI: "connect to Telegram", go through auth | `reborn_qa_connect_flows.rs::reborn_qa_connect_telegram_auth_flow` |
+| Telegram: "summarize the latest BTC news" | `reborn_qa_channel_delivery.rs::reborn_qa_telegram_dm_btc_news_request_gets_reply_in_same_thread` (channel half) + `reborn_qa_web_fetch.rs::reborn_qa_btc_news_summary_from_web_search` (fetch half) |
+| Telegram: "every 5 minutes send me a BTC news summary" → routine created | `reborn_qa_channel_delivery.rs::reborn_qa_telegram_dm_routine_request_is_acknowledged_in_same_thread` + `reborn_qa_routines.rs::reborn_qa_routine_created_for_btc_news_telegram_every_5_minutes` |
+| Routine fires and sends the Telegram message | `reborn_qa_routines.rs::reborn_qa_fired_routine_executes_action_and_finalizes_reply` (channel-agnostic: proves fire → action → reply; the Telegram-specific delivery leg is not pinned — §7) |
+
+**UC2 — Calendar prep assistant** (Gmail, Calendar, Drive, routines)
+| Row | Evidence |
+|---|---|
+| connect Gmail / Calendar / Drive | `reborn_qa_connect_flows.rs::reborn_qa_connect_{gmail,google_calendar,google_drive}_auth_flow` |
+| "for my next meeting, find company info from my Docs + latest news" | `reborn_qa_doc_grounding.rs::reborn_qa_meeting_prep_references_company_doc_and_latest_news` |
+| "every 3 minutes email me a meeting summary" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_meeting_prep_email_every_30_minutes` (same ask, 30m cadence) |
+| The email actually goes out with company + news | `reborn_qa_routines.rs::reborn_qa_fired_routine_executes_action_and_finalizes_reply` (action-shaped, not email-shaped — §7) |
+
+**UC3 — Deployment health watcher** (Slack, HTTP, routines) — **fully covered**
+| Row | Evidence |
+|---|---|
+| connect Slack | `reborn_qa_connect_flows.rs::reborn_qa_connect_slack_auth_flow` |
+| "check if near.ai returns a 200 status" | `reborn_qa_web_fetch.rs::reborn_qa_endpoint_status_check_reports_http_200` |
+| "every 5 min ping it and DM me in Slack" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_endpoint_health_ping_every_5_minutes` |
+| Slack message for the routine result | `reborn_qa_routines.rs::reborn_qa_fired_routine_executes_action_and_finalizes_reply` (this case *is* the Slack-DM-shaped one) |
+
+**UC4 — Competitor release tracker** (Gmail, GitHub, routines)
+| Row | Evidence |
+|---|---|
+| connect Gmail / GitHub | `reborn_qa_connect_flows.rs::reborn_qa_connect_{gmail,github}_auth_flow` |
+| "list my repos in GitHub" | `reborn_qa_web_fetch.rs::reborn_qa_github_repo_list_reports_caller_repos` |
+| (stated expected result: most-recent release summary) | `reborn_qa_web_fetch.rs::reborn_qa_latest_release_summary_from_github_api` |
+| "every 5 min check open issues, message me" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_github_release_watch_every_5_minutes` |
+
+**UC5 — AMA in Slack** (Slack, Drive) — **fully covered**
+| Row | Evidence |
+|---|---|
+| connect Slack / Drive | `reborn_qa_connect_flows.rs::reborn_qa_connect_{slack,google_drive}_auth_flow` |
+| "use the NEAR AI Strategy doc as your knowledge base" | `reborn_qa_doc_grounding.rs::reborn_qa_strategy_doc_becomes_knowledge_base_for_answers` |
+| Slack DM: detailed strategy question → grounded reply | `reborn_qa_channel_delivery.rs::reborn_qa_slack_dm_strategy_question_gets_reply_in_same_thread` |
+
+**UC6 — CRM inbound tracker** (Gmail, Sheets, routines) — **fully covered**
+| Row | Evidence |
+|---|---|
+| connect Gmail / Sheets | `reborn_qa_connect_flows.rs::reborn_qa_connect_{gmail,google_sheets}_auth_flow` |
+| "check recent emails, add near.ai ones to the ABC sheet" | `reborn_qa_web_fetch.rs::reborn_qa_near_ai_inbound_email_is_appended_to_sheet` |
+| "every 30 min sweep the inbox" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_crm_inbox_sweep_every_30_minutes` |
+
+**UC7 — Slack → Sheet bug logger** (Slack, Sheets, routines)
+| Row | Evidence |
+|---|---|
+| connect Slack DM / Sheets | `reborn_qa_connect_flows.rs::reborn_qa_connect_{slack_channel,google_sheets}_auth_flow` |
+| A `bug:` message runs the logging action | `reborn_qa_channel_delivery.rs::reborn_qa_slack_bug_prefix_message_runs_logging_action` |
+| "whenever I send a `bug:` message, add a row" → trigger created | — **product gap**, see §7: Reborn has no message-matched trigger kind |
+
+**UC8 — HN keyword monitor** (Slack, web search, routines) — **fully covered**
+| Row | Evidence |
+|---|---|
+| connect Slack | `reborn_qa_connect_flows.rs::reborn_qa_connect_slack_auth_flow` |
+| "search HN for IronClaw / NEAR AI" | `reborn_qa_web_fetch.rs::reborn_qa_hacker_news_keyword_search_reports_matches` |
+| "every hour, summarize matches to Slack" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_hacker_news_monitor_every_hour` |
+
+**UC9 — TEAM agent** — explicitly out of scope for now; no rows tracked.
+
+**Cross-usage rows** — not in the QA script, but the steps a tester takes next.
+Each is anchored to a bug QA has actually filed against these flows.
+
+| Row | Anchoring issue | Evidence |
+|---|---|---|
+| Several automations coexist; the list shows all of them | #2232 "Routines dashboard shows wrong count — only 1 of 4 visible" | `reborn_qa_routines.rs::reborn_qa_multiple_routine_variations_coexist_with_their_own_destinations` |
+| Creating a second automation does not reroute the first | #5420 "Routine delivery target is a global per-user default, not per-routine" | same test (cadence + `delivery_target_id` per routine; see §7 for the unobservable half) |
+| An automation with a delivery target the host can't resolve is rejected, not silently misrouted | #5508, #5944 "Slack delivery target not found / silently fails but run reports success" | `tests/integration/group_triggers/scenario_delivery_target_fail_closed.rs` |
+| A follow-up question in a channel DM keeps the thread's history | #6349 "Telegram chat history rendered inconsistently in WebUI", #1993 "falsely reports completion after reopen" | `reborn_qa_channel_delivery.rs::reborn_qa_telegram_follow_up_question_carries_thread_history` |
+| An automation cannot create or modify other automations | #6479 "Routines can create or modify other routines, risking self-replicating automations" | `tests/integration/group_triggers/scenario_trigger_self_create_denied.rs` |
+| A user can still chat while one of their automations is running | #6125 "User message rejected with 'busy' error while routine runs" | `tests/integration/steering.rs` (queued mid-run steering) |
+| An automation keeps working after the provider revokes its credential | #5884 "Routine loses credentials after external token revocation" | `tests/integration/group_journeys/scenario_expired_credential_resume.rs` |
+
+**UC10 — Custom tool with Telegram** (custom tool, Telegram, web search, routines)
+| Row | Evidence |
+|---|---|
+| connect Telegram | `reborn_qa_connect_flows.rs::reborn_qa_connect_telegram_auth_flow` |
+| Upload a custom tool → available for use | `tests/e2e/scenarios/test_reborn_private_tool_installs.py::test_private_tool_installs_full_path` |
+| "give me a quick technical analysis on BTC" → custom tool called | — §7 |
+| Telegram: "every 5 min send me an updated BTC analysis" → routine created | `reborn_qa_routines.rs::reborn_qa_routine_created_for_btc_technical_analysis_telegram_every_5_minutes` |
+| Routine sends the Telegram message with the tool's output | — §7 |
+
+**UC11 — Responses API** (Responses API, custom tool, web search, routines)
+| Row | Evidence |
+|---|---|
+| Upload a custom tool | `tests/e2e/scenarios/test_reborn_private_tool_installs.py` |
+| connect Telegram | `reborn_qa_connect_flows.rs::reborn_qa_connect_telegram_auth_flow` |
+| The API surface itself (create/continue/retrieve/stream/tools/auth) | `tests/e2e/scenarios/test_reborn_responses_api.py` (14) |
+| Responses API: "summarize the latest BTC news" | — §7 |
+| Responses API: custom-tool BTC analysis | — §7 |
+| Responses API: "every 5 min…" → routine created | — §7 |
 
 **Binary-level behavior**
 | Behavior | Evidence |
@@ -428,6 +527,12 @@ verify it.
 
 | Gap | Notes |
 |---|---|
+| **UC7 has no message-matched trigger to create** — *product* gap, not a test gap | `TriggerSchedule` (`crates/ironclaw_triggers/src/lib.rs`) has exactly two kinds, `Cron` and `Once`; `builtin.trigger_create` rejects anything else. So "whenever I send a Slack message starting with `bug:`, add a row" cannot become a trigger today. The legacy v1 gateway *did* have event-triggered routines (`test_routine_event_batch.py::test_event_trigger_fires_on_matching_message`), so this is a capability Reborn has not regained. Do not write a cron test for this row — it would assert a routine the user never asked for. |
+| **A routine's destination is not observable through any capability surface** | `trigger_list`/`trigger_create` project name, schedule, `delivery_target_id`, state and run history — never `prompt` (`crates/ironclaw_host_runtime/src/first_party_tools/trigger_management.rs`). When the destination lives only in the prompt text ("…send it to me on Telegram"), no test at any tier can assert routine A still points at Telegram after routine B is created. `reborn_qa_multiple_routine_variations_coexist_with_their_own_destinations` pins the observable half (cadence, target id). Closing this properly means routing through `delivery_target_id` — the epic is #6801 / #6800. |
+| **Channel-confusion rows have no coverage** | #6478 "Agent does not recognize connected Telegram, redirects to Slack authorization" and #6716 "Model incorrectly claims Slack integration is unavailable" are both *"a channel is connected but the agent acts as though it isn't"*. `reborn_qa_connect_flows.rs` proves connecting works; nothing asserts a **subsequent** turn sees that channel as connected. Needs a two-turn case per channel on shared storage. |
+| **Routine *delivery* to a named channel is not pinned per-channel** | `reborn_qa_routines.rs::reborn_qa_fired_routine_executes_action_and_finalizes_reply` proves fire → action → reply with a Slack-DM-shaped action, and stands in for the delivery row of UC1/UC2/UC3/UC4/UC8. What is *not* pinned: that a routine whose prompt says "Telegram" reaches Telegram, or "email" reaches Gmail. Needs a fired-routine case per delivery target. |
+| **UC10: custom tool invoked for a domain ask** | Custom-tool import/install/dispatch is covered (`test_reborn_private_tool_installs.py`), and the recurring form is covered (`reborn_qa_routine_created_for_btc_technical_analysis_telegram_every_5_minutes`). The one-shot "give me a quick technical analysis on BTC" → *this specific uploaded tool* runs → chart output is not. Needs a custom-tool fixture with a known output shape. |
+| **UC11: Responses API as a scenario surface** | The API surface is covered mechanically (`test_reborn_responses_api.py`, 14 tests). What is missing is the three QA rows that drive *the same use-case asks* through it (BTC news summary, custom-tool analysis, routine creation) — i.e. proof that the Responses API is a first-class entry point for these journeys, not just for chat. Python tier, since it drives real HTTP against the served binary. |
 | **Proactive / background execution** has no Reborn scenario at any tier | The v1 heartbeat loop has no Reborn equivalent yet — issue #6369. Nothing in §3–§6 drives it. |
 | **Skills** have only one group scenario (`install_list_remove`) | No group-tier coverage of skill activation under a gate, install failure/denial, or trusted-vs-installed tool attenuation. Attenuation rules are in `.claude/rules/skills.md`. |
 | **Telegram** has no group-tier lifecycle scenario | Slack has `scenario_slack_channel_lifecycle_state_machine.rs`; Telegram's setup resolves through a pairing mechanism the bare group harness doesn't mount (see `scenario_extension_install_github_normal_gate.rs`'s module doc). Telegram is covered at the Python tier only. |
