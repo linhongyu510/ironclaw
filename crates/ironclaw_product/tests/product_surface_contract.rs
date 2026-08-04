@@ -42,7 +42,8 @@ use ironclaw_product::{
     ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
+    ResolvedProductActorUser, StaticProductInstallationResolver,
+    UnroutedSharedConversationSubjectPolicy, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -4781,17 +4782,22 @@ async fn unrouted_shared_route_does_not_fallback_to_default_subject() {
         .await;
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations;
+    let installation_scope = ProductInstallationScope::with_default_scope(
+        tenant_id,
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_default_subject_user_id(UserId::new("user:operator").expect("operator subject"));
+    assert_eq!(
+        installation_scope.unrouted_shared_conversation_subject_policy,
+        UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute
+    );
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
             AdapterInstallationId::new("install_alpha").expect("installation"),
         ),
-        ProductInstallationScope::with_default_scope(
-            tenant_id,
-            AgentId::new("agent:alpha").expect("agent"),
-            Some(ProjectId::new("project:alpha").expect("project")),
-        )
-        .with_default_subject_user_id(UserId::new("user:operator").expect("operator subject")),
+        installation_scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
     let envelope = sample_envelope_with_payload(
