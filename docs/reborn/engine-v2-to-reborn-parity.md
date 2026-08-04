@@ -113,9 +113,12 @@ backend is wired for it; **Gap** = no direct equivalent, and none is needed
    Engine v2 Tier 1 embedded a Python interpreter (Monty) inside the loop with
    the RLM pattern: context-as-variables, `llm_query()` recursive subagent
    calls, and compact inter-step output metadata. Reborn does **not** ship an
-   equivalent in-loop Monty orchestrator. Instead it provides (a) a native
-   script/software execution lane (`ironclaw_sandbox`, `RuntimeKind::Script`)
-   sandboxed via `ironclaw_sandbox`, and (b) an architecture where
+   equivalent in-loop Monty orchestrator. Instead it provides (a) a typed
+   script/software runtime contract (`ironclaw_sandbox`, `RuntimeKind::Script`)
+   — the lane definition and its plan validation, **not** a running execution
+   path, since no production composition wires a backend for it and
+   `with_script_runtime` has zero production callers (note 5) — and (b) an
+   architecture where
    CodeAct is an explicitly *allowed pluggable parent loop family*
    (`contracts/agent-loop-protocol.md`) rather than a hardcoded tier. The most
    valuable RLM sub-feature — recursive subagents — is realized as
