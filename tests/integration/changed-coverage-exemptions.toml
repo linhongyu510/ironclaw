@@ -2048,6 +2048,8 @@ lines = [
 ]
 owner = "@nearai/reborn"
 reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
 
 # WS3 sandbox-lane merge + mcp-onto-contracts flip (PR #7065).
 #
