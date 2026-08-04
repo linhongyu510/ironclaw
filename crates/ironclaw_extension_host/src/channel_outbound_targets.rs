@@ -194,7 +194,11 @@ impl GenericChannelOutboundTargetProvider {
                 }
             }
         }
-        if let Some(handle) = handles.allowed_channels.as_deref()
+        // Allowed-only channels need the connection-scoping claim to produce
+        // an authoritative external conversation ref. Do not derive a
+        // space-less managed owner that a caller could reproduce.
+        if space_id.is_some()
+            && let Some(handle) = handles.allowed_channels.as_deref()
             && let Some(raw) = self.config_value(&extension_id, handle).await?
         {
             match serde_json::from_str::<Vec<String>>(&raw) {

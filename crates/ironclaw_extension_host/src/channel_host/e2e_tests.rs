@@ -4476,18 +4476,25 @@ async fn save_allowed_outbound_target_config(harness: &Harness, include_team: bo
         .expect("save allowed outbound target config"); // safety: manifest declares the handles.
 }
 
-fn managed_channel_caller(conversation_id: &str) -> OutboundDeliveryTargetScope {
+fn managed_channel_caller_with_space(
+    conversation_id: &str,
+    space_id: Option<&str>,
+) -> OutboundDeliveryTargetScope {
     let tenant_id = TenantId::new(TENANT).expect("tenant"); // safety: static id is valid.
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation"); // safety: static id is valid.
     let user_id = managed_channel_subject_user_id(
         ADAPTER,
         &tenant_id,
         &installation_id,
-        Some(TEAM),
+        space_id,
         conversation_id,
     )
     .expect("managed channel subject"); // safety: static inputs derive a valid id.
     OutboundDeliveryTargetScope::new(tenant_id, user_id)
+}
+
+fn managed_channel_caller(conversation_id: &str) -> OutboundDeliveryTargetScope {
+    managed_channel_caller_with_space(conversation_id, Some(TEAM))
 }
 
 #[tokio::test]
@@ -4631,9 +4638,14 @@ async fn generic_outbound_targets_allowed_channels_fail_closed_without_space_or_
         )
         .await;
         let provider = generic_outbound_target_provider(&harness, generic_dm_target_store());
+        let caller = if description == "missing space id" {
+            managed_channel_caller_with_space(ALLOWED_CHANNEL, None)
+        } else {
+            managed_channel_caller(ALLOWED_CHANNEL)
+        };
         assert!(
             provider
-                .list_outbound_delivery_targets(&managed_channel_caller(ALLOWED_CHANNEL))
+                .list_outbound_delivery_targets(&caller)
                 .await
                 .expect("target list")
                 .is_empty(),
