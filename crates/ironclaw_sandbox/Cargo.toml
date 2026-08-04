@@ -24,7 +24,6 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_resources = { path = "../ironclaw_resources" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 serde_json = "1"
@@ -40,6 +39,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Dev-only: the production dependency is gone, which is what the layer matrix
 # measures.
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+# Same shape, same reason (#7067): the lane's production dependency on the
+# budget authority is gone — it sees only `host_api::resource`'s narrow
+# `RuntimeResourceBudget` port. The tests drive that port over the REAL
+# governor through `GovernorRuntimeBudget`, so a denial they assert on is a
+# denial the kernel actually produced rather than one a lane-local fake made
+# up. Do not re-add this under `[dependencies]`.
+ironclaw_resources = { path = "../ironclaw_resources" }
 rust_decimal_macros = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

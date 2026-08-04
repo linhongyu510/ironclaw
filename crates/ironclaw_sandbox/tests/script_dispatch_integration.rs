@@ -27,7 +27,7 @@ fn script_lane_executes_manifest_command_and_reconciles_resources() {
 
     let result = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             script_request(json!({"message":"hello", "command":"ignored"})),
         )
         .unwrap();
@@ -61,7 +61,10 @@ fn script_lane_nonzero_exit_releases_reservation() {
     let (governor, account) = script_governor();
 
     let err = runtime
-        .execute_extension_json(&governor, script_request(json!({"message":"fail"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            script_request(json!({"message":"fail"})),
+        )
         .unwrap_err();
 
     assert!(matches!(err, ScriptError::ExitFailure { code: 2, .. }));
@@ -81,7 +84,10 @@ fn script_lane_invalid_json_releases_reservation() {
     let (governor, account) = script_governor();
 
     let err = runtime
-        .execute_extension_json(&governor, script_request(json!({"message":"bad-json"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            script_request(json!({"message":"bad-json"})),
+        )
         .unwrap_err();
 
     assert!(matches!(err, ScriptError::InvalidOutput { .. }));

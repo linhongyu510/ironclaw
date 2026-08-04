@@ -17,6 +17,7 @@ use ironclaw_host_api::{
     resource::{ResourceEstimate, ResourceReservation},
     runtime_policy::EffectiveRuntimePolicy,
 };
+use ironclaw_resources::GovernorRuntimeBudget;
 use serde_json::Value;
 
 use super::wasm_blocking::run_wasm_prepare_blocking;
@@ -378,10 +379,13 @@ where
         &self,
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        // The lane holds no budget authority: it is handed the narrow
+        // reserve/reconcile/release port, not the governor (#7067).
+        let budget = GovernorRuntimeBudget::new(request.governor);
         let execution = self
             .executor
             .execute_extension_json(
-                request.governor,
+                &budget,
                 ScriptExecutionRequest {
                     extension: &request.package.id,
                     capabilities: &request.package.capabilities,
@@ -432,10 +436,13 @@ where
         &self,
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        // The lane holds no budget authority: it is handed the narrow
+        // reserve/reconcile/release port, not the governor (#7067).
+        let budget = GovernorRuntimeBudget::new(request.governor);
         let execution = self
             .executor
             .execute_extension_json(
-                request.governor,
+                &budget,
                 McpExecutionRequest {
                     extension: &request.package.id,
                     capabilities: &request.package.capabilities,

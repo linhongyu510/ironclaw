@@ -4,7 +4,9 @@
 //! `ironclaw_mcp` adapts manifest-declared MCP tools into IronClaw
 //! capabilities. It does not grant MCP servers ambient filesystem, secret, or
 //! network authority; the host-selected client is the only integration point and
-//! resource accounting still happens through the host governor.
+//! resource accounting still happens host-side, through the narrow
+//! [`RuntimeResourceBudget`] port — this lane holds no budget authority of its
+//! own and can only reserve, reconcile, and release.
 
 use std::{
     collections::HashMap,
@@ -35,11 +37,10 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle},
     resource::{
         CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
-        ResourceScope, ResourceUsage,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget, RuntimeResourceError,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -1762,7 +1763,7 @@ fn invalid_tool_list(cause: McpInvalidToolListCause) -> String {
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("resource governor error: {0}")]
-    Resource(Box<ResourceError>),
+    Resource(RuntimeResourceError),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
     #[error("MCP server advertised an invalid tool catalog: {reason}")]
@@ -1793,9 +1794,9 @@ pub enum McpError {
     OutputLimitExceeded { limit: u64, actual: u64 },
 }
 
-impl From<ResourceError> for McpError {
-    fn from(error: ResourceError) -> Self {
-        Self::Resource(Box::new(error))
+impl From<RuntimeResourceError> for McpError {
+    fn from(error: RuntimeResourceError) -> Self {
+        Self::Resource(error)
     }
 }
 
@@ -1818,13 +1819,13 @@ where
         &self.config
     }
 
-    pub async fn execute_extension_json<G>(
+    pub async fn execute_extension_json<Budget>(
         &self,
-        governor: &G,
+        budget: &Budget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>
     where
-        G: ResourceGovernor + ?Sized,
+        Budget: RuntimeResourceBudget + ?Sized,
     {
         let client_request = self.prepare_client_request(&request)?;
         let auth_context = client_request.auth_context;
@@ -1834,7 +1835,7 @@ where
             return Err(McpError::HostHttpEgressRequired { transport });
         }
         let reservation = reserve_or_use_existing(
-            governor,
+            budget,
             request.scope.clone(),
             request.estimate.clone(),
             request.resource_reservation.clone(),
@@ -1844,7 +1845,7 @@ where
             Ok(output) => output,
             Err(error) => {
                 return Err(release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     mcp_error_from_client_error(error, auth_context),
                 ));
@@ -1854,7 +1855,7 @@ where
         let serialized_len = serde_json::to_vec(&output.output)
             .map_err(|error| {
                 release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     McpError::InvalidInvocation {
                         reason: error.to_string(),
@@ -1868,7 +1869,7 @@ where
             .max(serialized_len);
         if output_bytes > self.config.max_output_bytes {
             return Err(release_after_failure(
-                governor,
+                budget,
                 reservation.id,
                 McpError::OutputLimitExceeded {
                     limit: self.config.max_output_bytes,
@@ -1882,7 +1883,7 @@ where
         if transport == "stdio" {
             usage.process_count = usage.process_count.max(1);
         }
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(McpExecutionResult {
             result: CapabilityHostResult {
                 output: output.output,
@@ -2014,7 +2015,7 @@ fn mcp_auth_context(
 pub trait McpExecutor: Send + Sync {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>;
 }
@@ -2026,10 +2027,10 @@ where
 {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
-        McpRuntime::execute_extension_json(self, governor, request).await
+        McpRuntime::execute_extension_json(self, budget, request).await
     }
 }
 
@@ -2037,35 +2038,35 @@ fn requires_host_http_egress(transport: &str) -> bool {
     matches!(transport, "http" | "sse")
 }
 
-fn reserve_or_use_existing<G>(
-    governor: &G,
+fn reserve_or_use_existing<Budget>(
+    budget: &Budget,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     reservation: Option<ResourceReservation>,
 ) -> Result<ResourceReservation, McpError>
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
     if let Some(reservation) = reservation {
         if reservation.scope != scope || reservation.estimate != estimate {
-            return Err(McpError::Resource(Box::new(
-                ResourceError::ReservationMismatch { id: reservation.id },
-            )));
+            return Err(McpError::Resource(
+                RuntimeResourceError::reservation_mismatch(reservation.id),
+            ));
         }
         return Ok(reservation);
     }
-    governor.reserve(scope, estimate).map_err(McpError::from)
+    budget.reserve(scope, estimate).map_err(McpError::from)
 }
 
-fn release_after_failure<G>(
-    governor: &G,
+fn release_after_failure<Budget>(
+    budget: &Budget,
     reservation_id: ResourceReservationId,
     original: McpError,
 ) -> McpError
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
-    let _ = governor.release(reservation_id);
+    let _ = budget.release(reservation_id);
     original
 }
 

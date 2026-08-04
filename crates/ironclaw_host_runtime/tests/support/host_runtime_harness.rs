@@ -62,7 +62,7 @@ use ironclaw_host_api::{
     path::{HostPath, MountAlias, VirtualPath},
     resource::{
         CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
-        ResourceScope, ResourceUsage,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget,
     },
     runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
@@ -746,16 +746,16 @@ impl RecordingScriptExecutor {
 impl ScriptExecutor for RecordingScriptExecutor {
     fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: ScriptExecutionRequest<'_>,
     ) -> Result<ScriptExecutionResult, ironclaw_sandbox::ScriptError> {
         self.mounts.lock().unwrap().push(request.mounts.clone());
         let reservation = match request.resource_reservation.clone() {
             Some(reservation) => reservation,
-            None => governor.reserve(request.scope.clone(), request.estimate.clone())?,
+            None => budget.reserve(request.scope.clone(), request.estimate.clone())?,
         };
         let usage = ResourceUsage::default();
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
             result: CapabilityHostResult {
                 output: request.invocation.input,
@@ -1587,7 +1587,7 @@ pub(crate) struct ClientErrorMcpExecutor;
 impl McpExecutor for ClientErrorMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::Client {
@@ -1602,7 +1602,7 @@ pub(crate) struct InvalidToolCatalogMcpExecutor;
 impl McpExecutor for InvalidToolCatalogMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::InvalidToolCatalog {
@@ -1617,7 +1617,7 @@ pub(crate) struct PanicMcpExecutor;
 impl McpExecutor for PanicMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         panic!("health-only test must not execute MCP runtime")

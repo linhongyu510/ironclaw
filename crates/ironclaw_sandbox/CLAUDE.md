@@ -103,11 +103,17 @@ no production constructor (`with_script_runtime` and
     lane (`scripts/reborn-e2e-rust.sh`) runs `docker_security` as of WS3, which
     is strictly more coverage than before (it was in no lane); it will assert
     rather than skip the moment #7081 lands.
-- **`ironclaw_resources` dependency.** The lane holds a `runtimes → kernel`
-  layer-matrix exception because it takes `&dyn ResourceGovernor` and constructs
-  `ResourceError`. See that exception's `reason` field in
-  `reborn_dependency_boundaries.rs` for the measured evidence and what actually
-  clears it.
+- **No budget authority (#7067, 2026-08-04).** The lane takes
+  `ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
+  release, and nothing else — never `ResourceGovernor`. The kernel implements
+  the port over its governor (`ironclaw_resources::GovernorRuntimeBudget`), so
+  the lane cannot set limits, read account state, or name an account, and the
+  `runtimes → kernel` layer-matrix exception this dependency used to need is
+  **deleted, not waived**. `ironclaw_resources` remains a **dev**-dependency
+  only: the lane suites drive the port over the real governor so a denial they
+  assert on is one the kernel actually produced. Do not re-add it under
+  `[dependencies]`, and do not widen the port — a lane that needs more budget
+  surface is a design question for the kernel, not a lane change.
 
 ## Validation
 
