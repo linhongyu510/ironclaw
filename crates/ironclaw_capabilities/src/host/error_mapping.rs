@@ -7,8 +7,6 @@
 
 use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
-    Timestamp,
-    capability::PermissionMode,
     decision::{DenyReason, Obligation},
     dispatch::DispatchError,
     ids::{CapabilityGrantId, CapabilityId, InvocationId},
@@ -23,44 +21,6 @@ use crate::trust::TrustEvaluationError;
 use crate::{
     CapabilityInvocationError, CapabilityObligationError, CapabilityObligationFailureKind,
 };
-
-/// Whether a capability's manifest permission mode may be upgraded by an
-/// explicit persistent ("always allow") user decision — the gate on the kernel's
-/// persistent-approval fold.
-///
-/// Pure over [`PermissionMode`] (a `host_api` type), relocated into the kernel
-/// from host_runtime so the fold does not depend on host_runtime or
-/// `ironclaw_approvals`. Semantics match `ironclaw_approvals`'
-/// `permission_mode_allows_persistent_approval`: `Allow` and `Ask` are eligible;
-/// `Deny` is not. Modes requiring mandatory per-invocation consent must use a
-/// gate that does not offer persistent approval.
-/// Bounded default validity window for the sealed witness when the authorization
-/// froze no shorter-lived fact. Keeps no-frozen-fact capabilities on the prior
-/// fixed window; a frozen fact, when present, always shortens this.
-pub(super) const WITNESS_DEFAULT_TTL: chrono::Duration = chrono::Duration::minutes(5);
-
-/// Derive the sealed witness deadline from the shortest-lived frozen fact so a
-/// held witness cannot outlive the facts that justified it (§5.3.2): take the
-/// earliest of the candidate expiries, falling back to [`WITNESS_DEFAULT_TTL`]
-/// from now when none is present. Candidate expiries today are the adopted
-/// persistent-grant expiry (invoke/spawn) and the claimed approval lease's expiry
-/// (resume). Credential-lease expiry integration is future — the credential
-/// presence port returns presence, not lease expiry — so it is not a candidate
-/// yet; do not block on it.
-pub(super) fn witness_deadline<I>(candidate_expiries: I) -> Timestamp
-where
-    I: IntoIterator<Item = Option<Timestamp>>,
-{
-    candidate_expiries
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or_else(|| chrono::Utc::now() + WITNESS_DEFAULT_TTL)
-}
-
-pub(super) fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
-    matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
-}
 
 /// Map a kernel trust-classification failure to the model-visible invocation
 /// error, preserving today's outcome kinds: the "unknown capability" case →

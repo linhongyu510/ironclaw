@@ -14,9 +14,8 @@ use ironclaw_host_api::{
 use ironclaw_processes::{ProcessInvocationError, ProcessInvocationStart, ProcessInvocationStatus};
 use ironclaw_trust::TrustDecision;
 
-use super::error_mapping::{
-    WITNESS_DEFAULT_TTL, enrich_dispatch_error_credential_requirements, witness_deadline,
-};
+use super::authorize::{WITNESS_DEFAULT_TTL, witness_deadline};
+use super::error_mapping::enrich_dispatch_error_credential_requirements;
 use super::*;
 use crate::ports::CredentialPresence;
 

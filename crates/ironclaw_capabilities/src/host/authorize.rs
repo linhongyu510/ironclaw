@@ -9,7 +9,7 @@ use ironclaw_host_api::authorized::CapabilityAuthorizer;
 use ironclaw_host_api::{
     Timestamp,
     authorized::{AuthorizeResult, Authorized},
-    capability::CapabilityDescriptor,
+    capability::{CapabilityDescriptor, PermissionMode},
     decision::{Decision, DenyReason},
     dispatch::CapabilityDispatcher,
     ids::{ActivityId, CapabilityId, DenyRef, GateRef},
@@ -26,8 +26,7 @@ use tracing::{debug, warn};
 
 use super::error_mapping::{
     add_capability_input_display_hint, obligation_invocation_error_kind,
-    permission_mode_allows_persistent_approval, runtime_policy_error_to_invocation_error,
-    trust_error_to_invocation_error, witness_deadline,
+    runtime_policy_error_to_invocation_error, trust_error_to_invocation_error,
 };
 use super::{AuthorizeFold, AuthorizedFold, CapabilityHost, InvocationInput};
 use crate::helpers::{
@@ -43,15 +42,6 @@ impl<'a, D> CapabilityHost<'a, D>
 where
     D: CapabilityDispatcher + ?Sized,
 {
-    /// The pre-dispatch authority fold for `invoke_json`, extracted per
-    /// arch-simplification §9 step 2 / §5.3.2: validate the context, fingerprint
-    /// the invocation, start the invocation record, resolve the descriptor, run
-    /// trust-aware authorization, and on `Allow` prepare obligations and mint
-    /// the sealed [`Authorized`] witness. Every side effect that today's inline
-    /// fold performed — process-invocation `start`/`fail`/`block`, approval
-    /// persist-and-rollback, obligation `prepare`, and each early error return —
-    /// stays here, verbatim; `invoke_json` only maps the returned
-    /// [`AuthorizeFold`] back to today's outcome.
     /// Compute provider trust for `capability_id` (§5.3.2/§9): the kernel now
     /// classifies trust itself instead of trusting a caller-stamped field.
     pub(super) fn evaluate_trust(
@@ -162,6 +152,15 @@ where
         None
     }
 
+    /// The pre-dispatch authority fold for `invoke_json`, extracted per
+    /// arch-simplification §9 step 2 / §5.3.2: validate the context, fingerprint
+    /// the invocation, start the invocation record, resolve the descriptor, run
+    /// trust-aware authorization, and on `Allow` prepare obligations and mint
+    /// the sealed [`Authorized`] witness. Every side effect that today's inline
+    /// fold performed — process-invocation `start`/`fail`/`block`, approval
+    /// persist-and-rollback, obligation `prepare`, and each early error return —
+    /// stays here, verbatim; `invoke_json` only maps the returned
+    /// [`AuthorizeFold`] back to today's outcome.
     pub(super) async fn authorize(
         &self,
         request: &InvocationInput,
@@ -609,4 +608,42 @@ where
             deadline,
         ))))
     }
+}
+
+/// Bounded default validity window for the sealed witness when the authorization
+/// froze no shorter-lived fact. Keeps no-frozen-fact capabilities on the prior
+/// fixed window; a frozen fact, when present, always shortens this.
+pub(super) const WITNESS_DEFAULT_TTL: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Derive the sealed witness deadline from the shortest-lived frozen fact so a
+/// held witness cannot outlive the facts that justified it (§5.3.2): take the
+/// earliest of the candidate expiries, falling back to [`WITNESS_DEFAULT_TTL`]
+/// from now when none is present. Candidate expiries today are the adopted
+/// persistent-grant expiry (invoke/spawn) and the claimed approval lease's expiry
+/// (resume). Credential-lease expiry integration is future — the credential
+/// presence port returns presence, not lease expiry — so it is not a candidate
+/// yet; do not block on it.
+pub(super) fn witness_deadline<I>(candidate_expiries: I) -> Timestamp
+where
+    I: IntoIterator<Item = Option<Timestamp>>,
+{
+    candidate_expiries
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or_else(|| chrono::Utc::now() + WITNESS_DEFAULT_TTL)
+}
+
+/// Whether a capability's manifest permission mode may be upgraded by an
+/// explicit persistent ("always allow") user decision — the gate on the kernel's
+/// persistent-approval fold.
+///
+/// Pure over [`PermissionMode`] (a `host_api` type), relocated into the kernel
+/// from host_runtime so the fold does not depend on host_runtime or
+/// `ironclaw_approvals`. Semantics match `ironclaw_approvals`'
+/// `permission_mode_allows_persistent_approval`: `Allow` and `Ask` are eligible;
+/// `Deny` is not. Modes requiring mandatory per-invocation consent must use a
+/// gate that does not offer persistent approval.
+pub(super) fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
+    matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
 }
