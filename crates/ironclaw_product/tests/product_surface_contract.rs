@@ -6449,6 +6449,11 @@ fn product_binding_service(
                 )
                 .with_default_subject_user_id(
                     UserId::new("user:team-agent").expect("team subject"),
+                )
+                .with_conversation_subject_route(
+                    ProductConversationRouteKey::new(None, "conv1".to_string())
+                        .expect("shared conversation route"),
+                    UserId::new("user:team-agent").expect("team subject"),
                 ),
             )
         },
