@@ -294,7 +294,20 @@ is_reborn_test_path() {
     crates/ironclaw_architecture_tests/*)
       return 0
       ;;
-    crates/ironclaw_turn_runner/*|crates/ironclaw_reborn_*/*)
+    # The WS6 renames dropped the `ironclaw_reborn_` prefix from all seven
+    # crates that carried it, so the `crates/ironclaw_reborn_*/*` glob this
+    # arm used to rely on now matches NOTHING and every one of these crates
+    # silently reclassified as legacy. Enumerated rather than re-globbed:
+    # the new names share no prefix, and a glob that matches nothing fails
+    # open (quietly) instead of closed.
+    crates/ironclaw_turn_runner/*|\
+    crates/ironclaw_cli/*|\
+    crates/ironclaw_composition/*|\
+    crates/ironclaw_config/*|\
+    crates/ironclaw_event_store/*|\
+    crates/ironclaw_identity/*|\
+    crates/ironclaw_openai_compat/*|\
+    crates/ironclaw_trace_commons/*)
       return 0
       ;;
     crates/ironclaw_product_*/*|\

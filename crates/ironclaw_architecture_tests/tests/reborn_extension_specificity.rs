@@ -1501,6 +1501,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// not with `grep`, which also matches prose. Tracked as #7147; whichever of
 /// the concurrent branches touching this list merges last must recount the
 /// union rather than trusting any single branch's number.
+///
+/// ✎ **Union recounted 2026-08-04 (WS6 renames, #7152): still 125.** Doing what
+/// the sentence above demands. This branch carried 129 and `main` carried 125,
+/// and the merge auto-resolved to 125 with no conflict — so the number was
+/// *inherited*, not measured, and inheriting is the failure mode #7147 names.
+/// Recounted off the compiler instead of off a script: set this constant to
+/// `0`, ran the ratchet, and read the true length out of its own panic
+/// (`ALLOWLIST grew to 125 entries`). 125 is therefore the live count with
+/// **zero slack**, not a ceiling that happens to hold. Counting by eye or by
+/// paren once answered 142 here when the truth was 124 — entry comments contain
+/// parens — which is why the compiler is the only oracle used.
 const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
