@@ -42,8 +42,7 @@ use ironclaw_product::{
     ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, StaticProductInstallationResolver,
-    UnroutedSharedConversationSubjectPolicy, approval_gate_ref,
+    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -4788,10 +4787,6 @@ async fn unrouted_shared_route_does_not_fallback_to_default_subject() {
         Some(ProjectId::new("project:alpha").expect("project")),
     )
     .with_default_subject_user_id(UserId::new("user:operator").expect("operator subject"));
-    assert_eq!(
-        installation_scope.unrouted_shared_conversation_subject_policy,
-        UnroutedSharedConversationSubjectPolicy::RequireConfiguredRoute
-    );
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(
             ProductAdapterId::new("test_adapter").expect("adapter"),
