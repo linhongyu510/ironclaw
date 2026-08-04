@@ -32,6 +32,11 @@ IGNORED_GUIDANCE_PATHS = {
     "tests/integration/CLAUDE.md",
 }
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+# WIT compatibility evidence is owned by the `Platform & Compat`
+# workflow (`platform-and-compat.yml`), whose own path filter claims
+# `wit/`. This planner keeps the QA replay sentinel but selects no
+# Rust crate lane for WIT-only changes.
+PLATFORM_COMPAT_PREFIXES = ("wit/",)
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
     "scripts/reborn_webui_v2_live_qa/",
@@ -367,7 +372,7 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
             continue
-        if path.startswith("wit/"):
+        if path.startswith(PLATFORM_COMPAT_PREFIXES):
             reasons.append(
                 f"Platform & Compat owns WIT compatibility evidence: {path}"
             )
