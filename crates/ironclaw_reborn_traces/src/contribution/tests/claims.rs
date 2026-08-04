@@ -3,6 +3,7 @@
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::support::EnvVarRestore;
 use crate::contribution::*;
 
 #[test]
@@ -302,35 +303,79 @@ async fn device_key_auth_mode_revoke_context_self_signs_workload_jwt() {
     assert_eq!(header.kid.as_deref(), Some(promoted.device_key_id.as_str()));
 }
 #[tokio::test]
-// Holding the env lock across the await is the point: the variable must stay
-// set for the whole request, and `#[tokio::test]` drives this future on a
-// current-thread runtime, so the guard never moves between threads.
-#[allow(clippy::await_holding_lock)]
 async fn workload_token_env_mode_reads_env_unchanged() {
-    // Serialize against every other test that touches the process
-    // environment: a unique name avoids *logical* interference, but
-    // concurrent setenv/getenv is undefined behavior on Rust 1.82+ whatever
-    // the names are.
-    let _env_lock = ironclaw_common::env_helpers::lock_env();
-    let env_var = "IRONCLAW_TEST_WORKLOAD_TOKEN_UNIQUE_9f3a2b1c";
-    // SAFETY: test-only, uniquely named, and serialized by the env lock held
-    // for the rest of this test.
-    unsafe {
-        std::env::set_var(env_var, "test-bearer-xyz");
-    }
+    // `EnvVarRestore` holds the process-env lock for its whole lifetime and
+    // restores the previous value in `Drop`, so an assertion failure below
+    // unwinds without leaking the variable into other tests.
+    const ENV_VAR: &str = "IRONCLAW_TEST_WORKLOAD_TOKEN_UNIQUE_9f3a2b1c";
+    let _env = EnvVarRestore::set(ENV_VAR, "test-bearer-xyz");
 
     let policy = StandingTraceContributionPolicy::default()
         .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
-        .set_upload_token_workload_token_env(env_var.to_string());
+        .set_upload_token_workload_token_env(ENV_VAR.to_string());
     let context = TraceUploadClaimContext::for_status_sync();
 
     let result = issuer_request_bearer(&policy, &context).await.unwrap();
     assert_eq!(result.as_deref(), Some("test-bearer-xyz"));
+}
 
-    // SAFETY: same as set above — cleanup.
-    unsafe {
-        std::env::remove_var(env_var);
-    }
+/// Caller-tier companion to the `issuer_request_bearer` unit tests above.
+///
+/// Those assert what the helper *returns*; this asserts the token actually
+/// reaches the wire. The direct issuer path attaches it conditionally
+/// (`if let Some(bearer) = issuer_bearer`), so a helper that regressed to
+/// `None` would send an unauthenticated request while every unit test above
+/// stayed green.
+#[tokio::test]
+async fn workload_token_reaches_the_issuer_request_as_a_bearer_header() {
+    use std::sync::{Arc, Mutex};
+
+    const ENV_VAR: &str = "IRONCLAW_TEST_ISSUER_BEARER_ON_WIRE_4b7e1a";
+    let _env = EnvVarRestore::set(ENV_VAR, "wire-bearer-xyz");
+
+    let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::clone(&seen);
+    let app = axum::Router::new().route(
+        "/v1/trace-upload-claim",
+        axum::routing::post(move |headers: axum::http::HeaderMap| {
+            let captured = Arc::clone(&captured);
+            async move {
+                *captured.lock().expect("header capture lock") = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                // Shape does not matter: the assertion is on the request.
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "stop after the request",
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock issuer listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let policy = StandingTraceContributionPolicy::default()
+        .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
+        .set_upload_token_workload_token_env(ENV_VAR.to_string())
+        .set_upload_token_issuer_url(format!("http://{addr}/v1/trace-upload-claim"))
+        .set_upload_token_issuer_allowed_hosts([addr.ip().to_string()]);
+    let context = TraceUploadClaimContext::for_status_sync();
+
+    // Expected to fail on the 500 — the request is what is under test.
+    let _ = fetch_trace_upload_claim_from_issuer(&policy, &context, None).await;
+
+    let header = seen.lock().expect("header capture lock").clone();
+    assert_eq!(
+        header.as_deref(),
+        Some("Bearer wire-bearer-xyz"),
+        "the workload token must reach the issuer as an Authorization header"
+    );
 }
 /// Focused unit test on request construction: verify that DeviceKey mode
 /// sets invite_code = None while WorkloadTokenEnv mode uses the policy value.
