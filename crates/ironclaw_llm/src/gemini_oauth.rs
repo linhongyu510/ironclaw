@@ -1239,10 +1239,11 @@ impl GeminiOauthProvider {
         }
     }
 
-    fn build_streaming_http_request(
+    fn build_http_request(
         &self,
         original_request: &serde_json::Value,
         credential: &OAuthCredential,
+        streaming: bool,
     ) -> Result<(String, serde_json::Value, reqwest::header::HeaderMap), LlmError> {
         let (url, request_body, mut headers) = if self.uses_cloud_code_api() {
             let mut request_body = serde_json::json!({
@@ -1300,8 +1301,13 @@ impl GeminiOauthProvider {
         } else {
             let api_version =
                 std::env::var("GOOGLE_GENAI_API_VERSION").unwrap_or_else(|_| "v1beta".to_string());
+            let operation = if streaming {
+                "streamGenerateContent?alt=sse"
+            } else {
+                "generateContent"
+            };
             let url = format!(
-                "https://generativelanguage.googleapis.com/{api_version}/models/{}:streamGenerateContent?alt=sse",
+                "https://generativelanguage.googleapis.com/{api_version}/models/{}:{operation}",
                 self.config.model
             );
             let mut headers = reqwest::header::HeaderMap::new();
@@ -1341,11 +1347,13 @@ impl GeminiOauthProvider {
         };
 
         for (name, value) in parse_custom_headers() {
-            if let (Ok(name), Ok(value)) = (
+            if let (Ok(header_name), Ok(header_value)) = (
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()),
                 reqwest::header::HeaderValue::from_str(&value),
             ) {
-                headers.insert(name, value);
+                headers.insert(header_name, header_value);
+            } else {
+                warn!(header = %name, "Skipping invalid custom header");
             }
         }
         Ok((url, request_body, headers))
@@ -1366,7 +1374,7 @@ impl GeminiOauthProvider {
                     provider: "gemini_oauth".to_string(),
                 })?;
             let (url, request_body, headers) =
-                self.build_streaming_http_request(request, &credential)?;
+                self.build_http_request(request, &credential, true)?;
             let response = tokio::time::timeout(
                 self.stream_idle_timeout,
                 self.streaming_client
@@ -1435,6 +1443,8 @@ impl GeminiOauthProvider {
                 });
             }
             let aggregate = Self::aggregate_cloud_code_sse(&state.normalized_sse);
+            // silent-ok: caching `last_response_meta` is best-effort telemetry;
+            // a poisoned lock must not fail an otherwise-good streamed response.
             if let Ok(mut meta) = self.last_response_meta.lock() {
                 *meta = aggregate.meta;
             }
@@ -1462,146 +1472,8 @@ impl GeminiOauthProvider {
                     provider: "gemini_oauth".to_string(),
                 })?;
 
-            // Format is equivalent to the Google Generative Language API
-            // https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-            let (url, request_body, mut headers) = if self.uses_cloud_code_api() {
-                // Use Cloud Code API for new models
-                let url =
-                    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
-                        .to_string();
-                let mut req = serde_json::json!({
-                    "model": self.config.model,
-                    "request": original_request,
-                });
-                if let Some(ref pid) = credential.project_id {
-                    req["project"] = serde_json::Value::String(pid.clone());
-                }
-
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    "Content-Type",
-                    "application/json"
-                        .parse()
-                        .map_err(|_| LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: "invalid Content-Type header value".to_string(),
-                        })?,
-                );
-                headers.insert(
-                    "User-Agent",
-                    format!(
-                        "GeminiCLI-ironclaw/{}/{} ({}; {}; cli)",
-                        env!("CARGO_PKG_VERSION"),
-                        self.config.model,
-                        std::env::consts::OS,
-                        std::env::consts::ARCH,
-                    )
-                    .parse()
-                    .map_err(|_| LlmError::RequestFailed {
-                        provider: "gemini_oauth".to_string(),
-                        reason: "invalid User-Agent header value".to_string(),
-                    })?,
-                );
-                headers.insert(
-                    "X-Goog-Api-Client",
-                    GOOG_API_CLIENT
-                        .parse()
-                        .map_err(|_| LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: "invalid X-Goog-Api-Client header value".to_string(),
-                        })?,
-                );
-                headers.insert(
-                    "Client-Metadata",
-                    "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}"
-                        .parse()
-                        .map_err(|_| LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: "invalid Client-Metadata header value".to_string(),
-                        })?,
-                );
-                headers.insert(
-                    "Authorization",
-                    reqwest::header::HeaderValue::from_str(&format!(
-                        "Bearer {}",
-                        credential.access_token
-                    ))
-                    .map_err(|_| LlmError::AuthFailed {
-                        provider: "gemini_oauth".to_string(),
-                    })?,
-                );
-                (url, req, headers)
-            } else {
-                // Legacy / Standard fallback
-                // Respect GOOGLE_GENAI_API_VERSION env var (default: v1beta)
-                let api_version = std::env::var("GOOGLE_GENAI_API_VERSION")
-                    .unwrap_or_else(|_| "v1beta".to_string());
-                let url = format!(
-                    "https://generativelanguage.googleapis.com/{}/models/{}:generateContent",
-                    api_version, self.config.model
-                );
-
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    "Content-Type",
-                    "application/json"
-                        .parse()
-                        .map_err(|_| LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: "invalid Content-Type header value".to_string(),
-                        })?,
-                );
-
-                // Support GEMINI_API_KEY for non-OAuth auth + GEMINI_API_KEY_AUTH_MECHANISM
-                let api_key = std::env::var("GEMINI_API_KEY").ok();
-                let auth_mechanism = std::env::var("GEMINI_API_KEY_AUTH_MECHANISM")
-                    .unwrap_or_else(|_| "x-goog-api-key".to_string());
-
-                let (final_url, auth_header_name, auth_header_value) =
-                    if let Some(ref key) = api_key {
-                        if auth_mechanism == "bearer" {
-                            (url, "Authorization".to_string(), format!("Bearer {}", key))
-                        } else {
-                            // x-goog-api-key: append key as query param or header
-                            (url, "x-goog-api-key".to_string(), key.clone())
-                        }
-                    } else {
-                        (
-                            url,
-                            "Authorization".to_string(),
-                            format!("Bearer {}", credential.access_token),
-                        )
-                    };
-
-                headers.insert(
-                    reqwest::header::HeaderName::from_bytes(auth_header_name.as_bytes()).map_err(
-                        |_| LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: "invalid auth header name".to_string(),
-                        },
-                    )?,
-                    reqwest::header::HeaderValue::from_str(&auth_header_value).map_err(|_| {
-                        LlmError::AuthFailed {
-                            provider: "gemini_oauth".to_string(),
-                        }
-                    })?,
-                );
-
-                (final_url, original_request.clone(), headers)
-            };
-
-            // Inject custom headers from GEMINI_CLI_CUSTOM_HEADERS env var
-            let custom_headers = parse_custom_headers();
-            for (name, value) in &custom_headers {
-                if let (Ok(hname), Ok(hval)) = (
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                    reqwest::header::HeaderValue::from_str(value),
-                ) {
-                    headers.insert(hname, hval);
-                } else {
-                    warn!(header = %name, "Skipping invalid custom header");
-                }
-            }
+            let (url, request_body, headers) =
+                self.build_http_request(original_request, &credential, false)?;
 
             debug!(
                 url = %url,

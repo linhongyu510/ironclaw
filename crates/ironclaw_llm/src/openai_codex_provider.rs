@@ -177,10 +177,6 @@ impl OpenAiCodexProvider {
     }
 
     /// Send a request and parse the SSE response stream.
-    async fn send_request(&self, body: serde_json::Value) -> Result<ParsedResponse, LlmError> {
-        self.send_request_with_sink(body, None).await
-    }
-
     async fn send_request_with_sink(
         &self,
         body: serde_json::Value,
@@ -259,6 +255,74 @@ impl OpenAiCodexProvider {
             .map(|chunk| chunk.map_err(|error| error.to_string()));
         parse_sse_stream(stream, self.stream_idle_timeout, sink).await
     }
+
+    async fn complete_inner(
+        &self,
+        request: CompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(&messages, None);
+        let parsed = self.send_request_with_sink(body, sink).await?;
+
+        Ok(CompletionResponse {
+            content: parsed.text_content,
+            input_tokens: parsed.input_tokens,
+            output_tokens: parsed.output_tokens,
+            finish_reason: parsed.finish_reason,
+            reasoning: parsed.reasoning,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools_inner(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let name_map: std::collections::HashMap<String, String> = request
+            .tools
+            .iter()
+            .filter_map(|tool| {
+                let sanitized = sanitize_tool_name(&tool.name);
+                (sanitized != tool.name).then(|| (sanitized, tool.name.clone()))
+            })
+            .collect();
+        let body = self.build_request_body(&messages, Some(&request.tools));
+        let mut parsed = self.send_request_with_sink(body, sink).await?;
+
+        for tool_call in &mut parsed.tool_calls {
+            if let Some(original) = name_map.get(&tool_call.name) {
+                tool_call.name = original.clone();
+            }
+        }
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut parsed.tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
+        let finish_reason = if parsed.tool_calls.is_empty() {
+            parsed.finish_reason
+        } else {
+            FinishReason::ToolUse
+        };
+
+        Ok(ToolCompletionResponse {
+            content: (!parsed.text_content.is_empty()).then_some(parsed.text_content),
+            tool_calls: parsed.tool_calls,
+            input_tokens: parsed.input_tokens,
+            output_tokens: parsed.output_tokens,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: parsed.reasoning,
+            reasoning_details: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -280,20 +344,7 @@ impl LlmProvider for OpenAiCodexProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None);
-        let parsed = self.send_request(body).await?;
-
-        Ok(CompletionResponse {
-            content: parsed.text_content,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason: parsed.finish_reason,
-            reasoning: parsed.reasoning,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+        self.complete_inner(request, None).await
     }
 
     async fn complete_streaming(
@@ -301,88 +352,14 @@ impl LlmProvider for OpenAiCodexProvider {
         request: CompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None);
-        let parsed = self.send_request_with_sink(body, Some(sink)).await?;
-
-        Ok(CompletionResponse {
-            content: parsed.text_content,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason: parsed.finish_reason,
-            reasoning: parsed.reasoning,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+        self.complete_inner(request, Some(sink)).await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-
-        // Build a reverse map so we can translate sanitized names back to originals.
-        // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
-        let name_map: std::collections::HashMap<String, String> = request
-            .tools
-            .iter()
-            .filter_map(|t| {
-                let sanitized = sanitize_tool_name(&t.name);
-                if sanitized != t.name {
-                    Some((sanitized, t.name.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let body = self.build_request_body(&messages, Some(&request.tools));
-        let mut parsed = self.send_request(body).await?;
-
-        // Reverse-map sanitized tool names back to originals so the caller
-        // can look them up in the tool registry.
-        if !name_map.is_empty() {
-            for tc in &mut parsed.tool_calls {
-                if let Some(original) = name_map.get(&tc.name) {
-                    tc.name = original.clone();
-                }
-            }
-        }
-
-        // Strict-mode tool schemas advertise every optional as required+nullable,
-        // so the model fills unset optionals with `null` (or `""` for some codex
-        // models). Strip those placeholders against each tool's original schema so
-        // only provided values reach the tool.
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut parsed.tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason = if !parsed.tool_calls.is_empty() {
-            FinishReason::ToolUse
-        } else {
-            parsed.finish_reason
-        };
-
-        Ok(ToolCompletionResponse {
-            content: if parsed.text_content.is_empty() {
-                None
-            } else {
-                Some(parsed.text_content)
-            },
-            tool_calls: parsed.tool_calls,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: parsed.reasoning,
-            reasoning_details: None,
-        })
+        self.complete_with_tools_inner(request, None).await
     }
 
     async fn complete_with_tools_streaming(
@@ -390,53 +367,7 @@ impl LlmProvider for OpenAiCodexProvider {
         request: ToolCompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let name_map: std::collections::HashMap<String, String> = request
-            .tools
-            .iter()
-            .filter_map(|tool| {
-                let sanitized = sanitize_tool_name(&tool.name);
-                if sanitized != tool.name {
-                    Some((sanitized, tool.name.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let body = self.build_request_body(&messages, Some(&request.tools));
-        let mut parsed = self.send_request_with_sink(body, Some(sink)).await?;
-        if !name_map.is_empty() {
-            for tool_call in &mut parsed.tool_calls {
-                if let Some(original) = name_map.get(&tool_call.name) {
-                    tool_call.name = original.clone();
-                }
-            }
-        }
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut parsed.tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason = if parsed.tool_calls.is_empty() {
-            parsed.finish_reason
-        } else {
-            FinishReason::ToolUse
-        };
-
-        Ok(ToolCompletionResponse {
-            content: (!parsed.text_content.is_empty()).then_some(parsed.text_content),
-            tool_calls: parsed.tool_calls,
-            input_tokens: parsed.input_tokens,
-            output_tokens: parsed.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: parsed.reasoning,
-            reasoning_details: None,
-        })
+        self.complete_with_tools_inner(request, Some(sink)).await
     }
 
     /// Returns empty — Codex uses subscription-based access with a fixed model,

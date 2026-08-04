@@ -331,29 +331,31 @@ impl AnthropicOAuthProvider {
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<AnthropicStreamingResponse, LlmError> {
         let url = self.api_url();
-        let response = tokio::time::timeout(
-            self.stream_idle_timeout,
-            self.streaming_client
-                .post(&url)
-                .bearer_auth(self.current_token())
-                .header("anthropic-version", ANTHROPIC_API_VERSION)
-                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
-                .header("Content-Type", "application/json")
-                .json(body)
-                .send(),
-        )
-        .await
-        .map_err(|_| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
-            reason: format!(
-                "timed out waiting {}s for streaming response headers",
-                self.stream_idle_timeout.as_secs()
-            ),
-        })?
-        .map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
-            reason: e.to_string(),
-        })?;
+        let current_token = self.current_token();
+        let mut response = self
+            .send_streaming_http_request(&url, body, &current_token)
+            .await?;
+
+        if response.status().as_u16() == 401 {
+            drop(response);
+            // OAuth tokens from `claude login` expire in ~8-12h. Match the
+            // buffered request path by allowing Claude Code's asynchronous
+            // credential-store refresh to settle, then retry exactly once.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let Some(fresh) = refresh_claude_oauth_token() else {
+                return Err(LlmError::AuthFailed {
+                    provider: "anthropic_oauth".to_string(),
+                });
+            };
+            let fresh_token = SecretString::from(fresh);
+            response = self
+                .send_streaming_http_request(&url, body, fresh_token.expose_secret())
+                .await?;
+            if response.status().is_success() {
+                self.update_token(fresh_token);
+                tracing::info!("Anthropic OAuth token refreshed from credential store");
+            }
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -420,6 +422,37 @@ impl AnthropicOAuthProvider {
             });
         }
         streamed.finish()
+    }
+
+    async fn send_streaming_http_request(
+        &self,
+        url: &str,
+        body: &AnthropicRequest,
+        token: &str,
+    ) -> Result<reqwest::Response, LlmError> {
+        tokio::time::timeout(
+            self.stream_idle_timeout,
+            self.streaming_client
+                .post(url)
+                .bearer_auth(token)
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
+                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| LlmError::RequestFailed {
+            provider: "anthropic_oauth".to_string(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                self.stream_idle_timeout.as_secs()
+            ),
+        })?
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "anthropic_oauth".to_string(),
+            reason: e.to_string(),
+        })
     }
 }
 
@@ -1413,6 +1446,73 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_rejects_eof_without_terminal_event() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let body = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write streaming response");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-test",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let sink = Arc::new(RecordingSink::default());
+        let error = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                sink.clone(),
+            )
+            .await
+            .expect_err("unterminated stream must fail");
+        server.await.expect("loopback server");
+
+        assert!(matches!(
+            error,
+            LlmError::StreamInterrupted { provider, reason }
+                if provider == "anthropic_oauth"
+                    && reason == "stream ended before message_stop or a stop reason"
+        ));
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["partial"]
+        );
     }
 
     #[test]

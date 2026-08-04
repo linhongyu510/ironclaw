@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+use aws_sdk_bedrockruntime::operation::converse_stream::ConverseStreamError;
 use aws_sdk_bedrockruntime::types::{
     AnyToolChoice, AutoToolChoice, ContentBlock, ContentBlockDelta, ContentBlockStart,
     ConversationRole, ConverseStreamOutput, ImageBlock, ImageFormat, ImageSource,
@@ -110,7 +111,10 @@ impl BedrockProvider {
         }
 
         let mut output =
-            await_bedrock_stream_headers(self.stream_idle_timeout, builder.send()).await?;
+            await_bedrock_stream_headers(self.stream_idle_timeout, builder.send(), |error| {
+                map_converse_stream_sdk_error(model_id, error)
+            })
+            .await?;
         let mut parsed = BedrockStreamingResponse::default();
         loop {
             let received = tokio::time::timeout(self.stream_idle_timeout, output.stream.recv())
@@ -470,6 +474,7 @@ fn bedrock_stream_idle_timeout(timeout: Duration) -> LlmError {
 async fn await_bedrock_stream_headers<T, E>(
     timeout: Duration,
     send: impl std::future::Future<Output = Result<T, E>>,
+    map_error: impl FnOnce(&E) -> LlmError,
 ) -> Result<T, LlmError>
 where
     E: std::fmt::Display,
@@ -478,10 +483,7 @@ where
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
             tracing::warn!(error = %error, "Bedrock ConverseStream request failed");
-            Err(LlmError::RequestFailed {
-                provider: "bedrock".to_string(),
-                reason: "Bedrock ConverseStream request failed".to_string(),
-            })
+            Err(map_error(&error))
         }
         Err(_) => Err(LlmError::RequestFailed {
             provider: "bedrock".to_string(),
@@ -994,6 +996,101 @@ fn map_sdk_error<R: std::fmt::Debug>(
     }
 }
 
+/// Map ConverseStream setup errors to the same typed classifications as the
+/// buffered Converse path. These errors occur before event consumption begins.
+fn map_converse_stream_sdk_error<R: std::fmt::Debug>(
+    model_id: &str,
+    error: &aws_sdk_bedrockruntime::error::SdkError<ConverseStreamError, R>,
+) -> LlmError {
+    use aws_sdk_bedrockruntime::error::SdkError;
+
+    match error {
+        SdkError::ServiceError(service_err) => {
+            map_converse_stream_error(model_id, service_err.err())
+        }
+        SdkError::TimeoutError(_) => LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: "Request timed out".to_string(),
+        },
+        SdkError::DispatchFailure(error) => LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: format!("Connection error: {error:?}"),
+        },
+        _ => LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: format!("AWS SDK error: {error}"),
+        },
+    }
+}
+
+fn map_converse_stream_error(model_id: &str, error: &ConverseStreamError) -> LlmError {
+    let provider = "bedrock".to_string();
+    match error {
+        ConverseStreamError::ModelTimeoutException(error) => LlmError::RequestFailed {
+            provider,
+            reason: format!("Model timeout: {}", error.message().unwrap_or("unknown")),
+        },
+        ConverseStreamError::ModelNotReadyException(error) => LlmError::RequestFailed {
+            provider,
+            reason: format!("Model not ready: {}", error.message().unwrap_or("unknown")),
+        },
+        ConverseStreamError::ThrottlingException(_) => LlmError::RateLimited {
+            provider,
+            retry_after: None,
+        },
+        ConverseStreamError::ValidationException(error) => {
+            let reason = error.message().unwrap_or("unknown");
+            let mapped =
+                crate::error::map_provider_message_error("bedrock", model_id, reason.to_string());
+            if matches!(mapped, LlmError::ContextLengthExceeded { .. }) {
+                mapped
+            } else {
+                LlmError::InvalidRequest {
+                    provider,
+                    reason: format!("Validation error: {reason}"),
+                }
+            }
+        }
+        ConverseStreamError::AccessDeniedException(_) => LlmError::AuthFailed { provider },
+        ConverseStreamError::ResourceNotFoundException(_) => LlmError::ModelNotAvailable {
+            provider,
+            model: model_id.to_string(),
+        },
+        ConverseStreamError::ModelErrorException(error) => LlmError::InvalidResponse {
+            provider,
+            reason: format!(
+                "Model error (original status {}, resource {}): {}",
+                error
+                    .original_status_code()
+                    .map_or_else(|| "unknown".to_string(), |status| status.to_string()),
+                error.resource_name().unwrap_or(model_id),
+                error.message().unwrap_or("unknown")
+            ),
+        },
+        ConverseStreamError::InternalServerException(_) => LlmError::BadGateway {
+            provider,
+            status: 500,
+            retry_after: None,
+        },
+        ConverseStreamError::ServiceUnavailableException(_) => LlmError::BadGateway {
+            provider,
+            status: 503,
+            retry_after: None,
+        },
+        ConverseStreamError::ModelStreamErrorException(error) => LlmError::RequestFailed {
+            provider,
+            reason: format!(
+                "Bedrock model stream setup error: {}",
+                error.message().unwrap_or("unknown")
+            ),
+        },
+        _ => LlmError::RequestFailed {
+            provider,
+            reason: format!("Bedrock service error: {error}"),
+        },
+    }
+}
+
 fn map_converse_error(model_id: &str, error: &ConverseError) -> LlmError {
     let provider = "bedrock".to_string();
     match error {
@@ -1349,7 +1446,14 @@ mod tests {
     async fn response_header_wait_is_bounded_as_request_failure() {
         let pending_send = std::future::pending::<Result<(), std::io::Error>>();
 
-        match await_bedrock_stream_headers(Duration::ZERO, pending_send).await {
+        match await_bedrock_stream_headers(Duration::ZERO, pending_send, |_| {
+            LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "unexpected send error".to_string(),
+            }
+        })
+        .await
+        {
             Err(LlmError::RequestFailed { provider, reason }) => {
                 assert_eq!(provider, "bedrock");
                 assert_eq!(
@@ -1413,6 +1517,61 @@ mod tests {
             }
             other => panic!("expected rate limit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn converse_stream_errors_preserve_recovery_classifications() {
+        let throttled = ConverseStreamError::ThrottlingException(
+            ThrottlingException::builder()
+                .message("account request quota exceeded")
+                .build(),
+        );
+        assert!(matches!(
+            map_converse_stream_error(TEST_MODEL_ID, &throttled),
+            LlmError::RateLimited {
+                provider,
+                retry_after: None
+            } if provider == "bedrock"
+        ));
+
+        let overflow = ConverseStreamError::ValidationException(
+            ValidationException::builder()
+                .message(
+                    "maximum context length is 128000 tokens; messages resulted in 150000 tokens",
+                )
+                .build(),
+        );
+        assert!(matches!(
+            map_converse_stream_error(TEST_MODEL_ID, &overflow),
+            LlmError::ContextLengthExceeded {
+                used: 150_000,
+                limit: 128_000
+            }
+        ));
+
+        let denied = ConverseStreamError::AccessDeniedException(
+            AccessDeniedException::builder()
+                .message("principal lacks bedrock:InvokeModel")
+                .build(),
+        );
+        assert!(matches!(
+            map_converse_stream_error(TEST_MODEL_ID, &denied),
+            LlmError::AuthFailed { provider } if provider == "bedrock"
+        ));
+
+        let unavailable = ConverseStreamError::ServiceUnavailableException(
+            ServiceUnavailableException::builder()
+                .message("service unavailable")
+                .build(),
+        );
+        assert!(matches!(
+            map_converse_stream_error(TEST_MODEL_ID, &unavailable),
+            LlmError::BadGateway {
+                provider,
+                status: 503,
+                retry_after: None
+            } if provider == "bedrock"
+        ));
     }
 
     #[test]

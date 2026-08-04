@@ -1735,6 +1735,9 @@ mod tests {
         deltas: Vec<&'static str>,
         fail_after_deltas: bool,
         calls: AtomicU32,
+        completion_requests: Mutex<Vec<CompletionRequest>>,
+        tool_requests: Mutex<Vec<ToolCompletionRequest>>,
+        sinks: Mutex<Vec<Arc<dyn CompletionStreamSink>>>,
     }
 
     impl StreamingStubLlm {
@@ -1749,6 +1752,9 @@ mod tests {
                 deltas,
                 fail_after_deltas: false,
                 calls: AtomicU32::new(0),
+                completion_requests: Mutex::new(Vec::new()),
+                tool_requests: Mutex::new(Vec::new()),
+                sinks: Mutex::new(Vec::new()),
             }
         }
 
@@ -1793,10 +1799,18 @@ mod tests {
 
         async fn complete_streaming(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
             sink: Arc<dyn CompletionStreamSink>,
         ) -> Result<CompletionResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
+            self.completion_requests
+                .lock()
+                .expect("completion requests lock")
+                .push(request);
+            self.sinks
+                .lock()
+                .expect("stream sinks lock")
+                .push(Arc::clone(&sink));
             for delta in &self.deltas {
                 sink.text_delta((*delta).to_string()).await;
             }
@@ -1814,6 +1828,36 @@ mod tests {
             _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
             panic!("streaming routing test must not use complete_with_tools()")
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.tool_requests
+                .lock()
+                .expect("tool requests lock")
+                .push(request);
+            self.sinks
+                .lock()
+                .expect("stream sinks lock")
+                .push(Arc::clone(&sink));
+            for delta in &self.deltas {
+                sink.text_delta((*delta).to_string()).await;
+            }
+            Ok(ToolCompletionResponse {
+                content: Some(self.response.to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: crate::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
         }
     }
 
@@ -2023,6 +2067,161 @@ mod tests {
         assert_eq!(primary.calls(), 0);
 
         let stats = router.stats();
+        assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn simple_streaming_forwards_request_and_sink_to_cheap() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "cheap response",
+            vec!["cheap response"],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let mut request = make_request("hello").with_model("requested-model");
+        request.max_tokens = Some(321);
+        request.metadata.insert("trace".into(), "simple".into());
+        let sink_impl = Arc::new(AppendOnlyStreamSink::default());
+        let sink: Arc<dyn CompletionStreamSink> = sink_impl.clone();
+
+        let response = router
+            .complete_streaming(request, Arc::clone(&sink))
+            .await
+            .expect("cheap stream should succeed");
+
+        assert_eq!(response.content, "cheap response");
+        assert_eq!(
+            sink_impl.text.lock().expect("sink text lock").as_str(),
+            "cheap response"
+        );
+        assert_eq!(primary.calls(), 0);
+        assert_eq!(cheap.calls(), 1);
+        let requests = cheap
+            .completion_requests
+            .lock()
+            .expect("completion requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages.len(), 1);
+        assert_eq!(requests[0].messages[0].content, "hello");
+        assert_eq!(requests[0].model.as_deref(), Some("requested-model"));
+        assert_eq!(requests[0].max_tokens, Some(321));
+        assert_eq!(
+            requests[0].metadata.get("trace").map(String::as_str),
+            Some("simple")
+        );
+        let sinks = cheap.sinks.lock().expect("stream sinks lock");
+        assert_eq!(sinks.len(), 1);
+        assert!(Arc::ptr_eq(&sinks[0], &sink));
+        let stats = router.stats();
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.cheap_requests, 1);
+        assert_eq!(stats.primary_requests, 0);
+        assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn complex_streaming_forwards_request_and_sink_to_primary() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "cheap response",
+            vec!["cheap response"],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let mut request = make_request("Please do a security audit of this smart contract");
+        request.temperature = Some(0.25);
+        request.metadata.insert("trace".into(), "complex".into());
+        let sink_impl = Arc::new(AppendOnlyStreamSink::default());
+        let sink: Arc<dyn CompletionStreamSink> = sink_impl.clone();
+
+        let response = router
+            .complete_streaming(request, Arc::clone(&sink))
+            .await
+            .expect("primary stream should succeed");
+
+        assert_eq!(response.content, "primary response");
+        assert_eq!(cheap.calls(), 0);
+        assert_eq!(primary.calls(), 1);
+        let requests = primary
+            .completion_requests
+            .lock()
+            .expect("completion requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].messages[0].content,
+            "Please do a security audit of this smart contract"
+        );
+        assert_eq!(requests[0].temperature, Some(0.25));
+        assert_eq!(
+            requests[0].metadata.get("trace").map(String::as_str),
+            Some("complex")
+        );
+        let sinks = primary.sinks.lock().expect("stream sinks lock");
+        assert_eq!(sinks.len(), 1);
+        assert!(Arc::ptr_eq(&sinks[0], &sink));
+        let stats = router.stats();
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.cheap_requests, 0);
+        assert_eq!(stats.primary_requests, 1);
+        assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_forwards_request_and_sink_to_primary() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "tool response",
+            vec!["tool response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "cheap response",
+            vec!["cheap response"],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let mut request = make_tool_request()
+            .with_model("tool-model")
+            .with_max_tokens(654);
+        request.tool_choice = Some("required".to_string());
+        request.metadata.insert("trace".into(), "tool".into());
+        let sink_impl = Arc::new(AppendOnlyStreamSink::default());
+        let sink: Arc<dyn CompletionStreamSink> = sink_impl.clone();
+
+        let response = router
+            .complete_with_tools_streaming(request, Arc::clone(&sink))
+            .await
+            .expect("primary tool stream should succeed");
+
+        assert_eq!(response.content.as_deref(), Some("tool response"));
+        assert_eq!(cheap.calls(), 0);
+        assert_eq!(primary.calls(), 1);
+        let requests = primary.tool_requests.lock().expect("tool requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages[0].content, "implement a search");
+        assert!(requests[0].tools.is_empty());
+        assert_eq!(requests[0].model.as_deref(), Some("tool-model"));
+        assert_eq!(requests[0].max_tokens, Some(654));
+        assert_eq!(requests[0].tool_choice.as_deref(), Some("required"));
+        assert_eq!(
+            requests[0].metadata.get("trace").map(String::as_str),
+            Some("tool")
+        );
+        let sinks = primary.sinks.lock().expect("stream sinks lock");
+        assert_eq!(sinks.len(), 1);
+        assert!(Arc::ptr_eq(&sinks[0], &sink));
+        let stats = router.stats();
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.cheap_requests, 0);
+        assert_eq!(stats.primary_requests, 1);
         assert_eq!(stats.cascade_escalations, 0);
     }
 

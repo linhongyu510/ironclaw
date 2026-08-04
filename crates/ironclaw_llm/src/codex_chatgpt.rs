@@ -543,10 +543,6 @@ impl CodexChatGptProvider {
     ///
     /// On HTTP 401, if a refresh token is available, attempts to refresh
     /// the access token and retry the request once.
-    async fn send_request(&self, body: Value) -> Result<ResponsesResult, LlmError> {
-        self.send_request_with_sink(body, None).await
-    }
-
     async fn send_request_with_sink(
         &self,
         body: Value,
@@ -1157,6 +1153,87 @@ impl CodexChatGptProvider {
             }
         }
     }
+
+    async fn complete_inner(
+        &self,
+        request: CompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model = self.resolve_model().await;
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(model, &messages, &[], None);
+        let result = self.send_request_with_sink(body, sink).await?;
+
+        Ok(CompletionResponse {
+            content: result.text,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools_inner(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let name_map = build_sanitized_tool_name_map(&request.tools)?;
+        let model = self.resolve_model().await;
+        let body = self.build_request_body(
+            model,
+            &messages,
+            &request.tools,
+            request.tool_choice.as_deref(),
+        );
+        let result = self.send_request_with_sink(body, sink).await?;
+
+        let mut tool_calls: Vec<ToolCall> = result
+            .pending_tool_calls
+            .into_values()
+            .map(|tool_call| {
+                let returned_name = tool_call.name;
+                let name = name_map
+                    .get(&returned_name)
+                    .cloned()
+                    .unwrap_or(returned_name);
+                let arguments = serde_json::from_str(&tool_call.arguments)
+                    .unwrap_or_else(|_| json!(tool_call.arguments));
+                ToolCall {
+                    id: tool_call.call_id,
+                    name,
+                    arguments,
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                }
+            })
+            .collect();
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
+        let finish_reason =
+            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
+
+        Ok(ToolCompletionResponse {
+            content: (!result.text.is_empty()).then_some(result.text),
+            tool_calls,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            reasoning_details: None,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1202,21 +1279,7 @@ impl LlmProvider for CodexChatGptProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = self.resolve_model().await;
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(model, &messages, &[], None);
-        let result = self.send_request(body).await?;
-
-        Ok(CompletionResponse {
-            content: result.text,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+        self.complete_inner(request, None).await
     }
 
     async fn complete_streaming(
@@ -1224,88 +1287,14 @@ impl LlmProvider for CodexChatGptProvider {
         request: CompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
-        let model = self.resolve_model().await;
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(model, &messages, &[], None);
-        let result = self.send_request_with_sink(body, Some(sink)).await?;
-
-        Ok(CompletionResponse {
-            content: result.text,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+        self.complete_inner(request, Some(sink)).await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let name_map = build_sanitized_tool_name_map(&request.tools)?;
-        let model = self.resolve_model().await;
-        let body = self.build_request_body(
-            model,
-            &messages,
-            &request.tools,
-            request.tool_choice.as_deref(),
-        );
-        let result = self.send_request(body).await?;
-
-        let mut tool_calls: Vec<ToolCall> = result
-            .pending_tool_calls
-            .into_values()
-            .map(|tc| {
-                let returned_name = tc.name;
-                let name = name_map
-                    .get(&returned_name)
-                    .cloned()
-                    .unwrap_or(returned_name);
-                let args: Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
-                ToolCall {
-                    id: tc.call_id,
-                    name,
-                    arguments: args,
-                    reasoning: None,
-                    signature: None,
-                    arguments_parse_error: None,
-                }
-            })
-            .collect();
-        // Strict-mode tool schemas advertise every optional as required+nullable,
-        // so the model fills unset optionals with `null` (or `""` for some codex
-        // models). Strip those placeholders against each tool's original schema
-        // so only genuinely-provided values reach the tool.
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason =
-            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
-
-        Ok(ToolCompletionResponse {
-            content: if result.text.is_empty() {
-                None
-            } else {
-                Some(result.text)
-            },
-            tool_calls,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            reasoning_details: None,
-        })
+        self.complete_with_tools_inner(request, None).await
     }
 
     async fn complete_with_tools_streaming(
@@ -1313,63 +1302,7 @@ impl LlmProvider for CodexChatGptProvider {
         request: ToolCompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let name_map = build_sanitized_tool_name_map(&request.tools)?;
-        let model = self.resolve_model().await;
-        let body = self.build_request_body(
-            model,
-            &messages,
-            &request.tools,
-            request.tool_choice.as_deref(),
-        );
-        let result = self.send_request_with_sink(body, Some(sink)).await?;
-
-        let mut tool_calls: Vec<ToolCall> = result
-            .pending_tool_calls
-            .into_values()
-            .map(|tc| {
-                let returned_name = tc.name;
-                let name = name_map
-                    .get(&returned_name)
-                    .cloned()
-                    .unwrap_or(returned_name);
-                let args: Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
-                ToolCall {
-                    id: tc.call_id,
-                    name,
-                    arguments: args,
-                    reasoning: None,
-                    signature: None,
-                    arguments_parse_error: None,
-                }
-            })
-            .collect();
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason =
-            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
-
-        Ok(ToolCompletionResponse {
-            content: if result.text.is_empty() {
-                None
-            } else {
-                Some(result.text)
-            },
-            tool_calls,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            reasoning_details: None,
-        })
+        self.complete_with_tools_inner(request, Some(sink)).await
     }
 }
 
