@@ -15,6 +15,14 @@
 - Backend selection/composition: `RebornEventStoreConfig`, `RebornProfile`, `RebornEventStores`, `RebornEventStoreError`.
 - Concrete durable-log backends implementing the `ironclaw_events` `DurableEventLog`/`DurableAuditLog` traits: filesystem (`FilesystemDurableEventLog`, `FilesystemDurableAuditLog`), JSONL (`JsonlDurableEventLog`, `JsonlDurableAuditLog`), The crate declares **no cargo features** and has no per-backend `LibSql*`/`Postgres*` log impls — those were removed; libSQL/Postgres dispatch happens one layer down, at `RootFilesystem` (see `src/lib.rs`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- The PostgreSQL TLS/driver cone (`deadpool-postgres`, `tokio-postgres-rustls`)
+  — but **not** in the public API. `open_postgres_pool_with_tls_options` returns
+  `ironclaw_filesystem::PostgresConnectionPool`, and
+  `RebornEventStoreConfig::PostgresPool` carries it, so no caller has to name
+  `deadpool_postgres` (PROPOSAL §6.3.2). The driver type may only appear inside
+  the private `postgres_backed` module;
+  `reborn_persistence_driver_boundary.rs::event_store_names_the_driver_only_inside_its_private_backend_module`
+  fails if it moves above that module.
 
 ## Do Not Move In Here
 
@@ -25,6 +33,7 @@
 
 - Fast local check: `cargo test -p ironclaw_reborn_event_store`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Driver-boundary check: `cargo test -p ironclaw_architecture --test reborn_persistence_driver_boundary`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes
