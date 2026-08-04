@@ -9,9 +9,18 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
@@ -20,10 +29,8 @@ use ironclaw_processes::{
 use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::SecretStore;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnRunState,
 };
 use secrecy::SecretString;
 use std::sync::Mutex;
@@ -85,11 +92,12 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-error").unwrap(), // safety: fixed test binding literal is valid.
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
+        gate_ref: Some(TurnGateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
@@ -203,7 +211,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let gate_ref = ironclaw_turns::GateRef::new("gate:auth-callback").unwrap();
+    let gate_ref = ironclaw_host_api::turn::TurnGateRef::new("gate:auth-callback").unwrap();
     suspend_auth_process(
         runtime_surfaces.processes.transitions(),
         &scope,
@@ -216,10 +224,12 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
     let flow = product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: auth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -335,15 +345,15 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -380,15 +390,15 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -518,21 +528,22 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
     let egress = Arc::new(RecordingOAuthEgress::ok(
         br#"{"access_token":"vendor-access","refresh_token":"vendor-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
     ));
-    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
-        "method": "oauth2_code",
-        "display_name": "Vendor account",
-        "authorization_endpoint": "https://mcp.vendorco.example/authorize",
-        "token_endpoint": "https://mcp.vendorco.example/token",
-        "scopes": ["workspace"],
-        "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
-        "token_response": {
-            "access_token": "/access_token",
-            "refresh_token": "/refresh_token",
-            "expires_in": "/expires_in",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-    }))
-    .expect("vendor recipe parses");
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
+        serde_json::from_value(serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": "Vendor account",
+            "authorization_endpoint": "https://mcp.vendorco.example/authorize",
+            "token_endpoint": "https://mcp.vendorco.example/token",
+            "scopes": ["workspace"],
+            "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
+            "token_response": {
+                "access_token": "/access_token",
+                "refresh_token": "/refresh_token",
+                "expires_in": "/expires_in",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+        }))
+        .expect("vendor recipe parses");
 
     #[derive(Debug)]
     struct StaticTestCredentials;
@@ -542,7 +553,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
         {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
@@ -559,6 +570,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
                     vendor: "vendorco".to_string(),
                     recipe,
                     token_exchange_resource: Some("https://mcp.vendorco.example/mcp".to_string()),
+                    protected_resource_metadata_url: None,
                 },
             ])),
             client_credentials: Arc::new(StaticTestCredentials),
@@ -841,13 +853,18 @@ async fn submit_and_block_provider_auth_run(
         transition,
         &scope,
         run_id,
-        GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
-        vec![ironclaw_host_api::RuntimeCredentialAuthRequirement {
-            provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ironclaw_host_api::ExtensionId::new(requester_extension).unwrap(),
-            provider_scopes: Vec::new(),
-        }],
+        TurnGateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
+        vec![
+            ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
+                provider: ironclaw_host_api::ids::VendorId::new(provider).unwrap(),
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: Vec::new(),
+                },
+                requester_extension: ironclaw_host_api::ids::ExtensionId::new(requester_extension)
+                    .unwrap(),
+                provider_scopes: Vec::new(),
+            },
+        ],
     )
     .await;
     run_id
@@ -857,8 +874,8 @@ async fn suspend_auth_process(
     transition: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     scope: &TurnScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
-    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    gate_ref: TurnGateRef,
+    credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let worker_id = ProcessWorkerId::from_trusted(format!("auth-test-{run_id}"));
     let claimed = transition
@@ -884,7 +901,7 @@ async fn suspend_auth_process(
             worker_id,
             lease_token: claimed.lease_token,
             checkpoint_ref: ProcessCheckpointRef::from_trusted(
-                ironclaw_turns::TurnCheckpointId::new()
+                ironclaw_host_api::turn::TurnCheckpointId::new()
                     .as_uuid()
                     .to_string(),
             ),
@@ -955,7 +972,7 @@ async fn submit_and_block_auth_run(
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
-) -> ironclaw_turns::TurnRunId {
+) -> ironclaw_host_api::turn::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
@@ -980,7 +997,7 @@ async fn submit_and_block_auth_run(
         runtime_surfaces.processes.transitions(),
         &scope,
         run_id,
-        ironclaw_turns::GateRef::new(gate_ref).unwrap(),
+        ironclaw_host_api::turn::TurnGateRef::new(gate_ref).unwrap(),
         Vec::new(),
     )
     .await;
@@ -1005,10 +1022,12 @@ async fn create_provider_flow(
     product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider,
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -1032,10 +1051,12 @@ async fn create_vendor_flow(
     match product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: vendor_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://mcp.vendorco.example/authorize"),
                 expires_at: Utc::now() + Duration::minutes(5),

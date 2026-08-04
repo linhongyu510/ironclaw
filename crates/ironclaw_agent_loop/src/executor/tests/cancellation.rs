@@ -287,11 +287,19 @@ async fn steering_drain_acks_only_after_cursor_checkpoint_is_durable() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
     );
+    // The drain stage checkpoints the advanced input cursor and acks
+    // immediately, BEFORE this iteration's prompt bundle is built — the ack is
+    // what flips the queued transcript row model-visible, so an ack deferred
+    // past the prompt build would feed the model a prompt without the drained
+    // message. The two pinned invariants are: no ack before a durable cursor
+    // checkpoint, and no prompt build before the ack.
     assert_eq!(
         host.events(),
         vec![
             "checkpoint:before_model".to_string(),
             "ack_inputs".to_string(),
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
             "checkpoint:final".to_string(),
         ]
     );
@@ -328,9 +336,16 @@ async fn cancellation_after_steering_drain_flushes_pending_input_ack() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-user-before-cancel").expect("valid")]
     );
+    // The drained input is acked eagerly by the drain stage (after its durable
+    // cursor checkpoint); the cancellation observed right after still exits
+    // with the ack already flushed rather than dropping it.
     assert_eq!(
         host.events(),
-        vec!["checkpoint:final".to_string(), "ack_inputs".to_string()]
+        vec![
+            "checkpoint:before_model".to_string(),
+            "ack_inputs".to_string(),
+            "checkpoint:final".to_string(),
+        ]
     );
 }
 
@@ -451,12 +466,17 @@ async fn cancellation_after_followup_drain_flushes_pending_input_ack() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-followup-before-cancel").expect("valid")]
     );
+    // The follow-up drain acks eagerly after its own durable cursor
+    // checkpoint (second before_model event), so by the time the post-drain
+    // cancellation check exits, the ack is already flushed.
     assert_eq!(
         host.events(),
         vec![
+            "build_prompt_bundle".to_string(),
             "checkpoint:before_model".to_string(),
-            "checkpoint:final".to_string(),
+            "checkpoint:before_model".to_string(),
             "ack_inputs".to_string(),
+            "checkpoint:final".to_string(),
         ]
     );
 }
@@ -476,6 +496,29 @@ async fn model_cancelled_returns_cancelled_without_retry() {
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
     assert_eq!(host.model_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn transcript_finalize_cancelled_propagates_cancelled_without_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .fail_transcript_with(AgentLoopHostErrorKind::Cancelled);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "transcript cancellation must not trigger another model call"
+    );
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "a cancelled transcript write must not fabricate a finalized reply"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -539,7 +582,7 @@ async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
 #[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::Cancelled,
                 "capability cancelled".to_string(),
@@ -668,11 +711,11 @@ async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call(
 async fn cancellation_after_capability_batch_preserves_completed_result() {
     let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed before cancellation".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,

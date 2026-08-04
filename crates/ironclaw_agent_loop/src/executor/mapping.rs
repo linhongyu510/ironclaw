@@ -1,10 +1,12 @@
-use ironclaw_host_api::{FailureKind, Resolution, ToolVerdict};
-use ironclaw_turns::{
-    LoopBlockedKind, SanitizedFailure,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
-        LoopGateKind, LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
-    },
+use ironclaw_host_api::turn::SanitizedFailure;
+use ironclaw_host_api::{
+    resolution::{Resolution, ToolVerdict},
+    result_meta::FailureKind,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopBlockedKind,
+    LoopCheckpointKind, LoopGateKind, LoopRecoveryClass, LoopSafeSummary,
+    sanitize_model_visible_text,
 };
 
 use crate::{
@@ -78,7 +80,7 @@ pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, 
 
 pub(super) fn model_preference_to_host(
     preference: ModelPreference,
-) -> Result<(Option<ironclaw_turns::ModelProfileId>, u32), AgentLoopExecutorError> {
+) -> Result<(Option<ironclaw_loop_contracts::ModelProfileId>, u32), AgentLoopExecutorError> {
     match preference {
         ModelPreference::Primary => Ok((None, 0)),
         ModelPreference::Fallback { index } if index > 0 => Ok((None, index)),
@@ -116,7 +118,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // kind + reason_kind (`model_credits_exhausted` vs
         // `model_credentials_unavailable`); classifying here would lose the
         // reason_kind distinction. See
-        // `ironclaw_runner::model_failure_mapping::model_stage_failure_category`.
+        // `ironclaw_runner::model_failure_mapping::host_stage_failure_category`.
         AgentLoopHostErrorKind::CredentialUnavailable => None,
         // Model-fixable by rebuild: the request was built against a stale
         // surface or prompt bundle (surface refreshed mid-iteration, host
@@ -210,6 +212,9 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
+    if error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
+        return transcript_host_error(error);
+    }
     // Fail soft on a malformed summary: a summary that fails strict validation
     // (e.g. contains `/`, `{`) must NOT bork the run. Degrade to a canned
     // fallback and carry the real cause on the model-visible detail channel so
@@ -242,6 +247,40 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
         safe_summary,
         reason_kind: error.reason_kind,
         detail,
+    }
+}
+
+/// Preserve the typed transcript-write cause without exposing backend detail.
+///
+/// Another model output would cross the same failed durability boundary, so
+/// remediation is derived from the terminal category rather than model
+/// inference.
+pub(super) fn transcript_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+    let error = error.sanitize_transcript_write_failure();
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                kind = error.kind.as_str(),
+                validation_error = %validation_error,
+                "transcript host error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::assistant_transcript_write_failed(),
+                Some(sanitize_model_visible_text(raw_summary)),
+            )
+        }
+    };
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+        stage: HostStage::Transcript,
+        kind: error.kind,
+        safe_summary,
+        reason_kind: error.reason_kind,
+        detail: error.detail.or(rejected_summary_detail),
     }
 }
 
@@ -378,7 +417,7 @@ mod tests {
     #[test]
     fn invalid_capability_input_is_model_error_not_protocol_failure() {
         use crate::strategies::capability_error_to_failure_kind;
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::InputEncode),
@@ -406,7 +445,7 @@ mod tests {
     #[test]
     fn protocol_and_policy_failure_kinds_remain_distinct() {
         use crate::strategies::capability_error_to_failure_kind;
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::OutputDecode),
@@ -435,7 +474,7 @@ mod tests {
     ///   sole Terminal-fated kind.
     #[test]
     fn every_failure_kind_has_a_deliberate_failure_category() {
-        use ironclaw_host_api::FailureFate;
+        use ironclaw_host_api::result_meta::FailureFate;
 
         const ALL_CATEGORIES: [&str; 7] = [
             "capability_transient",
@@ -592,6 +631,72 @@ mod tests {
         assert_eq!(
             model_error_class(&error),
             Some(ModelErrorClass::InvalidOutput)
+        );
+    }
+
+    #[test]
+    fn capability_result_transcript_failure_uses_terminal_transcript_lane() {
+        let mapped = capability_host_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                "raw tool result",
+            )
+            .with_detail("storage credential sk-secret"),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+                safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+                reason_kind: None,
+                detail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn non_transcript_finalization_error_preserves_its_sanitized_diagnostics() {
+        let mapped = transcript_host_error(
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "thread scope did not match",
+            )
+            .with_detail("expected tenant scope"),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::ScopeMismatch,
+                safe_summary: LoopSafeSummary::new("thread scope did not match").expect("safe"),
+                reason_kind: None,
+                detail: Some("expected tenant scope".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_transcript_stage_summary_uses_transcript_specific_fallback() {
+        let mapped = transcript_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "invalid\0summary",
+        ));
+
+        let AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage,
+            safe_summary,
+            ..
+        } = mapped
+        else {
+            panic!("transcript host error must retain diagnostic structure");
+        };
+        assert_eq!(stage, HostStage::Transcript);
+        assert_eq!(
+            safe_summary,
+            LoopSafeSummary::assistant_transcript_write_failed()
         );
     }
 }

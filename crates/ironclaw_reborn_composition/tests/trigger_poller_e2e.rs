@@ -15,17 +15,29 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
+use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
-    AdapterInstallationId as ProductAdapterInstallationId, AgentId, CapabilityGrant,
-    CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ProviderToolName, ResourceEstimate,
-    RunId, RuntimeKind, TenantId, TrustClass, UserId,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId, TenantId,
+        UserId,
+    },
+    mount::MountView,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -43,15 +55,11 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput, RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
     TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
     TriggerSourceKind, TriggerState,
-};
-use ironclaw_turns::run_profile::{
-    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
@@ -753,8 +761,12 @@ async fn pair_trigger_creator(runtime: &RebornRuntime) {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("valid adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("valid trigger installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, USER)
-                .expect("valid trigger actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                USER,
+                None::<String>,
+            )
+            .expect("valid trigger actor ref"),
             UserId::new(USER).expect("valid user id"),
         )
         .await
@@ -1003,8 +1015,12 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -1539,8 +1555,12 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -1763,8 +1783,12 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await

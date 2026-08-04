@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
-use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
@@ -23,23 +23,23 @@ pub struct ThreadScope {
 }
 
 impl ThreadScope {
-    /// Convert into a [`ironclaw_host_api::ResourceScope`] suitable for the
+    /// Convert into a [`ironclaw_host_api::resource::ResourceScope`] suitable for the
     /// per-tenant filesystem resolver. `user_id` falls back to a per-thread
     /// system-tenant slot when `owner_user_id` is absent (system-scoped
     /// thread infrastructure that has no owning user).
-    pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
-        ironclaw_host_api::ResourceScope {
+    pub fn to_resource_scope(&self) -> ironclaw_host_api::resource::ResourceScope {
+        ironclaw_host_api::resource::ResourceScope {
             tenant_id: self.tenant_id.clone(),
             user_id: self.owner_user_id.clone().unwrap_or_else(|| {
-                ironclaw_host_api::UserId::from_trusted(
-                    ironclaw_host_api::SYSTEM_RESERVED_ID.to_string(),
+                ironclaw_host_api::ids::UserId::from_trusted(
+                    ironclaw_host_api::resource::SYSTEM_RESERVED_ID.to_string(),
                 )
             }),
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
             mission_id: self.mission_id.clone(),
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         }
     }
 }
@@ -159,6 +159,9 @@ pub enum MessageKind {
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
     Accepted,
+    /// Message is accepted and queued for an active run to consume at the next
+    /// steering/input boundary.
+    Queued,
     Submitted,
     /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
     /// The user must resend the message once the current task finishes.
@@ -528,6 +531,14 @@ pub struct ThreadHistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessageRangeRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -574,6 +585,18 @@ pub struct ThreadHistory {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedThreadMessages {
+    Complete(Box<BoundedThreadMessageSnapshot>),
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessageSnapshot {
+    pub history: ThreadMessageRange,
+    pub context: ContextMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,6 +703,30 @@ pub struct CreateSummaryArtifactRequest {
 pub struct UpdateThreadGoalRequest {
     pub thread_id: ThreadId,
     pub goal: ThreadGoal,
+}
+
+/// Whether `append_assistant_draft` / `append_finalized_assistant_message`
+/// should reuse an existing assistant row for the same run instead of starting
+/// a sibling. Retries of the same draft/final content reuse the record (and
+/// redacted/deleted rows are never resurrected); a DIFFERENT finalized reply
+/// starts a sibling — a steered run replies more than once. Reuse identity for
+/// a finalized row is the full persisted payload — text AND attachment refs —
+/// because attachments are stored beside `content`; matching on text alone
+/// would return the old row and silently drop a retry's new attachment set.
+/// Shared by both backends so the dedup policy cannot drift.
+pub(crate) fn should_reuse_assistant_run_message(
+    message: &ThreadMessageRecord,
+    requested_content: &str,
+    requested_attachments: &[AttachmentRef],
+) -> bool {
+    match message.status {
+        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
+        MessageStatus::Finalized => {
+            message.content.as_deref() == Some(requested_content)
+                && message.attachments.as_slice() == requested_attachments
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -850,6 +897,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
             AttachmentKind::Document
+        );
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Video).unwrap(),
+            r#""video""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""other""#).unwrap(),
+            AttachmentKind::Other
         );
     }
 

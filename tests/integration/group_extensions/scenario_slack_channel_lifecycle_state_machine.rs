@@ -51,7 +51,7 @@
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_auth::OAuthProviderIdentity;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_secrets::SecretMaterial;
 use serde_json::json;
@@ -64,7 +64,7 @@ const SLACK_OAUTH_CLIENT_ID: &str = "slack-oauth-client";
 const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
-/// (`crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`):
+/// (`crates/extensions/packages/slack/manifest.toml`):
 /// read scopes shared by every tool plus `chat:write` for `send_message`.
 const SLACK_SCOPES: &[&str] = &[
     "search:read",
@@ -111,7 +111,7 @@ async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> Harne
     let channel_config = services
         .channel_config_service()
         .ok_or("composed runtime must expose the channel-config configure port")?;
-    let slack_id = ironclaw_host_api::ExtensionId::new("slack")
+    let slack_id = ironclaw_host_api::ids::ExtensionId::new("slack")
         .map_err(|error| format!("slack extension id: {error}"))?;
     channel_config
         .save_values(

@@ -18,17 +18,23 @@ use ironclaw_extension_host::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
     FirstPartyRegistrarContext, ProductAuthProviderRuntimePorts,
 };
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_support::{
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
     GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
     find_gsuite_capability, gsuite_google_account_visible_to_requester, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostApiError, NetworkScheme, NetworkTargetPattern,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
 };
 
 /// Installs the GSuite first-party capability handlers into the shared registry.
@@ -279,7 +285,7 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_first_party_extensions::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
+    use ironclaw_extension_support::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
     use ironclaw_reborn_composition::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, RuntimeDispatchErrorKind, Timestamp,

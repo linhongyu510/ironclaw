@@ -169,7 +169,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
 ];
 
 /// Bundled first-party extension asset directories under
-/// `crates/ironclaw_first_party_extensions/assets/`, parsed by
+/// `crates/extensions/packages/`, parsed by
 /// [`bundled_extension_manifest_capability_ids`]. Excludes `github` (parsed
 /// separately by `github::capability_ids()`, which this list intentionally
 /// does not duplicate).
@@ -194,11 +194,11 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
 /// hand-transcribed test-only id list like `BUNDLED_EXTENSION_CAPABILITY_IDS`
 /// above.
 pub fn bundled_extension_manifest_capability_ids()
--> Result<Vec<ironclaw_host_api::CapabilityId>, Box<dyn std::error::Error + Send + Sync>> {
+-> Result<Vec<ironclaw_host_api::ids::CapabilityId>, Box<dyn std::error::Error + Send + Sync>> {
     let mut registry = ironclaw_extensions::ExtensionRegistry::new();
     for dir_name in BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS {
         let asset_root = repo_root()
-            .join("crates/ironclaw_first_party_extensions/assets")
+            .join("crates/extensions/packages")
             .join(dir_name);
         // Parse through the single record entry point (the bundled assets
         // are manifest v3 documents since the first-party rewrite).
@@ -219,7 +219,9 @@ pub fn bundled_extension_manifest_capability_ids()
         let extension_id = manifest.id.as_str().to_string();
         let package = ironclaw_extensions::ExtensionPackage::from_manifest(
             manifest,
-            ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{extension_id}"))?,
+            ironclaw_host_api::path::VirtualPath::new(format!(
+                "/system/extensions/{extension_id}"
+            ))?,
         )?;
         registry.insert(package)?;
     }

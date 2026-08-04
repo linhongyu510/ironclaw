@@ -6,9 +6,14 @@ use crate::{
 use chrono::Utc;
 use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
-    AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
-    ThreadId, UserId, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::CredentialStageError,
+    ids::{
+        AgentId, ExtensionId, InvocationId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId,
+        UserId, VendorId,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort as _};
 
@@ -18,7 +23,7 @@ mod duplicate_selection;
 
 /// Local injected policy used to prove the selector honors a wider-than-default
 /// account-visibility seam. The vendor-specific GSuite policy lives in
-/// `ironclaw_first_party_extensions`; `ironclaw_auth` stays neutral and must not
+/// `ironclaw_extension_support`; `ironclaw_auth` stays neutral and must not
 /// depend upward on that crate, even in tests.
 struct TestGoogleFamilyVisibilityPolicy;
 

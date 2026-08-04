@@ -10,11 +10,11 @@ use ironclaw_extension_host::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
     FirstPartyRegistrarContext,
 };
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_support::{
     WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError,
     WebAccessDispatchRequest, WebAccessExecutor,
 };
-use ironclaw_host_api::{CapabilityId, HostApiError};
+use ironclaw_host_api::{error::HostApiError, ids::CapabilityId};
 
 /// Installs the web-access first-party capability handlers into the shared
 /// registry. Web access needs no product-auth ports, so the registrar context

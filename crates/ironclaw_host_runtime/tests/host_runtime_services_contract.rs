@@ -33,14 +33,32 @@ use ironclaw_events::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation, RootFilesystem};
-use ironclaw_host_api::FailureKind;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::ApprovalRequest,
+    audit::AuditStage,
+    capability::{EffectKind, GrantConstraints},
+    decision::Obligation,
+    http::RuntimeCredentialTarget,
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, InvocationId, ProcessId, ProjectId,
+        ResourceReservationId, SecretHandle, ThreadId, UserId,
+    },
+    mount::{MountPermissions, MountView},
+    path::VirtualPath,
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
     TenantSandboxProcessPort, builtin_first_party_handlers,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_processes::{
     BackgroundProcessManager, ProcessError, ProcessInvocationError, ProcessInvocationRecord,
     ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
@@ -58,9 +76,7 @@ use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
-use ironclaw_turns::{
-    AgentTurnProcessRuntime, InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator,
-};
+use ironclaw_turns::{AgentTurnProcessRuntime, SubmitTurnResponse, TurnCoordinator};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHttpResponse, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -362,7 +378,10 @@ async fn production_wiring_validation_accepts_persistent_resource_governor_compo
 #[tokio::test]
 async fn with_filesystem_resource_governor_persists_reservations_across_handles() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -404,7 +423,10 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
 #[tokio::test]
 async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(

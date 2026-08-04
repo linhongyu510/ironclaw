@@ -5,7 +5,8 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
-use ironclaw_host_api::HostApiError;
+use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
+use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -136,6 +137,22 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    declared_command_help_text_with_prefix(commands, None)
+}
+
+/// Same rendering as [`declared_command_help_text`], but renders each name
+/// as `{prefix}{name}` instead of the bare `/{name}` form when `prefix` is
+/// set — the manifest-declared `[channel.presentation].command_prefix` a
+/// channel adapter whose native command namespace requires an app-scoped
+/// dispatcher prefix (e.g. a `/ironclaw` slash dispatcher) uses to
+/// namespace its commands. `prefix` is rendered exactly as declared,
+/// including any trailing separator (a manifest `command_prefix` of
+/// `"/ironclaw "` plus `model` yields `/ironclaw model`).
+pub fn declared_command_help_text_with_prefix<I, S>(commands: I, prefix: Option<&str>) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let names = commands
         .into_iter()
         .map(|command| command.as_ref().to_string())
@@ -145,7 +162,10 @@ where
     }
     let names = names
         .into_iter()
-        .map(|name| format!("/{name}"))
+        .map(|name| match prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => format!("/{name}"),
+        })
         .collect::<Vec<_>>();
     format!("Available commands:\n{}", names.join("\n"))
 }
@@ -304,6 +324,9 @@ fn parse_lifecycle_command_payload(
     payload: &InboundCommandPayload,
 ) -> ProductCommandParseResult {
     Ok(match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => {
+            parse_register_hosted_mcp_command(payload)?
+        }
         LifecycleCommandKind::ExtensionSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionSearch {
                 query: payload.arguments.trim().to_string(),
@@ -338,6 +361,23 @@ fn parse_lifecycle_command_payload(
         },
         LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
         LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
+    })
+}
+
+fn parse_register_hosted_mcp_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    let request = serde_json::from_str::<RegisterHostedMcpRequest>(payload.arguments.trim())
+        .map_err(|error| {
+            tracing::debug!(
+                error = %error,
+                "hosted MCP registration payload failed to parse"
+            );
+            ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "extension_register_hosted_mcp expects a registration JSON payload",
+            )
+        })?;
+    Ok(ProductCommand::Lifecycle {
+        action: LifecycleProductAction::ExtensionRegisterHostedMcp { request },
     })
 }
 
@@ -485,6 +525,11 @@ fn lifecycle_command_metadata(
     kind: LifecycleCommandKind,
 ) -> (&'static str, &'static str, &'static str) {
     match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => (
+            "Register hosted MCP",
+            "Register a hosted MCP endpoint",
+            "/extension_register_hosted_mcp <json>",
+        ),
         LifecycleCommandKind::ExtensionSearch => (
             "Search extensions",
             "Search the extension registry",

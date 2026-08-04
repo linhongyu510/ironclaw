@@ -1,6 +1,6 @@
 //! Shared credential-redaction primitives for the model-visible result
-//! vocabulary — the single definition used by both [`crate::SafeSummary`] (the
-//! bounded caption) and [`crate::ModelResultPreview`] (the bounded tool-result
+//! vocabulary — the single definition used by both [`crate::safe_summary::SafeSummary`] (the
+//! bounded caption) and [`crate::model_result_preview::ModelResultPreview`] (the bounded tool-result
 //! CONTENT preview).
 //!
 //! Two independent scans:
@@ -347,6 +347,24 @@ mod tests {
         assert!(contains_credential_marker("the password is hunter2"));
         // `passwordless` is a different word — not a standalone `password`.
         assert!(!contains_credential_marker("passwordless login enabled"));
+    }
+
+    #[test]
+    fn marker_boundaries_and_redaction_skip_embedded_vocabulary() {
+        assert!(marker_match_at("secret", "secret", 0, 6));
+        assert!(!marker_match_at("xsecret", "secret", 1, 7));
+        assert!(!marker_match_at("secretary", "secret", 0, 6));
+        assert!(marker_match_at("bearer token", "bearer ", 0, 7));
+        assert!(marker_match_at(
+            "authorization: token",
+            "authorization:",
+            0,
+            14
+        ));
+        assert_eq!(
+            redact_credential_text("secretary then secret value"),
+            "secretary then [redacted] value"
+        );
     }
 
     #[test]

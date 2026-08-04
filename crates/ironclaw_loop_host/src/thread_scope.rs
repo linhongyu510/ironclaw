@@ -5,7 +5,7 @@
 //! subsequent read/write for the run must resolve the SAME owner — the
 //! loop host's thread ports, runner completion-evidence reads, and any
 //! composition-side durable thread append that is keyed by a
-//! [`LoopRunContext`](ironclaw_turns::run_profile::LoopRunContext).
+//! [`LoopRunContext`](ironclaw_loop_contracts::LoopRunContext).
 //!
 //! [`ThreadScopeResolver::resolve`] is the single definition of that
 //! owner-rewrite rule. Both subsystems call it, so the rule cannot drift
@@ -54,7 +54,7 @@ impl ThreadScopeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 
     fn scope(owner: Option<&str>) -> ThreadScope {
         ThreadScope {
@@ -106,7 +106,7 @@ mod tests {
             base.tenant_id.clone(),
             Some(base.agent_id.clone()),
             base.project_id.clone(),
-            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+            ironclaw_host_api::ids::ThreadId::new("thread").unwrap(),
             None,
         );
 

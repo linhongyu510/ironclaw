@@ -1,12 +1,10 @@
 use super::*;
-use ironclaw_host_api::RuntimeKind;
-use ironclaw_turns::{
-    CapabilityActivityId, LoopCompletionKind, LoopExitId, TurnId,
-    run_profile::{
-        InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopSafeSummary,
-    },
+use ironclaw_host_api::runtime::RuntimeKind;
+use ironclaw_loop_contracts::{
+    InMemoryLoopHostMilestoneSink, LoopCompletionKind, LoopDriverId, LoopHostMilestone,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
 };
+use ironclaw_turns::{CapabilityActivityId, LoopExitId, TurnId};
 use std::sync::Arc;
 
 struct LiveProjectionFixture {
@@ -309,10 +307,8 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
             safe_text: "I’ll research this first.".to_string(),
         },
         LoopHostMilestoneKind::ModelCompleted {
-            effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new(
-                "test-model",
-            )
-            .unwrap(),
+            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")
+                .unwrap(),
         },
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
@@ -961,7 +957,7 @@ async fn product_event_stream_projects_live_tool_failure() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: ironclaw_host_api::FailureKind::InputEncode,
+                reason_kind: ironclaw_host_api::result_meta::FailureKind::InputEncode,
                 safe_summary: Some(
                     LoopSafeSummary::new("invalid JSON: expected value at line 1")
                         .expect("safe summary"),
@@ -1038,7 +1034,7 @@ async fn product_event_stream_redacts_live_tool_failure_filename_detail() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
+                reason_kind: ironclaw_host_api::result_meta::FailureKind::OperationFailed,
                 safe_summary: Some(
                     LoopSafeSummary::new("failed to read AGENTS.md").expect("safe summary"),
                 ),
@@ -1108,7 +1104,7 @@ async fn product_event_stream_preserves_redacted_loop_safe_failure_detail() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
+                reason_kind: ironclaw_host_api::result_meta::FailureKind::OperationFailed,
                 safe_summary: Some(LoopSafeSummary::capability_failure_summary(
                     "provider returned ghp_live_secret",
                 )),

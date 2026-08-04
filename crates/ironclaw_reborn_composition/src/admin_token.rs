@@ -4,7 +4,7 @@
 //! signature. The trait carries no WebUI/ingress types — just the canonical
 //! identifiers and a `SecretString` — so it is dependency-free.
 
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use secrecy::SecretString;
 
 /// Mints a one-time API bearer for a newly created user. Implemented at the
@@ -20,7 +20,7 @@ pub trait AdminApiTokenMinter: Send + Sync {
 }
 
 /// Fail-closed placeholder for composition paths that need an
-/// [`AdminUserService`](ironclaw_product::AdminUserService) handle purely for
+/// [`AdminUserService`](ironclaw_product_contracts::admin_users::AdminUserService) handle purely for
 /// tenant-scoped role reads (channel-command admission's `get_user` calls,
 /// which never mint tokens) rather than the WebUI admin `create_user` route.
 /// `RebornAdminUserDirectory::create_user` is the sole caller of the minter;

@@ -8,8 +8,11 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityActivityId, ProcessId, ResourceScope, RuntimeCredentialAuthRequirement,
-    SanitizedFailure, TenantId, Timestamp, TurnGateRef, UserId,
+    Timestamp,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ProcessId, TenantId, UserId},
+    resource::ResourceScope,
+    turn::{CapabilityActivityId, SanitizedFailure, TurnGateRef},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -444,6 +447,23 @@ pub trait ProcessJournalCommitObserver: Send + Sync {
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String>;
+
+    /// Deliver one committed batch in a single call, in cursor order.
+    ///
+    /// The journal commits many lifecycle commands per transaction, so an
+    /// observer that persists per commit can group a whole batch into one
+    /// round trip by overriding this. The default applies the per-commit
+    /// method in order, which is what an observer with no groupable work
+    /// wants.
+    async fn observe_process_commits(
+        &self,
+        commits: Vec<ProcessJournalCommit>,
+    ) -> Result<(), String> {
+        for commit in commits {
+            self.observe_process_commit(commit).await?;
+        }
+        Ok(())
+    }
 }
 
 pub trait ProcessJournalObserverRegistry: Send + Sync {

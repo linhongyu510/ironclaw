@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ResourceScope, SYSTEM_RESERVED_ID};
+use ironclaw_host_api::resource::{ResourceScope, SYSTEM_RESERVED_ID};
 use ironclaw_processes::{
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessJournalPage,
     ProcessJournalSource, ProcessKind, ProcessLifecycleStatus, ProcessSuspension,
@@ -11,10 +11,9 @@ use ironclaw_processes::{
 };
 
 use crate::{
-    TurnError, TurnEventKind, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    EventCursor, TurnError, TurnEventKind, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     events::{
-        EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventPage,
-        TurnEventProjectionSource,
+        TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventPage, TurnEventProjectionSource,
     },
 };
 
@@ -34,7 +33,7 @@ impl TurnEventProjectionSource for TurnEventProjectionFromProcessJournal {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
-        owner_user_id: Option<&ironclaw_host_api::UserId>,
+        owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {

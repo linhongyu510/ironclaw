@@ -1,4 +1,5 @@
 use super::*;
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
@@ -338,7 +339,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) process_concurrency_limits: ProcessConcurrencyLimits,
     pub(super) resolved_memory: crate::ResolvedMemoryProvider,
     pub(super) scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
-    pub(super) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(super) account_setup_descriptors: Vec<ExtensionAccountSetupDescriptor>,
     pub(super) nearai_mcp_bootstrap_config:
         Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     pub(super) native_extension_factories:
@@ -349,7 +350,7 @@ pub(super) struct RebornProductionBuildContext {
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     pub(super) credential_account_visibility_policy:
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
-    pub(super) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
+    pub(super) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
     pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,

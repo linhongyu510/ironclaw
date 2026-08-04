@@ -27,10 +27,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
-    Suspension,
+    ids::{CapabilityId, InvocationId, ProviderToolName},
+    resolution::{Resolution, ResolutionBatch, Suspension},
+    runtime::RuntimeKind,
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
     CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
     LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
@@ -79,8 +80,8 @@ impl ToolSpec {
     fn descriptor_view(
         &self,
         capability_id: &CapabilityId,
-    ) -> ironclaw_turns::run_profile::CapabilityDescriptorView {
-        ironclaw_turns::run_profile::CapabilityDescriptorView {
+    ) -> ironclaw_loop_contracts::CapabilityDescriptorView {
+        ironclaw_loop_contracts::CapabilityDescriptorView {
             capability_id: capability_id.clone(),
             provider: None,
             runtime: RuntimeKind::System,
@@ -507,11 +508,13 @@ mod tests {
     use super::*;
 
     use crate::CapabilityWriteResult;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        CapabilityInputRef, InMemoryRunProfileResolver, RunProfileResolutionRequest,
+        RunProfileResolver,
+    };
     use ironclaw_turns::{
-        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,
-        run_profile::{CapabilityInputRef, InMemoryRunProfileResolver},
+        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog, TurnId, TurnScope,
     };
 
     struct EmptyInnerPort;

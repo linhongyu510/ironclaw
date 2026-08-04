@@ -1,7 +1,8 @@
 use crate::subagent::directions::DirectionId;
 use async_trait::async_trait;
+use ironclaw_loop_contracts::AgentLoopHostError;
 use ironclaw_loop_host::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
-use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
+use ironclaw_turns::{RunProfileRequest, TurnRunId};
 use serde::{Deserialize, Serialize};
 
 use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
@@ -174,7 +175,7 @@ impl SubagentDefinitionResolver for StaticSubagentDefinitionResolver {
             requested_run_profile: RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).map_err(
                 |reason| {
                     AgentLoopHostError::new(
-                        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                         reason,
                     )
                 },
@@ -345,7 +346,7 @@ mod tests {
 
     #[test]
     fn every_flavor_capability_surface_equals_allowlist() {
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use std::collections::BTreeSet;
 
         // Attenuation invariant: the capability surface derived for each flavor
@@ -422,16 +423,20 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
-        use ironclaw_loop_host::{
-            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-            CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
+        use ironclaw_host_api::{
+            ids::CapabilityId,
+            resolution::{Resolution, ResolutionBatch},
+            runtime::RuntimeKind,
         };
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef,
             CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
             LoopRequest, LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
             VisibleCapabilitySurface, resolution,
+        };
+        use ironclaw_loop_host::{
+            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+            CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
@@ -466,17 +471,19 @@ mod tests {
         }
 
         async fn process_inputs_with_goal(
-            context: &ironclaw_turns::run_profile::LoopRunContext,
+            context: &ironclaw_loop_contracts::LoopRunContext,
         ) -> Arc<dyn ironclaw_processes::ProcessInputPort<Error = ironclaw_turns::TurnError>>
         {
             let system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
             let mut scope = context.scope.to_resource_scope();
             scope.invocation_id =
-                ironclaw_host_api::InvocationId::from_uuid(context.run_id.as_uuid());
+                ironclaw_host_api::ids::InvocationId::from_uuid(context.run_id.as_uuid());
             system
                 .submission()
                 .submit_process(SubmitProcessRequest {
-                    process_id: ironclaw_host_api::ProcessId::from_uuid(context.run_id.as_uuid()),
+                    process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        context.run_id.as_uuid(),
+                    ),
                     process_kind: ProcessKind::AgentTurn,
                     scope,
                     exclusive_within_scope: false,
@@ -523,7 +530,7 @@ mod tests {
         impl CapabilitySurfaceProfileResolver for StaticProfileResolver {
             async fn resolve(
                 &self,
-                _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+                _run_context: &ironclaw_loop_contracts::LoopRunContext,
             ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
                 Ok(self.0.clone())
             }
@@ -536,7 +543,7 @@ mod tests {
                     .iter()
                     .map(|id| ProviderToolDefinition {
                         capability_id: cap(id),
-                        name: ironclaw_host_api::ProviderToolName::new(id.replace('.', "__"))
+                        name: ironclaw_host_api::ids::ProviderToolName::new(id.replace('.', "__"))
                             .expect("provider tool name"),
                         description: format!("{id} description"),
                         description_trust: Default::default(),
@@ -580,7 +587,7 @@ mod tests {
                 Ok(resolution::completed(
                     LoopResultRef::new("result:ok").expect("valid result ref"),
                     "ok".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,

@@ -25,14 +25,15 @@ use ironclaw_event_streams::{
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
-use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
-use ironclaw_turns::{
-    TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
-    },
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
+};
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 // Live progress uses a synthetic cursor because it is an ephemeral UI hint,
 // not a durable runtime event. This sink must remain the only producer on this

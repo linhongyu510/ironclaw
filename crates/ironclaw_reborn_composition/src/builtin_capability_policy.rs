@@ -5,9 +5,11 @@ use std::{
 
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal,
+    action::{Action, NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId},
+    mount::MountView,
+    scope::Principal,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -31,7 +33,7 @@ pub(crate) enum BuiltinCapabilityPolicyError {
     #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
     DuplicateEffect { target: String, effect: EffectKind },
     #[error("standalone capability policy provider id is invalid as an extension id: {0}")]
-    InvalidProviderExtensionId(#[source] ironclaw_host_api::HostApiError),
+    InvalidProviderExtensionId(#[source] ironclaw_host_api::error::HostApiError),
     #[error("standalone capability policy provider manifest path is empty")]
     EmptyProviderManifestPath,
     #[error("standalone capability policy provider manifest path must be absolute")]
@@ -440,7 +442,9 @@ fn constraint_terms(
     let network = match source.network() {
         CapabilityNetworkProfile::Default => NetworkPolicy::default(),
         CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
-        CapabilityNetworkProfile::IronhubArtifacts => ironclaw_ironhub::artifact_network_policy(),
+        CapabilityNetworkProfile::IronhubArtifacts => {
+            ironclaw_extension_manager::ironhub::artifact_network_policy()
+        }
     };
     let mut allowed_effects = source.effects().to_vec();
     if let Some(effect) = required_effect
@@ -756,11 +760,12 @@ mod tests {
 
     #[test]
     fn ironhub_artifact_policy_is_https_only_and_host_scoped() {
-        let policy = ironclaw_ironhub::artifact_network_policy();
+        let policy = ironclaw_extension_manager::ironhub::artifact_network_policy();
 
         assert!(policy.deny_private_ip_ranges);
         assert!(policy.allowed_targets.iter().all(|target| {
-            target.scheme == Some(ironclaw_host_api::NetworkScheme::Https) && target.port.is_none()
+            target.scheme == Some(ironclaw_host_api::action::NetworkScheme::Https)
+                && target.port.is_none()
         }));
         let hosts = policy
             .allowed_targets

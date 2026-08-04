@@ -3,7 +3,25 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_extensions::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    host_port::HostPortCatalog,
+    http::{
+        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    },
+    ids::{
+        CapabilityId, ExtensionId, InvocationId, ProjectId, ResourceReservationId, SecretHandle,
+        TenantId, UserId,
+    },
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
+        ResourceUsage,
+    },
+    runtime::RuntimeKind,
+};
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use serde_json::json;
@@ -282,6 +300,94 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
         vec!["tools/call", "initialize", "notifications/initialized"]
     );
     assert_eq!(planner_calls[0].json_rpc_id, json_rpc_id(&requests[2].body));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake() {
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(host_http_plan());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    let request = McpClientRequest {
+        provider: ExtensionId::new("hosted-docs").unwrap(),
+        capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+        scope: sample_scope(),
+        transport: "http".to_string(),
+        command: None,
+        args: vec![],
+        url: Some("https://mcp.example.test/mcp".to_string()),
+        input: json!({}),
+        max_output_bytes: 4096,
+    };
+    client
+        .probe_auth(request.clone())
+        .await
+        .expect("credential-free initialization succeeds");
+
+    client
+        .call_tool(request)
+        .await
+        .expect("a later tool call starts its own session");
+
+    let requests = egress.requests();
+    let methods = requests
+        .iter()
+        .map(|request| json_rpc_method(&request.body))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        vec![
+            "initialize",
+            "notifications/initialized",
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+        ]
+    );
+    assert_eq!(
+        header_value(&requests[2].headers, "Mcp-Session-Id"),
+        None,
+        "the runtime initialize must not reuse the probe session",
+    );
+    assert_eq!(planner.calls().len(), 5);
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_auth_probe_rejects_non_http_or_missing_url_without_egress() {
+    for (transport, url, expected_reason) in [
+        (
+            "stdio",
+            Some("https://mcp.example.test/mcp"),
+            "mcp_unsupported_transport",
+        ),
+        ("http", None, "mcp_missing_url"),
+    ] {
+        let egress = RecordingRuntimeEgress::json_rpc();
+        let client = McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+            StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+        );
+        let error = client
+            .probe_auth(McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: transport.to_string(),
+                command: None,
+                args: vec![],
+                url: url.map(str::to_string),
+                input: json!({}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .expect_err("an invalid auth probe must fail closed");
+
+        assert_eq!(error.stable_reason(), expected_reason);
+        assert!(egress.requests().is_empty());
+    }
 }
 
 #[tokio::test]

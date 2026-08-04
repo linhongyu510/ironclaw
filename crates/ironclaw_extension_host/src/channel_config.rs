@@ -20,13 +20,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RecipeSecretField, ResourceScope, SecretHandle,
+    ids::{ExtensionId, SecretHandle},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
@@ -184,6 +185,20 @@ impl ChannelConfigService {
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
         let record = self.manifest(extension_id).await?;
         Ok(channel_config_fields(record.resolved()))
+    }
+
+    /// Whether the installed manifest declares `[admin_configuration]`.
+    ///
+    /// `pub` for the manager-side product service (§6.8.3): the
+    /// `ChannelConfigProductService` projection suppresses the field list for
+    /// such an extension. Only this yes/no leaves the crate — the manifest
+    /// read itself stays internal.
+    pub async fn declares_admin_configuration(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ChannelConfigError> {
+        let manifest = self.resolved_manifest(extension_id).await?;
+        Ok(!manifest.admin_configuration.is_empty())
     }
 
     async fn resolved_manifest(
@@ -659,100 +674,6 @@ fn channel_config_admin_idempotency_key(
     })
 }
 
-/// The production [`ironclaw_product::ChannelConfigProductService`] port
-/// over [`ChannelConfigService`] — the surface the WebUI setup service and
-/// the lifecycle configure action route through.
-pub struct RebornChannelConfigProductService {
-    service: Arc<ChannelConfigService>,
-}
-
-impl RebornChannelConfigProductService {
-    pub fn new(service: Arc<ChannelConfigService>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait]
-impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
-        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
-            && !manifest.admin_configuration.is_empty()
-        {
-            return Ok(Vec::new());
-        }
-        match self.service.status(extension_id).await {
-            Ok(statuses) => Ok(statuses
-                .into_iter()
-                .map(|status| ironclaw_product::RebornChannelConfigField {
-                    name: status.handle,
-                    label: status.label,
-                    secret: status.secret,
-                    provided: status.provided,
-                })
-                .collect()),
-            // A not-yet-installed extension has nothing to configure; the
-            // setup view renders for it, so this projection stays empty
-            // rather than erroring.
-            Err(ChannelConfigError::NotInstalled { .. }) => Ok(Vec::new()),
-            Err(error) => Err(map_channel_config_error(error)),
-        }
-    }
-
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError> {
-        self.service
-            .save(extension_id, values)
-            .await
-            .map_err(map_channel_config_error)
-    }
-}
-
-fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
-    match error {
-        ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::NotFound,
-            kind: ProductSurfaceErrorKind::NotFound,
-            status_code: 404,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::UnknownField { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::Storage { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Unavailable,
-            kind: ProductSurfaceErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
-        },
-        // The save persisted but the §6.5 reactivate cycle failed: the host
-        // record is left per §6.1 with the typed reason; the operator fixes
-        // the value and saves again.
-        ChannelConfigError::Reactivation { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Conflict,
-            kind: ProductSurfaceErrorKind::Conflict,
-            status_code: 409,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -763,8 +684,9 @@ mod tests {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, SecretHandle, UserId,
-        VirtualPath,
+        ids::{InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_secrets::SecretStore;
 
@@ -848,7 +770,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
 
     const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
-        include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+        include_str!("../../extensions/packages/gmail/manifest.toml");
 
     struct RecordingReactivation {
         calls: AtomicUsize,
@@ -893,7 +815,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let store = Arc::new(
             ExtensionInstallationStore::load_at(
                 Arc::new(InMemoryBackend::new()),
-                ironclaw_host_api::VirtualPath::new("/system/extensions/.installations/test")
+                ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
                 ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),

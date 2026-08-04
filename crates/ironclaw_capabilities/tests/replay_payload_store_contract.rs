@@ -21,10 +21,12 @@ use ironclaw_capabilities::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ResourceEstimate, ResourceScope, TenantId, UserId, VirtualPath,
+    ids::{ApprovalRequestId, CorrelationId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
 };
-use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
+use ironclaw_loop_contracts::{AuthResumeApprovalIdentity, CapabilityInputRef};
 
 #[tokio::test]
 async fn replay_payload_round_trips_all_fields() {

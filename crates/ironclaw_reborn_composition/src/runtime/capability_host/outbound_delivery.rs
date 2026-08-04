@@ -7,24 +7,33 @@ use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_approvals::{ApprovalStatus, ApprovalStoreError};
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus};
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    FailureKind, GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, Resolution,
-    ResourceEstimate, ResourceScope, SafeSummary, UserId,
+    action::Action,
+    approval::{ApprovalRequest, InvocationFingerprint},
+    gate_record::GateRecord,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, GateRef, InvocationId,
+        UserId,
+    },
+    resolution::Resolution,
+    resource::{ResourceEstimate, ResourceScope},
+    result_meta::FailureKind,
+    safe_summary::SafeSummary,
+    scope::Principal,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+    CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
+    ConcurrencyHint, LoopRunContext, resolution,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext, resolution,
-    },
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
+use ironclaw_turns::LoopGateRef;
 
 use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
@@ -859,8 +868,8 @@ fn approval_lease_outcome(
 mod tests {
     use super::*;
     use crate::runtime::capability_host::assert_recoverable_failure;
-    use ironclaw_host_api::ProductSurfaceErrorKind;
-    use ironclaw_turns::run_profile::LoopSafeSummary;
+    use ironclaw_loop_contracts::LoopSafeSummary;
+    use ironclaw_product_contracts::surface::ProductSurfaceErrorKind;
 
     fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
         ProductSurfaceError {
@@ -900,7 +909,10 @@ mod tests {
         let outcome =
             outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::InvalidRequest))
                 .expect("invalid request must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        );
         LoopSafeSummary::new(recoverable_summary(&outcome))
             .expect("safe summary must satisfy the loop validator");
     }
@@ -909,7 +921,10 @@ mod tests {
     fn not_found_is_a_recoverable_tool_failure_not_terminal() {
         let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::NotFound))
             .expect("not found must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        );
     }
 
     #[test]
@@ -933,7 +948,10 @@ mod tests {
     fn conflict_is_a_recoverable_tool_failure_not_terminal() {
         let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Conflict))
             .expect("conflict must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::OperationFailed);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::OperationFailed,
+        );
     }
 
     #[test]
@@ -941,7 +959,10 @@ mod tests {
         let outcome =
             outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::RateLimited))
                 .expect("rate limited must be a model-visible failure, not terminal");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::Resource,
+        );
     }
 
     #[test]
@@ -949,7 +970,10 @@ mod tests {
         let outcome =
             outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unavailable))
                 .expect("transient unavailability must not kill the run");
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::Unavailable,
+        );
     }
 
     #[test]

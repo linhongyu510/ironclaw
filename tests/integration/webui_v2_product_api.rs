@@ -28,15 +28,21 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceStreamRequest, SecretHandle, TenantId, UserId,
-};
-use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
+    capability::{EffectKind, PermissionMode},
+    ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
 };
 use ironclaw_product::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product::{RebornServices, RebornStreamEventsRequest};
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
+};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
@@ -184,7 +190,7 @@ impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
     // composition-tier catalog test (#5459 P1).
     async fn list_operator_tools(
         &self,
-        _caller: &ironclaw_host_api::UserId,
+        _caller: &ironclaw_host_api::ids::UserId,
     ) -> Vec<RebornOperatorToolInfo> {
         vec![RebornOperatorToolInfo {
             capability_id: CapabilityId::new("builtin.http").expect("capability id"),
@@ -734,7 +740,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let orphan_manifest = ExtensionManifestRecord::from_toml(
         orphan_raw_toml,
         catalog_manifest.manifest().source,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         catalog_manifest.manifest_hash().cloned(),
         &contracts,
         None,
@@ -1662,10 +1668,11 @@ impl AdminConfigurationFixture {
     }
 
     fn pairing_member_router(&self) -> Router {
-        let pairing = self
-            .runtime
-            .channel_pairing_route_mount()
-            .expect("Telegram pairing route mount");
+        let pairing = ironclaw_webui::channel_pairing_route_mount(
+            self.runtime
+                .channel_pairing_registry()
+                .expect("Telegram pairing registry"),
+        );
         pairing
             .router
             .layer(axum::Extension(self.caller.clone()))

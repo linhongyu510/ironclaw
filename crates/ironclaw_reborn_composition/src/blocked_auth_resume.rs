@@ -242,14 +242,17 @@ mod tests {
     use ironclaw_auth::{
         AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
     };
+    use ironclaw_host_api::turn::{EventCursor, TurnGateRef, TurnScope, TurnStatus};
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId, VendorId,
+        capability::RuntimeCredentialAccountSetup,
+        decision::RuntimeCredentialAuthRequirement,
+        ids::{ExtensionId, InvocationId, ProcessId, TenantId, ThreadId, UserId, VendorId},
+        resource::ResourceScope,
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, EventCursor, GateRef, GetRunStateRequest,
-        SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunState, TurnScope, TurnStatus,
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest,
+        SubmitTurnResponse, TurnError, TurnRunState,
     };
 
     struct RecordingInnerDispatcher {
@@ -411,7 +414,7 @@ mod tests {
             owner_user_id: Some(owner_user_id),
             suspension: ProcessSuspension {
                 kind: ProcessSuspensionKind::Authorization,
-                gate_ref: Some(GateRef::new(format!("gate-{run_id}")).expect("gate ref")),
+                gate_ref: Some(TurnGateRef::new(format!("gate-{run_id}")).expect("gate ref")),
                 activity_id: None,
                 credential_requirements: vec![requirement],
                 detail: None,
