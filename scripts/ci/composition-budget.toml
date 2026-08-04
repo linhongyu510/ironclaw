@@ -68,18 +68,26 @@ observed_date = "2026-07-16"
 # LOC under the composition crate's src tree, test-only files excluded — but no
 # denominator, so nobody else's feature work can buy composition headroom.
 #
-# 44021 is a real count on origin/main @ 676d86ce02 (2026-08-04), cross-checked
+# 44021 was the count on origin/main @ 676d86ce02 (2026-08-04), cross-checked
 # two ways that agree exactly: the gate's own `find`-based counter, and a
 # git-tracked-only count (`git ls-files … | xargs cat | wc -l`) so a stray
 # untracked file in a working tree cannot be what set the baseline. Set to
 # current, not padded — a true ratchet.
+#
+# Re-seeded 44021 -> 44392 on 2026-08-04 after merging main @ be33ae138f into
+# this branch: #7062 (workspace/memory view scoping) landed +371 production LOC
+# of composition wiring between this gate's seeding and its merge, and the gate
+# correctly went red against its own merge context. Re-measured with
+# `bash scripts/ci/check-composition-budget.sh --print` on the merged tree
+# (44392 exactly, matching the CI failure output). Still set to current, not
+# padded.
 #
 # RE-RATCHET AT EVERY WAVE CLOSE. When a wave evicts behavior from composition,
 # lower loc_ceiling to the new observed count in the same PR; the gate prints a
 # NUDGE once observed sits more than loc_nudge_slack below the ceiling, so the
 # obligation is visible in CI output rather than remembered. Raising it is
 # allowed but must carry a one-line PR rationale, same rule as ceiling_bp.
-loc_ceiling = 44021
+loc_ceiling = 44392
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -90,7 +98,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 44021
+loc_observed = 44392
 loc_observed_date = "2026-08-04"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
