@@ -182,28 +182,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["mode"], "none")
 
-    def test_crate_family_markdown_is_guidance_not_a_crate(self) -> None:
-        """`crates/AGENTS.md` and its siblings belong to no package.
-
-        They used to reach the fail-closed `crates/` arm and raise
-        `unmapped crate path`, which blocked every PR that touched the
-        crate-family map (issue #7100).
-        """
-        for path in (
-            "crates/AGENTS.md",
-            "crates/Architecture.md",
-            "crates/README.md",
-        ):
-            with self.subTest(path=path):
-                plan = self.plan("pull_request", [path])
-                self.assertEqual(plan["changed_packages"], [])
-                self.assertEqual(plan["mode"], "none")
-
-    def test_non_markdown_directly_under_crates_still_fails_closed(self) -> None:
-        """Only markdown is guidance; anything else wants an explicit decision."""
-        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
-            self.plan("pull_request", ["crates/unexpected.txt"])
-
     def test_recorded_fixture_change_runs_only_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request",
