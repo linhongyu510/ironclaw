@@ -89,24 +89,9 @@ Current provider material includes:
 
 ### Reborn WebUI v2 Slack lane
 
-The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
-into `config.toml`. The generated Reborn config writes only:
-
-```toml
-[slack]
-enabled = true
-```
-
-> ✎ **2026-08-04 — this section is now inert and the runner still keys off it.**
-> `[slack]` is a retired config section: nothing reads `enabled`, so the block
-> above enables nothing and `ironclaw serve` logs a deprecation notice for it.
-> Slack goes live purely through the extension install + admin-configuration
-> step described below. The runner also *gates* its Slack cases on
-> `[slack].enabled` being true (`run_live_qa.py`, `_slack_enabled`), which now
-> gates on a value it wrote itself and that the binary ignores — tracked in
-> [#7116](https://github.com/nearai/ironclaw/issues/7116). Left as-is here
-> because the live-canary harness is out of scope for the WS6 config
-> narrowing; the block is harmless, not load-bearing.
+The Reborn WebUI v2 live QA runner does not write the retired `[slack]`
+configuration section. Slack cases are gated on the required live credentials
+below and their `auth.test` preflight.
 
 Bot installation setup is applied headlessly after `ironclaw serve`
 boots by saving the manifest-declared `extension.slack` group through the
