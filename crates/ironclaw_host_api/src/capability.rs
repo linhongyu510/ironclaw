@@ -607,3 +607,23 @@ mod origin_gate_wire_tests {
         assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
     }
 }
+
+#[cfg(test)]
+mod process_sandbox_capability_id_tests {
+    use super::PROCESS_SANDBOX_CAPABILITY_ID;
+    use crate::ids::CapabilityId;
+
+    /// The constant is compared as a `&str` on two gating paths — the kernel
+    /// spawn check (`ironclaw_host_runtime::production`) and the process
+    /// executor's routing check — where a malformed literal would not fail
+    /// loudly: `capability_id.as_str() == LITERAL` would simply never match, so
+    /// sandbox plans would silently stop being recognised. `CapabilityId::new`
+    /// is fallible and cannot be evaluated in a `const`, so pin it here instead:
+    /// this is the check that makes the literal a valid capability id.
+    #[test]
+    fn process_sandbox_capability_id_literal_is_a_valid_capability_id() {
+        let parsed = CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID)
+            .expect("PROCESS_SANDBOX_CAPABILITY_ID must be a valid CapabilityId");
+        assert_eq!(parsed.as_str(), PROCESS_SANDBOX_CAPABILITY_ID);
+    }
+}
