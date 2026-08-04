@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is twenty-four shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-six shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -27,6 +27,7 @@ Today that is twenty-four shipped modules (plus the dev-only `test_support`, gat
 | `interaction_commands` | The channel-neutral interaction-reply grammar (`parse_interaction_resolution_text`). |
 | `operator_llm` | The operator LLM-administration port (`LlmConfigService`), the active-model read port (`ActiveModelReader`), the provider-menu and login/probe wire vocabulary, `LlmConfigServiceError`, and its projection onto `ProductSurfaceError`. Implemented by `ironclaw_operator`; the `llm_config` view descriptor and the "no service wired" error stay with product. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`) — see the ruling below. |
+| `ironhub` | The IronHub link port (`IronhubLinkService`), its register/install-delivery request and result bodies, `IronhubLinkError`, and the `ironhub.deliver_install` command descriptor. |
 | `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_manager` (WS2.4); the *authority* it calls — the only writer of lifecycle state — stayed in `ironclaw_extension_host`. |
 | `delivery` | The delivery-resolution ports: `ChannelDeliveryResolver`, `ResolvedChannelDelivery`, `DeliveryReplyContextSource`. The coordinator itself is product's. |
 | `account_setup` | `AccountConnectionStatusSource` + the extension account-setup descriptor/notice/error vocabulary. The declaration registry is product's (it holds mutable state). |
