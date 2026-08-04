@@ -444,6 +444,7 @@ fn create_openai_compat_from_registry(
     };
     let adapter = RigAdapter::new(model, &config.model)
         .with_provider_id(config.provider_id.clone())
+        .with_native_streaming()
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
@@ -550,6 +551,7 @@ fn create_anthropic_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
+            .with_native_streaming()
             .with_cache_retention(cache_retention)
             .with_default_max_tokens(DEFAULT_MAX_TOKENS)
             .with_unsupported_params(config.unsupported_params.clone())

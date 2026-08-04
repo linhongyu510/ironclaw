@@ -112,7 +112,8 @@ async fn streaming_without_terminal_frame_is_a_retryable_incomplete_stream() {
             terminal_frame: None,
         },
         "streaming-truncated",
-    );
+    )
+    .with_native_streaming();
 
     let error = adapter
         .complete_streaming(
@@ -141,7 +142,8 @@ async fn streaming_tool_call_without_terminal_frame_is_a_retryable_incomplete_st
             terminal_frame: None,
         },
         "streaming-truncated",
-    );
+    )
+    .with_native_streaming();
 
     let error = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())
@@ -167,7 +169,8 @@ async fn streaming_reads_the_terminal_frames_finish_reason() {
             }),
         },
         "streaming-ollama",
-    );
+    )
+    .with_native_streaming();
 
     let response = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())
@@ -193,7 +196,8 @@ async fn streaming_terminal_frame_without_a_finish_reason_falls_back_to_shape() 
             terminal_frame: Some(OllamaShapedStreamingResponse { done_reason: None }),
         },
         "streaming-openai-like",
-    );
+    )
+    .with_native_streaming();
 
     let response = adapter
         .complete_with_tools_streaming(search_tool_request(), discarding_sink())

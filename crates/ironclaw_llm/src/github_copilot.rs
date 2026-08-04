@@ -9,13 +9,10 @@
 //! with the raw OAuth token, which gets rejected with "Authorization header
 //! is badly formatted". This provider handles the token exchange transparently.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::StreamExt;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -25,11 +22,10 @@ use crate::config::RegistryProviderConfig;
 use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
-use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
 
@@ -48,8 +44,6 @@ fn context_length_error_for_status(status_code: u16, response_text: &str) -> Opt
 /// GitHub Copilot provider with automatic token exchange.
 pub(crate) struct GithubCopilotProvider {
     client: Client,
-    streaming_client: Client,
-    stream_idle_timeout: Duration,
     token_manager: Arc<CopilotTokenManager>,
     model: String,
     base_url: String,
@@ -81,12 +75,6 @@ impl GithubCopilotProvider {
                 provider: "github_copilot".to_string(),
                 reason: format!("Failed to build HTTP client: {e}"),
             })?;
-        let streaming_client = crate::config::hardened_streaming_client_builder()
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: format!("Failed to build streaming HTTP client: {e}"),
-            })?;
 
         let token_manager = Arc::new(CopilotTokenManager::new(client.clone(), oauth_token));
 
@@ -102,8 +90,6 @@ impl GithubCopilotProvider {
 
         Ok(Self {
             client,
-            streaming_client,
-            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             token_manager,
             model: config.model.clone(),
             base_url,
@@ -244,128 +230,6 @@ impl GithubCopilotProvider {
             }
         })
     }
-
-    async fn send_authenticated_streaming_request(
-        &self,
-        url: &str,
-        token: &SecretString,
-        body: &impl Serialize,
-    ) -> Result<reqwest::Response, LlmError> {
-        let mut request = self
-            .streaming_client
-            .post(url)
-            .bearer_auth(token.expose_secret())
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream");
-        for (key, value) in &self.extra_headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
-        tokio::time::timeout(self.stream_idle_timeout, request.json(body).send())
-            .await
-            .map_err(|_| LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: format!(
-                    "timed out waiting {}s for streaming response headers",
-                    self.stream_idle_timeout.as_secs()
-                ),
-            })?
-            .map_err(|error| LlmError::RequestFailed {
-                provider: "github_copilot".to_string(),
-                reason: error.to_string(),
-            })
-    }
-
-    async fn send_streaming_request(
-        &self,
-        body: &impl Serialize,
-        sink: Arc<dyn CompletionStreamSink>,
-    ) -> Result<OpenAiStreamingResponse, LlmError> {
-        let url = self.api_url();
-        let token = self
-            .token_manager
-            .get_token()
-            .await
-            .map_err(Self::map_token_error)?;
-        let mut response = self
-            .send_authenticated_streaming_request(&url, &token, body)
-            .await?;
-
-        if response.status().as_u16() == 401 {
-            drop(response);
-            self.token_manager.invalidate().await;
-            let refreshed = self
-                .token_manager
-                .get_token()
-                .await
-                .map_err(Self::map_token_error)?;
-            response = self
-                .send_authenticated_streaming_request(&url, &refreshed, body)
-                .await?;
-        }
-
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = crate::retry::retry_after_for_status(
-                status.as_u16(),
-                response.headers().get(reqwest::header::RETRY_AFTER),
-            );
-            let response_body = tokio::time::timeout(
-                Duration::from_secs(5),
-                crate::error::read_bounded_provider_error_body(response),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-            let response_text = String::from_utf8_lossy(&response_body);
-            return Err(crate::error::map_provider_http_error(
-                crate::error::ProviderHttpError {
-                    adapter: crate::error::ProductionModelAdapter::GithubCopilot,
-                    model: &self.active_model_name(),
-                    status: status.as_u16(),
-                    body: response_text.as_ref(),
-                    retry_after,
-                },
-            ));
-        }
-
-        let mut events = response
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(|error| error.to_string()))
-            .eventsource();
-        let mut parsed = OpenAiStreamingResponse::default();
-
-        loop {
-            let next = tokio::time::timeout(self.stream_idle_timeout, events.next())
-                .await
-                .map_err(|_| {
-                    stream_interrupted(format!(
-                        "stream was idle for {} seconds",
-                        self.stream_idle_timeout.as_secs()
-                    ))
-                })?;
-            let Some(event) = next else { break };
-            let event = match event {
-                Ok(event) => event,
-                Err(_) if parsed.completed => break,
-                Err(error) => {
-                    return Err(stream_interrupted(format!(
-                        "failed to read SSE stream: {error}"
-                    )));
-                }
-            };
-            if process_stream_data(event.data.trim(), &mut parsed, sink.as_ref()).await? {
-                break;
-            }
-        }
-
-        if !parsed.completed {
-            return Err(stream_interrupted(
-                "stream ended before terminal completion marker",
-            ));
-        }
-        Ok(parsed)
-    }
 }
 
 #[async_trait]
@@ -389,8 +253,6 @@ impl LlmProvider for GithubCopilotProvider {
             stop: req.stop_sequences,
             tools: None,
             tool_choice: None,
-            stream: false,
-            stream_options: None,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -432,40 +294,6 @@ impl LlmProvider for GithubCopilotProvider {
         })
     }
 
-    async fn complete_streaming(
-        &self,
-        mut req: CompletionRequest,
-        sink: Arc<dyn CompletionStreamSink>,
-    ) -> Result<CompletionResponse, LlmError> {
-        let model = req
-            .take_model_override()
-            .unwrap_or_else(|| self.active_model_name());
-        self.strip_unsupported_completion_params(&mut req);
-        let request = OpenAiRequest {
-            model,
-            messages: convert_messages(req.messages),
-            max_tokens: req.max_tokens,
-            temperature: req.temperature,
-            stop: req.stop_sequences,
-            tools: None,
-            tool_choice: None,
-            stream: true,
-            stream_options: Some(OpenAiStreamOptions {
-                include_usage: true,
-            }),
-        };
-        let response = self.send_streaming_request(&request, sink).await?;
-        Ok(CompletionResponse {
-            content: response.content,
-            finish_reason: response.finish_reason,
-            input_tokens: response.input_tokens,
-            output_tokens: response.output_tokens,
-            reasoning: None,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        })
-    }
-
     async fn complete_with_tools(
         &self,
         mut req: ToolCompletionRequest,
@@ -494,8 +322,6 @@ impl LlmProvider for GithubCopilotProvider {
             stop: req.stop_sequences,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
-            stream: false,
-            stream_options: None,
         };
 
         let response: OpenAiResponse = self.send_request(&request).await?;
@@ -538,55 +364,6 @@ impl LlmProvider for GithubCopilotProvider {
                 .as_ref()
                 .map(|u| u.completion_tokens)
                 .unwrap_or(0),
-            cache_creation_input_tokens: 0,
-            reasoning: None,
-            reasoning_details: None,
-            cache_read_input_tokens: 0,
-        })
-    }
-
-    async fn complete_with_tools_streaming(
-        &self,
-        mut req: ToolCompletionRequest,
-        sink: Arc<dyn CompletionStreamSink>,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        let model = req
-            .take_model_override()
-            .unwrap_or_else(|| self.active_model_name());
-        self.strip_unsupported_tool_params(&mut req);
-        let tools = req
-            .tools
-            .into_iter()
-            .map(convert_tool_definition)
-            .collect::<Vec<_>>();
-        let tool_choice = req.tool_choice.map(|choice| match choice.as_str() {
-            "auto" | "required" | "none" => serde_json::Value::String(choice),
-            specific => serde_json::json!({
-                "type": "function",
-                "function": {"name": specific}
-            }),
-        });
-        let request = OpenAiRequest {
-            model,
-            messages: convert_messages(req.messages),
-            max_tokens: req.max_tokens,
-            temperature: req.temperature,
-            stop: req.stop_sequences,
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_choice,
-            stream: true,
-            stream_options: Some(OpenAiStreamOptions {
-                include_usage: true,
-            }),
-        };
-        let response = self.send_streaming_request(&request, sink).await?;
-        let tool_calls = response.tool_calls()?;
-        Ok(ToolCompletionResponse {
-            content: (!response.content.is_empty()).then_some(response.content),
-            tool_calls,
-            finish_reason: response.finish_reason,
-            input_tokens: response.input_tokens,
-            output_tokens: response.output_tokens,
             cache_creation_input_tokens: 0,
             reasoning: None,
             reasoning_details: None,
@@ -639,15 +416,6 @@ struct OpenAiRequest {
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<OpenAiStreamOptions>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiStreamOptions {
-    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -777,168 +545,6 @@ struct OpenAiUsage {
     completion_tokens: u32,
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChunk {
-    #[serde(default)]
-    choices: Vec<OpenAiStreamChoice>,
-    #[serde(default)]
-    usage: Option<OpenAiUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChoice {
-    #[serde(default)]
-    delta: OpenAiStreamDelta,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OpenAiStreamDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<OpenAiStreamToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamToolCall {
-    index: usize,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    function: Option<OpenAiStreamFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamFunction {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct OpenAiStreamingToolState {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-#[derive(Debug, Default)]
-struct OpenAiStreamingResponse {
-    content: String,
-    finish_reason: FinishReason,
-    input_tokens: u32,
-    output_tokens: u32,
-    completed: bool,
-    tool_calls: HashMap<usize, OpenAiStreamingToolState>,
-}
-
-impl OpenAiStreamingResponse {
-    fn tool_calls(&self) -> Result<Vec<ToolCall>, LlmError> {
-        let mut calls = self.tool_calls.iter().collect::<Vec<_>>();
-        calls.sort_by_key(|(index, _)| **index);
-        calls
-            .into_iter()
-            .map(|(_, state)| {
-                if state.id.is_empty() || state.name.is_empty() {
-                    return Err(LlmError::InvalidResponse {
-                        provider: "github_copilot".to_string(),
-                        reason: "streamed tool call is missing its id or name".to_string(),
-                    });
-                }
-                let raw_arguments = &state.arguments;
-                let (arguments, arguments_parse_error) =
-                    parse_tool_call_args_allow_trailing_lossy(raw_arguments);
-                let arguments_parse_error = arguments_parse_error.map(|parse_error| {
-                    format!(
-                        "{parse_error}\nRaw malformed tool-call arguments (verbatim, {} bytes):\n{raw_arguments}",
-                        raw_arguments.len()
-                    )
-                });
-                Ok(ToolCall {
-                    id: state.id.clone(),
-                    name: state.name.clone(),
-                    arguments,
-                    reasoning: None,
-                    signature: None,
-                    arguments_parse_error,
-                })
-            })
-            .collect()
-    }
-}
-
-fn map_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason {
-    match reason {
-        Some("stop") => FinishReason::Stop,
-        Some("length") => FinishReason::Length,
-        Some("tool_calls") => FinishReason::ToolUse,
-        Some("content_filter") => FinishReason::ContentFilter,
-        _ if has_tool_calls => FinishReason::ToolUse,
-        _ => FinishReason::Unknown,
-    }
-}
-
-fn stream_interrupted(reason: impl Into<String>) -> LlmError {
-    LlmError::StreamInterrupted {
-        provider: "github_copilot".to_string(),
-        reason: reason.into(),
-    }
-}
-
-async fn process_stream_data(
-    data: &str,
-    response: &mut OpenAiStreamingResponse,
-    sink: &dyn CompletionStreamSink,
-) -> Result<bool, LlmError> {
-    if data.is_empty() {
-        return Ok(false);
-    }
-    if data == "[DONE]" {
-        response.completed = true;
-        return Ok(true);
-    }
-    let chunk: OpenAiStreamChunk =
-        serde_json::from_str(data).map_err(|error| LlmError::InvalidResponse {
-            provider: "github_copilot".to_string(),
-            reason: format!("stream JSON parse error: {error}"),
-        })?;
-    if let Some(usage) = chunk.usage {
-        response.input_tokens = usage.prompt_tokens;
-        response.output_tokens = usage.completion_tokens;
-    }
-    for choice in chunk.choices {
-        if let Some(delta) = choice.delta.content.filter(|delta| !delta.is_empty()) {
-            response.content.push_str(&delta);
-            sink.text_delta(delta).await;
-        }
-        for tool_delta in choice.delta.tool_calls {
-            let state = response.tool_calls.entry(tool_delta.index).or_default();
-            if let Some(id) = tool_delta.id.filter(|value| !value.is_empty()) {
-                state.id = id;
-            }
-            if let Some(function) = tool_delta.function {
-                if let Some(name) = function.name.filter(|value| !value.is_empty()) {
-                    state.name = name;
-                }
-                if let Some(arguments) = function.arguments {
-                    state.arguments.push_str(&arguments);
-                }
-            }
-        }
-        if let Some(reason) = choice.finish_reason.as_deref() {
-            response.completed = true;
-            response.finish_reason =
-                map_finish_reason(Some(reason), !response.tool_calls.is_empty());
-        }
-    }
-    // A finish reason is an authoritative terminal signal, but providers may
-    // send the usage-only chunk after it. Keep consuming until [DONE] or EOF.
-    Ok(false)
-}
-
 /// Convert IronClaw messages to OpenAI Chat Completions format.
 fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
     messages
@@ -1052,105 +658,6 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
-
-    #[derive(Default)]
-    struct RecordingSink(Mutex<Vec<String>>);
-
-    #[async_trait]
-    impl CompletionStreamSink for RecordingSink {
-        async fn text_delta(&self, delta: String) {
-            self.0.lock().await.push(delta);
-        }
-    }
-
-    #[tokio::test]
-    async fn streaming_parser_preserves_text_tools_usage_and_finish_reason() {
-        let sink = RecordingSink::default();
-        let mut response = OpenAiStreamingResponse::default();
-        process_stream_data(
-            r#"{"choices":[{"delta":{"content":"Hel","tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\"q\":"}}]},"finish_reason":null}]}"#,
-            &mut response,
-            &sink,
-        )
-        .await
-        .expect("first stream chunk");
-        assert!(!response.completed);
-        process_stream_data(
-            r#"{"choices":[{"delta":{"content":"lo","tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":7}}"#,
-            &mut response,
-            &sink,
-        )
-        .await
-        .expect("terminal stream chunk");
-
-        assert_eq!(sink.0.lock().await.as_slice(), ["Hel", "lo"]);
-        assert_eq!(response.content, "Hello");
-        assert_eq!(response.finish_reason, FinishReason::ToolUse);
-        assert_eq!((response.input_tokens, response.output_tokens), (12, 7));
-        let calls = response.tool_calls().expect("valid streamed tool call");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call_1");
-        assert_eq!(calls[0].name, "search");
-        assert_eq!(calls[0].arguments, serde_json::json!({"q": "rust"}));
-    }
-
-    #[test]
-    fn streaming_tool_reconstruction_preserves_malformed_arguments_for_repair() {
-        let mut response = OpenAiStreamingResponse::default();
-        response.tool_calls.insert(
-            0,
-            OpenAiStreamingToolState {
-                id: "call_1".to_string(),
-                name: "search".to_string(),
-                arguments: r#"{"q":"#.to_string(),
-            },
-        );
-
-        let calls = response
-            .tool_calls()
-            .expect("malformed arguments should remain a repairable tool call");
-
-        assert_eq!(calls[0].arguments, serde_json::json!({}));
-        let parse_error = calls[0]
-            .arguments_parse_error
-            .as_deref()
-            .expect("parse error should retain the malformed arguments for repair");
-        assert!(parse_error.starts_with("failed to parse tool-call arguments JSON:"));
-        assert!(
-            parse_error.contains("Raw malformed tool-call arguments (verbatim, 5 bytes):\n{\"q\":")
-        );
-    }
-
-    #[test]
-    fn streaming_tool_reconstruction_rejects_missing_id_or_name() {
-        for (id, name) in [("", "search"), ("call_1", "")] {
-            let mut response = OpenAiStreamingResponse::default();
-            response.tool_calls.insert(
-                0,
-                OpenAiStreamingToolState {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    arguments: "{}".to_string(),
-                },
-            );
-
-            assert!(matches!(
-                response.tool_calls(),
-                Err(LlmError::InvalidResponse { provider, reason })
-                    if provider == "github_copilot"
-                        && reason == "streamed tool call is missing its id or name"
-            ));
-        }
-    }
-
-    #[test]
-    fn incomplete_stream_is_retryable_interruption_not_partial_success() {
-        assert!(matches!(
-            stream_interrupted("stream ended before terminal completion marker"),
-            LlmError::StreamInterrupted { provider, .. } if provider == "github_copilot"
-        ));
-    }
 
     #[test]
     fn context_overflow_413_maps_to_context_length_exceeded() {

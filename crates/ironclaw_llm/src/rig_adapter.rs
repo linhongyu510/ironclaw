@@ -62,6 +62,9 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Anthropic requires this field on every request; other rig-backed
     /// providers preserve their existing omission semantics by leaving it unset.
     default_max_tokens: Option<u32>,
+    /// Whether this provider has been live-validated for rig-core streaming.
+    /// Untested rig-backed providers retain the buffered trait fallback.
+    native_streaming: bool,
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
     /// `CompletionModel` does not expose model discovery, so this is wired
@@ -261,6 +264,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             default_max_tokens: None,
+            native_streaming: false,
             models_endpoint: None,
         }
     }
@@ -334,6 +338,13 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Set a provider-required fallback for requests that omit `max_tokens`.
     pub(crate) fn with_default_max_tokens(mut self, max_tokens: u32) -> Self {
         self.default_max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Enable rig-core streaming for a provider whose live request path has
+    /// been validated against its upstream API.
+    pub(crate) fn with_native_streaming(mut self) -> Self {
+        self.native_streaming = true;
         self
     }
 
@@ -1239,6 +1250,10 @@ where
         mut request: CompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
+        if !self.native_streaming {
+            return self.complete(request).await;
+        }
+
         let model_override = request.take_model_override();
 
         self.strip_unsupported_completion_params(&mut request);
@@ -1384,6 +1399,10 @@ where
         mut request: ToolCompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        if !self.native_streaming {
+            return self.complete_with_tools(request).await;
+        }
+
         let model_override = request.take_model_override();
 
         self.strip_unsupported_tool_params(&mut request);
@@ -2268,13 +2287,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_methods_use_buffered_fallback_until_explicitly_enabled() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::text("buffered")),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "buffered"},
+                        "finish_reason": "stop",
+                    }],
+                }),
+            },
+            "untested-provider",
+        );
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let text_response = adapter
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                sink.clone(),
+            )
+            .await
+            .expect("buffered text fallback succeeds");
+        let tool_response = adapter
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(vec![ChatMessage::user("hello")], Vec::new()),
+                sink,
+            )
+            .await
+            .expect("buffered tool fallback succeeds");
+
+        assert_eq!(text_response.content, "buffered");
+        assert_eq!(tool_response.content.as_deref(), Some("buffered"));
+        assert!(
+            delta_rx.try_recv().is_err(),
+            "buffered fallback must not emit deltas"
+        );
+    }
+
+    #[tokio::test]
     async fn complete_streaming_preserves_reasoning_deltas() {
         let adapter = RigAdapter::new(
             StreamingOnlyCompletionModel {
                 expected_max_tokens: None,
             },
             "streaming-only",
-        );
+        )
+        .with_native_streaming();
         let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
@@ -2299,7 +2360,8 @@ mod tests {
                 expected_max_tokens: None,
             },
             "streaming-only",
-        );
+        )
+        .with_native_streaming();
         let request = ToolCompletionRequest::new(
             vec![ChatMessage::user("search")],
             vec![IronToolDefinition {
@@ -2340,6 +2402,7 @@ mod tests {
             },
             "streaming-only",
         )
+        .with_native_streaming()
         .with_default_max_tokens(DEFAULT_MAX_TOKENS);
         let request = ToolCompletionRequest::new(
             vec![ChatMessage::user("search")],
@@ -2372,6 +2435,7 @@ mod tests {
             },
             "streaming-only",
         )
+        .with_native_streaming()
         .with_default_max_tokens(8192);
         let request =
             CompletionRequest::new(vec![ChatMessage::user("hello")]).with_max_tokens(4096);
