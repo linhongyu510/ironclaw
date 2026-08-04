@@ -48,8 +48,15 @@ EXCLUDED = {
     "ironclaw_telegram_extension",
     # The package inventory crate owns the concrete packages.
     "ironclaw_extension_support",
-    # Sanctioned assemblers.
-    "ironclaw_reborn_cli",
+    # Sanctioned assemblers. NOTE: these are cargo *package* names, not crate
+    # directory names. The CLI package is named "ironclaw" while its directory
+    # is crates/app/ironclaw_cli. This entry used to read "ironclaw_reborn_cli"
+    # (a directory name), so it matched no package and left this gate red on
+    # main for the two concrete extension crates the binary is explicitly
+    # allowed to link under DEL-7. Same class of bug that
+    # boundary_rule_names_are_package_names_not_crate_directories catches for
+    # the dependency-boundary rules.
+    "ironclaw",
     "ironclaw_architecture_tests",
     "ironclaw_stress",
 }

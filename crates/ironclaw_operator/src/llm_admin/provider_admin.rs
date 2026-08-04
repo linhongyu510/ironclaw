@@ -930,8 +930,7 @@ mod tests {
     /// duplicating the JSON literal, keeping the fixture used above tied to
     /// the actual stub `config init`/`onboard` write.
     fn providers_stub_json() -> &'static str {
-        const INIT_RS: &str =
-            include_str!("../../../ironclaw_reborn_cli/src/commands/config/init.rs");
+        const INIT_RS: &str = include_str!("../../../app/ironclaw_cli/src/commands/config/init.rs");
         const START_MARKER: &str = "const PROVIDERS_STUB: &str = r#\"";
         let start = INIT_RS.find(START_MARKER).unwrap_or_else(|| {
             panic!(

@@ -240,14 +240,14 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",
-        anchor="ironclaw_reborn_cli",
+        anchor="ironclaw_cli",
         kind="regex",
         crates=(
             ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
-            ("ironclaw_reborn_cli", "src/main.rs"),
+            ("ironclaw_cli", "src/main.rs"),
             ("ironclaw_config", "src/lib.rs"),
             ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),

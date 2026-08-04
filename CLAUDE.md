@@ -31,7 +31,7 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 v1 `src/` monolith or a legacy crate enclave to route around — `crates/` is the
 whole production tree. A Reborn WebUI feature crosses
 `ironclaw_webui → ProductSurface → ironclaw_assistant → composition → runtime`;
-the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
+the binary entry point is `crates/app/ironclaw_cli` (binary name `ironclaw`).
 Start from the `reborn-feature` skill — it maps those layers so you wire a
 feature in one pass instead of layer-by-layer. The workspace root
 (`Cargo.toml`, package `ironclaw_integration_tests`) now hosts only the
@@ -171,7 +171,7 @@ binary). For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 `AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature
 flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
-`ironclaw` in `crates/ironclaw_reborn_cli`).
+`ironclaw` in `crates/app/ironclaw_cli`).
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)

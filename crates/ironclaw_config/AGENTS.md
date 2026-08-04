@@ -9,7 +9,7 @@
   - `boot.rs`, `config_file.rs` — boot/config file loading.
   - `doctor.rs` — config diagnostics.
   - `secrets_guard.rs` — secret/config guardrails.
-- Neighboring consumers: `crates/ironclaw_reborn_cli/AGENTS.md`, `crates/ironclaw_composition/AGENTS.md`.
+- Neighboring consumers: `crates/app/ironclaw_cli/AGENTS.md`, `crates/ironclaw_composition/AGENTS.md`.
 
 ## What This Crate Owns
 

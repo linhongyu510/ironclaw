@@ -10,7 +10,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 
 | Need | Start with |
 | --- | --- |
-| Standalone Reborn binary | `crates/ironclaw_reborn_cli/` and `docs/reborn/onboarding.md` |
+| Standalone Reborn binary | `crates/app/ironclaw_cli/` and `docs/reborn/onboarding.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
 | Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |

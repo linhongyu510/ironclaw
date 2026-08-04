@@ -54,7 +54,7 @@ Not generic yet — the work:
 | Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_trace_commons/src/contribution.rs` |
-| Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_config` |
+| Slack CLI command, cargo feature, config types | `crates/app/ironclaw_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_config` |
 | Telegram adapter exists but is test-only | `crates/extensions/packages/telegram` |
 
 ## 3. Target crate and module map
@@ -80,7 +80,7 @@ Not generic yet — the work:
 | `ironclaw_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
 | `ironclaw_extension_support` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
-| `ironclaw` (`crates/ironclaw_reborn_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
+| `ironclaw` (`crates/app/ironclaw_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
 | `ironclaw_trace_commons` | Generic extension/surface origin ids replace concrete variants |
 | `ironclaw_architecture_tests` | New specificity scanner + dependency gates (section 12) |

@@ -37,7 +37,7 @@
   bot-qualified command entities before generic classification.
 - `crates/ironclaw_composition/src/input.rs`,
   `crates/ironclaw_composition/src/runtime.rs`,
-  `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`, and their
+  `crates/app/ironclaw_cli/src/runtime/native_extensions.rs`, and their
   callers remove the obsolete optional classifier plumbing.
 - `tests/integration/support/harness/profiles/extension.rs`,
   `tests/integration/extension_ingress.rs`, and
@@ -394,7 +394,7 @@ git commit -m "fix(channels): classify interactions in generic ingress"
 - Modify: `crates/ironclaw_composition/src/runtime.rs`
 - Modify: `crates/ironclaw_composition/src/runtime/tests/core.rs`
 - Modify: `crates/ironclaw_composition/tests/trigger_poller_e2e.rs`
-- Modify: `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+- Modify: `crates/app/ironclaw_cli/src/runtime/native_extensions.rs`
 - Modify: `tests/integration/support/harness/profiles/extension.rs`
 - Modify: `tests/integration/extension_ingress.rs`
 - Modify: `tests/integration/extension_delivery.rs`
@@ -523,7 +523,7 @@ git add crates/ironclaw_extension_host/src/extension_ingress.rs \
   crates/ironclaw_composition/src/runtime.rs \
   crates/ironclaw_composition/src/runtime/tests/core.rs \
   crates/ironclaw_composition/tests/trigger_poller_e2e.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs \
+  crates/app/ironclaw_cli/src/runtime/native_extensions.rs \
   tests/integration/support/harness/profiles/extension.rs \
   tests/integration/extension_ingress.rs \
   tests/integration/extension_delivery.rs
@@ -776,7 +776,7 @@ git add crates/ironclaw_host_api/src/product_adapter/inbound.rs \
   crates/ironclaw_composition/src/runtime.rs \
   crates/ironclaw_composition/src/runtime/tests/core.rs \
   crates/ironclaw_composition/tests/trigger_poller_e2e.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs \
+  crates/app/ironclaw_cli/src/runtime/native_extensions.rs \
   tests/integration/support/harness/profiles/extension.rs \
   tests/integration/extension_ingress.rs \
   tests/integration/extension_delivery.rs

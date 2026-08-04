@@ -32,7 +32,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
     let root = workspace_root();
     for rule in boundary_rules() {
         let manifest = if rule.crate_name == "ironclaw" {
-            root.join("crates/ironclaw_reborn_cli/Cargo.toml")
+            root.join("crates/app/ironclaw_cli/Cargo.toml")
         } else {
             root.join("crates").join(rule.crate_name).join("Cargo.toml")
         };
@@ -56,7 +56,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 /// names `cargo metadata` reports, which are package names. A crate whose
 /// directory and package disagree therefore has one spelling that guards and
 /// one that is inert — and the inert one fails *silently*, because a forbidden
-/// entry that matches nothing simply never fires. `crates/ironclaw_reborn_cli/`
+/// entry that matches nothing simply never fires. `crates/app/ironclaw_cli/`
 /// declaring `name = "ironclaw"` is the only such crate in the tree today, and
 /// it is exactly the one an author reaches for by directory name.
 ///
@@ -885,7 +885,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         .collect::<HashMap<_, _>>();
 
     let root = workspace_root();
-    let manifest_path = root.join("crates/ironclaw_reborn_cli/Cargo.toml");
+    let manifest_path = root.join("crates/app/ironclaw_cli/Cargo.toml");
     assert!(
         manifest_path.exists(),
         "Reborn should ship as a separate binary crate at {}",
@@ -904,14 +904,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     );
 
     let command_module_paths = [
-        "crates/ironclaw_reborn_cli/AGENTS.md",
-        "crates/ironclaw_reborn_cli/src/commands/mod.rs",
-        "crates/ironclaw_reborn_cli/src/commands/completion.rs",
-        "crates/ironclaw_reborn_cli/src/commands/doctor.rs",
-        "crates/ironclaw_reborn_cli/src/commands/repl.rs",
-        "crates/ironclaw_reborn_cli/src/commands/run.rs",
-        "crates/ironclaw_reborn_cli/src/commands/serve.rs",
-        "crates/ironclaw_reborn_cli/src/context.rs",
+        "crates/app/ironclaw_cli/AGENTS.md",
+        "crates/app/ironclaw_cli/src/commands/mod.rs",
+        "crates/app/ironclaw_cli/src/commands/completion.rs",
+        "crates/app/ironclaw_cli/src/commands/doctor.rs",
+        "crates/app/ironclaw_cli/src/commands/repl.rs",
+        "crates/app/ironclaw_cli/src/commands/run.rs",
+        "crates/app/ironclaw_cli/src/commands/serve.rs",
+        "crates/app/ironclaw_cli/src/context.rs",
     ];
     for path in command_module_paths {
         assert!(
@@ -920,7 +920,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         );
     }
 
-    let agent_contract = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/AGENTS.md"))
+    let agent_contract = std::fs::read_to_string(root.join("crates/app/ironclaw_cli/AGENTS.md"))
         .expect("Reborn CLI crate-local AGENTS.md must be readable");
     for required_phrase in [
         "one command per file",
@@ -978,7 +978,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let runtime_dir = root.join("crates/app/ironclaw_cli/src/runtime");
     let mut cli_runtime_source = String::new();
     collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
     assert!(
@@ -2408,10 +2408,9 @@ fn reborn_provider_catalog_is_owned_by_its_crate() {
     let catalog: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&catalog_path).expect("catalog readable"))
             .expect("providers.json must parse as JSON");
-    let init_rs = std::fs::read_to_string(
-        root.join("crates/ironclaw_reborn_cli/src/commands/config/init.rs"),
-    )
-    .expect("CLI config init.rs must be readable");
+    let init_rs =
+        std::fs::read_to_string(root.join("crates/app/ironclaw_cli/src/commands/config/init.rs"))
+            .expect("CLI config init.rs must be readable");
 
     // Pull each `const NAME: &str = "value";` out of the CLI source. If the
     // constant is renamed or restructured the extraction fails loudly rather
@@ -2447,7 +2446,7 @@ fn reborn_provider_catalog_is_owned_by_its_crate() {
         assert_eq!(
             entry.get(catalog_field).and_then(|v| v.as_str()),
             Some(const_value(const_name).as_str()),
-            "`{const_name}` in crates/ironclaw_reborn_cli/src/commands/config/init.rs has \
+            "`{const_name}` in crates/app/ironclaw_cli/src/commands/config/init.rs has \
              drifted from the `{provider_id}` entry's `{catalog_field}` in \
              crates/ironclaw_llm/assets/providers.json. The CLI mirrors these values as \
              constants because it may not depend on `ironclaw_llm`; when the catalog changes, \
@@ -2679,7 +2678,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     // for the owner rather than silently introduced by a CI-gates change.
     let reborn_product_api_src_roots = [
         "crates/ironclaw_turn_runner/src",
-        "crates/ironclaw_reborn_cli/src",
+        "crates/app/ironclaw_cli/src",
         "crates/ironclaw_composition/src",
         "crates/ironclaw_config/src",
         "crates/ironclaw_event_store/src",
@@ -3719,7 +3718,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_host_ingress",
                 "ironclaw_operator",
-                // The CLI, by its PACKAGE name. `crates/ironclaw_reborn_cli/`
+                // The CLI, by its PACKAGE name. `crates/app/ironclaw_cli/`
                 // is only the directory; `forbidden` is matched against
                 // `cargo metadata` package names, so the directory spelling
                 // is an entry that can never fire. Pinned by

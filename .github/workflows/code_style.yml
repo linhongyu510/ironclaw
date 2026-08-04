@@ -98,7 +98,7 @@ jobs:
           # `ironclaw_turn_runner`, so without it a PR touching only the new home
           # would no longer light this lane — the move would have narrowed CI
           # scope as a side effect.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_turn_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_config/|crates/([^/]+/)*ironclaw_architecture_tests/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_turn_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_cli/|crates/([^/]+/)*ironclaw_config/|crates/([^/]+/)*ironclaw_architecture_tests/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"

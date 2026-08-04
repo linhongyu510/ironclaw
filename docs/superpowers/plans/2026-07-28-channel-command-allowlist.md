@@ -507,7 +507,7 @@ git commit -m "feat(channels): enforce resolved command exposure"
 - Modify: `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
 - Modify: `crates/ironclaw_extension_host/src/available_extensions.rs`
 - Modify if the existing production-binding assertion requires it:
-  `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+  `crates/app/ironclaw_cli/src/runtime/native_extensions.rs`
 
 **Interfaces:**
 - Shipping Slack and Telegram resolved manifests each expose exactly
@@ -580,7 +580,7 @@ owning product availability.
 git add crates/ironclaw_first_party_extensions/assets/slack/manifest.toml \
   crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml \
   crates/ironclaw_extension_host/src/available_extensions.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs
+  crates/app/ironclaw_cli/src/runtime/native_extensions.rs
 git commit -m "feat(channels): expose status in bundled channels"
 ```
 

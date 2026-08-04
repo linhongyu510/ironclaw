@@ -31,7 +31,7 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **Reborn stack (most current work)** | `crates/ironclaw_turn_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_composition/`, `crates/ironclaw_event_store/`, `crates/ironclaw_identity/`, `crates/ironclaw_openai_compat*/`, `crates/ironclaw_trace_commons/`, `crates/ironclaw_webui/`, `crates/ironclaw_assistant/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
+| **Reborn stack (most current work)** | `crates/ironclaw_turn_runner/`, `crates/app/ironclaw_cli/`, `crates/ironclaw_composition/`, `crates/ironclaw_event_store/`, `crates/ironclaw_identity/`, `crates/ironclaw_openai_compat*/`, `crates/ironclaw_trace_commons/`, `crates/ironclaw_webui/`, `crates/ironclaw_assistant/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `crates/ironclaw_skills/` |
 | **Tools & Extensions** | `crates/extensions/ironclaw_extension_support/`, `crates/ironclaw_extension_host/`, `crates/ironclaw_extension_registry/` |
