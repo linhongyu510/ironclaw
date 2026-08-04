@@ -317,7 +317,17 @@ Verification checklist:
 
 ### Slack events are rejected with 503 or 401
 
-There is no config or env enablement gate to check; the route is always mounted. A 503 `temporarily_unavailable` means the Slack extension's ingress signing secret is not registered yet, so finish installing the Slack extension and completing its setup and OAuth at `/extensions`. A 401 means a signing secret is registered but does not match the app, so confirm the Admin Configuration signing secret against Basic Information in the Slack app.
+There is no config or env enablement gate to check; the route is always mounted.
+
+A 503 `temporarily_unavailable` means the Slack extension's ingress signing secret is not
+registered yet. Register it where `docs/channels/slack.mdx` documents: in the web
+interface, open **Extensions**, switch to the **Channels** tab, scroll to the bottom of
+the Built-in section, and use **Configure** on the Slack card. (Extensions opens on the
+**Registry** tab, which is not where channels are connected — that is the usual reason
+this step is missed.)
+
+A 401 means a signing secret is registered but does not match the app. Compare the value
+on that same Slack card against **Basic Information -> Signing Secret** in the Slack app.
 
 ### Slack route never receives events
 
