@@ -1577,20 +1577,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
 ///
-/// ✎ **129 → 125 (2026-08-04, #7143).** Two separate things, both owed by the
-/// sentence directly above and neither done until now:
+/// ✎ **129 → 125, and the gate below is now an equality (2026-08-04).**
+/// Two branches found the same defect independently and this is their union;
+/// the count was **recounted on the merged tree**, not taken from either side.
 ///
-/// - **This PR deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
-///   stale by the retired-identity branch deletion — and lowering the ceiling
-///   in the same PR is exactly what that sentence requires. Shipping without it
-///   would have banked the deletion as slack rather than as a floor.
-/// - **The ceiling was already carrying 3 entries of slack before this PR.**
-///   Recounted on `origin/main`: the list holds **126** pairs against a
-///   constant of 129, so three earlier deletions lowered the list without
-///   lowering the ceiling. That slack is silent — the ratchet only refuses
-///   *growth*, so three new vendor carve-outs could have been added without
-///   any gate objecting. Setting the constant to the live count (**125** on
-///   this branch) closes the pre-existing gap as well as this PR's.
+/// - **#7143 deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowered the ceiling in
+///   the same PR, which is exactly what the sentence above requires. Shipping
+///   without that would have banked the deletion as slack rather than as a
+///   floor.
+/// - **#7147 found the ceiling was already carrying 3 entries of slack before
+///   either branch.** The list held **126** pairs against a constant of 129, so
+///   three earlier deletions lowered the list without lowering the ceiling —
+///   silent, because a `<=` ratchet says nothing when the constant sits *above*
+///   the list. Three new vendor carve-outs could have been added green.
+/// - **#7147 also closed the mechanism, not just the number:** the gate below
+///   is an **equality**. Slack now fails with its own message, so this cannot
+///   recur — a deletion that forgets to lower the constant is a red build
+///   instead of a fresh budget for the next carve-out.
 ///
 /// Counted with a script over the entries between `const ALLOWLIST` and its
 /// closing `];`, ignoring comment lines, on the **pushed ref** — not by eye and
@@ -1635,11 +1639,38 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// failure message with the baseline set to 0 — never inherited from either
 /// side (#7141's own-tree 125, #7139's 123). The ratchet reported **123**
 /// — #7139's removals and #7141's repoints do not overlap on any entry.
+/// The number is read off the **compiler** — set the constant to `0`, run the
+/// gate, and the panic prints `ALLOWLIST.len()` — never by counting parens or
+/// `grep`-ing the file, both of which also match the entry comments and the
+/// prose above.
+///
+/// ⚠ **#7139 and #7141 also touch this list.** Whichever merges next must
+/// recount on *its* merged tree and set this constant to that number in the
+/// merge commit. The equality turns a stale union into a red build rather than
+/// into new silent slack — which is the point — but it makes the recount
+/// mandatory rather than optional.///
+/// ✎ **Batch union recount, 2026-08-04 (Waves 0–4 batch: #7141+#7160+#7159+
+/// #7161+#7156).** Recounted on the batch's merged tree per the mandate
+/// above, by the ratchet's own failure message with the constant set to 0:
+/// the batch union is **123** — #7161's conversions repoint entries in place
+/// and add none.
 const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 123;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+///
+/// **Equality, not `<=`.** Growth past the baseline is new vendor debt;
+/// *slack* (a baseline above the live list) is an unclaimed budget for exactly
+/// that debt, and a one-directional ratchet cannot see it. Both directions
+/// fail, with distinct messages, so the constant tracks the list on every
+/// commit.
 #[test]
 fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        !ALLOWLIST.is_empty(),
+        "extension-specificity ALLOWLIST is empty — the ratchet below would pass having \
+         measured nothing. Either the list really reached §11.2.8's target (delete this gate \
+         and the baseline together, and say so in the PR) or the const was truncated."
+    );
     assert!(
         ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
         "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
@@ -1650,6 +1681,18 @@ fn reborn_extension_specificity_allowlist_ratchets_down_only() {
          PR body.",
         ALLOWLIST.len(),
         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+    assert!(
+        ALLOWLIST.len() >= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST holds {} entries but \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE is {} — {} entries of UNTRACKED SLACK. \
+         A ceiling above the live list is an unclaimed budget: that many new vendor carve-outs \
+         can be added and every gate stays green. Lower the constant to {} in the PR that \
+         deleted the entries, which is what the doc comment on it already required (#7147).",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE - ALLOWLIST.len(),
+        ALLOWLIST.len()
     );
 }
 
