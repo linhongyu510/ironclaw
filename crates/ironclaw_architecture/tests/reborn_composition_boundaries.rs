@@ -116,6 +116,64 @@ fn composition_public_api_is_service_shaped() {
     }
 }
 
+/// The composition root owns assembly, not prompt text. Prompt content is a
+/// behavior of the crate that puts it in front of a model, so it lives in that
+/// crate's `prompts/` directory (`ironclaw_loop_host` for the system prompt and
+/// the identity-context protocols; `ironclaw_skills`, `ironclaw_turns` and the
+/// extension packages for theirs) — CHECKLIST WS6 "system-prompt content →
+/// owning prompt asset", PROPOSAL §6.10.1, and the house rule that prompt
+/// templates live in files inside the crate that owns the behavior.
+///
+/// Embedding *config-as-data* is still composition's charter, so this scan is
+/// keyed on markdown, not on `include_str!` (`builtin_capability_policy.toml`
+/// is deliberately unaffected).
+#[test]
+fn composition_root_embeds_no_prompt_content() {
+    let crate_root = workspace_root().join("crates/ironclaw_reborn_composition");
+
+    let embedded_markdown: Vec<String> = rust_sources(&crate_root.join("src"))
+        .into_iter()
+        .flat_map(|(path, contents)| {
+            contents
+                .lines()
+                .filter(|line| {
+                    (line.contains("include_str!") || line.contains("include_bytes!"))
+                        && line.contains(".md")
+                })
+                .map(|line| format!("{}: {}", path.display(), line.trim()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        embedded_markdown.is_empty(),
+        "the composition root must not embed markdown prompt content; move the asset \
+         into the `prompts/` directory of the crate that owns the behavior and export \
+         it as a `pub const` (see PROPOSAL §6.10.1). Offending sites:\n{}",
+        embedded_markdown.join("\n")
+    );
+
+    // A prompt asset that is *shipped* but not yet embedded is the same debt one
+    // commit earlier, so the directory itself is pinned rather than only its
+    // `include_str!` call sites. Crate guides (`AGENTS.md` / `CLAUDE.md`) and the
+    // pub-use snapshot are documentation, not prompt content.
+    let shipped_markdown: Vec<String> = markdown_assets(&crate_root)
+        .into_iter()
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("AGENTS.md") | Some("CLAUDE.md") | Some("README.md")
+            )
+        })
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        shipped_markdown.is_empty(),
+        "the composition root ships markdown assets that are not crate guidance; \
+         prompt content belongs to its owning crate's `prompts/` directory. Found:\n{}",
+        shipped_markdown.join("\n")
+    );
+}
+
 #[test]
 fn composition_public_pub_use_surface_matches_snapshot() {
     let root = workspace_root();
@@ -384,6 +442,30 @@ fn is_test_module_file(path: &Path) -> bool {
         || path
             .components()
             .any(|component| component.as_os_str() == "tests")
+}
+
+/// Recursively collect every `.md` file under `dir`, skipping build output.
+fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
