@@ -681,21 +681,40 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let updated = {
+            let matches_request = |message: &ThreadMessageRecord| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+            };
+            let message_index = match request.provider_call_id.as_deref() {
+                Some(requested) => thread
+                    .messages
+                    .iter()
+                    .position(|message| {
+                        matches_request(message)
+                            && message
+                                .tool_result_provider_call
+                                .as_ref()
+                                .is_some_and(|existing| existing.provider_call_id == requested)
+                    })
+                    .or_else(|| {
+                        thread.messages.iter().position(|message| {
+                            matches_request(message) && message.tool_result_provider_call.is_none()
+                        })
+                    }),
+                None => thread.messages.iter().position(matches_request),
+            }
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
             let message = thread
                 .messages
-                .iter_mut()
-                .find(|message| {
-                    message.kind == MessageKind::ToolResultReference
-                        && message.status == MessageStatus::Finalized
-                        && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                        && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
-                })
-                .ok_or_else(|| {
-                    SessionThreadError::Backend(format!(
-                        "tool result reference {} was not found in thread {}",
-                        request.result_ref, request.thread_id
-                    ))
-                })?;
+                .get_mut(message_index)
+                .ok_or_else(|| SessionThreadError::Backend("tool result index vanished".into()))?;
             let before_created_at = message.created_at;
             let before_updated_at = message.updated_at;
             let content = message.content.as_deref().ok_or_else(|| {

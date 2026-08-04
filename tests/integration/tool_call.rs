@@ -737,13 +737,24 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         .persisted_tool_result_envelopes()
         .await
         .expect("tool-result envelopes persist");
-    let mut result_read_envelopes = envelopes.iter().rev();
-    let page_two_envelope = result_read_envelopes
-        .next()
-        .expect("second result_read envelope exists");
-    let page_one_envelope = result_read_envelopes
-        .next()
-        .expect("first result_read envelope exists");
+    let result_read_envelopes = envelopes
+        .iter()
+        .filter(|envelope| {
+            envelope.result_ref == result_ref
+                && envelope
+                    .model_observation
+                    .as_ref()
+                    .and_then(|observation| observation["summary"].as_str())
+                    == Some("Requested tool-result chunk returned.")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_read_envelopes.len(),
+        2,
+        "exactly the two ordered result_read envelopes must be selected"
+    );
+    let page_one_envelope = result_read_envelopes[0];
+    let page_two_envelope = result_read_envelopes[1];
     let page_one_observation = page_one_envelope
         .model_observation
         .as_ref()

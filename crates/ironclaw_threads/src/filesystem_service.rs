@@ -749,7 +749,7 @@ where
         // Compatibility/backfill path for rows whose generic v1 index predates
         // provider-call-specific result indexes. Before provider calls were
         // part of this key there could be at most one row per (run, result), so
-        // accepting only a missing or matching call id is unambiguous.
+        // only a row with no provider metadata is an unambiguous legacy match.
         if provider_call_id.is_some() {
             let indexed_message_id = index_store
                 .read_tool_result(scope, thread_id, turn_run_id, result_ref)
@@ -758,12 +758,8 @@ where
                 && let Some((message, _)) = self
                     .read_message_versioned(scope, thread_id, message_id)
                     .await?
-                && matches_tool_result_reference_invocation(
-                    &message,
-                    turn_run_id,
-                    result_ref,
-                    provider_call_id,
-                )
+                && matches_tool_result_reference(&message, turn_run_id, result_ref)
+                && message.tool_result_provider_call.is_none()
             {
                 return Ok(Some(message));
             }
@@ -2199,7 +2195,7 @@ where
                 &request.thread_id,
                 &request.turn_run_id,
                 &request.result_ref,
-                None,
+                request.provider_call_id.as_deref(),
             )
             .await?
             .ok_or_else(|| {
@@ -2216,6 +2212,7 @@ where
         // the initial lookup path.
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
+        let provider_call_id = request.provider_call_id.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
         let now = Utc::now();
@@ -2225,7 +2222,12 @@ where
             &request.thread_id,
             message.message_id,
             |message| {
-                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                if !matches_tool_result_reference_invocation(
+                    message,
+                    &turn_run_id,
+                    &result_ref,
+                    provider_call_id.as_deref(),
+                ) {
                     return Err(SessionThreadError::Backend(format!(
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));

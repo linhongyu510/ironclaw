@@ -920,6 +920,19 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
 
     assert_eq!(duplicate.message_id, first.message_id);
     assert_ne!(second.message_id, first.message_id);
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            provider_call_id: Some("call_1".to_string()),
+            safe_summary: ToolResultSafeSummary::new("first page settled").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.message_id, first.message_id);
+    assert_ne!(updated.message_id, second.message_id);
     assert_eq!(
         first
             .tool_result_provider_call
@@ -2252,6 +2265,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:model-observation-tool".into(),
+            provider_call_id: None,
             safe_summary: ToolResultSafeSummary::new("tool failed after child completion").unwrap(),
         })
         .await

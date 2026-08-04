@@ -240,11 +240,12 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
         // the completed outcome's origin so the transcript and replay surface
         // exactly the ref the next `result_read` call can use.
         let continuation_result_ref =
-            LoopResultRef::new(input.result_ref.clone()).map_err(|_| {
+            LoopResultRef::new(input.result_ref.clone()).map_err(|error| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "validated result reference could not be represented",
                 )
+                .with_detail(format!("loop result reference validation failed: {error}"))
             })?;
         // `InlineOnly` (see `DurablePersistence` doc comment): this chunk is
         // already fully delivered to the model inline via

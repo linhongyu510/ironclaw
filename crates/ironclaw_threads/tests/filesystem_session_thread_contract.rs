@@ -44,7 +44,8 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -62,6 +63,77 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
         reasoning: None,
         signature: None,
     }
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-exact-result-update", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-exact-result-update");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-exact-result-update").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let spawn = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            safe_summary: ToolResultSafeSummary::new("subagent still running").unwrap(),
+            provider_call: Some(provider_call_reference("spawn-call")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let page = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            safe_summary: ToolResultSafeSummary::new("result page returned").unwrap(),
+            provider_call: Some(provider_call_reference("result-read-call")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-update".into(),
+            provider_call_id: Some("spawn-call".to_string()),
+            safe_summary: ToolResultSafeSummary::new("subagent completed").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(updated.message_id, spawn.message_id);
+    assert_ne!(updated.message_id, page.message_id);
+    let updated_envelope =
+        ToolResultReferenceEnvelope::from_json_str(updated.content.as_deref().unwrap()).unwrap();
+    assert_eq!(updated_envelope.safe_summary.as_str(), "subagent completed");
+    let context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![page.message_id],
+        })
+        .await
+        .unwrap();
+    let page_envelope =
+        ToolResultReferenceEnvelope::from_json_str(context.messages[0].content.as_str()).unwrap();
+    assert_eq!(page_envelope.safe_summary.as_str(), "result page returned");
 }
 
 #[tokio::test]
@@ -121,6 +193,22 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
 
     assert_eq!(duplicate.message_id, first.message_id);
     assert_ne!(second.message_id, first.message_id);
+    assert_eq!(
+        first
+            .tool_result_provider_call
+            .as_ref()
+            .expect("first provider call persists")
+            .provider_call_id,
+        "call_1"
+    );
+    assert_eq!(
+        second
+            .tool_result_provider_call
+            .as_ref()
+            .expect("second provider call persists")
+            .provider_call_id,
+        "call_2"
+    );
     let history = service
         .list_thread_history(ThreadHistoryRequest {
             scope,
