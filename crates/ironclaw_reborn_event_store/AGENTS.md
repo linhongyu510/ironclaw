@@ -20,9 +20,10 @@
   `ironclaw_filesystem::PostgresConnectionPool`, and
   `RebornEventStoreConfig::PostgresPool` carries it, so no caller has to name
   `deadpool_postgres` (PROPOSAL §6.3.2). The driver type may only appear inside
-  the private `postgres_backed` module;
+  the **body** of the private `postgres_backed` module —
   `reborn_persistence_driver_boundary.rs::event_store_names_the_driver_only_inside_its_private_backend_module`
-  fails if it moves above that module.
+  scans **every** `.rs` file in `src/` minus that brace-matched body, so a
+  mention in a sibling module, or after the body in `lib.rs`, fails it too.
 
 ## Do Not Move In Here
 

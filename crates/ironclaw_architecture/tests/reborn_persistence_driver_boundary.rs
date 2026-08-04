@@ -75,52 +75,160 @@ fn only_chartered_crates_link_the_postgres_driver() {
 /// §6.3.2: "stop leaking `deadpool_postgres::Pool` in the public API (wrap)".
 ///
 /// The driver may still be *used* — this crate builds the pool and owns the TLS
-/// policy — but only inside the private `postgres_backed` module. Anything
-/// above it in the file is public surface, and naming the driver there puts a
-/// third-party type in every caller's signature.
+/// policy — but only inside the private `postgres_backed` module. Anywhere else
+/// in the crate is reachable from its public surface, and naming the driver
+/// there puts a third-party type into callers' signatures.
+///
+/// Scans **every** `.rs` file in the crate minus that one module *body*. An
+/// earlier version scanned only `lib.rs` up to the module header, which left
+/// two blind spots that made the gate weaker than its own docs claimed: items
+/// *after* the module body, and every sibling file (`coalescing_sink.rs`,
+/// `durable_log.rs`).
 #[test]
 fn event_store_names_the_driver_only_inside_its_private_backend_module() {
-    let path = workspace_root().join("crates/ironclaw_reborn_event_store/src/lib.rs");
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("readable event store lib.rs {path:?}: {error}"));
-    let lines: Vec<&str> = source.lines().collect();
-
-    let module_start = lines
-        .iter()
-        .position(|line| line.trim_start().starts_with("mod postgres_backed {"))
-        .expect(
-            "expected a private `mod postgres_backed {` in event store lib.rs — if the \
-             backend module was renamed or split, update this gate rather than deleting it",
-        );
-
-    // A `pub mod` would make everything below it public surface too, which
-    // would silently defeat the assertion beneath.
+    let src = workspace_root().join("crates/ironclaw_reborn_event_store/src");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
+        .unwrap_or_else(|error| panic!("readable event store src {src:?}: {error}"))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("readable entry under {src:?}: {error}"))
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect();
+    files.sort();
     assert!(
-        !lines[module_start].trim_start().starts_with("pub "),
-        "`postgres_backed` must stay private; a `pub mod` re-exports the driver cone \
-         it exists to contain"
+        files.len() >= 2,
+        "expected several source files in {src:?}, saw {} — this scan cannot be trusted",
+        files.len()
     );
 
-    let leaks: Vec<String> = lines
-        .iter()
-        .enumerate()
-        .take(module_start)
-        .filter(|(_, line)| {
-            let trimmed = line.trim_start();
-            !trimmed.starts_with("//") && line.contains("deadpool_postgres")
-        })
-        .map(|(index, line)| format!("  lib.rs:{}: {}", index + 1, line.trim()))
-        .collect();
+    let mut leaks = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("readable source {path:?}: {error}"));
+        let exempt = private_backend_module_body(&source, path);
+        for (index, line) in source.lines().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("deadpool_postgres") {
+                continue;
+            }
+            if exempt.as_ref().is_some_and(|range| range.contains(&index)) {
+                continue;
+            }
+            leaks.push(format!(
+                "  {}:{}: {}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                index + 1,
+                line.trim()
+            ));
+        }
+    }
 
     assert!(
         leaks.is_empty(),
-        "`ironclaw_reborn_event_store` names `deadpool_postgres` in its public surface \
-         (above the private `postgres_backed` module). Callers should receive \
+        "`ironclaw_reborn_event_store` names `deadpool_postgres` outside its private \
+         `postgres_backed` module body. Callers should receive \
          `ironclaw_filesystem::PostgresConnectionPool` instead — the driver cone belongs \
          to this crate and the filesystem substrate, not to their signatures (PROPOSAL \
          §6.3.2). Offending lines:\n{}",
         leaks.join("\n")
     );
+}
+
+/// Line range of the private `postgres_backed` module *body*, if `source`
+/// declares one. `None` when the file has no such module.
+///
+/// Brace-matched rather than delimited by the next `}` at some indentation, and
+/// trivia-aware (line comments, nestable block comments, strings, raw strings,
+/// char literals) so a brace inside a literal cannot end the body early — which
+/// would silently re-expose part of the module to the scan, or hide part of the
+/// file from it.
+fn private_backend_module_body(
+    source: &str,
+    path: &std::path::Path,
+) -> Option<std::ops::Range<usize>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let header = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("mod postgres_backed {"))?;
+    assert!(
+        !lines[header].trim_start().starts_with("pub "),
+        "{path:?}: `postgres_backed` must stay private; a `pub mod` re-exports the \
+         driver cone it exists to contain"
+    );
+
+    let mut depth = 0usize;
+    let mut in_block_comment = 0usize;
+    for (offset, line) in lines.iter().enumerate().skip(header) {
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            if in_block_comment > 0 {
+                if rest.starts_with(b"/*") {
+                    in_block_comment += 1;
+                    i += 2;
+                } else if rest.starts_with(b"*/") {
+                    in_block_comment -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if rest.starts_with(b"//") {
+                break;
+            }
+            if rest.starts_with(b"/*") {
+                in_block_comment = 1;
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'r' {
+                let mut hashes = 0usize;
+                while bytes.get(i + 1 + hashes) == Some(&b'#') {
+                    hashes += 1;
+                }
+                if bytes.get(i + 1 + hashes) == Some(&b'"') {
+                    let terminator = format!("\"{}", "#".repeat(hashes));
+                    let body = i + 2 + hashes;
+                    match line[body..].find(&terminator) {
+                        Some(n) => i = body + n + terminator.len(),
+                        None => break,
+                    }
+                    continue;
+                }
+            }
+            if bytes[i] == b'"' {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                continue;
+            }
+            if bytes[i] == b'\'' {
+                let escaped = bytes.get(i + 1) == Some(&b'\\');
+                let close = if escaped { i + 3 } else { i + 2 };
+                if bytes.get(close) == Some(&b'\'') {
+                    i = close + 1;
+                    continue;
+                }
+            }
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(header..offset + 1);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    panic!("{path:?}: unterminated `mod postgres_backed` body");
 }
 
 /// Every crate with a normal (non-dev) dependency on `name`.
@@ -160,4 +268,49 @@ fn normal_dependents_of(name: &str) -> BTreeSet<String> {
         })
         .filter_map(|package| package["name"].as_str().map(ToString::to_string))
         .collect()
+}
+
+#[cfg(test)]
+mod backend_module_body_tests {
+    use super::private_backend_module_body;
+    use std::path::Path;
+
+    fn body(source: &str) -> Option<std::ops::Range<usize>> {
+        private_backend_module_body(source, Path::new("fixture.rs"))
+    }
+
+    /// A driver mention *inside* the body is permitted — that is the whole
+    /// point of keeping the cone somewhere.
+    #[test]
+    fn a_mention_inside_the_body_is_within_the_exempt_range() {
+        let source = "pub fn a() {}\nmod postgres_backed {\n    use deadpool_postgres::Pool;\n}\n";
+        let range = body(source).expect("module found");
+        assert!(range.contains(&2), "line 3 (index 2) is inside the body");
+    }
+
+    /// The regression: an item *after* the body used to be invisible, because
+    /// the old scan stopped at the module header.
+    #[test]
+    fn a_mention_after_the_body_is_outside_the_exempt_range() {
+        let source = "mod postgres_backed {\n    fn inner() {}\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        let range = body(source).expect("module found");
+        assert!(
+            !range.contains(&3),
+            "line 4 (index 3) is after the body and must be scanned"
+        );
+    }
+
+    /// A brace inside a string literal must not close the body early — that
+    /// would drag the rest of the file into the exempt range.
+    #[test]
+    fn a_brace_in_a_literal_does_not_end_the_body() {
+        let source = "mod postgres_backed {\n    const A: &str = \"}\";\n    fn inner() {}\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        let range = body(source).expect("module found");
+        assert_eq!(range, 0..4, "body must end at the real closing brace");
+    }
+
+    #[test]
+    fn a_file_without_the_module_has_no_exempt_range() {
+        assert!(body("pub fn a() {}\n").is_none());
+    }
 }
