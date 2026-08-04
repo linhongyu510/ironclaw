@@ -121,6 +121,44 @@ PR_STATIC_CONTROL_PATHS = {
     #     with "unclassified pull-request path: Dockerfile" and takes
     #     `Tests (Reborn)` down with it.
     "Dockerfile",
+    #   * the rest of the repo-root metadata class, added 2026-08-04 as a class
+    #     rather than one file per red run. Every entry above this block was
+    #     added the same way — a rename-shaped diff touches root files no
+    #     feature PR normally touches, the planner fails closed on the first
+    #     one, and the next only surfaces after that one is fixed (`Dockerfile`,
+    #     then `clippy.toml`, then six more). The whole remaining class is
+    #     enumerated here so the sequence stops.
+    #
+    #     Membership rule: a file belongs here only if NO Reborn test lane
+    #     reads it. Verified per file against `crates/**/*.rs` and `tests/**`
+    #     before listing. Two root files that LOOK like this class are
+    #     deliberately absent because that check found real readers —
+    #     `.dockerignore` (`tests/dockerfile_runtime_home.rs`) and
+    #     `.env.example` (`ironclaw_cli`, `ironclaw_host_runtime`). They stay
+    #     fail-closed on purpose: silently classifying a file a test depends on
+    #     would skip that test, which is worse than an aborted planner.
+    #
+    #     VCS/repo metadata — read by git and by review tooling, never by a lane:
+    ".gitattributes",
+    ".gitignore",
+    ".coderabbit.yaml",
+    ".mcp.json",
+    #     Toolchain pins and lint config for non-Rust lanes:
+    ".node-version",
+    ".nvmrc",
+    ".sqlfluff",
+    #     Container/deploy descriptors owned by their own workflows:
+    "Dockerfile.process-sandbox",
+    "docker-compose.yml",
+    "railway.toml",
+    "codecov.yml",
+    #     Shipped artifacts with no test coverage of their own:
+    "ironclaw.bash",
+    "ironclaw.fish",
+    "ironclaw.zsh",
+    "ironclaw.png",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
