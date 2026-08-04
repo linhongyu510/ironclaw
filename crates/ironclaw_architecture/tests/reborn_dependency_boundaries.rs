@@ -4312,7 +4312,7 @@ struct LayerMatrixException {
 /// verdict rather than a judgement call. Every one of the nine crates that
 /// depends on `processes` is kernel or above, so the move legalizes an edge
 /// without forbidding any existing one.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 4;
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 3;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4321,13 +4321,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_conversations",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04) - BLOCKED on the owner call recorded there",
-        reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. RE-MEASURED 2026-08-04 (WS5 sever slice): the vocabulary half is now done - every host_api-owned turn name this crate uses (AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnScope, RunProfileId, RunProfileRequest, RunOriginAdapter, TurnSurfaceType) is imported from ironclaw_host_api::turn directly instead of through the ironclaw_turns re-export hop, so the residual is exactly TWO turn-crate-owned names outside the orchestration (SubmitTurnResponse in the idempotency-ledger contract, TurnError in InboundTurnError::TurnSubmissionFailed) plus the orchestration itself. The removal destination this entry used to name is REFUTED: PROPOSAL 6.4.2 says move it to the product tier, but PROPOSAL 8.2's own named rule says untrusted-ingress paths never construct trusted trigger submitters and untrusted_ingress_paths_cannot_submit_host_trusted_inbound lists crates/ironclaw_product/src as an untrusted root, while conversation_trusted_trigger_submitter_stays_conversation_or_composition_owned names conversations/composition as the only owners. 6.4.2 also self-contradicts: its charter sentence RETAINS the trusted-trigger submitter in this crate while its Deps clause drops the coordinator that submitter requires. The fork (composition destination vs shrink-composition goal vs the documented product tier) is an owner call, recorded with measurements on the CHECKLIST WS5 row",
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",

@@ -68,6 +68,7 @@ mod trigger_fire_access;
 mod trigger_poller_assembly;
 
 pub use admin_token::AdminApiTokenMinter;
+pub use automation::conversation_turn_submitter::conversation_turn_submitter;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
