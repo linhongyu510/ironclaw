@@ -294,6 +294,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/live-canary/README.md",
             "scripts/live-canary/notify_slack.py",
             "scripts/reborn_webui_v2_live_qa/run_live_qa.py",
+            # WS10 (2026-08-04): the QA surface-inventory auditor and its
+            # self-test are the same class of offline QA tooling, and were
+            # raising `unmapped test or CI path` until they were classified.
+            "scripts/reborn_qa_matrix/audit_surface_inventory.py",
+            "scripts/reborn_qa_matrix/test_audit_surface_inventory.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -544,15 +549,24 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         The `unmapped test or CI path` arm deliberately refuses `scripts/**`
         outside `scripts/ci/` so each file gets a decision rather than a
-        blanket prefix. These two have one, recorded beside the constant: the
-        panic baseline belongs to Code Style, and the E2E selector script
-        belongs to the `Reborn E2E` workflow's own scope detector. Neither
-        selects a lane in *this* planner — but the sibling that has no
+        blanket prefix. Each of these has one, recorded beside the constant:
+        the panic baseline belongs to Code Style, the E2E selector script
+        belongs to the `Reborn E2E` workflow's own scope detector,
+        `check-version-bumps.sh` is invoked only by `platform-and-compat.yml`,
+        and `run-reborn-webui.sh` is a local launcher no workflow references.
+        None selects a lane in *this* planner — but the sibling that has no
         decision must still refuse, which the second half asserts.
+
+        The last two were added by WS10 (2026-08-04) after editing
+        `check-version-bumps.sh` failed `Detect Reborn test scope` outright and
+        skipped every downstream Reborn lane — the same fail-closed-with-no-rule
+        shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            "scripts/check-version-bumps.sh",
+            "scripts/run-reborn-webui.sh",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

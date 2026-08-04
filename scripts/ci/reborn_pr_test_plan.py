@@ -61,6 +61,14 @@ DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
     "scripts/reborn_webui_v2_live_qa/",
+    # The QA surface-inventory auditor and its self-test. Same footing as the
+    # two above: an offline reporting tool over the WebUI/OpenAI-compat route
+    # descriptors, run by hand and by the QA matrix, never by a `Tests (Reborn)`
+    # lane. Added 2026-08-04 (WS10) — before this, editing it raised
+    # `unmapped test or CI path` and failed `Detect Reborn test scope`, skipping
+    # every downstream Reborn lane. Same class as the `.claude/` gap this row
+    # already records.
+    "scripts/reborn_qa_matrix/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 INTEGRATION_SUPPORT_OWNERS = {
@@ -78,7 +86,7 @@ PR_STATIC_CONTROL_PATHS = {
     "tests/integration/coverage-floor.toml",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
-    # These two are decided:
+    # These are decided:
     #   * the panic baseline is enforced by Code Style
     #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
     #     owns the whole check; no Reborn lane reads it.
@@ -86,8 +94,20 @@ PR_STATIC_CONTROL_PATHS = {
     #     its own scope detector (`Detect Reborn E2E scope`). This planner
     #     selects lanes for `Tests (Reborn)` only, and that workflow does not
     #     invoke the script.
+    #   * `check-version-bumps.sh` is the WIT/package version-parity gate, run
+    #     only by `platform-and-compat.yml` (`run: ./scripts/check-version-bumps.sh`,
+    #     behind that workflow's own `has_direct_wasm_abi_risk` filter, which
+    #     already names the script). No `Tests (Reborn)` lane invokes it.
+    #     Decided 2026-08-04 (WS10): editing it previously raised
+    #     `unmapped test or CI path`, failing `Detect Reborn test scope` and
+    #     skipping every downstream Reborn lane.
+    #   * `run-reborn-webui.sh` is a local developer launcher for the WebUI dev
+    #     server. It is referenced by no workflow at all (a search over
+    #     `.github/` finds nothing), so no lane can be selected for it.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    "scripts/check-version-bumps.sh",
+    "scripts/run-reborn-webui.sh",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
