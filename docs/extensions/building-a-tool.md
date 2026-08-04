@@ -431,12 +431,12 @@ failure and not a model-visible token prompt.
 
 ## WASM implementation pattern
 
-WASM tools implement `wit/tool.wit`:
+WASM tools implement `crates/ironclaw_wasm/wit/tool.wit`:
 
 ```rust
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../../wit/tool.wit",
+    path: "../../../../ironclaw_wasm/wit/tool.wit",
 });
 
 struct ExampleTool;

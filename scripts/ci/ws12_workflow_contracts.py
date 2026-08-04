@@ -264,20 +264,39 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=PLATFORM_WORKFLOW,
         name="has_direct_wasm_abi_risk",
-        anchor="wit/",
+        # Anchored on the build script rather than on a path prefix: the WIT
+        # directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so the bare
+        # `wit/` alternative that used to anchor this filter is gone.
+        anchor="build-wasm-extensions",
         kind="regex",
         crates=(
             ("ironclaw_common", "src/lib.rs"),
             ("ironclaw_wasm", "src/lib.rs"),
         ),
-        # Probe derived from reality rather than from a guessed layout: the
-        # shipped package manifests are found on disk and every one of them
-        # must be in scope. Anchored on the support crate and hopping to its
-        # sibling `packages/` directory, which is where WS2 put them — if that
-        # moves again this stops discovering files or stops matching them,
-        # either way loudly.
-        crate_globs=(("ironclaw_extension_support", "../packages/*/manifest.toml"),),
-        in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
+        # Probes derived from reality rather than from a guessed layout: the
+        # files are found on disk and every one of them must be in scope.
+        #
+        #  * the shipped package manifests, anchored on the support crate and
+        #    hopping to its sibling `packages/` directory, which is where WS2
+        #    put them — if that moves again this stops discovering files or
+        #    stops matching them, either way loudly.
+        #  * the canonical WASM ABI contracts themselves. Naming them by glob
+        #    rather than by literal is the point: the filter's whole job is to
+        #    put a `tool.wit`/`channel.wit` edit in scope, and a literal probe
+        #    can only assert the path someone typed. `wit/*.wit` discovers
+        #    whatever the crate actually ships, so adding a third contract or
+        #    moving the directory out of the crate fails here instead of
+        #    passing on a stale name. (It replaces two `.../wit/host.wit`
+        #    probes: no `host.wit` exists in this repository, so they asserted
+        #    the crate-name alternative twice and nothing about the ABI files.)
+        crate_globs=(
+            ("ironclaw_extension_support", "../packages/*/manifest.toml"),
+            ("ironclaw_wasm", "wit/*.wit"),
+        ),
+        in_scope=(
+            "registry/tools/x.json",
+            "scripts/build-wasm-extensions.sh",
+        ),
         out_of_scope=(
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
