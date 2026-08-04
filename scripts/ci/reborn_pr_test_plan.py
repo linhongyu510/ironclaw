@@ -62,6 +62,14 @@ PR_STATIC_CONTROL_PATHS = {
     #     invoke the script.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    #   * the container build context is owned by the `Docker` workflow, which
+    #     has its own trigger on this path. No Reborn test lane reads the
+    #     Dockerfile, and its `include_str!`/COPY coverage is separately
+    #     enforced by `scripts/ci/check-include-str-paths.sh` under Code Style.
+    #     Without this entry any PR touching the Dockerfile aborts the planner
+    #     with "unclassified pull-request path: Dockerfile" and takes
+    #     `Tests (Reborn)` down with it.
+    "Dockerfile",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {

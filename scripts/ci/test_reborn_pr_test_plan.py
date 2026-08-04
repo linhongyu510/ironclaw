@@ -442,8 +442,38 @@ class RebornPrTestPlanTests(unittest.TestCase):
             self.plan("pull_request", ["crates/deleted/src/lib.rs"])
 
     def test_unclassified_build_input_fails_fast(self) -> None:
+        """The fail-closed arm still rejects a genuinely unknown root path.
+
+        This used to use `Dockerfile` as its example, which stopped being an
+        example once the container build context was classified (see
+        `test_dockerfile_is_static_control_not_a_planner_abort`). The invariant
+        under test is the arm, not the filename, so it keeps a path no rule
+        claims — like `test_unmapped_crate_path_fails_fast` above, the fixture
+        is deliberately fictional and never touched on disk.
+        """
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
-            self.plan("pull_request", ["Dockerfile"])
+            self.plan("pull_request", ["unowned-root-input.mk"])
+
+    def test_dockerfile_is_static_control_not_a_planner_abort(self) -> None:
+        """Editing the container build context must not abort the planner.
+
+        Regression for the failure this rule was added from: a PR that moved
+        `providers.json` into its owning crate had to drop two `COPY` lines,
+        and the planner rejected the whole run with "unclassified
+        pull-request path: Dockerfile", failing `Detect Reborn test scope`
+        and taking `Tests (Reborn)` down with it. The Dockerfile is owned by
+        the `Docker` workflow and its COPY coverage by
+        `check-include-str-paths.sh`; no Reborn test lane reads it, so it
+        de-escalates rather than selecting lanes.
+        """
+        plan = self.plan("pull_request", ["Dockerfile"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["coverage_mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertIn(
+            "static CI or workspace-policy checks own: Dockerfile",
+            plan["reasons"],
+        )
 
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
