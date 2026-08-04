@@ -113,6 +113,13 @@ OAuth client credentials, and channel mappings are configured after startup
 from Admin Configuration. These deployment values are never shown in a user's
 extension setup flow.
 
+> **"Admin Configuration" and the "Slack card" are the same place.** This guide
+> uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
+> Concretely: web interface -> **Extensions** -> **Channels** tab -> scroll to the
+> bottom of the Built-in section -> **Configure** on the Slack card. (Extensions
+> opens on the **Registry** tab, which is *not* where channels are connected.)
+> Every "Admin Configuration" reference below means that dialog.
+
 As an operator, open Admin, Configuration, then Slack deployment configuration.
 Save:
 
@@ -320,14 +327,12 @@ Verification checklist:
 There is no config or env enablement gate to check; the route is always mounted.
 
 A 503 `temporarily_unavailable` means the Slack extension's ingress signing secret is not
-registered yet. Register it where `docs/channels/slack.mdx` documents: in the web
-interface, open **Extensions**, switch to the **Channels** tab, scroll to the bottom of
-the Built-in section, and use **Configure** on the Slack card. (Extensions opens on the
-**Registry** tab, which is not where channels are connected — that is the usual reason
-this step is missed.)
+registered yet. Register it in Admin Configuration for Slack (the Slack card — see the
+note under "Reborn Config" for the exact UI path; landing on the wrong Extensions tab is
+the usual reason this step is missed).
 
 A 401 means a signing secret is registered but does not match the app. Compare the value
-on that same Slack card against **Basic Information -> Signing Secret** in the Slack app.
+there against **Basic Information -> Signing Secret** in the Slack app.
 
 ### Slack route never receives events
 
