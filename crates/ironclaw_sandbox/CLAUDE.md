@@ -76,8 +76,14 @@ no production constructor (`with_script_runtime` and
   (pre-existing, inherited with the move).** `tests/support/docker_gate.rs` says
   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` is what turns a missing daemon or image from
   a silent skip into a hard failure, and that "CI sets this". **Nothing sets
-  it** — the name appears only in `docker_gate.rs` and `attribution_tests.rs`,
-  in this tree and on `main`. So every real-Docker test in this crate skips-and-
+  it.** Stated as the search that checks it: no workflow, script, env file or
+  manifest mentions the name at all —
+  `git grep IRONCLAW_REQUIRE_DOCKER_TESTS -- '*.yml' '*.yaml' '*.sh' '*.toml' '*.py' '*.json' '.env*'`
+  is empty in this tree **and** on `main` — and the sole code reference is a
+  **read**, `std::env::var("IRONCLAW_REQUIRE_DOCKER_TESTS")` at
+  `docker_gate.rs:23`. Every other occurrence (here, `docker_security.rs`,
+  `attribution_tests.rs`, the rest of `docker_gate.rs`) is a doc comment or a
+  panic message. So every real-Docker test in this crate skips-and-
   passes everywhere, which is the exact gap the gate's own comment says let
   sandbox security bugs ship unnoticed. Guardrail-claim-vs-reality, the #6945
   class. The fix has two halves and **only one of them is here**:
