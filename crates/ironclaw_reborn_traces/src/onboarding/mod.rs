@@ -205,6 +205,26 @@ pub async fn onboard_instance_with_sink(
     onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
 }
 
+/// Default-base instance enrollment using the direct-`reqwest` sink — the
+/// admin CLI path (`ironclaw-reborn traces enroll-instance`).
+///
+/// Resolves the contribution root itself (the scope-`None` location under the
+/// IronClaw base dir), so callers need no base-dir vocabulary of their own.
+/// This is the seam that replaced the `ironclaw_reborn_traces::paths`
+/// re-export module, which existed only so the CLI could reach
+/// `ironclaw_common::paths` without declaring the dependency
+/// (PROPOSAL §6.4.14: "drop the boundary-laundering re-export modules —
+/// consumers import the owners"). Path layout under the base dir is this
+/// crate's own knowledge, so owning the resolution here is the honest form.
+/// Tests that need an isolated root call [`onboard_instance_at_base`].
+pub async fn onboard_instance(
+    invite_url: &str,
+    consents: OnboardConsents,
+) -> Result<OnboardOutcome, OnboardError> {
+    let dir = trace_contribution_dir_for_scope(None);
+    onboard_at_dir(&dir, invite_url, consents).await
+}
+
 /// Base-dir-parameterised instance enrollment using the default
 /// direct-`reqwest` sink — the admin CLI path (`ironclaw-reborn traces
 /// enroll-instance`), where host-shell possession is the admin gate and there

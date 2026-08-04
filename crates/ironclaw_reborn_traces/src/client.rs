@@ -76,6 +76,32 @@ impl TraceClientHost {
         self.redact_and_score_raw_contribution(raw).await
     }
 
+    /// Build an envelope from the raw JSON of a recorded trace file.
+    ///
+    /// The recorded-trace wire shape is `ironclaw_llm`'s
+    /// (`recording::TraceFile`). Parsing it here keeps that type inside the
+    /// crate that already depends on `ironclaw_llm`, so callers — notably
+    /// `ironclaw-reborn traces preview` — need no `ironclaw_llm` edge of their
+    /// own. This is the seam that replaced the
+    /// `ironclaw_reborn_traces::recording` re-export module, a `pub use
+    /// ironclaw_llm::recording::*` passthrough whose only purpose was to let
+    /// the CLI name an `ironclaw_llm` type without declaring the dependency
+    /// (PROPOSAL §6.4.14: "drop the boundary-laundering re-export modules —
+    /// consumers import the owners"). The CLI's dependency allowlist
+    /// (`reborn_cli_binary_crate_stays_separate_from_v1_root`) deliberately
+    /// excludes `ironclaw_llm`, so "import the owner" is satisfied by owning
+    /// the operation here rather than by re-exporting the type.
+    pub async fn build_envelope_from_recorded_trace_json(
+        &self,
+        recorded_trace_json: &str,
+        options: trace::RecordedTraceContributionOptions,
+    ) -> anyhow::Result<TraceContributionEnvelope> {
+        let trace_file: TraceFile = serde_json::from_str(recorded_trace_json)
+            .context("recorded trace is not a valid recorded-trace JSON document")?;
+        self.build_envelope_from_recorded_trace(&trace_file, options)
+            .await
+    }
+
     pub async fn build_envelope_from_capture_turns(
         &self,
         turns: &[RawTraceCaptureTurn],

@@ -594,13 +594,9 @@ async fn enroll_instance(
         include_message_text,
         include_tool_payloads,
     };
-    let outcome = ironclaw_reborn_traces::onboarding::onboard_instance_at_base(
-        &ironclaw_reborn_traces::paths::ironclaw_base_dir(),
-        invite,
-        consents,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("instance enrollment failed: {e}"))?;
+    let outcome = ironclaw_reborn_traces::onboarding::onboard_instance(invite, consents)
+        .await
+        .map_err(|e| anyhow::anyhow!("instance enrollment failed: {e}"))?;
 
     if json {
         println!(
@@ -1081,19 +1077,10 @@ async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
             e
         )
     })?;
-    let recorded_trace: ironclaw_reborn_traces::recording::TraceFile =
-        serde_json::from_str(&raw_json).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse recorded trace {}: {}",
-                options.recorded_trace.display(),
-                e
-            )
-        })?;
-
     let trace_host = TraceClientHost;
     let envelope = trace_host
-        .build_envelope_from_recorded_trace(
-            &recorded_trace,
+        .build_envelope_from_recorded_trace_json(
+            &raw_json,
             RecordedTraceContributionOptions {
                 include_message_text: options.include_message_text,
                 include_tool_payloads: options.include_tool_payloads,
@@ -1899,8 +1886,16 @@ fn queue_dir() -> PathBuf {
     trace_contribution_dir().join("queue")
 }
 
+/// The unscoped Trace Commons contribution root.
+///
+/// Delegates to the crate that owns the layout rather than re-deriving
+/// `<base>/trace_contributions` here: this used to read
+/// `ironclaw_reborn_traces::paths::ironclaw_base_dir().join("trace_contributions")`
+/// through a re-export module that existed only to hide a
+/// `ironclaw_common` dependency (PROPOSAL §6.4.14). `trace_contribution_dir_for_scope(None)`
+/// resolves to the identical path and keeps the layout knowledge in one place.
 fn trace_contribution_dir() -> PathBuf {
-    ironclaw_reborn_traces::paths::ironclaw_base_dir().join("trace_contributions")
+    ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(None)
 }
 
 fn read_policy() -> anyhow::Result<StandingTraceContributionPolicy> {
