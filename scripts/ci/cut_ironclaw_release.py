@@ -150,7 +150,7 @@ def _checked_out_sha(candidate_root: Path) -> str:
 
 
 def _manifest_version(candidate_root: Path) -> str:
-    manifest = candidate_root / "crates/ironclaw_reborn_cli/Cargo.toml"
+    manifest = candidate_root / "crates/app/ironclaw_cli/Cargo.toml"
     with manifest.open("rb") as manifest_file:
         return str(tomllib.load(manifest_file)["package"]["version"])
 

@@ -210,7 +210,7 @@ class ReleaseTagTests(unittest.TestCase):
     def test_candidate_metadata_comes_from_supplied_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
-            manifest = candidate_root / "crates/ironclaw_reborn_cli/Cargo.toml"
+            manifest = candidate_root / "crates/app/ironclaw_cli/Cargo.toml"
             manifest.parent.mkdir(parents=True)
             manifest.write_text(
                 f'[package]\nname = "ironclaw"\nversion = "{VERSION}"\n',
