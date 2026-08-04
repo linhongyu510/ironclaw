@@ -1950,7 +1950,7 @@ fn scanner_allowlist_is_shrink_only() {
 /// makes the same entry keep matching; an entry naming a crate that is really
 /// gone still falls through to `stale`.
 #[test]
-fn allowlist_entries_follow_a_crate_into_its_family_directory() {
+fn reborn_allowlist_entries_follow_a_crate_into_its_family_directory() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let root = temporary.path();
     std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("root manifest");

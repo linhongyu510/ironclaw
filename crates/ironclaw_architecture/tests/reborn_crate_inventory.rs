@@ -44,7 +44,7 @@ const REPRESENTATIVE_CRATES: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 #[test]
-fn crate_inventory_measures_the_real_tree() {
+fn reborn_crate_inventory_measures_the_real_tree() {
     let root = workspace_root();
     let inventory = crate_directories(&root);
 
@@ -101,7 +101,7 @@ fn crate_inventory_measures_the_real_tree() {
 /// pre-push hook already runs Python gates, and a guardrail that quietly opts
 /// out on a machine is the class of defect this row exists to close.
 #[test]
-fn rust_and_python_crate_inventories_agree() {
+fn reborn_rust_and_python_crate_inventories_agree() {
     let root = workspace_root();
     let script = root.join("scripts/ci/lib/crate_tree.py");
     assert!(
@@ -148,10 +148,10 @@ fn rust_and_python_crate_inventories_agree() {
 /// untouched. On today's flat tree every one of these is the identity — which
 /// is the evidence that repointing ~450 literals through the resolver changed
 /// no gate's verdict — and after Wave 5 the same assertions still hold without
-/// an edit. (`resolution_is_the_identity_on_a_flat_fixture_tree` pins the
+/// an edit. (`reborn_resolution_is_the_identity_on_a_flat_fixture_tree` pins the
 /// identity claim itself, on a tree whose shape this test cannot lose.)
 #[test]
-fn logical_spellings_resolve_to_each_crates_real_directory() {
+fn reborn_logical_spellings_resolve_to_each_crates_real_directory() {
     let root = workspace_root();
 
     for (name, rest) in [
@@ -202,7 +202,7 @@ fn logical_spellings_resolve_to_each_crates_real_directory() {
 /// "adopting the resolver changed nothing" checkable forever, including from a
 /// checkout where the family move has already landed.
 #[test]
-fn resolution_is_the_identity_on_a_flat_fixture_tree() {
+fn reborn_resolution_is_the_identity_on_a_flat_fixture_tree() {
     let (_guard, root) = fixture_root(|root| {
         write(&root.join("crates/ironclaw_llm/src/lib.rs"), "// fixture\n");
         write(&root.join("crates/ironclaw_llm/Cargo.toml"), "[package]\n");
@@ -256,7 +256,7 @@ fn fixture_root(extra: impl FnOnce(&Path)) -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
-fn a_crate_moved_into_a_family_directory_still_resolves() {
+fn reborn_crate_moved_into_a_family_directory_still_resolves() {
     let (_guard, root) = fixture_root(|root| {
         write(
             &root.join("crates/substrates/ironclaw_llm/Cargo.toml"),
@@ -302,7 +302,7 @@ fn a_crate_moved_into_a_family_directory_still_resolves() {
 }
 
 #[test]
-fn a_crate_that_no_longer_exists_is_refused_not_answered() {
+fn reborn_crate_that_no_longer_exists_is_refused_not_answered() {
     let (_guard, root) = fixture_root(|_| {});
 
     let error = try_resolve_crate_relative(&root, "crates/ironclaw_deleted/src/lib.rs")
@@ -321,7 +321,7 @@ fn a_crate_that_no_longer_exists_is_refused_not_answered() {
 }
 
 #[test]
-fn an_ambiguous_crate_name_is_refused_not_picked() {
+fn reborn_ambiguous_crate_name_is_refused_not_picked() {
     let (_guard, root) = fixture_root(|root| {
         write(
             &root.join("crates/substrates/ironclaw_llm/Cargo.toml"),
@@ -342,7 +342,7 @@ fn an_ambiguous_crate_name_is_refused_not_picked() {
 }
 
 #[test]
-fn a_truncated_tree_refuses_rather_than_reporting_an_empty_inventory() {
+fn reborn_truncated_tree_refuses_rather_than_reporting_an_empty_inventory() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let root = temporary.path();
     write(&root.join("Cargo.toml"), "[workspace]\n");
@@ -368,7 +368,7 @@ fn a_truncated_tree_refuses_rather_than_reporting_an_empty_inventory() {
 }
 
 #[test]
-fn separate_workspaces_nested_manifests_and_build_output_are_excluded() {
+fn reborn_separate_workspaces_nested_manifests_and_build_output_are_excluded() {
     let (_guard, root) = fixture_root(|root| {
         // A guest component: its own workspace, never built here.
         write(

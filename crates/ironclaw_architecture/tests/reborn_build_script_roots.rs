@@ -52,7 +52,7 @@ fn build_scripts(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn build_scripts_do_not_derive_the_repo_root_by_counted_parent_hops() {
+fn reborn_build_scripts_do_not_derive_the_repo_root_by_counted_parent_hops() {
     let root = workspace_root();
     let scripts = build_scripts(&root);
 
@@ -97,7 +97,7 @@ fn build_scripts_do_not_derive_the_repo_root_by_counted_parent_hops() {
 /// The matcher must actually catch the shape it bans — a gate whose pattern
 /// never matches is the same dark verdict one level up.
 #[test]
-fn fixed_depth_matcher_catches_the_banned_shapes_and_ignores_prose() {
+fn reborn_fixed_depth_matcher_catches_the_banned_shapes_and_ignores_prose() {
     let condense = |text: &str| -> String {
         strip_comments_and_strings(text)
             .chars()
