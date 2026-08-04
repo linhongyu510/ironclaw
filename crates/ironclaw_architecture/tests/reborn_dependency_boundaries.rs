@@ -4249,6 +4249,15 @@ struct LayerMatrixException {
 /// `PackageIdentity` in `ironclaw_host_api::trust`, which is §6.8.1's own
 /// prescription ("`trust`-vocabulary via `host_api`").
 ///
+/// **Label semantics (recorded 2026-08-04).** `removes_in: "W7"` on the
+/// original entries is the retired **July-train** wave label (the tags were
+/// written when this gate was armed — every one carries `introduced:
+/// 2026-07-09`, predating the target-architecture program), **not** the
+/// program's Wave 5 or its WS7 physical-move workstream: PROPOSAL §8.3
+/// resolves every W7-tagged edge through WS2/WS3/WS4 work. Surviving entries
+/// carry a workstream-or-issue key; do not read any remaining `W7` as a
+/// schedule.
+///
 /// **6 → 5 (WS3, consolidated).** Two WS3 slices touch this list and their
 /// edits are disjoint, so the consolidated PR recomputes the constant rather
 /// than inheriting either slice's figure.
@@ -4310,14 +4319,14 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_extension_support",
         introduced: "2026-07-09",
-        removes_in: "W7",
+        removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
     },
     LayerMatrixException {
         crate_name: "ironclaw_conversations",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
-        removes_in: "WS5",
+        removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04)",
         reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
     },
     LayerMatrixException {
