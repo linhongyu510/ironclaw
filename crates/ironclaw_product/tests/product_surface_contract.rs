@@ -4808,11 +4808,13 @@ async fn unrouted_shared_route_does_not_fallback_to_default_subject() {
         .await
         .expect_err("shared binding must require an explicit subject user");
 
-    assert!(matches!(
-        error,
-        ProductSurfaceFailure::BindingRequired { reason }
-            if reason == "shared product route requires a configured subject user"
-    ));
+    let ProductSurfaceFailure::BindingRequired { reason } = error else {
+        panic!("unrouted shared binding returned an unexpected error: {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "shared product route requires a configured subject user"
+    );
 }
 
 #[tokio::test]
