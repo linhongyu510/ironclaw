@@ -632,9 +632,13 @@ impl LlmConfigService for RebornLlmConfigService {
         // retain an API key past the point the UI claims cleanup completed.
         self.keys.delete(&id).await.map_err(|error| {
             match error {
-                crate::llm_admin::llm_key_store::LlmKeyStoreError::Store(store_error) => {
+                crate::llm_admin::llm_key_store::LlmKeyStoreError::Store {
+                    operation,
+                    source: store_error,
+                } => {
                     tracing::error!(
                         provider_id = %id,
+                        secret_store_operation = operation,
                         secret_store_reason = store_error.stable_reason(),
                         "LLM provider delete: key cleanup failed"
                     );

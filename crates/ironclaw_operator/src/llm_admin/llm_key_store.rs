@@ -53,7 +53,10 @@ impl LlmKeyStore {
         self.store
             .put(&handle, value)
             .await
-            .map_err(LlmKeyStoreError::Store)?;
+            .map_err(|source| LlmKeyStoreError::Store {
+                operation: "put",
+                source,
+            })?;
         Ok(())
     }
 
@@ -76,7 +79,10 @@ impl LlmKeyStore {
         self.store
             .contains(&handle)
             .await
-            .map_err(LlmKeyStoreError::Store)
+            .map_err(|source| LlmKeyStoreError::Store {
+                operation: "contains",
+                source,
+            })
     }
 
     /// Provider ids that have an operator-stored key.
@@ -88,7 +94,10 @@ impl LlmKeyStore {
             .store
             .handles()
             .await
-            .map_err(LlmKeyStoreError::Store)?
+            .map_err(|source| LlmKeyStoreError::Store {
+                operation: "handles",
+                source,
+            })?
             .into_iter()
             .filter_map(|handle| {
                 handle
@@ -110,7 +119,10 @@ impl LlmKeyStore {
         self.store
             .read(&handle)
             .await
-            .map_err(LlmKeyStoreError::Store)
+            .map_err(|source| LlmKeyStoreError::Store {
+                operation: "read",
+                source,
+            })
     }
 
     /// Delete the stored key for `provider_id`. Returns whether one existed.
@@ -119,7 +131,10 @@ impl LlmKeyStore {
         self.store
             .delete(&handle)
             .await
-            .map_err(LlmKeyStoreError::Store)
+            .map_err(|source| LlmKeyStoreError::Store {
+                operation: "delete",
+                source,
+            })
     }
 }
 
@@ -137,8 +152,21 @@ fn handle_for(provider_id: &str) -> Result<SecretHandle, LlmKeyStoreError> {
 pub enum LlmKeyStoreError {
     #[error("invalid provider id `{provider_id}` for secret handle: {reason}")]
     InvalidProviderId { provider_id: String, reason: String },
-    #[error("secret store error: {0}")]
-    Store(#[source] OperatorSecretValueStoreError),
+    /// A port call failed. `operation` names which one.
+    ///
+    /// All five port calls used to collapse into a bare
+    /// `Store(OperatorSecretValueStoreError)`, so the stable reason survived
+    /// but the operation did not: a store failure could not be attributed to
+    /// `put`, `contains`, `handles`, `read` or `delete` without a stack trace.
+    /// The name is `&'static str` rather than an enum because it is diagnostic
+    /// only — nothing branches on it, and a caller that needs to branch should
+    /// match the source error instead.
+    #[error("operator secret {operation} failed: {source}")]
+    Store {
+        operation: &'static str,
+        #[source]
+        source: OperatorSecretValueStoreError,
+    },
 }
 
 #[cfg(test)]
@@ -194,7 +222,7 @@ mod tests {
             "BackendUnavailable",
         )));
 
-        for error in [
+        for (error, expected_operation) in [
             keys.put("acme", SecretString::from("v"))
                 .await
                 .expect_err("put"),
@@ -202,10 +230,20 @@ mod tests {
             keys.stored_provider_ids().await.expect_err("stored ids"),
             keys.read("acme").await.expect_err("read"),
             keys.delete("acme").await.expect_err("delete"),
-        ] {
+        ]
+        // Paired with the port call each element above made, in order. The
+        // operation name is the point of the struct variant: before it, all
+        // five collapsed into one indistinguishable error.
+        .into_iter()
+        .zip(["put", "contains", "handles", "read", "delete"])
+        {
             match error {
-                LlmKeyStoreError::Store(store) => {
-                    assert_eq!(store.stable_reason(), "BackendUnavailable")
+                LlmKeyStoreError::Store { operation, source } => {
+                    assert_eq!(source.stable_reason(), "BackendUnavailable");
+                    assert_eq!(
+                        operation, expected_operation,
+                        "store failure must name the port call it came from"
+                    );
                 }
                 other => panic!("expected a store error, got {other:?}"),
             }
