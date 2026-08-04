@@ -3342,6 +3342,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product",
                 "ironclaw_reborn_composition",
                 "ironclaw_scripts",
+                "ironclaw_secrets",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3414,12 +3415,21 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // LLM providers, rings logs, and controls an OS service; none of
             // that needs to see a turn.
             //
-            // `ironclaw_secrets` is deliberately **not** here. WS3's row
-            // ("tighten direct `secrets` consumers: remove the `webui` and
-            // `operator` edges via `product_contracts` ports") removes it, and
-            // PROPOSAL §12.1b names it security-sensitive with "port
-            // replacements land first". Adding it before that port exists
-            // would either fail today or force a waiver — the row owns it.
+            // ✎ **`ironclaw_secrets` joined the list with WS3's row** ("tighten
+            // direct `secrets` consumers: remove the `webui` and `operator`
+            // edges via `product_contracts` ports"). PROPOSAL §12.1b required
+            // the port replacement to land first, and it did, in the same
+            // change: `ironclaw_product_contracts::operator_secrets::
+            // OperatorSecretValueStore` is what `LlmKeyStore` now holds, and
+            // `ironclaw_reborn_composition::RuntimeOperatorSecretValueStore`
+            // implements it over the substrate. This entry is the "add the
+            // boundary rule" half of the row and is what stops the edge coming
+            // back through some later convenience.
+            //
+            // The rule is normal-deps only, so a *dev*-dependency would still be
+            // legal here — and there is deliberately none: the substrate-fidelity
+            // tests moved to the port's implementor rather than keeping a test
+            // seam open into the substrate from the products tier.
             crate_name: "ironclaw_operator",
             forbidden: vec![
                 "ironclaw_extension_host",

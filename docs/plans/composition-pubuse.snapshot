@@ -66,6 +66,7 @@ pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
     create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
+pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,

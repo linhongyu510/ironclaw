@@ -1978,13 +1978,15 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2127,13 +2129,15 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2630,13 +2634,15 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     // Provider selection lives entirely in config.toml (mirrors an

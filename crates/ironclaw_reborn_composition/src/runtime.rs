@@ -1471,7 +1471,9 @@ impl RebornRuntime {
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
-            ironclaw_operator::LlmKeyStore::new(self.secret_store()),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                self.secret_store(),
+            )),
         )))
     }
 
@@ -4096,7 +4098,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             boot_config.clone(),
             Arc::clone(&reload_parts.reload_handle),
             Arc::clone(&reload_parts.session),
-            ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store)),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
         );
         if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
         {
@@ -4520,7 +4524,9 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         return Ok(None);
     };
 
-    let keys = ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store));
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        Arc::clone(&services.secret_store),
+    ));
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await
