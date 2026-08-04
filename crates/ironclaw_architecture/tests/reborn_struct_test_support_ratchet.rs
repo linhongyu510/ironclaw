@@ -300,10 +300,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
         count: 1,
     },
+    // WS3 split `obligations.rs` into one module per chartered owner; the
+    // single frozen test-support method travelled to the staged-handoff owner.
+    // Repointed, not re-baselined: the count is unchanged at 1.
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/obligations.rs",
+        path: "crates/ironclaw_host_runtime/src/obligations/staged_handoffs.rs",
         count: 1,
     },
     FrozenPathCount {

@@ -980,7 +980,13 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
 
     let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
     let mut cli_runtime_source = String::new();
-    collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
+    let cli_runtime_files = collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
+    assert!(
+        cli_runtime_files > 0,
+        "expected the Reborn CLI runtime module tree at {}; found no .rs files, so this scan \
+         would be enforcing nothing",
+        runtime_dir.display()
+    );
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
@@ -1008,9 +1014,23 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let services =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
             .expect("host runtime services.rs must be readable");
-    let obligations =
-        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/obligations.rs"))
-            .expect("host runtime obligations.rs must be readable");
+    // WS3 split `obligations.rs` into `obligations/{mod,handler,staged_handoffs,
+    // process_store,tests}.rs` (one module per chartered owner). This gate is
+    // about the *escape hatches* the obligation code may not make public, and
+    // those can now be written in any of those modules — so it scans the whole
+    // directory rather than one file. The file count is asserted so a future
+    // move that empties the directory fails here instead of scanning nothing
+    // and reporting success (the loud-vs-silent distinction WS10 tracks).
+    let obligations_dir = root.join("crates/ironclaw_host_runtime/src/obligations");
+    let mut obligations = String::new();
+    let obligations_files = collect_runtime_rs(&obligations_dir, &mut obligations);
+    assert!(
+        obligations_files >= 4,
+        "expected the host-runtime obligation owners under {} (mod + the three chartered \
+         modules at minimum); found {obligations_files} .rs files, so this gate would be \
+         scanning nothing",
+        obligations_dir.display()
+    );
     let host_runtime_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
@@ -4586,35 +4606,37 @@ fn assert_no_normal_workspace_deps<'a>(
 }
 
 /// Recursively concatenate every `.rs` file under `dir` into `out`,
-/// descending into subdirectories. Matches the recursion pattern used by
-/// `collect_forbidden_*` walkers above so future boundary checks over
-/// `runtime/` can reuse the same helper. Used by
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the
-/// entire `runtime/` module tree for forbidden imports.
-fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
-    for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
-        panic!(
-            "Reborn CLI runtime directory must be readable at {}: {err}",
-            dir.display()
-        )
-    }) {
+/// descending into subdirectories, and return how many files were read.
+/// Matches the recursion pattern used by `collect_forbidden_*` walkers above so
+/// future boundary checks over a module tree can reuse the same helper. Used by
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the entire
+/// `runtime/` module tree for forbidden imports, and by
+/// `reborn_host_runtime_services_do_not_expose_lower_substrate_handles` to scan
+/// the obligation owners.
+///
+/// The count is returned so a caller can assert it actually read something: a
+/// path-keyed scan that silently walks an empty directory reports success while
+/// enforcing nothing.
+fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) -> usize {
+    let mut files = 0usize;
+    for entry in std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("directory must be readable at {}: {err}", dir.display()))
+    {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
-            collect_runtime_rs(&path, out);
+            files += collect_runtime_rs(&path, out);
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "Reborn CLI runtime file {} unreadable: {err}",
-                path.display()
-            )
-        });
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("file {} unreadable: {err}", path.display()));
         out.push_str(&content);
         out.push('\n');
+        files += 1;
     }
+    files
 }
 
 fn collect_forbidden_runtime_network_uses(
