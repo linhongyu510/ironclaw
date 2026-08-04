@@ -374,6 +374,21 @@ def build_plan(
             path.endswith(".md") and "/" not in path
         ):
             continue
+        # Markdown sitting *directly* under `crates/` is the crate-family map
+        # (`AGENTS.md`, `Architecture.md`, `README.md`), not a crate. It belongs
+        # to no package directory, so the fail-closed `crates/` arm below
+        # rejected it — and with it every PR that edited it, which is precisely
+        # the guidance maintenance the house rule "guidance travels with the
+        # change" asks for (issue #7100). Markdown *inside* a package directory
+        # is unaffected and stays package-owned; anything non-markdown directly
+        # under `crates/` still falls through to the explicit-decision arm.
+        if (
+            path.startswith("crates/")
+            and path.endswith(".md")
+            and path.count("/") == 1
+        ):
+            reasons.append(f"crate-family guidance changed: {path}")
+            continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
