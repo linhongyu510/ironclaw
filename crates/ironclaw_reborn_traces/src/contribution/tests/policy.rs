@@ -2,8 +2,6 @@
 //! back-compat with policy JSON written before a field existed) and the
 //! auth-mode round trip.
 
-//! Standing-policy serde, upload-claim cache keys and error labels, and device-key auth modes.
-
 use crate::contribution::*;
 
 #[test]

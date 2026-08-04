@@ -1,4 +1,8 @@
-//! Standing-policy serde, upload-claim cache keys and error labels, and device-key auth modes.
+//! Upload-claim minting: cache keys, issuer error labels, the bearer the
+//! issuer request carries, and the device-key auth modes.
+//!
+//! The standing policy's own serde contract lives in `policy.rs`, beside
+//! its production owner.
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
