@@ -47,13 +47,21 @@ fi
 # --- Helper functions ---------------------------------------------------------
 
 # Extract the version from a WIT package line like: package near:agent@1.2.3;
+#
+# `[[:space:]][[:space:]]*` rather than `[[:space:]]\+`: `\+` is a GNU BRE
+# extension that BSD sed (the macOS default) does not implement, where it
+# matched nothing and returned an empty version. That degraded silently and in
+# the fail-open direction — the WIT_TOOL_VERSION cross-check below is guarded
+# on a non-empty version, so this hook printed "All version checks passed"
+# having compared nothing (#7085). The two forms are identical under GNU sed,
+# so the enforced Linux CI lane is unchanged.
 extract_wit_version() {
     local file="$1"
     if [[ ! -f "$file" ]]; then
         echo ""
         return
     fi
-    sed -n 's/^[[:space:]]*package[[:space:]]\+[^@]*@\([0-9][0-9.]*[0-9]\)[[:space:]]*;.*/\1/p' "$file" \
+    sed -n 's/^[[:space:]]*package[[:space:]][[:space:]]*[^@]*@\([0-9][0-9.]*[0-9]\)[[:space:]]*;.*/\1/p' "$file" \
         | head -n1
 }
 
@@ -61,7 +69,7 @@ extract_wit_version() {
 extract_wit_version_base() {
     local file="$1"
     git show "origin/${BASE_BRANCH}:${file}" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*package[[:space:]]\+[^@]*@\([0-9][0-9.]*[0-9]\)[[:space:]]*;.*/\1/p' \
+        | sed -n 's/^[[:space:]]*package[[:space:]][[:space:]]*[^@]*@\([0-9][0-9.]*[0-9]\)[[:space:]]*;.*/\1/p' \
         | head -n1 || true
 }
 

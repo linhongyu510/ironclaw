@@ -33,6 +33,42 @@ QA_HARNESS_PREFIXES = (
     "scripts/reborn_webui_v2_live_qa/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+# Asset trees that live outside every crate root but are compiled *into* a
+# workspace crate through a relative `include_bytes!` / `include_str!` that
+# escapes its own crate (the §11.2.7 reach-ins inventoried by
+# `crates/ironclaw_architecture/tests/reborn_cross_crate_include_scan.rs`).
+# Cargo's package directories cannot see them, so the `crates/` arm below
+# resolves no package and the planner used to fail closed on every PR that
+# touched a first-party extension package.
+#
+# They must NOT be classified as ignored. A `wasm/*.wasm` under
+# `crates/extensions/packages/` is a *shipped artifact* that
+# `ironclaw_extension_support` embeds byte-for-byte; calling it prose would
+# turn today's loud failure into a silent under-schedule of a change to
+# production output. Route each tree to the crate that compiles it instead, so
+# a change still schedules that crate's tests and everything downstream of it.
+#
+# `scripts/ci/test_reborn_pr_test_plan.py` pins both halves: that the mapping
+# routes (not ignores), and that every prefix and owner below still exists.
+EMBEDDED_ASSET_OWNERS: tuple[tuple[str, str], ...] = (
+    # manifests, prompts, schemas and built `wasm/*.wasm` for the first-party
+    # extension packages -> `ironclaw_extension_support`
+    # (`src/packages/*.rs`). Packages that are themselves workspace crates
+    # (slack, telegram, mem0, memory-native) resolve to their own package
+    # first and never reach this table.
+    ("crates/extensions/packages/", "ironclaw_extension_support"),
+    # the uploadable WASM fixture bundles, whose `manifest.toml` files are
+    # `include_str!`d by `ironclaw_extension_host`
+    # (`src/available_extension_import.rs`). The guest sources beside them are
+    # standalone cargo workspaces that no Reborn lane compiles; routing the
+    # whole tree to the embedding crate over-schedules those rather than
+    # letting a fixture change select nothing at all.
+    ("test-tools/", "ironclaw_extension_host"),
+)
+# Everything the crate/asset arm owns: crate roots plus the asset trees above.
+CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
+    prefix for prefix, _ in EMBEDDED_ASSET_OWNERS
+)
 INTEGRATION_SUPPORT_OWNERS = {
     "tests/support/hosted_mcp_registration_server.rs": (
         "tests/integration/hosted_mcp_registration.rs"
@@ -56,10 +92,28 @@ PR_STATIC_CONTROL_PATHS = {
     #     its own scope detector (`Detect Reborn E2E scope`). This planner
     #     selects lanes for `Tests (Reborn)` only, and that workflow does not
     #     invoke the script.
+    #   * the two WASM build/ABI scripts are named in
+    #     `platform-and-compat.yml`'s `has_direct_wasm_abi_risk` classifier,
+    #     which both scopes and *runs* them (`./scripts/check-version-bumps.sh`);
+    #     `build-wasm-extensions.sh` additionally has a Code Style self-test
+    #     (`scripts/ci/test-build-wasm-extensions.sh`). No Reborn Rust lane
+    #     executes either.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    "scripts/build-wasm-extensions.sh",
+    "scripts/check-version-bumps.sh",
+    # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
+    # off exactly this pair and owns the image build; Code Style additionally
+    # proves every `include_str!` target is inside each build context
+    # (`scripts/ci/check-include-str-paths.sh`, the #5603 outage class). A
+    # Reborn Rust lane never builds an image.
+    "Dockerfile",
+    ".dockerignore",
 }
-PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
+# `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
+# hook, while Code Style both triggers on the tree and lints its contents
+# (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
+PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -424,7 +478,7 @@ def build_plan(
             # path.
             reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
-        if path.startswith("crates/"):
+        if path.startswith(CRATE_OR_ASSET_PREFIXES):
             package = next(
                 (
                     name
@@ -434,6 +488,29 @@ def build_plan(
                 None,
             )
             if package is None:
+                # Markdown that belongs to no crate is prose, in the same class
+                # as `docs/` and `.claude/`: nothing compiles it, so it selects
+                # no lane. Depth-independent by construction, so it keeps
+                # holding for `crates/AGENTS.md` and for a future
+                # `crates/<family>/AGENTS.md` after the WS7 family move. A
+                # crate-resident doc still resolves to its package above and
+                # keeps selecting that package's lane.
+                if path.endswith(".md"):
+                    continue
+                owner = next(
+                    (
+                        owner
+                        for prefix, owner in EMBEDDED_ASSET_OWNERS
+                        if path.startswith(prefix)
+                    ),
+                    None,
+                )
+                if owner is not None:
+                    production_packages.add(owner)
+                    reasons.append(
+                        f"asset compiled into {owner} changed: {path}"
+                    )
+                    continue
                 raise ValueError(f"unmapped crate path: {path}")
             directory = next(
                 directory

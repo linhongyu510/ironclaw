@@ -442,8 +442,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             self.plan("pull_request", ["crates/deleted/src/lib.rs"])
 
     def test_unclassified_build_input_fails_fast(self) -> None:
+        # Was `Dockerfile` until that gained a decision (see
+        # `test_container_and_hook_inputs_are_owned_by_static_gates`). The arm
+        # itself must stay fail-closed, so this keeps a genuinely undecided
+        # repo-root build input pointed at it.
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
-            self.plan("pull_request", ["Dockerfile"])
+            self.plan("pull_request", ["Makefile"])
 
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
@@ -490,6 +494,159 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
+
+        # The two WASM build/ABI scripts are decided the same way: named in
+        # `platform-and-compat.yml`'s `has_direct_wasm_abi_risk` classifier,
+        # which scopes *and* runs them.
+        for path in (
+            "scripts/build-wasm-extensions.sh",
+            "scripts/check-version-bumps.sh",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+
+    def test_container_and_hook_inputs_are_owned_by_static_gates(self) -> None:
+        """`Dockerfile`, `.dockerignore` and `.githooks/**` select no Rust lane.
+
+        Regression for the #7087 gap, the same class #7064 fixed for
+        `.claude/`: the planner had no rule for the container build inputs or
+        the git hooks, so its fail-closed arm rejected any PR that touched
+        them — which made a `Dockerfile` edit unmergeable even when the edit
+        was required (Wave 3's `wit/` move had to drop a `COPY wit/ wit/` that
+        no longer resolved, #7084). The image build belongs to
+        `platform-and-compat.yml`'s `has_docker_risk` lane and the hooks to
+        Code Style; no Reborn Rust lane builds an image or runs a hook.
+
+        Paired assertion, as in the `.claude/` regression: accepted AND
+        selecting nothing, so a later "classification" that quietly escalates
+        these to a full matrix fails here too.
+        """
+        for path in (
+            "Dockerfile",
+            ".dockerignore",
+            ".githooks/pre-commit",
+            ".githooks/commit-msg",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_embedded_package_assets_schedule_the_crate_that_compiles_them(
+        self,
+    ) -> None:
+        """Asset trees outside every crate root route to their embedding crate.
+
+        The other half of the #7087 gap. `crates/extensions/packages/<pkg>/`
+        and `test-tools/<tool>/` hold no `Cargo.toml`, so cargo's package
+        directories cannot see them and the `crates/` arm failed closed.
+
+        Classifying them as *ignored* would have been wrong in the dangerous
+        direction: a `wasm/*.wasm` under `crates/extensions/packages/` is a
+        shipped artifact that `ironclaw_extension_support` embeds with
+        `include_bytes!`, so ignoring it converts a loud failure into a silent
+        under-schedule of a change to production output. Hence the assertion
+        below is that the path *selects a lane*, not merely that it is
+        accepted — the inverse of the `.claude/` prose test.
+        """
+        original = planner.EMBEDDED_ASSET_OWNERS
+        # Real prefixes, synthetic owners: the synthetic workspace in
+        # `metadata()` has no `ironclaw_*` packages, and pointing the real
+        # prefixes at `alpha`/`beta` exercises the real prefix strings through
+        # the real routing. `test_embedded_asset_owner_mapping_is_not_stale`
+        # below pins the real owners against the real workspace.
+        planner.EMBEDDED_ASSET_OWNERS = (
+            ("crates/extensions/packages/", "alpha"),
+            ("test-tools/", "beta"),
+        )
+        planner.CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
+            prefix for prefix, _ in planner.EMBEDDED_ASSET_OWNERS
+        )
+        try:
+            for path, owner in (
+                ("crates/extensions/packages/github/wasm/github_tool.wasm", "alpha"),
+                ("crates/extensions/packages/github/wasm-src/src/lib.rs", "alpha"),
+                ("crates/extensions/packages/gmail/manifest.toml", "alpha"),
+                ("test-tools/market-data/manifest.toml", "beta"),
+                ("test-tools/hacker-news/wasm-src/src/lib.rs", "beta"),
+            ):
+                with self.subTest(path=path):
+                    plan = self.plan("pull_request", [path])
+                    self.assertEqual(plan["mode"], "selected", path)
+                    self.assertEqual(plan["changed_packages"], [owner], path)
+                    # Routed as a *production* change, so the crates that
+                    # consume the embedded artifact run too.
+                    self.assertIn(owner, plan["affected_packages"], path)
+                    self.assertNotEqual(plan["crate_buckets"], [], path)
+
+            # A package that *is* a workspace crate still resolves to itself
+            # rather than falling through to the asset table.
+            plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
+            self.assertEqual(plan["changed_packages"], ["alpha"])
+
+            # The arm stays fail-closed for an asset tree with no owner.
+            with self.assertRaisesRegex(ValueError, "unmapped crate path"):
+                self.plan("pull_request", ["crates/extensions/nowhere/thing.bin"])
+        finally:
+            planner.EMBEDDED_ASSET_OWNERS = original
+            planner.CRATE_OR_ASSET_PREFIXES = ("crates/",) + tuple(
+                prefix for prefix, _ in original
+            )
+
+    def test_markdown_owned_by_no_crate_is_prose(self) -> None:
+        """`crates/AGENTS.md` and `test-tools/README.md` select no lane.
+
+        Nothing compiles a markdown file, so a doc that belongs to no crate is
+        prose in the same class as `docs/` and `.claude/`. The rule is keyed
+        on "no package owns this path", not on a literal, so it keeps holding
+        for a future `crates/<family>/AGENTS.md` after the WS7 family move.
+
+        The paired case is `test_nested_crate_markdown_remains_package_owned`:
+        a doc *inside* a crate still resolves to that crate and keeps
+        selecting its lane. This must not widen into that.
+        """
+        for path in ("crates/AGENTS.md", "test-tools/README.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+
+    def test_embedded_asset_owner_mapping_is_not_stale(self) -> None:
+        """Every prefix and owner in the real table still exists.
+
+        The mapping is a hand-written bridge across a boundary cargo cannot
+        see, so it is exactly the kind of path-keyed constant CHECKLIST WS10
+        found silently rotting: if an asset tree or its owning crate moves,
+        the planner would resume failing closed (loud) or, worse, route to a
+        crate that no longer exists. Fail here first instead.
+        """
+        crate_manifests = {
+            manifest.parent.name: manifest
+            for manifest in ROOT.glob("crates/**/Cargo.toml")
+        }
+        owner_names = set()
+        for manifest in crate_manifests.values():
+            for line in manifest.read_text(encoding="utf-8").splitlines():
+                if line.startswith("name ="):
+                    owner_names.add(line.split("=", 1)[1].strip().strip('"'))
+                    break
+
+        self.assertNotEqual(planner.EMBEDDED_ASSET_OWNERS, ())
+        for prefix, owner in planner.EMBEDDED_ASSET_OWNERS:
+            with self.subTest(prefix=prefix):
+                self.assertTrue(
+                    (ROOT / prefix).is_dir(),
+                    f"asset tree {prefix} no longer exists",
+                )
+                self.assertIn(
+                    owner,
+                    owner_names,
+                    f"{prefix} routes to {owner}, which is no longer a crate",
+                )
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.
