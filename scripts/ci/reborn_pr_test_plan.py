@@ -27,6 +27,16 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # not a policy anyone chose. Classifying it is the fix; loosening the
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
+# Repo-root prose/example files with no build or test surface. Root `*.md` is
+# already handled inline below; this covers the non-`.md` siblings.
+#
+# `.env.example` is documentation of environment variables, not an input to
+# anything: no crate, test, or workflow reads the file (only doc comments
+# mention it by name). It was unclassified until 2026-08-04, so the
+# fail-closed arm rejected every PR that corrected an env-var comment — the
+# same shape as the `.claude/` gap above, and the same fix: classify it,
+# rather than loosen the arm that catches genuinely unknown paths.
+IGNORED_ROOT_FILES = (".env.example",)
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
@@ -370,8 +380,10 @@ def build_plan(
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
-        if path.startswith(IGNORED_PREFIXES) or (
-            path.endswith(".md") and "/" not in path
+        if (
+            path.startswith(IGNORED_PREFIXES)
+            or path in IGNORED_ROOT_FILES
+            or (path.endswith(".md") and "/" not in path)
         ):
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
