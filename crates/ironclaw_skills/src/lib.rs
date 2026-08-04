@@ -10,9 +10,17 @@
 //! - **Trusted**: User-placed skills (local/workspace) with full tool access
 //! - **Installed**: Registry/external skills, restricted to read-only tools
 //!
-//! In v1, trust-based tool filtering happens via `src/skills/attenuation.rs`.
-//! In v2, the Python orchestrator handles trust labels and the policy engine
-//! controls tool access via capability leases.
+//! This crate owns the trust *label* ([`SkillTrust`]) and nothing that acts on
+//! it: enforcement is a capability-tier concern. A skill's trust ceiling is
+//! applied where the skill's tools are dispatched — `ironclaw_host_api`'s
+//! capability/invocation attenuation, reached through
+//! `ironclaw_first_party_extension_ports`' activation and execution paths —
+//! and the authorization decision itself is `ironclaw_authorization`'s
+//! default-deny grant matching plus capability leases.
+//!
+//! `SkillTrust`'s `Ord` derivation is load-bearing for that ceiling
+//! (`Installed < Trusted`); see the safety note on the enum before touching
+//! its variants.
 
 pub mod install_metadata;
 pub mod learning;
