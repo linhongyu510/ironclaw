@@ -52,7 +52,7 @@ Owner pre-approved inline execution straight to a single PR (base `main`, origin
 
 **Files:**
 - Create: `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
-- Modify: `crates/ironclaw_composition/Cargo.toml` (features block ~L74), `crates/app/ironclaw_cli/Cargo.toml` (~L51), `crates/ironclaw_composition/src/extension_host/available_extensions.rs`, `scripts/ci/package-feature-flags.sh` (L44/L55)
+- Modify: `crates/ironclaw_composition/Cargo.toml` (features block ~L74), `crates/ironclaw_cli/Cargo.toml` (~L51), `crates/ironclaw_composition/src/extension_host/available_extensions.rs`, `scripts/ci/package-feature-flags.sh` (L44/L55)
 - Test: extend `crates/ironclaw_composition` tests (new `#[cfg(feature = "telegram-v2-host-beta")]` test in `available_extensions.rs` tests mod)
 
 **Interfaces:**
@@ -400,8 +400,8 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 8: Serve wiring + config section + trigger-delivery composite
 
 **Files:**
-- Create: `crates/app/ironclaw_cli/src/commands/serve_telegram.rs`
-- Modify: `crates/app/ironclaw_cli/src/commands/serve.rs` (mirror slack blocks at L22-25/L221/L472-506/L612-619), `crates/ironclaw_config/src/config_file.rs` (add `TelegramSection { enabled: Option<bool> }` with `deny_unknown_fields`, next to `SlackSection` L344), `crates/ironclaw_composition/src/slack/slack_delivery.rs` consumers if a composite `PostSubmitDeliveryHook` is needed (`CompositePostSubmitDeliveryHook(Vec<Arc<dyn PostSubmitDeliveryHook>>)` in a shared module — `set_trigger_post_submit_hook` is a single OnceLock slot; when both slack+telegram are enabled serve installs the composite once)
+- Create: `crates/ironclaw_cli/src/commands/serve_telegram.rs`
+- Modify: `crates/ironclaw_cli/src/commands/serve.rs` (mirror slack blocks at L22-25/L221/L472-506/L612-619), `crates/ironclaw_config/src/config_file.rs` (add `TelegramSection { enabled: Option<bool> }` with `deny_unknown_fields`, next to `SlackSection` L344), `crates/ironclaw_composition/src/slack/slack_delivery.rs` consumers if a composite `PostSubmitDeliveryHook` is needed (`CompositePostSubmitDeliveryHook(Vec<Arc<dyn PostSubmitDeliveryHook>>)` in a shared module — `set_trigger_post_submit_hook` is a single OnceLock slot; when both slack+telegram are enabled serve installs the composite once)
 
 **Interfaces:**
 - Produces: `resolve_telegram_config_for_serve(section, tenant_id, agent_id, project_id, user_id) -> anyhow::Result<Option<TelegramHostRuntimeConfig>>` gated on env `IRONCLAW_REBORN_TELEGRAM_ENABLED` override else `section.enabled`; `#[cfg(not(feature))]` stub errors when enabled without the feature (mirror serve_slack.rs L90).

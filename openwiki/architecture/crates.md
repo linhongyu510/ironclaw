@@ -747,7 +747,7 @@ The v1 monolith in `src/` coexists with Reborn but is being phased out:
 
 - **v1 crates:** `ironclaw_executor`, `ironclaw_engine` (in `crates/`)
 - **v1 code:** `src/` directory (agent, channels, db, extensions, tools, workspace, etc.)
-- **Dual binary:** `src/main.rs` (legacy) and `crates/app/ironclaw_cli` (modern)
+- **Dual binary:** `src/main.rs` (legacy) and `crates/ironclaw_cli` (modern)
 
 **When to use each:**
 - **v1 (src/):** Only maintain existing v1 behavior; don't add features

@@ -150,7 +150,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/app/ironclaw_cli/src/commands/ironhub.rs"
+path = "crates/ironclaw_cli/src/commands/ironhub.rs"
 lines = [138, 219, 231]
 branch_lines = [203]
 owner = "@serrrfirat"
@@ -159,7 +159,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/app/ironclaw_cli/src/commands/serve.rs"
+path = "crates/ironclaw_cli/src/commands/serve.rs"
 lines = [592, 593, 594, 595, 596, 597]
 branch_lines = [592]
 owner = "@serrrfirat"

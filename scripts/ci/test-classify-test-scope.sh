@@ -58,7 +58,7 @@ assert_empty_scope() {
 
 assert_scope \
   "reborn binary crate" \
-  "crates/app/ironclaw_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -407,7 +407,7 @@ has_reborn_tests=true"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
-  "crates/app/ironclaw_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

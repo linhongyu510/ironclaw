@@ -171,7 +171,7 @@ normalize_crate_path() {
     # The crate DIRECTORY basename is the key, not the cargo package name.
     # Usually they are identical; two documented exceptions make the package
     # name the wrong choice here (PROPOSAL §5.1's directory rule):
-    # `crates/app/ironclaw_cli` declares `name = "ironclaw"`, and package
+    # `crates/ironclaw_cli` declares `name = "ironclaw"`, and package
     # directories under `extensions/packages/` are named by extension identity
     # (`packages/slack/` holds `ironclaw_slack_extension`). The arms below are
     # therefore keyed on directory names, and every package directory needs its

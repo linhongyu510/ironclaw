@@ -210,9 +210,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["reasons"],
         )
 
-    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
+    def test_undecided_shared_e2e_harness_remains_an_explicit_mapping_error(
+        self,
+    ) -> None:
+        """A shared harness with no recorded decision still fails closed.
+
+        The invariant is "changing a shared E2E fixture must be a deliberate
+        decision", not "this one filename always raises". This used to name
+        `reborn_webui_harness.py`, which made the guard unsatisfiable: there
+        was no way to *record* a decision, so any PR touching it -- including
+        a mechanical crate rename -- was blocked with no route forward. The
+        decision is now expressible via DECIDED_E2E_HARNESS_PATHS, and this
+        keeps the wall up for everything not in it.
+        """
         with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
-            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+            self.plan("pull_request", ["tests/e2e/reborn_undecided_harness.py"])
+
+    def test_decided_shared_e2e_harness_is_owned_by_the_e2e_workflow(self) -> None:
+        """A harness whose decision is recorded selects no Rust lane."""
+        plan = self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertIn(
+            "dedicated Reborn E2E workflow owns: tests/e2e/reborn_webui_harness.py",
+            plan["reasons"],
+        )
 
     def test_reborn_e2e_and_crate_changes_keep_both_owners(self) -> None:
         plan = self.plan(
@@ -388,9 +410,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "none")
         self.assertEqual(plan["integration_lanes"], [])
 
-    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
+    def test_tree_wide_crates_prose_selects_no_lane(self) -> None:
+        """`crates/AGENTS.md` belongs to no package and must not fail closed.
+
+        Files sitting directly in `crates/` are the tree-wide prose map; no
+        package directory can contain them, so the crate arm would raise
+        `unmapped crate path`. They are prose, like `docs/`.
+        """
+        plan = self.plan("pull_request", ["crates/AGENTS.md"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertIn("tree-wide crates/ prose owns: crates/AGENTS.md", plan["reasons"])
+
+    def test_second_undecided_harness_also_fails_closed(self) -> None:
+        """Both fail-closed arms guard the decided set, not just the first.
+
+        The planner carries two structurally identical
+        `unmapped Reborn test path` arms on different branches; a decided-set
+        check in front of only one would leave the other able to abort on a
+        path the project has already ruled on.
+        """
         with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
-            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+            self.plan("pull_request", ["tests/reborn_undecided_fixture.rs"])
 
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
@@ -438,8 +479,30 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
 
     def test_unmapped_crate_path_fails_fast(self) -> None:
+        """A crate path that EXISTS but belongs to no workspace package.
+
+        The fixture must exist on disk: paths that no longer exist are now
+        classified as "removed by this diff" (the old side of a rename), so a
+        fictional path would exercise that arm instead of this one.
+        `crates/ironclaw_silk_decoder` is real and is a workspace `exclude`,
+        which is exactly "on disk, in no package".
+        """
         with self.assertRaisesRegex(ValueError, "unmapped crate path"):
-            self.plan("pull_request", ["crates/deleted/src/lib.rs"])
+            self.plan("pull_request", ["crates/ironclaw_silk_decoder/src/main.rs"])
+
+    def test_removed_crate_path_is_classified_not_fatal(self) -> None:
+        """The old side of a crate rename must not abort the planner.
+
+        Regression for WS6: renaming 11 crates puts ~600 deleted paths in the
+        diff, none of which map to a package any more. Before this arm the
+        planner failed closed on the first one, which would have blocked every
+        rename PR in WS6 and every family move in WS7.
+        """
+        plan = self.plan("pull_request", ["crates/ironclaw_gone/src/lib.rs"])
+        self.assertIn(
+            "removed by this diff: crates/ironclaw_gone/src/lib.rs",
+            plan["reasons"],
+        )
 
     def test_unclassified_build_input_fails_fast(self) -> None:
         """The fail-closed arm still rejects a genuinely unknown root path.

@@ -3,7 +3,7 @@
 The **WebUI host stack** for Reborn WebChat v2: route surface + SPA bundle +
 gateway assembly/middleware + listener/serve loop + host authentication, all in
 one `products`-layer crate above `ironclaw_composition`. Driven by the
-`ironclaw` binary (`crates/app/ironclaw_cli`).
+`ironclaw` binary (`crates/ironclaw_cli`).
 
 ## Start here
 

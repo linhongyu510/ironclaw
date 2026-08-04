@@ -168,7 +168,7 @@ fn extension_host_cluster_stays_internal() {
 #[test]
 fn reborn_binary_main_is_thin_bootstrap() {
     let root = workspace_root();
-    let reborn_main = std::fs::read_to_string(root.join("crates/app/ironclaw_cli/src/main.rs"))
+    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_cli/src/main.rs"))
         .expect("reborn cli main.rs readable");
 
     assert!(

@@ -338,7 +338,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
-    let cli_manifest = std::fs::read_to_string(root.join("crates/app/ironclaw_cli/Cargo.toml"))
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/Cargo.toml"))
         .expect("Reborn CLI manifest")
         .replace("\r\n", "\n");
     let dist_build_setup = std::fs::read_to_string(root.join(".github/dist-build-setup.yml"))
@@ -6957,10 +6957,10 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
-    let cli_manifest = std::fs::read_to_string(root.join("crates/app/ironclaw_cli/Cargo.toml"))
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/Cargo.toml"))
         .expect("Reborn CLI manifest")
         .replace("\r\n", "\n");
-    let wix_manifest = std::fs::read_to_string(root.join("crates/app/ironclaw_cli/wix/main.wxs"))
+    let wix_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/wix/main.wxs"))
         .expect("Reborn WiX manifest")
         .replace("\r\n", "\n");
 

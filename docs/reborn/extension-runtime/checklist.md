@@ -945,7 +945,7 @@ Rules — kept short on purpose:
   `ironclaw_extension_support::packages::telegram`; P7b DEL-8 lane A
   migrated the former `available_extensions.rs::telegram_package` builder into
   the self-contained inventory), the binary-assembled
-  entrypoint binding (`crates/app/ironclaw_cli/src/runtime/native_extensions.rs`),
+  entrypoint binding (`crates/ironclaw_cli/src/runtime/native_extensions.rs`),
   the real channel-egress transport with host-side path-placeholder token
   injection (`HostRuntimeChannelEgressTransport`,
   `path_placeholder_injection_substitutes_the_secret_host_side`), the
