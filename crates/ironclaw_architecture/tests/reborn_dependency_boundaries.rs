@@ -4333,24 +4333,22 @@ struct LayerMatrixException {
 /// dependency — the lane suites drive the port over the REAL governor so a
 /// denial they assert on is one the kernel produced — and dev edges are
 /// outside the matrix by construction (`is_normal_dependency`).
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 2;
+///
+/// **2 → 1 / 3 → 1 (2026-08-04, Waves 0–4 batch union).** The two stacked
+/// slices each removed their own entries off the same 4-entry base — the
+/// governor port (#7160) the two lane `→ resources` rows, the conversations
+/// port inversion (#7159) the `conversations → turns` row — and this batch
+/// merge is where the union lands: recomputed as `len()` of the merged list
+/// per the CHECKLIST §11.2.2 union rule. One entry survives.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 1;
 
-const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_extension_support",
-        introduced: "2026-07-09",
-        removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
-        reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_conversations",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04)",
-        reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
-    },
-];
+const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[LayerMatrixException {
+    crate_name: "ironclaw_host_runtime",
+    dependency_name: "ironclaw_extension_support",
+    introduced: "2026-07-09",
+    removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
+    reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
+}];
 
 /// The tracking metadata every exception must carry to be removable: the edge
 /// it names, when it was taken on, the milestone that deletes it, and why it
