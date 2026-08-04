@@ -17,7 +17,6 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     ModelMetadata, Role, ToolCall, ToolDefinition, map_provider_finish_token,
 };
-use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 
 // Official Gemini CLI OAuth credentials (public, from google/gemini-cli).
 // Split and reversed to bypass GitHub Push Protection false positives.
@@ -1564,11 +1563,8 @@ impl GeminiOauthProvider {
                 .iter()
                 .map(|t| {
                     let mut description = t.description.clone();
-                    let parameters = shape_tool_schema(
-                        ToolSchemaPolicy::Gemini,
-                        &t.parameters,
-                        &mut description,
-                    );
+                    let parameters =
+                        crate::gemini_schema::shape_tool_schema(&t.parameters, &mut description);
                     serde_json::json!({
                         "name": t.name,
                         "description": description,
@@ -2508,6 +2504,27 @@ mod tests {
                             { "type": "string" },
                             { "type": "object", "properties": { "value": { "type": "string" } } }
                         ]
+                    },
+                    "schedule": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "cron" },
+                                    "expression": { "type": "string" }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "once" },
+                                    "at": { "type": "string" }
+                                }
+                            }
+                        ]
+                    },
+                    "requests": {
+                        "type": "array"
                     }
                 },
                 "allOf": [{
@@ -2530,7 +2547,14 @@ mod tests {
 
         let parameters = &req["tools"][0]["functionDeclarations"][0]["parameters"];
         let encoded = parameters.to_string();
-        for keyword in ["\"if\"", "\"then\"", "\"const\"", "\"oneOf\"", "\"allOf\""] {
+        for keyword in [
+            "\"if\"",
+            "\"then\"",
+            "\"const\"",
+            "\"oneOf\"",
+            "\"anyOf\"",
+            "\"allOf\"",
+        ] {
             assert!(
                 !encoded.contains(keyword),
                 "unsupported keyword survived: {encoded}"
@@ -2538,6 +2562,14 @@ mod tests {
         }
         assert_eq!(parameters["properties"]["headers"]["type"], "object");
         assert_eq!(parameters["properties"]["payload"]["type"], "object");
+        assert_eq!(
+            parameters["properties"]["schedule"]["properties"]["kind"]["enum"],
+            serde_json::json!(["cron", "once"]),
+        );
+        assert_eq!(
+            parameters["properties"]["requests"]["items"]["type"],
+            "object",
+        );
     }
 
     #[test]
