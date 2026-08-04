@@ -410,9 +410,19 @@ name = "ironclaw_host_runtime"
 # are crate-to-crate within the set the fixed aggregator can see, so lines
 # leave one visible denominator and enter another and the global pair is
 # unchanged by construction.
-floor_percent = 89.05
-floor_covered_lines = 18801
-captured_total_lines = 21114
+# MEASURED, replacing the composed estimate. The arithmetic above predicted
+# 89.05% (18801 / 21114) by adding the two slices' recorded deltas. Dispatch run
+# 30907774036 at 4512e03e28f1df15b419d2e36f9f38f8f55d62fd measured
+# 88.63% (17562 / 19814) — the real denominator is 1300 lines BELOW the
+# composition. The estimate was wrong because both slices measured their delta
+# under the pre-#7083 aggregator, which could not see `crates/extensions/**` at
+# all; lines leaving host_runtime for extension_support simply vanished from
+# the tree it could measure, so neither branch's recorded delta describes the
+# post-#7094 world. This is the reason the file demands a measurement rather
+# than a reconciliation.
+floor_percent = 88.63
+floor_covered_lines = 17562
+captured_total_lines = 19814
 captured_date = "2026-08-04"
 rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution. Re-captured once for two composed WS3 moves (#7065 sandbox_process/** -> ironclaw_sandbox, #7080 skill-install executor -> ironclaw_extension_support). Both are code moves, not coverage regressions: the percentage floor RISES 88.23 -> 89.05 and only the absolute count falls, because those lines are no longer in this crate. #7065's lines are floored in their new home (see the ironclaw_sandbox entry); #7080's cannot be floored until #7083 is fixed."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -441,11 +451,33 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 # contributes no instrumented lines and a floor would enforce nothing. Give it
 # one when a lane builds it.
 
+# ⚠ RECAPTURED 2026-08-04 by the WS3/WS4 consolidation, and the percentage
+# FALLS 82.64 -> 75.31. Flagged rather than quietly written: a 7.33pp floor drop
+# deserves an owner's eye.
+#
+# Measured on dispatch run 30907774036 at 4512e03e28f1df15b419d2e36f9f38f8f55d62fd:
+# observed 75.31% (7142 / 9484) against a floor captured by #7094 at
+# 82.64% (6826 / 8260) — a denominator that grew +1224 lines (+14.82%).
+#
+# Why this is composition rather than lost tests, stated as the evidence and not
+# as a conclusion: `floor_covered_lines` RISES 6826 -> 7142 (+316), so the crate
+# is protected in absolute terms by MORE lines than before, and #7080's
+# un-masking accounting showed 1398 -> 1398 tests with zero names lost (the two
+# deltas were the same two tests renamed by module path). The ratio falls
+# because the arriving skill-install executor carries a lower coverage profile
+# than this crate's existing average, and because #7094's floor was captured
+# before any of it arrived. Same shape as #7094's own ironclaw_runner recapture
+# (85.55 -> 82.53), which set the precedent of taking the honest measured number
+# over the flattering one.
+#
+# The follow-up this earns, recorded rather than performed: raise the executor's
+# own coverage in its new home. Lowering a floor is the correct bookkeeping for a
+# move, but it is not a substitute for that work.
 [[crate]]
 name = "ironclaw_extension_support"
-floor_percent = 82.64
-floor_covered_lines = 6826
-captured_total_lines = 8260
+floor_percent = 75.31
+floor_covered_lines = 7142
+captured_total_lines = 9484
 captured_date = "2026-08-04"
 rationale = "The package inventory and the shared native tool executors: what every first-party package ships as, and the code that runs its tools."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
