@@ -179,6 +179,34 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS3",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_capabilities",
+        dependency_name: "ironclaw_processes",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS3 (#7141: processes re-layered runtimes -> kernel; the edge predates the move and was downward-legal before it)",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_host_runtime",
+        dependency_name: "ironclaw_processes",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS3 (#7141: processes re-layered runtimes -> kernel; previously downward-legal)",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_processes",
+        dependency_name: "ironclaw_resources",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS3 (#7141: the former LAYER_MATRIX_EXCEPTIONS entry became same-layer when processes re-layered to kernel; the ratchet reported it stale and the register shrank 5 -> 4)",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_turns",
+        dependency_name: "ironclaw_processes",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS3 (#7141: processes re-layered runtimes -> kernel; previously downward-legal, #6696's journal dependency)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_authorization",
         dependency_name: "ironclaw_trust",
         layer: "kernel",
@@ -278,32 +306,11 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     },
     // ---- loops ----
     SameLayerEdge {
-        crate_name: "ironclaw_extension_support",
-        dependency_name: "ironclaw_skills",
-        layer: "loops",
-        owner: "extensions/",
-        decided_in: "WS2",
-    },
-    SameLayerEdge {
         crate_name: "ironclaw_first_party_extension_ports",
         dependency_name: "ironclaw_loop_host",
         layer: "loops",
         owner: "dissolved (no target family)",
         decided_in: "WS8",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_first_party_extension_ports",
-        dependency_name: "ironclaw_skills",
-        layer: "loops",
-        owner: "dissolved (no target family)",
-        decided_in: "WS8",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_loop_host",
-        dependency_name: "ironclaw_skills",
-        layer: "loops",
-        owner: "loop/",
-        decided_in: "WS4",
     },
     SameLayerEdge {
         crate_name: "ironclaw_runner",
@@ -477,6 +484,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS2",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_skills",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "substrates/",
+        decided_in: "WS4 (#7141: skills re-layered loops -> substrates per the WS4 row; its existing filesystem dep became same-layer)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_filesystem",
         dependency_name: "ironclaw_libsql_runtime",
         layer: "substrates",
@@ -645,7 +659,7 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 70;
+const SAME_LAYER_EDGE_BASELINE: usize = 72;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -702,7 +716,6 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_observability", "substrates"),
     ("ironclaw_operator", "products"),
     ("ironclaw_outbound", "substrates"),
-    ("ironclaw_process_sandbox", "runtimes"),
     ("ironclaw_processes", "runtimes"),
     ("ironclaw_product", "products"),
     ("ironclaw_product_contracts", "contracts"),
@@ -720,7 +733,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_runner", "kernel"),
     ("ironclaw_runtime_policy", "kernel"),
     ("ironclaw_safety", "substrates"),
-    ("ironclaw_scripts", "runtimes"),
+    ("ironclaw_sandbox", "runtimes"),
     ("ironclaw_secrets", "substrates"),
     ("ironclaw_skills", "loops"),
     ("ironclaw_slack_extension", "products"),
@@ -758,6 +771,20 @@ struct DowngradePin {
 
 const DOWNGRADE_PINS: &[DowngradePin] = &[
     DowngradePin {
+        crate_name: "ironclaw_skills",
+        from_layer: "loops",
+        to_layer: "substrates",
+        demoted_in: "#7141 (WS4 — skills re-layer, landed in the Waves 0-4 batch)",
+        permitted_consumers: &[
+            "ironclaw_extension_host",
+            "ironclaw_extension_manager",
+            "ironclaw_extension_support",
+            "ironclaw_first_party_extension_ports",
+            "ironclaw_loop_host",
+            "ironclaw_reborn_composition",
+        ],
+    },
+    DowngradePin {
         crate_name: "ironclaw_extensions",
         from_layer: "loops",
         to_layer: "substrates",
@@ -767,10 +794,8 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
             "ironclaw_extension_host",
             "ironclaw_extension_manager",
             "ironclaw_host_runtime",
-            "ironclaw_mcp",
             "ironclaw_product",
             "ironclaw_reborn_composition",
-            "ironclaw_scripts",
         ],
     },
     DowngradePin {
