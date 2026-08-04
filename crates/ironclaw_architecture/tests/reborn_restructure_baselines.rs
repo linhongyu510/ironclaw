@@ -83,7 +83,13 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// and the nudge-window assertion below correctly refused a ceiling that
 /// moved without its record (371 > 200). Measured on the merged tree with
 /// `bash scripts/ci/check-composition-budget.sh --print`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 45127;
+/// ✎ Re-recorded 45_127 → 42_688 on 2026-08-04 by the WS6 policy evictions
+/// (the profile approval gate to `ironclaw_approvals`, fire-time trigger
+/// access to `ironclaw_triggers`): −2,439 production LOC, banked as the new
+/// floor in the same PR that removed them, with `[gate].loc_ceiling` lowered
+/// to match. Measured with `bash scripts/ci/check-composition-budget.sh
+/// --print`, not derived by subtracting the diff.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42688;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
