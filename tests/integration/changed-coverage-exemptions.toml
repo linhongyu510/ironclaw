@@ -177,7 +177,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [4068, 4069, 4070, 4071, 4072, 4073, 4082, 4083]
+lines = [4070, 4071, 4072, 4073, 4074, 4075, 4084, 4085]
 owner = "@serrrfirat"
 reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -473,7 +473,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/lib.rs"
-lines = [616]
+lines = [618]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -481,7 +481,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [725, 728, 732, 733, 3701]
+lines = [725, 728, 732, 733, 3703]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -1544,7 +1544,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [1414, 1415, 1416, 3433]
+lines = [1414, 1415, 1416, 3435]
 owner = "@nearai/reborn"
 reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-1416 are the tail of `RebornRuntime::nearai_login_callback_mount`: the composition-local shim crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs was deleted (a 19-line file whose whole body re-wrapped the operator mount as `PublicRouteMount::new(mount.router, mount.descriptors)`), so the same four arguments -- `session, reload, boot, states` -- now go to `ironclaw_operator::nearai_login_callback_mount`, which returns the host-owned carrier directly. The pre-image (base runtime.rs:1411-1415) scored zero and the whole enclosing function scores zero in BOTH tracefiles (base 1401-1415, head 1396-1417), so nothing became untested; the callee itself IS covered, at crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs:86-104 with 2 hits per line. Line 3433 is the same shape one crate over: `ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher)` became `crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(...)` and rustfmt collapsed the call from three lines to one; the pre-image (base runtime.rs:3433/3435) scored zero, and the entire surrounding skill-learning assembly block (3425-3440) scores zero in both tracefiles. Reaching either would need a fully LLM-wired `RebornRuntime` built through `build_runtime_with_resource_governor`, which no tier below E2E stands up."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
