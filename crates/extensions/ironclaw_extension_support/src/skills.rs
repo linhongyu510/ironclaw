@@ -127,14 +127,27 @@ pub async fn resolve_install_input(
         .get("url")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    // `files`, `source` and `source_url` are companions of an *inline* install,
+    // not competitors: `dispatch_install` reads `content` and then
+    // `parse_install_files`/`parse_install_source`/`source_url` from the same
+    // object, so `{content, files}` is a bundle install it fully supports.
+    // Guarding the inline arm on their absence rejected that valid shape with
+    // `InputEncode` before it ever reached the dispatcher. They are conflicting
+    // only against `url`, which is what this function's contract says and what
+    // the url arm below now enforces.
+    let has_url_conflict = object.contains_key("files")
+        || object.contains_key("source")
+        || object.contains_key("source_url");
     match (has_content, url) {
-        (true, None)
-            if !object.contains_key("files")
-                && !object.contains_key("source")
-                && !object.contains_key("source_url") =>
-        {
-            Ok(input.clone())
-        }
+        (true, None) => Ok(input.clone()),
+        // Reject rather than silently drop. The rewrite below builds a fresh
+        // object from the fetched payload, so any `files`/`source`/`source_url`
+        // the caller sent alongside `url` would be discarded without a word —
+        // the caller would see a successful install of something other than
+        // what it asked for.
+        (false, Some(_)) if has_url_conflict => Err(SkillManagementCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        )),
         (false, Some(url)) => {
             let payload = url_install::fetch_skill_url_payload(fetch, url, usage).await?;
             let mut rewritten = Map::new();
@@ -515,7 +528,7 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        ids::{InvocationId, UserId},
+        ids::{CapabilityId, InvocationId, UserId},
         mount::MountView,
         resource::ResourceScope,
     };
@@ -541,5 +554,87 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    /// A fetch context with no egress, which must never be used.
+    ///
+    /// Both cases below are decided from the input shape alone, so reaching the
+    /// network at all would itself be the bug — and with `runtime_http_egress:
+    /// None` a fetch could not succeed anyway, so a regression that started
+    /// taking the url arm fails loudly here instead of going quiet.
+    fn unused_fetch_context() -> SkillUrlFetchContext {
+        SkillUrlFetchContext {
+            capability_id: CapabilityId::new("ironclaw.skill.install").unwrap(),
+            scope: ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            runtime_http_egress: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_install_keeps_its_bundle_files_source_and_source_url() {
+        // Regression: the inline arm used to require that `files`, `source`
+        // and `source_url` were all absent, so this shape — which
+        // `dispatch_install` fully supports, reading `content` and then
+        // `parse_install_files` / `parse_install_source` / `source_url` off the
+        // same object — was rejected with `InputEncode` before it ever reached
+        // the dispatcher. They conflict with `url`, not with `content`.
+        let input = json!({
+            "name": "bundled",
+            "content": "# SKILL\n",
+            "files": [{"path": "a.txt", "bytes_base64": "aGk="}],
+            "source": "installed_url",
+            "source_url": "https://example.test/skill",
+        });
+        let mut usage = ResourceUsage::default();
+
+        let resolved = resolve_install_input(&input, &unused_fetch_context(), &mut usage)
+            .await
+            .expect("an inline bundle install is a valid shape");
+
+        // Passed through untouched — the resolver has nothing to resolve here.
+        assert_eq!(resolved, input);
+    }
+
+    #[tokio::test]
+    async fn url_install_rejects_conflicting_fields_instead_of_dropping_them() {
+        // The url arm rebuilds a fresh object from the fetched payload, so
+        // anything the caller sent beside `url` would be silently discarded and
+        // the caller would see a successful install of something it did not ask
+        // for. The contract calls that an input error; now the code does too.
+        //
+        // The URL must be a *valid, allowed* skill host. An unroutable host is
+        // rejected by `validate_skill_url` with the same `InputEncode` kind, so
+        // a test written against one passes whether or not the conflict guard
+        // exists — it was, and it did, until sabotage-testing caught it. With an
+        // allowed host and no egress configured, removing the guard makes this
+        // reach the fetch and fail `Backend` instead, so the assertion below
+        // genuinely discriminates.
+        let allowed_url =
+            "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/helper/SKILL.md";
+        for conflicting in ["files", "source", "source_url"] {
+            let mut object = serde_json::Map::new();
+            object.insert("url".to_string(), Value::String(allowed_url.to_string()));
+            object.insert(conflicting.to_string(), json!("whatever"));
+            let input = Value::Object(object);
+            let mut usage = ResourceUsage::default();
+
+            let error = resolve_install_input(&input, &unused_fetch_context(), &mut usage)
+                .await
+                .expect_err(conflicting);
+
+            assert_eq!(
+                error.kind(),
+                RuntimeDispatchErrorKind::InputEncode,
+                "url + {conflicting} must be rejected by the guard, not dropped \
+                 (a `Backend` kind here means the guard is gone and the fetch ran)"
+            );
+            // The guard rejects before any egress, so nothing was consumed.
+            assert_eq!(
+                error.usage(),
+                None,
+                "{conflicting} must not reach the fetch"
+            );
+        }
     }
 }
