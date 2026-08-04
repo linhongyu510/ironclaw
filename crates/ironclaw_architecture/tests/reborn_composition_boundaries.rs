@@ -471,6 +471,17 @@ fn is_test_module_file(path: &Path) -> bool {
 /// containment plus cycle detection to be safe, and neither crate scanned here
 /// has ever contained a symlink. If one is ever wanted, this panic is where the
 /// decision gets made deliberately rather than silently.
+/// Refuse a symlink handed in as the *root* of either walk.
+///
+/// `reject_symlink` below only sees entries `read_dir` yields, and both walks
+/// push their root onto the stack before that ever runs — so a symlinked root
+/// was followed to its target silently, which is the same hole one level up.
+fn reject_symlink_root(dir: &Path) {
+    let metadata = std::fs::symlink_metadata(dir)
+        .unwrap_or_else(|error| panic!("readable walk root {dir:?}: {error}"));
+    reject_symlink(&metadata.file_type(), dir);
+}
+
 fn reject_symlink(file_type: &std::fs::FileType, path: &Path) {
     assert!(
         !file_type.is_symlink(),
@@ -483,6 +494,7 @@ fn reject_symlink(file_type: &std::fs::FileType, path: &Path) {
 
 /// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
 fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    reject_symlink_root(dir);
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -695,6 +707,7 @@ fn statement_end_after(contents: &str, from: usize) -> usize {
 /// must not look the same to an ownership gate. Extensions are compared
 /// case-insensitively so a `.MD` asset cannot slip past.
 fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
+    reject_symlink_root(dir);
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -869,6 +882,25 @@ mod markdown_include_scan_tests {
             panicked.is_err(),
             "a symlinked subtree must fail the markdown walk too"
         );
+
+        // The root itself is pushed onto the stack before `read_dir` ever runs,
+        // so a symlinked *root* used to be followed to its target silently.
+        let linked_root = root.path().join("linked_root");
+        std::os::unix::fs::symlink(&real, &linked_root).expect("symlink root");
+        for label in ["rust_sources", "markdown_assets"] {
+            let linked_root = linked_root.clone();
+            let panicked = std::panic::catch_unwind(move || {
+                if label == "rust_sources" {
+                    super::rust_sources(&linked_root);
+                } else {
+                    super::markdown_assets(&linked_root);
+                }
+            });
+            assert!(
+                panicked.is_err(),
+                "a symlinked walk root must fail {label}, not be followed"
+            );
+        }
     }
 
     /// The macro name must be a whole identifier and must be invoked.
