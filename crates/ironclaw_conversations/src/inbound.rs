@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_safety::{
-    InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
-};
 use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
     TrustedTriggerSubmitRequest,
@@ -294,10 +291,16 @@ where
     }
 }
 
+/// Conversations-owned implementation of the trusted-trigger submit seam.
+///
+/// It converts an already-validated `TrustedTriggerSubmitRequest` into this
+/// crate's private trusted inbound request and submits it. Prompt safety is
+/// *not* checked here: PROPOSAL §6.4.2 moved that scan behind the seam, into
+/// `ironclaw_triggers`' mint of the sealed request, so it applies to every
+/// submitter rather than only to this one.
 #[derive(Clone)]
 pub(crate) struct ConversationTrustedTriggerSubmitter<B, S, C: ?Sized> {
     inbound: InboundTurnService<B, S, C>,
-    prompt_safety: Arc<dyn InjectionScanner>,
 }
 
 impl<B, S, C> ConversationTrustedTriggerSubmitter<B, S, C>
@@ -317,7 +320,6 @@ where
                 conversation_service,
                 turn_coordinator,
             ),
-            prompt_safety: Arc::new(Sanitizer::new()),
         }
     }
 }
@@ -357,11 +359,6 @@ where
         request: TrustedTriggerSubmitRequest,
     ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
         let submitted_at = request.received_at();
-        // Defense in depth: composition scans before materializing/recording the
-        // prompt, and conversations scans again at the final trusted submission
-        // boundary before converting into the private trusted inbound request.
-        validate_trusted_trigger_prompt(&*self.prompt_safety, &request.fire().prompt)
-            .map_err(trigger_prompt_safety_rejection)?;
         let response = self
             .inbound
             .handle_inbound_turn_with_trusted_scope(
@@ -481,12 +478,6 @@ fn submit_trusted_trigger_outcome(
         submitted_at,
         turn_scope: response.resolution.turn_scope.clone(),
     })
-}
-
-fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError {
-    TriggerError::InvalidMaterialization {
-        reason: error.to_string(),
-    }
 }
 
 /// Classify conversation inbound failures for the trusted trigger submit path.
@@ -827,7 +818,8 @@ mod tests {
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)
+                .expect("a clean trigger prompt mints a trusted submit request");
 
         let outcome = submitter
             .submit_trusted_trigger_fire(request)

@@ -41,6 +41,12 @@
 - Raw user/assistant message content in turn-facing records; transcript content belongs to thread/transcript storage.
 - Capability runtime internals, runtime dispatch, model/provider behavior, or UI transport.
 - Silent retargeting of explicit links or route drift during adapter retries.
+- Trusted-trigger prompt safety scanning, and with it any `ironclaw_safety`
+  dependency. The scan is `ironclaw_triggers`' — it runs at the mint of the
+  sealed `TrustedTriggerSubmitRequest`, so it covers every
+  `TrustedTriggerFireSubmitter` rather than only the one wired here (moved
+  2026-08-04, PROPOSAL §6.4.2; the absent dependency is pinned by
+  `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`).
 
 ## Validation
 
