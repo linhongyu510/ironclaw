@@ -56,6 +56,15 @@
 //! (`ironclaw_extensions` `loops` → `substrates`, #7094 / WS2), alongside two
 //! promotions (`hooks` `substrates` → `loops`, `runner` `kernel` → `loops`)
 //! which need no pin because moving up narrows reach.
+//!
+//! ⚠ **Every test function here must keep its `reborn_` prefix.** The file name
+//! is not what selects it: `code_style.yml` runs
+//! `cargo test -p ironclaw_architecture reborn`, and that argument is a **test
+//! name** filter, not a path filter. Written without the prefix these gates
+//! compiled, passed locally, and reported `running 0 tests` under the exact
+//! command CI uses — inert in one of the two lanes that run them, which is the
+//! failure mode this whole file exists to stop. Verified by running that command
+//! and reading the count.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -910,7 +919,7 @@ fn edge_tracking_defect(edge: &SameLayerEdge) -> Option<&'static str> {
 /// The default guard: every same-layer edge is inventoried, and every
 /// inventoried edge is live.
 #[test]
-fn every_same_layer_edge_is_inventoried_and_no_entry_is_stale() {
+fn reborn_every_same_layer_edge_is_inventoried_and_no_entry_is_stale() {
     let metadata = cargo_metadata();
     let layers = declared_layers(&metadata);
     let edges = workspace_edges(&metadata, &layers);
@@ -1024,7 +1033,7 @@ fn every_same_layer_edge_is_inventoried_and_no_entry_is_stale() {
 /// above the live list is an unclaimed budget for exactly the growth the
 /// ceiling refuses.
 #[test]
-fn the_same_layer_edge_inventory_ratchets_down_only() {
+fn reborn_same_layer_edge_inventory_ratchets_down_only() {
     assert!(
         !SAME_LAYER_EDGE_INVENTORY.is_empty(),
         "SAME_LAYER_EDGE_INVENTORY is empty — the ratchet would pass having measured nothing"
@@ -1052,7 +1061,7 @@ fn the_same_layer_edge_inventory_ratchets_down_only() {
 
 /// Every entry is attributable — §11.2.2's discipline, applied to this list.
 #[test]
-fn every_same_layer_edge_entry_is_tracked() {
+fn reborn_every_same_layer_edge_entry_is_tracked() {
     let untracked: Vec<String> = SAME_LAYER_EDGE_INVENTORY
         .iter()
         .filter_map(|edge| {
@@ -1076,7 +1085,7 @@ fn every_same_layer_edge_entry_is_tracked() {
 /// A crate re-layered **downward** must land with a consumer-side pin, and that
 /// pin is enforced on every commit rather than being a note in a PR body.
 #[test]
-fn a_downward_re_layer_lands_with_its_consumer_side_pin() {
+fn reborn_downward_re_layer_lands_with_its_consumer_side_pin() {
     let metadata = cargo_metadata();
     let layers = declared_layers(&metadata);
     let edges = workspace_edges(&metadata, &layers);
@@ -1269,7 +1278,7 @@ fn a_downward_re_layer_lands_with_its_consumer_side_pin() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn layer_ladder_orders_the_matrix_rungs_and_rejects_unknowns() {
+fn reborn_layer_ladder_orders_the_matrix_rungs_and_rejects_unknowns() {
     assert_eq!(ladder_index("contracts"), Some(0));
     assert!(
         ladder_index("contracts") < ladder_index("substrates"),
@@ -1299,7 +1308,7 @@ fn layer_ladder_orders_the_matrix_rungs_and_rejects_unknowns() {
 }
 
 #[test]
-fn edge_tracking_predicate_self_test() {
+fn reborn_same_layer_edge_tracking_predicate_self_test() {
     let tracked = SameLayerEdge {
         crate_name: "ironclaw_example",
         dependency_name: "ironclaw_other",

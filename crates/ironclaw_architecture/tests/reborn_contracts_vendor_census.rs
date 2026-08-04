@@ -53,6 +53,13 @@
 //! the census fails on growth *and* on slack (#7147: a ceiling above the live
 //! count is an unclaimed budget for exactly the growth it refuses). A vendor
 //! hit in any un-censused file in the family fails outright.
+//!
+//! ⚠ **Every test function here must keep its `reborn_` prefix.** The file name
+//! is not what selects it: `code_style.yml` runs
+//! `cargo test -p ironclaw_architecture reborn`, and that argument is a **test
+//! name** filter, not a path filter. Written without the prefix these gates
+//! compiled, passed locally, and reported `running 0 tests` under the exact
+//! command CI uses.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -485,7 +492,7 @@ fn scan_contracts_family() -> (BTreeMap<String, BTreeMap<String, usize>>, usize)
 /// The census itself: the contracts family names LLM vendors only where the
 /// census says, in exactly the volume it records.
 #[test]
-fn the_contracts_family_names_llm_vendors_only_in_censused_scopes() {
+fn reborn_contracts_family_names_llm_vendors_only_in_censused_scopes() {
     assert!(
         !LLM_VENDOR_TERMS.is_empty(),
         "LLM_VENDOR_TERMS is empty — every scan would report zero hits and the census would \
@@ -605,7 +612,7 @@ fn the_contracts_family_names_llm_vendors_only_in_censused_scopes() {
 /// D-E's three structural bounds on the sanctioned module, enforced as numbers
 /// and as an exact roster.
 #[test]
-fn the_d_e_sanctioned_vendor_api_surface_is_frozen() {
+fn reborn_d_e_sanctioned_vendor_api_surface_is_frozen() {
     let root = workspace_root();
     let path = root.join(SANCTIONED_MODULE);
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|error| {
@@ -733,7 +740,7 @@ fn the_d_e_sanctioned_vendor_api_surface_is_frozen() {
 
 /// A carve-out must describe a live collision, or it is a hole.
 #[test]
-fn term_collision_carve_outs_stay_live_and_narrow() {
+fn reborn_vendor_term_collision_carve_outs_stay_live_and_narrow() {
     assert!(
         !TERM_COLLISION_CARVE_OUTS.is_empty(),
         "TERM_COLLISION_CARVE_OUTS is empty — if the collision it held is gone, delete this \
@@ -771,7 +778,7 @@ fn term_collision_carve_outs_stay_live_and_narrow() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn vendor_term_matcher_self_test() {
+fn reborn_vendor_term_matcher_self_test() {
     // Underscore is a word separator: without this the three D-E methods are
     // invisible and the census under-reports the surface as six items.
     assert_eq!(vendor_hits("start_nearai_login", "nearai").len(), 1);
@@ -809,7 +816,7 @@ fn vendor_term_matcher_self_test() {
 }
 
 #[test]
-fn stripper_self_test() {
+fn reborn_vendor_census_stripper_self_test() {
     let source = r#"
 /// A doc comment naming anthropic.
 // A line comment naming gemini.
