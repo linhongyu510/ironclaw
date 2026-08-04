@@ -89,7 +89,12 @@ Rules:
 
 ## 4. Resource lifecycle
 
-The script runtime owns the script lane reserve/execute/reconcile/release protocol:
+The script runtime owns the script lane reserve/execute/reconcile/release protocol.
+It holds no budget authority of its own: it is handed
+`ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
+release, and nothing else — which the kernel implements over its
+`ResourceGovernor` (`ironclaw_resources::GovernorRuntimeBudget`). The lane
+cannot set limits, read account state, or name an account (#7067).
 
 ```text
 validate package/capability/runtime

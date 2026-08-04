@@ -4312,7 +4312,28 @@ struct LayerMatrixException {
 /// verdict rather than a judgement call. Every one of the nine crates that
 /// depends on `processes` is kernel or above, so the move legalizes an edge
 /// without forbidding any existing one.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 4;
+///
+/// **4 → 2 (WS3, #7067 — the lanes take a narrow budget port).** Both
+/// `→ ironclaw_resources` lane rows are deleted, and neither was waived: the
+/// production edge is gone from `ironclaw_mcp` and `ironclaw_sandbox` alike.
+/// What held them was never the estimate/usage vocabulary the older rows
+/// blamed — that already lived in `host_api::resource` and both lanes already
+/// imported it from there — but `ResourceGovernor`, a 10-method kernel
+/// budget-authority trait of which each lane called exactly three, plus the
+/// `ResourceError` denial cone. Relocating those would have moved kernel
+/// budget authority into the zero-internal-dep contracts crate, which
+/// PROPOSAL §8.3's 2026-08-04 amendment rules out. Instead
+/// `ironclaw_host_api::resource` declares `RuntimeResourceBudget` — reserve /
+/// reconcile / release and nothing else, over shapes that crate already owned
+/// — and `ironclaw_resources` implements it over any `ResourceGovernor`
+/// (`GovernorRuntimeBudget`), projecting `ResourceError` onto a narrow
+/// classified port error. Dependency inversion, `type-placement.md` §2: the
+/// port is declared below and implemented above, so the lanes cannot name the
+/// authority at all. `ironclaw_resources` survives in both lanes as a **dev**
+/// dependency — the lane suites drive the port over the REAL governor so a
+/// denial they assert on is one the kernel produced — and dev edges are
+/// outside the matrix by construction (`is_normal_dependency`).
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 2;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4328,20 +4349,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04)",
         reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_mcp",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "issue #7067 (lane reserve/reconcile/release port)",
-        reason: "re-verified during WS3: the lane needs the ResourceGovernor authority port (reserve/reconcile/release) and the ResourceError denial cone (ResourceDenial/ResourceApprovalNeeded/BudgetWarning/ResourceDimension/ResourceAccount/ResourceValue) - NOT the estimate/usage vocabulary, which already lives in host_api::resource and which this lane already imports from there. PROPOSAL 6.6.3's \"moving the shapes it needs into host_api::resource\" is refuted as written: moving a 10-method kernel budget-authority trait plus its account/limit cone into the zero-internal-dep contracts crate is a kernel carve-out, not a vocabulary move. It clears when the lane takes a narrow reserve/reconcile/release port instead of the governor - a design change owed its own slice, tracked in issue #7067",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_sandbox",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "issue #7067 (lane reserve/reconcile/release port)",
-        reason: "re-verified during WS3: the lane needs the ResourceGovernor authority port (reserve/reconcile/release) and the ResourceError denial cone (ResourceDenial/ResourceApprovalNeeded/BudgetWarning/ResourceDimension/ResourceAccount/ResourceValue) - NOT the estimate/usage vocabulary, which already lives in host_api::resource and which this lane already imports from there. PROPOSAL 6.6.3's \"moving the shapes it needs into host_api::resource\" is refuted as written: moving a 10-method kernel budget-authority trait plus its account/limit cone into the zero-internal-dep contracts crate is a kernel carve-out, not a vocabulary move. It clears when the lane takes a narrow reserve/reconcile/release port instead of the governor - a design change owed its own slice, tracked in issue #7067",
     },
 ];
 

@@ -25,11 +25,10 @@ use ironclaw_host_api::{
     mount::MountView,
     resource::{
         CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
-        ResourceScope, ResourceUsage,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget, RuntimeResourceError,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -220,7 +219,7 @@ fn script_http_error(error: RuntimeHttpEgressError) -> ScriptHostHttpError {
 #[derive(Debug, Error)]
 pub enum ScriptError {
     #[error("resource governor error: {0}")]
-    Resource(Box<ResourceError>),
+    Resource(RuntimeResourceError),
     #[error("script backend error: {reason}")]
     Backend { reason: String },
     #[error("unsupported script runner {runner}")]
@@ -246,9 +245,9 @@ pub enum ScriptError {
     InvalidOutput { reason: String },
 }
 
-impl From<ResourceError> for ScriptError {
-    fn from(error: ResourceError) -> Self {
-        Self::Resource(Box::new(error))
+impl From<RuntimeResourceError> for ScriptError {
+    fn from(error: RuntimeResourceError) -> Self {
+        Self::Resource(error)
     }
 }
 
@@ -271,17 +270,17 @@ where
         &self.config
     }
 
-    pub fn execute_extension_json<G>(
+    pub fn execute_extension_json<Budget>(
         &self,
-        governor: &G,
+        budget: &Budget,
         request: ScriptExecutionRequest<'_>,
     ) -> Result<ScriptExecutionResult, ScriptError>
     where
-        G: ResourceGovernor + ?Sized,
+        Budget: RuntimeResourceBudget + ?Sized,
     {
         let backend_request = self.prepare_backend_request(&request)?;
         let reservation = reserve_or_use_existing(
-            governor,
+            budget,
             request.scope.clone(),
             request.estimate.clone(),
             request.resource_reservation.clone(),
@@ -291,7 +290,7 @@ where
             Ok(output) => output,
             Err(reason) => {
                 return Err(release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     ScriptError::Backend { reason },
                 ));
@@ -300,7 +299,7 @@ where
 
         if output.stdout.len() as u64 > self.config.max_stdout_bytes {
             return Err(release_after_failure(
-                governor,
+                budget,
                 reservation.id,
                 ScriptError::OutputLimitExceeded {
                     limit: self.config.max_stdout_bytes,
@@ -311,7 +310,7 @@ where
 
         if output.exit_code != 0 {
             return Err(release_after_failure(
-                governor,
+                budget,
                 reservation.id,
                 ScriptError::ExitFailure {
                     code: output.exit_code,
@@ -324,7 +323,7 @@ where
             Ok(parsed) => parsed,
             Err(error) => {
                 return Err(release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     ScriptError::InvalidOutput {
                         reason: error.to_string(),
@@ -338,7 +337,7 @@ where
             .set_wall_clock_ms(output.wall_clock_ms)
             .set_output_bytes(output_bytes)
             .set_process_count(1);
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
             result: CapabilityHostResult {
                 output: parsed,
@@ -424,7 +423,7 @@ where
 pub trait ScriptExecutor: Send + Sync {
     fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: ScriptExecutionRequest<'_>,
     ) -> Result<ScriptExecutionResult, ScriptError>;
 }
@@ -435,10 +434,10 @@ where
 {
     fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: ScriptExecutionRequest<'_>,
     ) -> Result<ScriptExecutionResult, ScriptError> {
-        ScriptRuntime::execute_extension_json(self, governor, request)
+        ScriptRuntime::execute_extension_json(self, budget, request)
     }
 }
 
@@ -568,35 +567,35 @@ where
     }
 }
 
-fn reserve_or_use_existing<G>(
-    governor: &G,
+fn reserve_or_use_existing<Budget>(
+    budget: &Budget,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     reservation: Option<ResourceReservation>,
 ) -> Result<ResourceReservation, ScriptError>
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
     if let Some(reservation) = reservation {
         if reservation.scope != scope || reservation.estimate != estimate {
-            return Err(ScriptError::Resource(Box::new(
-                ResourceError::ReservationMismatch { id: reservation.id },
-            )));
+            return Err(ScriptError::Resource(
+                RuntimeResourceError::reservation_mismatch(reservation.id),
+            ));
         }
         return Ok(reservation);
     }
-    governor.reserve(scope, estimate).map_err(ScriptError::from)
+    budget.reserve(scope, estimate).map_err(ScriptError::from)
 }
 
-fn release_after_failure<G>(
-    governor: &G,
+fn release_after_failure<Budget>(
+    budget: &Budget,
     reservation_id: ResourceReservationId,
     original: ScriptError,
 ) -> ScriptError
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
-    let _ = governor.release(reservation_id);
+    let _ = budget.release(reservation_id);
     original
 }
 

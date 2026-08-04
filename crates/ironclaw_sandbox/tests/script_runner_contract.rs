@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resource::{
         ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
-        ResourceUsage,
+        ResourceUsage, RuntimeResourceErrorKind,
     },
 };
 use ironclaw_resources::*;
@@ -39,7 +39,7 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
 
     let execution = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
@@ -103,9 +103,20 @@ fn script_runtime_denies_budget_before_backend_execution() {
         .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
 
+    // What the budget authority itself says about this request. The lane may
+    // narrow the *structure* it carries across the port, but the model-visible
+    // cause it forwards must stay the authority's own words (#7067).
+    let authority_reason = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate::default().set_output_bytes(10_000),
+        )
+        .unwrap_err()
+        .to_string();
+
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
@@ -120,7 +131,141 @@ fn script_runtime_denies_budget_before_backend_execution() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, ScriptError::Resource(_)));
+    let ScriptError::Resource(denial) = &err else {
+        panic!("expected a resource denial, got {err:?}");
+    };
+    assert_eq!(denial.kind(), RuntimeResourceErrorKind::LimitExceeded);
+    assert_eq!(denial.reason(), authority_reason);
+    assert_eq!(
+        err.to_string(),
+        format!("resource governor error: {authority_reason}")
+    );
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+/// A prepared reservation handed down from the host is spent, not duplicated —
+/// and only if it actually covers the request. The mismatch check is the one
+/// budget failure the lane raises itself, so it must classify as
+/// `ReservationMismatch` and must fire before any side effect, leaving the
+/// host's hold untouched for the host to release. Regression for #7067: this
+/// path moved from constructing the kernel's `ResourceError` to constructing
+/// the port's error.
+#[test]
+fn script_runtime_reuses_a_matching_prepared_reservation_and_rejects_a_mismatched_one() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_output_bytes(10_000)
+                .set_max_process_count(4),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+    let estimate = ResourceEstimate::default().set_output_bytes(1_000);
+    let prepared = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+
+    // Mismatched: same reservation, different estimate. Rejected before the
+    // backend runs, and the hold is left exactly as the host opened it.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope: scope.clone(),
+                estimate: ResourceEstimate::default().set_output_bytes(2_000),
+                mounts: None,
+                resource_reservation: Some(prepared.clone()),
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+    let ScriptError::Resource(mismatch) = &err else {
+        panic!("expected a reservation mismatch, got {err:?}");
+    };
+    assert_eq!(
+        mismatch.kind(),
+        RuntimeResourceErrorKind::ReservationMismatch
+    );
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account).output_bytes, 1_000);
+
+    // Matching: the prepared hold is reconciled, not re-reserved.
+    let result = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(prepared.clone()),
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap();
+    assert_eq!(result.receipt.id, prepared.id);
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(backend.requests.lock().unwrap().len(), 1);
+}
+
+/// A budget *pause* is not a budget *stop*: crossing the approval threshold
+/// must reach the lane as `RequiresApproval`, so the caller above it opens an
+/// approval gate instead of reporting a refusal. Regression for #7067 — the
+/// narrow port must not collapse the denial cone into one undifferentiated
+/// "resource error". Fail-closed either way: the backend is never executed.
+#[test]
+fn script_runtime_surfaces_approval_pause_distinctly_from_a_hard_denial() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_output_bytes(1_000)
+                .set_thresholds(BudgetThresholds::RECOMMENDED),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    // 95% of the cap: past the 90% pause threshold, still under the hard limit.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_output_bytes(950),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    let ScriptError::Resource(pause) = &err else {
+        panic!("expected a resource pause, got {err:?}");
+    };
+    assert_eq!(pause.kind(), RuntimeResourceErrorKind::RequiresApproval);
     assert!(backend.requests.lock().unwrap().is_empty());
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
@@ -148,7 +293,7 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
@@ -177,7 +322,7 @@ fn script_runtime_preserves_backend_error_when_release_cleanup_fails() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
@@ -223,7 +368,7 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
@@ -260,7 +405,7 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &wasm_package().id,
                 capabilities: &wasm_package().capabilities,
@@ -297,7 +442,7 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             ScriptExecutionRequest {
                 extension: &script_package().id,
                 capabilities: &script_package().capabilities,
