@@ -5,9 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_assistant::{
-    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
-};
+use ironclaw_assistant::{ChannelConnectionService, ExtensionAccountSetupRegistry};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
@@ -30,6 +28,7 @@ use ironclaw_product_contracts::account_setup::{
     ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,

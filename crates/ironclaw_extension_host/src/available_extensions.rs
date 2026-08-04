@@ -1,5 +1,4 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
-use ironclaw_assistant::RebornChannelConnectStrategy;
 use ironclaw_extension_contracts::{
     channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
 };
@@ -17,7 +16,12 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
 };
+// Imported from the contract that owns it. `ironclaw_assistant` only re-exports
+// this type under an alias (`reborn_services.rs`), and retiring the `Reborn*`
+// prefix is CHECKLIST WS10's type-name row — so the path moves to the owner
+// here and the local name is left alone.
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,

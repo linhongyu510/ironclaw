@@ -17,10 +17,6 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_assistant::{
-    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest,
-};
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::verified_inbound;
@@ -36,7 +32,10 @@ use ironclaw_host_api::product_adapter::{
 use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
 };
-use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
+use ironclaw_product_contracts::surface::{
+    ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+};
 use tokio::task::JoinSet;
 
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
@@ -878,7 +877,6 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_assistant::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
     use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
     use ironclaw_extension_contracts::channel_adapter::{
         ChannelAttachmentRef, ProductTriggerReason,
@@ -895,6 +893,9 @@ mod tests {
         AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
         InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
         UserMessagePayload,
+    };
+    use ironclaw_product_contracts::surface::{
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 

@@ -1,9 +1,10 @@
-use ironclaw_assistant::RebornChannelConnectStrategy;
 use ironclaw_assistant::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::capability::RuntimeCredentialAccountSetup;
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
-use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::package_lifecycle::{
+    ChannelConnectStrategy as RebornChannelConnectStrategy, ChannelConnectionRequirement,
+};
 
 use crate::package_runtime_credential_auth_requirements;
 
