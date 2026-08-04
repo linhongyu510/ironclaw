@@ -53,7 +53,7 @@ COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migrati
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
 ```
 
 Expected: FAIL because `Dockerfile.reborn` does not yet build or copy the migration binary.
@@ -86,10 +86,10 @@ Make the existing full migration an explicit default feature and gate its source
 Run:
 
 ```bash
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
-cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn_builds_with_postgres_feature -- --exact
-cargo test -p ironclaw_reborn_cli
-cargo clippy -p ironclaw_reborn_cli --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_ships_extension_ownership_migration -- --exact
+cargo test -p ironclaw_cli --test smoke dockerfile_reborn_builds_with_postgres_feature -- --exact
+cargo test -p ironclaw_cli
+cargo clippy -p ironclaw_cli --all-targets --all-features -- -D warnings
 git diff --check
 ```
 

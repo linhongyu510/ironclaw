@@ -79,7 +79,7 @@ cargo test -p ironclaw_composition --all-features --test resource_governor_libsq
 cargo test -p ironclaw_architecture_tests
 bash scripts/reborn-e2e-rust.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build -p ironclaw_reborn_cli --all-features
+cargo build -p ironclaw_cli --all-features
 scripts/pre-commit-safety.sh
 ```
 

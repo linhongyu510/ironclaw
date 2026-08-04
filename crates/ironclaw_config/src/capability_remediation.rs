@@ -3,13 +3,13 @@
 //! `google_remediation_text` is consumed by two independent surfaces that
 //! must not drift apart:
 //!
-//! - `ironclaw_reborn_cli::commands::config::capability_config` — printed as
+//! - `ironclaw_cli::commands::config::capability_config` — printed as
 //!   `config set google.*` follow-up guidance.
 //! - `ironclaw_composition::extension_host::gsuite` — printed in the
 //!   Gmail/Google Workspace "not configured" tool-result error a capability
 //!   dispatch returns before it ever reaches credential resolution.
 //!
-//! `ironclaw_reborn_cli` depends on `ironclaw_composition`, never the
+//! `ironclaw_cli` depends on `ironclaw_composition`, never the
 //! reverse, so this text cannot live in the CLI crate (composition could not
 //! import it). It lives here instead, since both crates already depend on
 //! `ironclaw_config`.
@@ -30,7 +30,7 @@ pub fn google_remediation_text() -> String {
 
 /// Canonical "apply the change" follow-up sentence: `config set` never
 /// restarts the service itself (see the module-level design note in
-/// `google_remediation_text` and `ironclaw_reborn_cli::commands::config::set`),
+/// `google_remediation_text` and `ironclaw_cli::commands::config::set`),
 /// so every surface that tells a caller "go configure this" must also tell
 /// them the explicit next step rather than implying it happens automatically.
 pub fn apply_step_text() -> &'static str {

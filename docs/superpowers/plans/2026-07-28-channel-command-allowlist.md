@@ -564,7 +564,7 @@ Run:
 ```bash
 cargo test -p ironclaw_extension_host bundled_slack_package -- --nocapture
 cargo test -p ironclaw_extension_host bundled_telegram_package -- --nocapture
-cargo test -p ironclaw_reborn_cli \
+cargo test -p ironclaw_cli \
   bundled_telegram_binding_routes_targeted_commands_through_generic_sink \
   -- --nocapture
 cargo test -p ironclaw_telegram_v2_adapter command -- --nocapture
@@ -617,7 +617,7 @@ cargo test -p ironclaw_assistant
 cargo test -p ironclaw_extension_host
 cargo test -p ironclaw_telegram_v2_adapter
 cargo test -p ironclaw_telegram_extension
-cargo test -p ironclaw_reborn_cli native_extensions -- --nocapture
+cargo test -p ironclaw_cli native_extensions -- --nocapture
 ```
 
 If a broad suite is blocked by an unrelated baseline failure, record the exact
@@ -631,7 +631,7 @@ Run:
 ```bash
 cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold
 cargo clippy -p ironclaw_host_api -p ironclaw_assistant \
-  -p ironclaw_extension_host -p ironclaw_reborn_cli \
+  -p ironclaw_extension_host -p ironclaw_cli \
   --all-targets --all-features -- -D warnings
 git diff --check
 ```

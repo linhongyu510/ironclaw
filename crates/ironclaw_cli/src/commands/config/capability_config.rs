@@ -7,7 +7,7 @@
 //! re-exports it as [`google_remediation_text`]) so
 //! `ironclaw_composition::extension_host::gsuite`'s "not configured"
 //! tool-result error can share the exact same wording without depending on
-//! this crate — `ironclaw_reborn_cli` sits above `composition` in the
+//! this crate — `ironclaw_cli` sits above `composition` in the
 //! dependency graph (`cli` depends on `composition`, never the reverse), so
 //! composition-layer code cannot import CLI modules directly, but both
 //! already depend on `ironclaw_config`.

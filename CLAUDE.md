@@ -175,7 +175,7 @@ flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)
-├── ironclaw_reborn_cli/    # binary entry point (binary name `ironclaw`)
+├── ironclaw_cli/    # binary entry point (binary name `ironclaw`)
 ├── ironclaw_composition/  # wires storage/runtime services by profile
 ├── ironclaw_assistant/             # product-facing orchestration and surface
 ├── ironclaw_turn_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop

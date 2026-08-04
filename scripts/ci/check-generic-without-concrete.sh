@@ -50,7 +50,7 @@ EXCLUDED = {
     "ironclaw_extension_support",
     # Sanctioned assemblers. NOTE: these are cargo *package* names, not crate
     # directory names. The CLI package is named "ironclaw" while its directory
-    # is crates/ironclaw_cli. This entry used to read "ironclaw_reborn_cli"
+    # is crates/ironclaw_cli. This entry used to read "ironclaw_cli"
     # (a directory name), so it matched no package and left this gate red on
     # main for the two concrete extension crates the binary is explicitly
     # allowed to link under DEL-7. Same class of bug that

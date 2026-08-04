@@ -81,7 +81,7 @@ Three parts, each currently assuming "standard OAuth" that Slack violates:
   a `SLACK_OAUTH_CALLBACK_PATH`, OR route Slack through the existing generic
   `oauth_callback_handler`. Prefer dedicated handler for parity with Google.
 
-### 6. Config (`ironclaw_reborn_cli/src/runtime/mod.rs`)
+### 6. Config (`ironclaw_cli/src/runtime/mod.rs`)
 - `resolve_slack_personal_oauth_config_from_env` reading
   `IRONCLAW_REBORN_SLACK_PERSONAL_CLIENT_ID/SECRET/OAUTH_REDIRECT_URI`; wire via
   a `with_slack_personal_oauth_backend(client)` builder → provider backend config.

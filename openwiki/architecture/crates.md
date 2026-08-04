@@ -456,14 +456,14 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Tests:** Core runtime contract tests
 - **Depends on:** `ironclaw_host_api`, `ironclaw_capabilities`, `ironclaw_agent_loop`
 
-### ironclaw_reborn_cli
+### ironclaw_cli
 **Role:** Primary CLI/WebUI binary entrypoint
 - `ironclaw-reborn` binary
 - Commands: `run`, `repl`, `serve`, `models`, `config`, `doctor`, `doctor-profile`
 - CLI argument parsing
 - **When to touch:** Adding new commands or CLI flags
 - **Key modules:** `main.rs`, `commands/`
-- **Build:** `cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn`
+- **Build:** `cargo build -p ironclaw_cli --bin ironclaw-reborn`
 - **Features:** `webui-v2-beta` (for serve command), `slack-v2-host-beta` (for Slack)
 - **Depends on:** `ironclaw_reborn`, `ironclaw_config`, `clap`
 
@@ -789,7 +789,7 @@ let llm: Arc<dyn LlmProvider> = match config.llm_backend {
 let response = llm.complete(request).await?;
 ```
 
-**Relevant crates:** `ironclaw_llm`, composition in `ironclaw_reborn_cli`
+**Relevant crates:** `ironclaw_llm`, composition in `ironclaw_cli`
 
 ### Pattern: Event Subscriptions
 

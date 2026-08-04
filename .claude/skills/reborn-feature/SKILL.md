@@ -23,7 +23,7 @@ The owning crates are:
 - `ironclaw_webui`: route descriptors, handlers, gateway/listener/auth, and
   the Vite frontend under `frontend/`.
 - `ironclaw_composition`: production assembly and dependency wiring.
-- `ironclaw_reborn_cli`: boot and serve command wiring.
+- `ironclaw_cli`: boot and serve command wiring.
 
 ## Before editing
 

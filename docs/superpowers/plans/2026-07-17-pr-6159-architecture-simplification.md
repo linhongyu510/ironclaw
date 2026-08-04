@@ -152,7 +152,7 @@ fn telegram_production_files_meet_the_line_budget() { /* enumerate touched .rs f
 fn telegram_composition_is_assembly_only() { /* enforce symbol denylist and 450-line production budget */ }
 ```
 
-Add `ironclaw_channel_delivery` to `SUBSTRATE_CRATES`, and add a `BoundaryRule` forbidding dependencies on `ironclaw_composition`, `ironclaw_reborn_cli`, `ironclaw_webui_v2`, `ironclaw_slack_v2_adapter`, and `ironclaw_telegram_extension`.
+Add `ironclaw_channel_delivery` to `SUBSTRATE_CRATES`, and add a `BoundaryRule` forbidding dependencies on `ironclaw_composition`, `ironclaw_cli`, `ironclaw_webui_v2`, `ironclaw_slack_v2_adapter`, and `ironclaw_telegram_extension`.
 
 - [x] **Step 2: Run each ratchet and record the intended baseline failure**
 

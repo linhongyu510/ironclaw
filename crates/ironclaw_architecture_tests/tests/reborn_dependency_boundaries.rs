@@ -2315,7 +2315,7 @@ fn embeds_provider_catalog(source: &str) -> bool {
 /// by `reborn_boot_config_file_layout_is_pinned` above.
 ///
 /// It also carries the `DEFAULT_LLM_*` drift assertions relocated out of
-/// `ironclaw_reborn_cli`'s `commands::config::init` tests: the CLI is excluded
+/// `ironclaw_cli`'s `commands::config::init` tests: the CLI is excluded
 /// from depending on `ironclaw_llm` (see
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root`), so it mirrors three
 /// catalog values as string constants and used to compare them by embedding the

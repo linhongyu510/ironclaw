@@ -172,7 +172,7 @@ After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `
 
 ## 9. Feature flag & config
 
-- New cargo feature `telegram-v2-host-beta` on `ironclaw_composition` (module gate + `lib.rs` re-exports) and `ironclaw_reborn_cli` (serve wiring), **declared in every workspace manifest that references it** and threaded through CI aggregate jobs, reborn-e2e, live-canary, and the QA runner flag sets — the S1 merge-hygiene lesson: no undeclared features.
+- New cargo feature `telegram-v2-host-beta` on `ironclaw_composition` (module gate + `lib.rs` re-exports) and `ironclaw_cli` (serve wiring), **declared in every workspace manifest that references it** and threaded through CI aggregate jobs, reborn-e2e, live-canary, and the QA runner flag sets — the S1 merge-hygiene lesson: no undeclared features.
 - Serve wiring mirrors `serve.rs` lines ~497–619 + `serve_slack.rs`: build telegram mounts, install facades (connectable channels, channel connection), `with_public_route_mount(telegram_mounts.events)`, `with_telegram_channel_routes(...)`, register the outbound delivery target provider.
 - Public base URL: required for `setWebhook`; sourced from the existing deployment public-origin config (same as OAuth callbacks), overridable per §2. Absent ⇒ admin save fails closed with a precise message.
 

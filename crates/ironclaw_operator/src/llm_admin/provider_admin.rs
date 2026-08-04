@@ -298,7 +298,7 @@ impl RebornProviderAdmin {
     ///   file's shape, not to be picked live. Matched by id (the only
     ///   stable marker available).
     /// - Returns the serializable [`ProviderMenuEntry`] DTO, not
-    ///   `&ProviderDefinition`: `ironclaw_reborn_cli` must never see the
+    ///   `&ProviderDefinition`: `ironclaw_cli` must never see the
     ///   `ironclaw_llm` setup-hint taxonomy (pinned by
     ///   `reborn_dependency_boundaries`).
     /// - `api_key_required` is a MENU-LEVEL value — see
@@ -335,7 +335,7 @@ impl RebornProviderAdmin {
     /// variables — the same env resolution `resolve_reborn_runtime_llm`'s
     /// fallback path and `run`/`serve`'s stub-gateway warning both use
     /// (`ironclaw_llm::resolve_provider_config_from_env`), wrapped here so
-    /// `ironclaw_reborn_cli` (excluded from depending on `ironclaw_llm`
+    /// `ironclaw_cli` (excluded from depending on `ironclaw_llm`
     /// directly, per `reborn_dependency_boundaries`) can offer onboard's
     /// env-detect-and-confirm/silent-seed step.
     ///
@@ -888,7 +888,7 @@ mod tests {
         .expect("valid reborn home");
         std::fs::create_dir_all(home.path()).expect("create reborn home dir");
 
-        // Built from the REAL `ironclaw_reborn_cli::commands::config::init::
+        // Built from the REAL `ironclaw_cli::commands::config::init::
         // PROVIDERS_STUB` JSON (not a hand-typed duplicate) so this test
         // catches drift between that stub's id and
         // `EXAMPLE_OVERLAY_PROVIDER_ID` instead of two disjoint fixtures
@@ -924,8 +924,8 @@ mod tests {
     }
 
     /// Extract the raw JSON text of `PROVIDERS_STUB` from
-    /// `ironclaw_reborn_cli::commands::config::init`'s source, via
-    /// `include_str!` — composition can't depend on `ironclaw_reborn_cli`
+    /// `ironclaw_cli::commands::config::init`'s source, via
+    /// `include_str!` — composition can't depend on `ironclaw_cli`
     /// (only the reverse), so this reads the file text directly rather than
     /// duplicating the JSON literal, keeping the fixture used above tied to
     /// the actual stub `config init`/`onboard` write.
@@ -934,7 +934,7 @@ mod tests {
         const START_MARKER: &str = "const PROVIDERS_STUB: &str = r#\"";
         let start = INIT_RS.find(START_MARKER).unwrap_or_else(|| {
             panic!(
-                "PROVIDERS_STUB definition not found in ironclaw_reborn_cli's init.rs — this \
+                "PROVIDERS_STUB definition not found in ironclaw_cli's init.rs — this \
                  test's extraction marker has drifted from the real source"
             )
         }) + START_MARKER.len();

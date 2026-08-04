@@ -962,7 +962,7 @@ fn files_reachable_only_through_cfg_test_modules_are_not_production() {
 ///
 /// 3. **A gated module carrying a visibility qualifier**
 ///    (`#[cfg(test)] pub(crate) mod …;`) — the shape that actually ships in
-///    `ironclaw_reborn_cli/src/runtime/mod.rs`. The backwards attribute walk
+///    `ironclaw_cli/src/runtime/mod.rs`. The backwards attribute walk
 ///    used to stop at `pub`, so the module read as ungated and its file stayed
 ///    countable as production. This half is the caller-level half: it asserts
 ///    through `production_rust_files`, the function the residue rows and

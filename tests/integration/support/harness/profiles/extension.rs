@@ -851,7 +851,7 @@ pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeC
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native
-/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+/// binding the binary assembles (`ironclaw_cli::runtime::native_extensions`).
 pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 
 /// Native factory for the bundled telegram package: binds the REAL
@@ -995,7 +995,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
 }
 
 /// Slack's channel-adapter binding, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// (`ironclaw_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
 /// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
 /// harness composes its own runtime and cannot depend on the CLI crate.
 /// Slack's WASM-runtime package cannot ride a native factory, so without

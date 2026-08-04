@@ -155,7 +155,7 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_embeddings` | Embedding provider abstraction (OpenAI, Bedrock, Ollama, etc.) |
 | `ironclaw_engine` | (v1) Legacy orchestration; in maintenance mode |
 | `ironclaw_reborn` | Reborn runtime kernel and composition |
-| `ironclaw_reborn_cli` | Primary CLI/WebUI binary entrypoint |
+| `ironclaw_cli` | Primary CLI/WebUI binary entrypoint |
 | `ironclaw_config` | Config.toml parsing, defaults, resolution |
 | `ironclaw_composition` | Dependency injection, app builder, service wiring |
 | `ironclaw_identity` | User/owner identity, session management |

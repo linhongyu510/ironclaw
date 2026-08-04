@@ -10,7 +10,7 @@ to the sealed `ironclaw_agent_loop` crate**. Demo value is the top priority.
 
 - Two parallel stacks: **engine v2** (`ironclaw_engine`) already has the full learning
   system but is **not** wired into the demo runtime; the demo binary `ironclaw-reborn`
-  (crate `ironclaw_reborn_cli`) has **zero dependency on `ironclaw_engine`**. Engine v2 is a
+  (crate `ironclaw_cli`) has **zero dependency on `ironclaw_engine`**. Engine v2 is a
   **blueprint to port**, not a runtime to enable.
 - The runtime is the **Reborn stack** (`ironclaw_turn_runner` + `ironclaw_agent_loop` +
   `ironclaw_turns` + `ironclaw_webui_v2`), WebChat v2 @ `:3000/v2`, provider NEAR AI,

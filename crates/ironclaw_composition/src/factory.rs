@@ -248,7 +248,7 @@ use runtime_lane_assembly::{
 
 /// Filename of the cached standalone secrets master-key dotfile under a
 /// Reborn home / standalone root directory. `pub` (re-exported from `lib.rs`)
-/// so onboarding (`ironclaw_reborn_cli::commands::onboard`) can check for its
+/// so onboarding (`ironclaw_cli::commands::onboard`) can check for its
 /// presence without duplicating the literal.
 pub const STANDALONE_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
@@ -1046,7 +1046,7 @@ pub enum KeychainMasterKeyOutcome {
 /// Facade over `ironclaw_secrets::keychain` for onboarding's OS-keychain
 /// master-key provisioning step.
 ///
-/// - Lets callers outside this crate (`ironclaw_reborn_cli`) avoid their own
+/// - Lets callers outside this crate (`ironclaw_cli`) avoid their own
 ///   `ironclaw_secrets` dependency — pinned by
 ///   `reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 /// - No key yet -> generate + store; already populated -> no-op `AlreadyPresent`.
@@ -1058,7 +1058,7 @@ pub async fn provision_standalone_keychain_master_key() -> KeychainMasterKeyOutc
     // here falls through to `generate` + `store` below, which overwrites
     // whatever key the keychain actually holds. Same accepted-risk class as
     // the TOCTOU documented on this function's only caller
-    // (`ironclaw_reborn_cli::commands::onboard::master_key::provision_master_key`):
+    // (`ironclaw_cli::commands::onboard::master_key::provision_master_key`):
     // Standalone, single-operator, run-once-by-hand; worst case is a
     // wrongly-regenerated key recoverable by re-entering one API key.
     if ironclaw_secrets::keychain::has_master_key().await {

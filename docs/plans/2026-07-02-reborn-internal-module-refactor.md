@@ -108,7 +108,7 @@ Optional; schedule when loop work next opens both crates anyway.
 | ironclaw_architecture_tests | **tests-only crate** — boundary tests (`reborn_dependency_boundaries.rs`, `reborn_composition_boundaries.rs`, 3.8k test lines). Load-bearing for this refactor's eval. |
 | ironclaw_hooks_parity | **tests-only crate** — postgres/libsql parity oracle + adversarial matrix (2.1k test lines) |
 | ironclaw_silk_decoder | standalone binary |
-| ironclaw_reborn_cli | binary (12.4k + 3.7k tests) |
+| ironclaw_cli | binary (12.4k + 3.7k tests) |
 
 ## 3. Composition dissection — 10 internal modules, 11 PRs
 
@@ -161,7 +161,7 @@ cargo clippy --all --benches --tests --examples --all-features
 # G3 full-feature build+test of the crate and its consumers
 cargo test -p ironclaw_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support,postgres"
 cargo test -p ironclaw_reborn_webui_ingress
-cargo build -p ironclaw_reborn_cli
+cargo build -p ironclaw_cli
 # G4 boundary tests (the load-bearing architectural contract)
 cargo test -p ironclaw_architecture_tests
 # G5 cfg-matrix (catches mis-hung feature gates — the #1 hazard)

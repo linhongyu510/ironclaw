@@ -5133,7 +5133,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
         // Target is `ironclaw` (the bin's normalized crate name, not
-        // the `ironclaw_reborn_cli` package this test itself compiles as).
+        // the `ironclaw_cli` package this test itself compiles as).
         // `ironclaw_composition=debug` is also needed to observe
         // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
         // that's the mechanism that actually swaps the placeholder gateway
@@ -5339,7 +5339,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         .env_remove("NEARAI_API_KEY")
         .env_remove("NEARAI_BASE_URL")
         // `key_applied` is emitted by `ironclaw_composition`'s
-        // `RebornLlmReloadAdapter::reload`, not the `ironclaw_reborn_cli`
+        // `RebornLlmReloadAdapter::reload`, not the `ironclaw_cli`
         // binary crate — the default filter caps that crate at `info`, so
         // it must be named explicitly.
         .env(
@@ -7182,7 +7182,7 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
     );
     // Keyed to the crate NAME, not to `crates/<name>/`: the workflow's scope
     // regex matches crate directories at any depth
-    // (`crates/([^/]+/)*ironclaw_reborn_cli/`) so it keeps working once crates
+    // (`crates/([^/]+/)*ironclaw_cli/`) so it keeps working once crates
     // move into family directories (#6963). A needle carrying the flat `crates/`
     // prefix would stop finding this line the moment the regex was made
     // depth-agnostic — and would then fail loudly here rather than silently, but
@@ -7191,7 +7191,7 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
     // in `scripts/ci/ws12_workflow_contracts.py`.
     let reborn_cli_selector = code_style_workflow
         .lines()
-        .find(|line| line.contains("grep -Eq") && line.contains("ironclaw_reborn_cli/"))
+        .find(|line| line.contains("grep -Eq") && line.contains("ironclaw_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
         reborn_cli_selector.contains(r"\.github/dist-build-setup\.yml$")

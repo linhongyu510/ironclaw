@@ -399,7 +399,7 @@ impl ServeCommand {
             // dispatch -> first-party tool); a single poll of one capability
             // dispatch consumes ~1.9 MB of stack in debug builds, which overflows
             // the default 2 MB worker thread. Match the 8 MB stack the codebase
-            // already uses for deep work (see ironclaw_reborn_cli traces tests and
+            // already uses for deep work (see ironclaw_cli traces tests and
             // src/cli stack_size sites).
             .thread_stack_size(8 * 1024 * 1024)
             .build()
