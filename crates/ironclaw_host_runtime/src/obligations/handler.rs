@@ -683,32 +683,9 @@ fn unsupported_obligations(
 ) -> Vec<Obligation> {
     obligations
         .iter()
-        .filter(|obligation| !obligation_supported_before_dispatch(phase, obligation))
+        .filter(|obligation| !obligation_supported(phase, obligation))
         .cloned()
         .collect()
-}
-
-fn obligation_supported_before_dispatch(
-    phase: CapabilityObligationPhase,
-    obligation: &Obligation,
-) -> bool {
-    match obligation {
-        Obligation::AuditBefore
-        | Obligation::ApplyNetworkPolicy { .. }
-        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
-        | Obligation::InjectCredentialAccountOnce { .. }
-        | Obligation::InjectSecretOnce { .. }
-        | Obligation::ReserveResources { .. }
-        | Obligation::UseScopedMounts { .. } => true,
-        Obligation::EnforceResourceCeiling { .. } => {
-            !matches!(phase, CapabilityObligationPhase::Spawn)
-        }
-        Obligation::AuditAfter
-        | Obligation::RedactOutput
-        | Obligation::EnforceOutputLimit { .. } => {
-            !matches!(phase, CapabilityObligationPhase::Spawn)
-        }
-    }
 }
 
 fn unsupported_completion_obligations(
@@ -717,15 +694,24 @@ fn unsupported_completion_obligations(
 ) -> Vec<Obligation> {
     obligations
         .iter()
-        .filter(|obligation| !obligation_supported_after_dispatch(phase, obligation))
+        .filter(|obligation| !obligation_supported(phase, obligation))
         .cloned()
         .collect()
 }
 
-fn obligation_supported_after_dispatch(
-    phase: CapabilityObligationPhase,
-    obligation: &Obligation,
-) -> bool {
+/// Whether the host can honour `obligation` at `phase`.
+///
+/// One predicate, deliberately. This was two — `obligation_supported_before_dispatch`
+/// and `obligation_supported_after_dispatch` — with byte-identical bodies: every arm
+/// and every phase condition matched. The names asserted a pre-dispatch/post-dispatch
+/// distinction that the code never implemented, and the pair gates *admission* of
+/// `RedactOutput`, `EnforceOutputLimit` and `EnforceResourceCeiling`. A later edit to
+/// one copy would have left the other stage silently accepting an obligation it cannot
+/// honour, which is a fail-open. Collapsed rather than resynchronised: if a real
+/// pre/post difference is ever needed, reintroduce it as an explicit parameter here so
+/// the distinction lives in one place instead of in two bodies that must be kept equal
+/// by hand.
+fn obligation_supported(phase: CapabilityObligationPhase, obligation: &Obligation) -> bool {
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }

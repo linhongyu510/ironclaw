@@ -284,7 +284,12 @@ impl ProcessObligationLifecycleStore {
         reconcile: bool,
     ) -> Result<(), ProcessError> {
         if let Err(error) = self.cleanup_record_obligations(record, reconcile) {
-            tracing::warn!(
+            // `debug!`, not `warn!`: `cleanup_terminal` runs from
+            // `observe_process_commit`, a background journal callback, and
+            // `warn!`/`info!` from a background task corrupt the REPL/TUI
+            // display. The error is not swallowed — it is returned on the next
+            // line, so the caller still sees the failure.
+            tracing::debug!(
                 process_id = %record.process_id,
                 tenant_id = %record.scope.tenant_id,
                 user_id = %record.scope.user_id,
