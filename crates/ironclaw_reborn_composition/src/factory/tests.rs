@@ -2940,7 +2940,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(expected_digest.clone()),
@@ -2959,7 +2959,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(
@@ -2981,7 +2981,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_path = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/other-manifest.toml",
                 Some(expected_digest),
@@ -3027,7 +3027,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(expected_digest.clone())),
             requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
@@ -3042,7 +3042,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                     .to_string(),

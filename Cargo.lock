@@ -3897,7 +3897,6 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_trust",
  "libsql",
  "parking_lot",
  "serde",
