@@ -474,7 +474,13 @@ fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
             let entry =
                 entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
             let path = entry.path();
-            if path.is_dir() {
+            // `Path::is_dir()` returns `false` on a metadata error, which would
+            // silently drop an unreadable directory out of the walk. Ask the
+            // entry and fail loud instead, matching `markdown_assets`.
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            if file_type.is_dir() {
                 stack.push(path);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
                 let contents = std::fs::read_to_string(&path)
@@ -570,10 +576,7 @@ fn markdown_include_sites(contents: &str) -> Vec<String> {
                 continue;
             }
 
-            let statement_end = contents[start..]
-                .find(';')
-                .map(|end| start + end)
-                .unwrap_or(contents.len());
+            let statement_end = statement_end_after(contents, start);
             let statement = &contents[start..statement_end];
             if statement.to_ascii_lowercase().contains(".md") {
                 out.push(statement.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -582,6 +585,84 @@ fn markdown_include_sites(contents: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Index of the first `;` at or after `from` that actually terminates a Rust
+/// statement — i.e. one that is not inside a string literal, a raw string, a
+/// char literal, a line comment, or a (nestable) block comment. Returns
+/// `contents.len()` if there is none.
+///
+/// A plain `.find(';')` is wrong in both directions that matter here: a `;` in
+/// a doc-ish comment above the path (`// see note; below`) or inside the path
+/// literal itself would end the span *before* the `.md`, and the gate would go
+/// quiet. Skipping trivia is the smallest correct thing — this only has to find
+/// a delimiter, not parse the expression.
+fn statement_end_after(contents: &str, from: usize) -> usize {
+    let bytes = contents.as_bytes();
+    let mut i = from;
+    let mut block_depth = 0usize;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if block_depth > 0 {
+            if rest.starts_with(b"/*") {
+                block_depth += 1;
+                i += 2;
+            } else if rest.starts_with(b"*/") {
+                block_depth -= 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if rest.starts_with(b"//") {
+            i += contents[i..].find('\n').map_or(bytes.len() - i, |n| n + 1);
+            continue;
+        }
+        if rest.starts_with(b"/*") {
+            block_depth = 1;
+            i += 2;
+            continue;
+        }
+        // Raw string: `r` followed by any number of `#` then `"`.
+        if bytes[i] == b'r' {
+            let mut hashes = 0usize;
+            while bytes.get(i + 1 + hashes) == Some(&b'#') {
+                hashes += 1;
+            }
+            if bytes.get(i + 1 + hashes) == Some(&b'"') {
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = i + 2 + hashes;
+                i = contents[body..]
+                    .find(&terminator)
+                    .map_or(bytes.len(), |n| body + n + terminator.len());
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+            continue;
+        }
+        // Char literal, but not a lifetime (`'a`) — a lifetime has no closing
+        // quote, so require one within three bytes (`'x'` / `'\n'`).
+        if bytes[i] == b'\'' {
+            let escaped = bytes.get(i + 1) == Some(&b'\\');
+            let close = if escaped { i + 3 } else { i + 2 };
+            if bytes.get(close) == Some(&b'\'') {
+                i = close + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b';' {
+            return i;
+        }
+        i += 1;
+    }
+    bytes.len()
 }
 
 /// Recursively collect every markdown file under `dir`, skipping build output.
@@ -692,6 +773,51 @@ mod markdown_include_scan_tests {
         assert!(
             markdown_include_sites(
                 "const P: &str = include_str!(\"builtin_capability_policy.toml\");"
+            )
+            .is_empty()
+        );
+    }
+
+    /// A `;` in a comment above the path used to end the span before the path
+    /// was reached, which made the gate go quiet on real content.
+    #[test]
+    fn semicolon_in_a_comment_does_not_end_the_statement() {
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    // see the note; below\n    \"../prompt.md\",\n);",
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    /* one; two */\n    \"../prompt.md\",\n);",
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// The same hole one level in: a `;` inside the path literal itself.
+    #[test]
+    fn semicolon_inside_a_string_literal_does_not_end_the_statement() {
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str!(\"../a;b/prompt.md\");").len(),
+            1
+        );
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str!(r#\"../a;b/prompt.md\"#);").len(),
+            1
+        );
+    }
+
+    /// The span must still *stop*: a markdown path in the next statement is not
+    /// this include's finding, or every non-markdown include would false-positive.
+    #[test]
+    fn the_span_stops_at_the_real_statement_end() {
+        assert!(
+            markdown_include_sites(
+                "const P: &str = include_str!(\"policy.toml\");\nconst Q: &str = \"../prompt.md\";"
             )
             .is_empty()
         );
