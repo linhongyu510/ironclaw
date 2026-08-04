@@ -1239,10 +1239,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
     (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearai_mcp",
     ),
@@ -1497,22 +1493,36 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
 ///
-/// ✎ **129 → 126 (2026-08-04, #7147), and the gate below is now an equality.**
-/// "Lower it in the same PR that deletes entries" was honour-system: a `<=`
-/// ratchet says nothing when the constant sits *above* the list, so three
-/// earlier deletions banked no floor and left **three untracked vendor
-/// carve-out slots** that could be filled green. Recounted on `origin/main`
-/// @ `676d86ce02`: the list holds **126** pairs. The number was read off the
-/// compiler — set the constant to `0`, run the gate, and the panic prints
-/// `ALLOWLIST.len()` — never by counting parens or `grep`-ing the file, both
-/// of which also match the entry comments and the prose above.
+/// ✎ **129 → 125, and the gate below is now an equality (2026-08-04).**
+/// Two branches found the same defect independently and this is their union;
+/// the count was **recounted on the merged tree**, not taken from either side.
 ///
-/// ⚠ **Concurrent branches touch this list.** Whichever of #7139 / #7141 /
-/// #7143 merges after this one must **recount on the merged tree** and set
-/// this constant to that number in the merge commit — the equality below turns
-/// a stale union into a red build rather than into new silent slack, which is
-/// the whole point, but it means the recount is mandatory rather than optional.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 126;
+/// - **#7143 deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowered the ceiling in
+///   the same PR, which is exactly what the sentence above requires. Shipping
+///   without that would have banked the deletion as slack rather than as a
+///   floor.
+/// - **#7147 found the ceiling was already carrying 3 entries of slack before
+///   either branch.** The list held **126** pairs against a constant of 129, so
+///   three earlier deletions lowered the list without lowering the ceiling —
+///   silent, because a `<=` ratchet says nothing when the constant sits *above*
+///   the list. Three new vendor carve-outs could have been added green.
+/// - **#7147 also closed the mechanism, not just the number:** the gate below
+///   is an **equality**. Slack now fails with its own message, so this cannot
+///   recur — a deletion that forgets to lower the constant is a red build
+///   instead of a fresh budget for the next carve-out.
+///
+/// The number is read off the **compiler** — set the constant to `0`, run the
+/// gate, and the panic prints `ALLOWLIST.len()` — never by counting parens or
+/// `grep`-ing the file, both of which also match the entry comments and the
+/// prose above.
+///
+/// ⚠ **#7139 and #7141 also touch this list.** Whichever merges next must
+/// recount on *its* merged tree and set this constant to that number in the
+/// merge commit. The equality turns a stale union into a red build rather than
+/// into new silent slack — which is the point — but it makes the recount
+/// mandatory rather than optional.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

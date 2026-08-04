@@ -9,7 +9,9 @@
 //! and `LAYER_MATRIX_EXCEPTIONS` never sees it. Measured on `origin/main`
 //! @ `676d86ce02`: **391 workspace normal edges, 73 of them same-layer** — and
 //! that count sat flat across the entire restructure while the *reported*
-//! exception count fell 20 → 6. The improvement was real; it was also
+//! exception count fell 20 → 6. (**70** on the merged tree at `acbf1d89e8`;
+//! #7143's `host_ingress` re-layer took three of them cross-layer, and the
+//! stale-row half of this gate is what named all three.) The improvement was real; it was also
 //! measuring a category that excludes most of the coupling. Every same-layer
 //! pair that is not yet an edge is silently addable:
 //! `ironclaw_product → ironclaw_webui` compiles and passes the whole
@@ -31,7 +33,7 @@
 //!    its disposition, and placeholders count as missing.
 //!
 //! ⚠ **What `decided_in` does and does not claim.** It is *not* a promise that
-//! every one of these 73 edges is scheduled for deletion. Same-layer edges are
+//! every inventoried edge is scheduled for deletion. Same-layer edges are
 //! legal by the matrix and some are permanent by charter — a provider
 //! implementing its own contract (`memory_native → memory`), the contracts
 //! family's internal vocabulary (`product_contracts → host_api`). The field
@@ -43,9 +45,11 @@
 //! # The second rule: a downward re-layer needs a consumer-side pin
 //!
 //! Moving a crate *down* a layer widens who may reach it, and the layer matrix
-//! by construction reports that widening as an improvement. #7143 demotes
-//! `ironclaw_host_ingress` to `substrates`, leaving it reachable by
-//! kernel/runtimes with nothing pinning who may take that new reach.
+//! by construction reports that widening as an improvement. #7143 demoted
+//! `ironclaw_host_ingress` to `substrates` with no such pin, leaving it
+//! reachable by every crate above `substrates` with nothing objecting —
+//! and when that PR merged into this branch, the rule below went red on it
+//! by name and the pin was supplied here.
 //! [`CRATE_LAYER_ORIGINS`] makes the trigger mechanical rather than
 //! remembered: each crate's **first** declared layer is frozen, so a live layer
 //! below it is a permanent, detectable demotion, and the gate then demands a
@@ -325,13 +329,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     // ---- products ----
     SameLayerEdge {
         crate_name: "ironclaw_extension_host",
-        dependency_name: "ironclaw_host_ingress",
-        layer: "products",
-        owner: "extensions/",
-        decided_in: "WS2",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_extension_host",
         dependency_name: "ironclaw_product",
         layer: "products",
         owner: "extensions/",
@@ -350,13 +347,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         layer: "products",
         owner: "extensions/",
         decided_in: "WS2",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_operator",
-        dependency_name: "ironclaw_host_ingress",
-        layer: "products",
-        owner: "product/",
-        decided_in: "WS5",
     },
     SameLayerEdge {
         crate_name: "ironclaw_reborn_openai_compat",
@@ -368,13 +358,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     SameLayerEdge {
         crate_name: "ironclaw_webui",
         dependency_name: "ironclaw_extension_host",
-        layer: "products",
-        owner: "product/",
-        decided_in: "WS5",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_webui",
-        dependency_name: "ironclaw_host_ingress",
         layer: "products",
         owner: "product/",
         decided_in: "WS5",
@@ -652,10 +635,17 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// Recounted here rather than inherited: #7149 quotes 68 from an earlier tree,
 /// and 68 is not what this tree holds.
 ///
+/// ✎ **73 → 70 when #7143 merged.** Its `host_ingress` re-layer turned
+/// `extension_host`/`operator`/`webui → host_ingress` from `products →
+/// products` into legal cross-layer edges. The stale-row half of the gate
+/// caught all three by name, and the baseline is lowered in the same change
+/// so the improvement is banked as a floor rather than left as headroom.
+/// Recounted on the merged tree, not derived by subtracting three.
+///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 73;
+const SAME_LAYER_EDGE_BASELINE: usize = 70;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -766,22 +756,41 @@ struct DowngradePin {
     permitted_consumers: &'static [&'static str],
 }
 
-const DOWNGRADE_PINS: &[DowngradePin] = &[DowngradePin {
-    crate_name: "ironclaw_extensions",
-    from_layer: "loops",
-    to_layer: "substrates",
-    demoted_in: "#7094 (WS2 — Extensions family)",
-    permitted_consumers: &[
-        "ironclaw_capabilities",
-        "ironclaw_extension_host",
-        "ironclaw_extension_manager",
-        "ironclaw_host_runtime",
-        "ironclaw_mcp",
-        "ironclaw_product",
-        "ironclaw_reborn_composition",
-        "ironclaw_scripts",
-    ],
-}];
+const DOWNGRADE_PINS: &[DowngradePin] = &[
+    DowngradePin {
+        crate_name: "ironclaw_extensions",
+        from_layer: "loops",
+        to_layer: "substrates",
+        demoted_in: "#7094 (WS2 — Extensions family)",
+        permitted_consumers: &[
+            "ironclaw_capabilities",
+            "ironclaw_extension_host",
+            "ironclaw_extension_manager",
+            "ironclaw_host_runtime",
+            "ironclaw_mcp",
+            "ironclaw_product",
+            "ironclaw_reborn_composition",
+            "ironclaw_scripts",
+        ],
+    },
+    DowngradePin {
+        crate_name: "ironclaw_host_ingress",
+        from_layer: "products",
+        to_layer: "substrates",
+        demoted_in: "#7143 (WS2 — re-layer host_ingress)",
+        // The demotion this rule was written for. #7143 landed the move with no
+        // consumer-side pin, leaving the crate reachable by every substrates,
+        // runtimes, kernel and loops crate with nothing objecting — the matrix
+        // reads the widening as an improvement. Frozen at the four consumers
+        // that existed when it merged; a fifth is a reviewed decision.
+        permitted_consumers: &[
+            "ironclaw_extension_host",
+            "ironclaw_operator",
+            "ironclaw_reborn_composition",
+            "ironclaw_webui",
+        ],
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Metadata
