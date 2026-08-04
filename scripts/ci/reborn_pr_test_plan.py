@@ -8,6 +8,7 @@ Merge-queue, main, and manual runs remain exhaustive.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import subprocess
 import sys
@@ -17,6 +18,30 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The WebUI frontend path prefix is resolved by crate NAME through the shared
+# inventory (scripts/ci/lib/crate_tree.py), not a literal `crates/ironclaw_webui`
+# prefix. Under the target-architecture family move
+# (crates/<family>/ironclaw_*, PROPOSAL §5) a literal prefix stops matching,
+# frontend diffs stop routing to the Code Style lane, and the planner reports
+# "no Reborn test surface changed" for a WebUI change — silently, since
+# nothing else covers that lane. See
+# docs/reborn/target-architecture/CHECKLIST.md WS10.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
+
+@functools.lru_cache(maxsize=None)
+def _webui_frontend_prefix() -> str:
+    """`<ironclaw_webui crate dir>/frontend/`, resolved once per process."""
+    try:
+        directory = crate_directory("ironclaw_webui", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_webui crate, so "
+            f"the frontend path prefix used to route Code Style is unknown: {error}"
+        ) from error
+    return f"{directory}/frontend/"
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -384,7 +409,7 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
-        if path.startswith("crates/ironclaw_webui/frontend/"):
+        if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
         if path in root_inventory:
@@ -589,7 +614,13 @@ def main() -> int:
             canonical_packages=canonical_packages,
             lockfile_manifest_owned=lockfile_manifest_owned,
         )
-    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
+    except (
+        OSError,
+        KeyError,
+        ValueError,
+        RuntimeError,
+        subprocess.CalledProcessError,
+    ) as error:
         print(f"Reborn PR test planner failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(plan, separators=(",", ":"), sort_keys=True))

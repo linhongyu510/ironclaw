@@ -393,4 +393,20 @@ do
   fi
 done
 
+# WS10 (docs/reborn/target-architecture/CHECKLIST.md): the WebUI frontend
+# directory the crates/prepare/frontend stages build must be resolved through
+# the shared crate inventory (scripts/ci/crate-dir.sh), never a literal
+# `crates/ironclaw_webui` path that the family move (PROPOSAL §5) can leave
+# pointed at nothing. A literal regressing back in is a silent break — the
+# suite would `cd` into a directory that used to exist and report nothing
+# wrong until the frontend build actually runs.
+if grep -Fq "crates/ironclaw_webui" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh regressed to a literal crates/ironclaw_webui path" >&2
+  exit 1
+fi
+if ! grep -Fq "resolve_webui_frontend_dir" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh lost its crate-inventory-resolved frontend directory helper" >&2
+  exit 1
+fi
+
 echo "hermetic test-process self-test: OK"

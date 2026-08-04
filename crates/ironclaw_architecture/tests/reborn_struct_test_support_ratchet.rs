@@ -14,7 +14,7 @@ mod ratchet_support;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ratchet_support::workspace_root;
+use ratchet_support::{try_resolve_crate_relative, workspace_root};
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{Attribute, Fields, ImplItem, Item, Meta, Token};
@@ -758,12 +758,19 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
     let mut found = BTreeMap::new();
     scan_dir(&root, &root.join("crates"), &mut found);
 
+    // Frozen paths are compared against paths DISCOVERED on disk, so each is
+    // resolved through the crate inventory first: after the family move
+    // (PROPOSAL section 5) every entry naming a moved crate would otherwise
+    // read as BOTH "new occurrence" and "debt that no longer exists" in the
+    // same run - 79 of them (CHECKLIST WS10). A path naming a crate that is
+    // really gone keeps its literal and is still reported as removed debt.
     let mut frozen = BTreeMap::new();
     for entry in FROZEN_PATH_COUNTS {
         let key = (
             entry.category.to_string(),
             entry.item_kind.to_string(),
-            entry.path.to_string(),
+            try_resolve_crate_relative(&root, entry.path)
+                .unwrap_or_else(|_| entry.path.to_string()),
         );
         assert!(
             frozen.insert(key.clone(), entry.count).is_none(),

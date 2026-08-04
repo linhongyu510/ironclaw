@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts/ci/reborn_pr_test_plan.py"
@@ -168,14 +169,68 @@ class RebornPrTestPlanTests(unittest.TestCase):
             )
 
     def test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay(self) -> None:
-        plan = self.plan(
-            "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
-        )
+        # The frontend prefix is resolved through the crate inventory
+        # (scripts/ci/lib/crate_tree.py), not a hardcoded literal — deriving
+        # the test input from the same resolver keeps this correct regardless
+        # of whether ironclaw_webui sits flat or has already moved into a
+        # family directory (PROPOSAL §5). Sibling tests below pin the
+        # resolution mechanism itself (nested + fail-closed) against a mocked
+        # crate_directory rather than the live tree.
+        frontend_prefix = planner._webui_frontend_prefix()
+        plan = self.plan("pull_request", [f"{frontend_prefix}src/app.tsx"])
         self.assertEqual(plan["mode"], "none")
         self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
+
+    def test_frontend_prefix_resolves_through_crate_inventory_when_nested(self) -> None:
+        """WS10: a family-moved ironclaw_webui still routes to Code Style.
+
+        Mocks `crate_directory` (rather than relying on the live repo's
+        current crate layout, which the target-architecture restructure is
+        actively changing) to pin that the frontend-prefix resolution follows
+        the crate wherever it lives.
+        """
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                return_value="crates/substrates/ironclaw_webui",
+            ) as resolver:
+                plan = self.plan(
+                    "pull_request",
+                    ["crates/substrates/ironclaw_webui/frontend/src/app.tsx"],
+                )
+            resolver.assert_called_once_with("ironclaw_webui", planner.ROOT)
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["crate_buckets"], [])
+            self.assertEqual(plan["integration_lanes"], [])
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
+
+    def test_frontend_prefix_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable ironclaw_webui crate must raise, never fall back
+        to the literal — a silent fallback is exactly the WS10 failure mode
+        (a moved crate makes the prefix match nothing and the planner reports
+        "no Reborn test surface changed" for a real WebUI diff)."""
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                side_effect=planner.CrateTreeError("boom"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "cannot resolve the ironclaw_webui crate"
+                ):
+                    self.plan(
+                        "pull_request",
+                        ["crates/ironclaw_webui/frontend/src/app.tsx"],
+                    )
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
 
     def test_nested_crate_markdown_remains_package_owned(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/README.md"])

@@ -141,12 +141,23 @@ if $WIT_TOOL_CHANGED; then
         echo "  OK: WIT package version bumped."
     fi
 
-    # Check WIT_TOOL_VERSION constant matches (Reborn host lives in
-    # crates/ironclaw_wasm/src/config.rs; the v1 src/tools/wasm/mod.rs was
-    # deleted under Tier B).
-    CONST_VER=$(extract_rust_const "crates/ironclaw_wasm/src/config.rs" "WIT_TOOL_VERSION")
-    if [[ -n "$NEW_VER" && "$CONST_VER" != "$NEW_VER" ]]; then
-        echo "  ERROR: WIT_TOOL_VERSION in crates/ironclaw_wasm/src/config.rs is '${CONST_VER}' but wit/tool.wit has '${NEW_VER}'. They must match."
+    # Check WIT_TOOL_VERSION constant matches (Reborn host lives in the
+    # ironclaw_wasm crate's src/config.rs; the v1 src/tools/wasm/mod.rs was
+    # deleted under Tier B). Resolved by crate NAME through the shared
+    # inventory (scripts/ci/lib/crate_tree.py via scripts/ci/crate-dir.sh) so
+    # the target-architecture family move (crates/<family>/ironclaw_*,
+    # PROPOSAL §5) cannot make this read an empty string and let the WIT
+    # version-parity gate pass vacuously
+    # (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    WASM_CRATE_DIR=$("${SCRIPT_DIR}/ci/crate-dir.sh" ironclaw_wasm) || exit 1
+    WASM_CONFIG_FILE="${WASM_CRATE_DIR}/src/config.rs"
+    CONST_VER=$(extract_rust_const "$WASM_CONFIG_FILE" "WIT_TOOL_VERSION")
+    if [[ -z "$CONST_VER" ]]; then
+        echo "  ERROR: could not read WIT_TOOL_VERSION from ${WASM_CONFIG_FILE} (file missing or constant not found). If the ironclaw_wasm crate moved or was renamed, repoint check-version-bumps.sh in the same change."
+        ERRORS=$((ERRORS + 1))
+    elif [[ -n "$NEW_VER" && "$CONST_VER" != "$NEW_VER" ]]; then
+        echo "  ERROR: WIT_TOOL_VERSION in ${WASM_CONFIG_FILE} is '${CONST_VER}' but wit/tool.wit has '${NEW_VER}'. They must match."
         ERRORS=$((ERRORS + 1))
     elif [[ -n "$NEW_VER" ]]; then
         echo "  OK: WIT_TOOL_VERSION matches wit/tool.wit."
