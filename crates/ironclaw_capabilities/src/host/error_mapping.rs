@@ -312,35 +312,34 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
     error: DispatchError,
     obligations: &[Obligation],
 ) -> DispatchError {
-    let DispatchError::AuthRequired {
-        ref required_secrets,
-        ref credential_requirements,
-        ..
-    } = error
-    else {
-        return error;
-    };
-    if !required_secrets.is_empty() || !credential_requirements.is_empty() {
-        return error;
-    }
-    let derived: Vec<_> = obligations
-        .iter()
-        .filter_map(Obligation::credential_auth_requirement)
-        .collect();
-    let [requirement] = derived.as_slice() else {
-        return error; // zero or >1 credential obligations: do not guess
-    };
-    let DispatchError::AuthRequired {
-        capability,
-        required_secrets,
-        ..
-    } = error
-    else {
-        unreachable!("matched AuthRequired above")
-    };
-    DispatchError::AuthRequired {
-        capability,
-        required_secrets,
-        credential_requirements: vec![requirement.clone()],
+    // Matched by value in one pass: the guard borrows the two vectors, so a
+    // non-enriching outcome falls through to `other` with `error` un-moved.
+    // Enriching rebuilds the variant from the parts it already owns, which is
+    // what lets this be total — there is no "matched above" branch to assert.
+    match error {
+        DispatchError::AuthRequired {
+            capability,
+            required_secrets,
+            credential_requirements,
+        } if required_secrets.is_empty() && credential_requirements.is_empty() => {
+            let derived: Vec<_> = obligations
+                .iter()
+                .filter_map(Obligation::credential_auth_requirement)
+                .collect();
+            match derived.as_slice() {
+                [requirement] => DispatchError::AuthRequired {
+                    capability,
+                    required_secrets,
+                    credential_requirements: vec![requirement.clone()],
+                },
+                // zero or >1 credential obligations: do not guess
+                _ => DispatchError::AuthRequired {
+                    capability,
+                    required_secrets,
+                    credential_requirements,
+                },
+            }
+        }
+        other => other,
     }
 }
