@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use ironclaw_reborn_config::RebornHome;
+use ironclaw_config::RebornHome;
 
 use crate::commands::config::init::{ExistingConfigPolicy, write_default_config_files};
 use crate::context::RebornCliContext;
@@ -201,7 +201,7 @@ impl OnboardCommand {
         // repo's schema) must not abort an otherwise-successful onboarding
         // run; falling back to the default env var name is a fine
         // degradation for this purely informational courtesy.
-        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
+        let config_file = ironclaw_config::RebornConfigFile::load(&home.config_file_path())
             .ok()
             .flatten();
         match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref())? {

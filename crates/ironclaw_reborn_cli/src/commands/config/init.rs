@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use ironclaw_reborn_config::{REBORN_CONFIG_API_VERSION, RebornHome};
+use ironclaw_config::{REBORN_CONFIG_API_VERSION, RebornHome};
 
 use crate::context::RebornCliContext;
 use crate::file_write::{FileWriteAction, write_atomic};
@@ -299,7 +299,7 @@ mod tests {
     use crate::context::RebornCliContext;
 
     // The `DEFAULT_LLM_*`-vs-catalog drift check that used to live here moved
-    // to `ironclaw_architecture`'s
+    // to `ironclaw_architecture_tests`'s
     // `reborn_provider_catalog_is_owned_by_its_crate`. It asserted these
     // consts against the catalog by embedding it from five directories up —
     // a repo-root reach-in. The catalog is now `ironclaw_llm`'s own asset
@@ -326,11 +326,9 @@ mod tests {
 
         let config_text =
             fs::read_to_string(home.config_file_path()).expect("read stub config.toml");
-        let config_file = ironclaw_reborn_config::RebornConfigFile::parse_text(
-            &config_text,
-            &home.config_file_path(),
-        )
-        .expect("stub config.toml must parse");
+        let config_file =
+            ironclaw_config::RebornConfigFile::parse_text(&config_text, &home.config_file_path())
+                .expect("stub config.toml must parse");
         assert!(
             config_file.default_llm_slot().is_none(),
             "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"

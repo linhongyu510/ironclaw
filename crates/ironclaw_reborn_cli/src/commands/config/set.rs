@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use clap::Args;
-use ironclaw_reborn_config::{GoogleFieldUpdate, GoogleOauthConfigUpdate, RebornHome};
+use ironclaw_config::{GoogleFieldUpdate, GoogleOauthConfigUpdate, RebornHome};
 
 use super::capability_config::{ConfigDestination, ConfigKey, ShapeVerdict, validate_shape};
 use crate::context::RebornCliContext;
@@ -111,7 +111,7 @@ fn set_value_key(
     // into `google.redirect_uri`) is caught here, whose error never echoes
     // the raw value, before `validate_shape`'s Reject arms would see it.
     if key.destination() == ConfigDestination::ConfigToml
-        && let Err(error) = ironclaw_reborn_config::reject_inline_secret(label.clone(), &value)
+        && let Err(error) = ironclaw_config::reject_inline_secret(label.clone(), &value)
     {
         anyhow::bail!("refusing to write `{label}` to config.toml: {error}");
     }
@@ -192,13 +192,13 @@ fn write_google_field(
         redirect_uri: redirect_uri.unwrap_or_default(),
         hosted_domain_hint: GoogleFieldUpdate::Keep,
     };
-    ironclaw_reborn_config::update_google_oauth_config(&home.config_file_path(), &update)
+    ironclaw_config::update_google_oauth_config(&home.config_file_path(), &update)
         .map_err(anyhow::Error::from)
 }
 
 fn write_slack_enabled(home: &RebornHome, value: &str) -> anyhow::Result<()> {
     let enabled = value.eq_ignore_ascii_case("true");
-    ironclaw_reborn_config::update_slack_enabled(&home.config_file_path(), enabled)
+    ironclaw_config::update_slack_enabled(&home.config_file_path(), enabled)
         .map_err(anyhow::Error::from)
 }
 
@@ -257,7 +257,7 @@ fn write_google_client_secret(
 /// service state.
 ///
 /// This is the CLI-surface twin of
-/// `ironclaw_reborn_config::apply_step_text` (the canonical sentence used
+/// `ironclaw_config::apply_step_text` (the canonical sentence used
 /// by the composition-layer tool-error surface, e.g. `gsuite.rs`) — kept
 /// as a separate literal rather than unified onto that helper because
 /// several CLI tests already pin this exact `  to apply: ...` wording;
@@ -377,7 +377,7 @@ trait SecretStoreOpener {
     fn open_google_oauth_secret_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore>;
+    ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore>;
 }
 
 struct StandaloneSecretStoreOpener;
@@ -397,7 +397,7 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
@@ -407,7 +407,7 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
     fn open_google_oauth_secret_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+    ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore> {
         // See `open_llm_key_store` above: `config set` is a write command,
         // so create the reborn home directory before opening the store.
         std::fs::create_dir_all(home_path).map_err(|error| {
@@ -415,12 +415,10 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
-                store,
-            ))
+            Ok::<_, anyhow::Error>(ironclaw_composition::GoogleOauthSecretStore::new(store))
         })
     }
 }
@@ -488,12 +486,12 @@ mod tests {
         fn open_google_oauth_secret_store(
             &self,
             home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+        ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore> {
             self.opened_paths
                 .lock()
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
-            Ok(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
+            Ok(ironclaw_composition::GoogleOauthSecretStore::new(
                 self.store.clone(),
             ))
         }
@@ -523,7 +521,7 @@ mod tests {
         fn open_google_oauth_secret_store(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+        ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore> {
             anyhow::bail!("store opener should not be called")
         }
     }
@@ -734,7 +732,7 @@ mod tests {
         );
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+            ironclaw_composition::GoogleOauthSecretStore::new(store)
                 .read()
                 .await
         })
@@ -815,7 +813,7 @@ mod tests {
 
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+            ironclaw_composition::GoogleOauthSecretStore::new(store)
                 .read()
                 .await
         })

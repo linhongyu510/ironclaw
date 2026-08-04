@@ -35,15 +35,13 @@ pub(super) fn build_config_get_dto(
 
 fn load_config_file(
     context: &RebornCliContext,
-) -> anyhow::Result<ironclaw_reborn_config::RebornConfigFile> {
+) -> anyhow::Result<ironclaw_config::RebornConfigFile> {
     let config_path = context.boot_config().home().config_file_path();
-    Ok(ironclaw_reborn_config::RebornConfigFile::load(&config_path)?.unwrap_or_default())
+    Ok(ironclaw_config::RebornConfigFile::load(&config_path)?.unwrap_or_default())
 }
 
-fn flatten_config(
-    config: &ironclaw_reborn_config::RebornConfigFile,
-) -> anyhow::Result<Vec<ConfigEntry>> {
-    use ironclaw_reborn_config::RebornConfigFile;
+fn flatten_config(config: &ironclaw_config::RebornConfigFile) -> anyhow::Result<Vec<ConfigEntry>> {
+    use ironclaw_config::RebornConfigFile;
 
     // Expand all None sections to Some(Default) so every leaf key appears
     // even when unset. The struct literal means a new field added to
@@ -163,7 +161,7 @@ impl Renderable for ConfigGetDto {
 mod tests {
     use super::*;
     use crate::context::RebornCliContext;
-    use ironclaw_reborn_config::RebornConfigFile;
+    use ironclaw_config::RebornConfigFile;
 
     #[test]
     fn flatten_empty_config_has_all_keys() {

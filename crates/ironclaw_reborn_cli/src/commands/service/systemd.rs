@@ -752,7 +752,7 @@ mod tests {
     /// WorkingDirectory.
     fn sample_context() -> RebornCliContext {
         RebornCliContext::from_boot_config(
-            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+            ironclaw_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         )
     }

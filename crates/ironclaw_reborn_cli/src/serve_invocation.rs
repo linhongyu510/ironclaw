@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use ironclaw_reborn_config::{REBORN_HOME_ENV, REBORN_PROFILE_ENV, RebornBootConfig};
+use ironclaw_config::{REBORN_HOME_ENV, REBORN_PROFILE_ENV, RebornBootConfig};
 
 /// A fully resolved way to launch `ironclaw serve` as a child
 /// process: the binary path, its arguments, and the environment pairs a

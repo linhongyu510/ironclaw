@@ -47,4 +47,4 @@
 
 - Fast local check: `cargo test -p ironclaw_extension_support`
 - Caller check after tool behavior changes: `cargo test -p ironclaw_host_runtime --test first_party_coding_tools`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`

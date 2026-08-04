@@ -3,7 +3,9 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::result_meta::FailureKind;
@@ -2198,7 +2200,7 @@ fn registry_with_slack_user_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
     let root = VirtualPath::new("/system/extensions/slack").unwrap();
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
@@ -2295,7 +2297,7 @@ fn registry_with_github_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
     let root = VirtualPath::new("/system/extensions/github").unwrap();
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
@@ -2334,7 +2336,7 @@ fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
     let root = VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap();
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),

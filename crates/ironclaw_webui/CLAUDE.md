@@ -1,7 +1,7 @@
 # ironclaw_webui guardrails
 
 The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
-crate, above `ironclaw_reborn_composition`, that turns composition's product/API
+crate, above `ironclaw_composition`, that turns composition's product/API
 surface into a running HTTP server a browser can talk to. It owns four
 subsystems that used to live apart (see `README.md` for the fold-in map):
 
@@ -10,7 +10,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE/WebSocket streaming, and the Vite SPA bundle.
 2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
-   from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
+   from `ironclaw_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
    OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
@@ -33,7 +33,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
-direct `ironclaw_product` dependency (see `Cargo.toml`), but as of the WS5
+direct `ironclaw_assistant` dependency (see `Cargo.toml`), but as of the WS5
 transport inversion it is limited to **the frozen operation inventory** — the
 `*_VIEW` / `*_COMMAND` / `*_CAPABILITY` descriptor constants a handler names to
 call the surface, which PROPOSAL §6.1.3 keeps in product — plus **nine** wire
@@ -47,9 +47,9 @@ other DTO, request body, and descriptor *type* now comes from
 `ironclaw_product_contracts`. Never behavior.
 
 That residue is exact, enumerated with per-entry reasons, and shrink-only in
-`ironclaw_architecture` (`tests/reborn_transport_product_boundary.rs`, alongside
+`ironclaw_architecture_tests` (`tests/reborn_transport_product_boundary.rs`, alongside
 `tests/reborn_dependency_boundaries.rs`). **Adding an import from
-`ironclaw_product` will fail that test** — put the type in
+`ironclaw_assistant` will fail that test** — put the type in
 `ironclaw_product_contracts` instead. Moving the inventory constants there to
 shrink the residue also fails it, deliberately: that is an unresolved §6.1.3 /
 §6.9.4 owner decision, not a cleanup.
@@ -240,7 +240,7 @@ The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,
 and the session lifecycle types. The OAuth callback's job is exactly that
 — turn a provider profile into a signed session `create_session` call
 — so the login mint path belongs in the same host-owned crate, not
-behind the product/API seam in `ironclaw_reborn_composition`.
+behind the product/API seam in `ironclaw_composition`.
 
 SSO sessions are user identity only. They must not inherit operator
 WebUI configuration privileges from the deployment. When the CLI
@@ -349,7 +349,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - **Session transport** is one-time login ticket in the callback
   redirect (`?login_ticket=<ticket>`) followed by same-origin
   exchange for the bearer — see
-  `ironclaw_reborn_composition/CLAUDE.md` → "Session transport
+  `ironclaw_composition/CLAUDE.md` → "Session transport
   decision" for the rationale.
 
 ### What the SSO router deliberately does NOT do

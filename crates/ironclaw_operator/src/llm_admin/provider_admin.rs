@@ -7,15 +7,15 @@
 
 use std::path::PathBuf;
 
+use ironclaw_config::{
+    DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
+    begin_default_llm_slot_update, update_default_llm_slot,
+};
 use ironclaw_product_contracts::operator_llm::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, LlmProbeRequest, ProviderMenuEntry,
     ProviderProbeOutcome, RebornModelRoutesState, RebornProviderInfo, RebornProviderList,
     RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
-};
-use ironclaw_reborn_config::{
-    DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
-    begin_default_llm_slot_update, update_default_llm_slot,
 };
 use thiserror::Error;
 
@@ -477,7 +477,7 @@ pub enum RebornProviderAdminError {
     #[error("load Reborn config `{}`: {source}", path.display())]
     LoadConfig {
         path: PathBuf,
-        source: Box<ironclaw_reborn_config::RebornConfigFileError>,
+        source: Box<ironclaw_config::RebornConfigFileError>,
     },
     #[error("unknown Reborn LLM provider `{provider}` in {}; available providers: {}", providers_file.display(), known.join(", "))]
     UnknownProvider {
@@ -490,7 +490,7 @@ pub enum RebornProviderAdminError {
     #[error("update Reborn config `{}`: {source}", path.display())]
     UpdateConfig {
         path: PathBuf,
-        source: Box<ironclaw_reborn_config::RebornConfigFileUpdateError>,
+        source: Box<ironclaw_config::RebornConfigFileUpdateError>,
     },
     /// [`RebornProviderAdmin::detect_env_llm`]'s "partial env" outcome: some
     /// LLM environment configuration was present but incomplete or invalid.
@@ -762,7 +762,7 @@ mod tests {
 
     fn test_admin() -> RebornProviderAdmin {
         let temp = tempfile::tempdir().expect("tempdir");
-        let home = ironclaw_reborn_config::RebornHome::resolve_from_env_parts(
+        let home = ironclaw_config::RebornHome::resolve_from_env_parts(
             Some(temp.path().join("reborn-home").as_os_str().to_os_string()),
             None,
             None,
@@ -773,7 +773,7 @@ mod tests {
         std::mem::forget(temp);
         RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::Standalone,
+            ironclaw_config::RebornProfile::Standalone,
         ))
     }
 
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn menu_entries_excludes_the_example_overlay_provider() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let home = ironclaw_reborn_config::RebornHome::resolve_from_env_parts(
+        let home = ironclaw_config::RebornHome::resolve_from_env_parts(
             Some(temp.path().join("reborn-home").as_os_str().to_os_string()),
             None,
             None,
@@ -911,7 +911,7 @@ mod tests {
 
         let admin = RebornProviderAdmin::new(RebornBootConfig::new(
             home,
-            ironclaw_reborn_config::RebornProfile::Standalone,
+            ironclaw_config::RebornProfile::Standalone,
         ));
         let entries = admin.menu_entries().expect("menu entries load");
         assert!(

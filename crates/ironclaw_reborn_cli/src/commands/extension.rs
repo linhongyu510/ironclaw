@@ -1,13 +1,11 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
+use ironclaw_composition::{LifecycleProductResponse, RebornRuntimeInput, build_reborn_runtime};
 use ironclaw_extension_manager::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, execute_reborn_extension_lifecycle_command,
     render_reborn_extension_lifecycle_response,
 };
 use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
-use ironclaw_reborn_composition::{
-    LifecycleProductResponse, RebornRuntimeInput, build_reborn_runtime,
-};
 
 use crate::context::RebornCliContext;
 use crate::runtime::{RuntimeInputCaller, RuntimeInputOptions};

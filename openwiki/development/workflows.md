@@ -97,7 +97,7 @@ grep -i "feature-name" FEATURE_PARITY.md
 
 # Decide where to build it:
 # - New runtime behavior? → crates/ironclaw_reborn*
-# - New tool? → crates/ironclaw_first_party_extensions or ironclaw_extensions
+# - New tool? → crates/ironclaw_first_party_extensions or ironclaw_extension_registry
 # - New gateway feature? → crates/ironclaw_gateway or ironclaw_reborn_webui_ingress
 # - New channel? → crates/ironclaw_*_adapter
 

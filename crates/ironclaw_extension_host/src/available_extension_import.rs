@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
     ManifestSource,
 };
@@ -206,7 +206,7 @@ pub fn parse_imported_manifest(
         &host_ports,
         None,
         &contracts,
-        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
+        ironclaw_extension_registry::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(map_binding_error)
 }
@@ -246,7 +246,7 @@ fn extension_package_from_files(
     // contract).
     let mut resolved_with_root = record.resolved().clone();
     resolved_with_root.root_binding =
-        ironclaw_extensions::PackageRootBinding::Materialized(root.clone());
+        ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone());
     let record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         source,
@@ -326,7 +326,7 @@ fn extension_package_from_files(
 /// declares exactly one, and concatenating several vendors' instructions would
 /// produce guidance for a credential the user was not asked for.
 fn onboarding_from_auth_recipes(
-    manifest: &ironclaw_extensions::ResolvedExtensionManifest,
+    manifest: &ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> Option<LifecycleExtensionOnboarding> {
     manifest.auth.iter().find_map(|surface| {
         let (display_name, instructions, setup_url) = match surface.recipe.as_ref()? {
@@ -354,7 +354,7 @@ fn onboarding_from_auth_recipes(
 }
 
 fn manifest_declared_asset_paths(
-    manifest: &ironclaw_extensions::ExtensionManifestV2,
+    manifest: &ironclaw_extension_registry::ExtensionManifestV2,
 ) -> Vec<String> {
     let mut declared = Vec::new();
     if let ExtensionRuntimeV2::Wasm { module } = &manifest.runtime {
@@ -376,7 +376,7 @@ fn manifest_declared_asset_paths(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ironclaw_extensions::ManifestSource;
+    use ironclaw_extension_registry::ManifestSource;
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::runtime::RuntimeKind;
 
@@ -822,7 +822,7 @@ setup_url = "{expected_url}"
         // survive onto the resolved contract, not just `package.package.root`.
         assert_eq!(
             package.resolved_manifest.root_binding,
-            ironclaw_extensions::PackageRootBinding::Materialized(
+            ironclaw_extension_registry::PackageRootBinding::Materialized(
                 VirtualPath::new("/system/extensions/uploaded-tool").unwrap()
             )
         );

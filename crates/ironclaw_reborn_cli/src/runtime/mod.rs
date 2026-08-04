@@ -5,20 +5,20 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
-use ironclaw_extension_host::FirstPartyPackageBundle;
-use ironclaw_operator::OperatorLogLayer;
-use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
-use ironclaw_reborn_composition::TriggerFireAccessPolicy;
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
-use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
-use ironclaw_reborn_composition::{
+use ironclaw_composition::TriggerFireAccessPolicy;
+use ironclaw_composition::host_api::{AgentId, TenantId, UserId};
+use ironclaw_composition::hosted_single_tenant_runtime_policy;
+use ironclaw_composition::{
     KeepaliveSweepSettings, OAuthClientConfig, PollSettings, RebornCompositionProfile,
     RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
-use ironclaw_reborn_config::{
+use ironclaw_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
 };
+use ironclaw_extension_host::FirstPartyPackageBundle;
+use ironclaw_operator::OperatorLogLayer;
+use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
@@ -45,14 +45,14 @@ pub(crate) fn init_tracing() {
     // terminal — the repo's logging invariant.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
-        "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
+        "info,ironclaw_turn_runner=info,ironclaw_composition=info",
     );
     // Operator Logs buffer: a *separate* per-layer filter capturing run
     // diagnostics at `debug` for the Logs panel, without those events also
     // going to stderr — keeps terminal safety and Logs-panel visibility decoupled.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
-        "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
+        "info,ironclaw_turn_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
         .with(
@@ -239,8 +239,8 @@ fn print_runtime_banner(config: &RebornBootConfig) {
 }
 
 async fn send_once(
-    runtime: &ironclaw_reborn_composition::RebornRuntime,
-    conversation: &ironclaw_reborn_composition::ConversationId,
+    runtime: &ironclaw_composition::RebornRuntime,
+    conversation: &ironclaw_composition::ConversationId,
     text: &str,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -258,8 +258,8 @@ async fn send_once(
 }
 
 async fn run_repl_loop(
-    runtime: &ironclaw_reborn_composition::RebornRuntime,
-    conversation: &ironclaw_reborn_composition::ConversationId,
+    runtime: &ironclaw_composition::RebornRuntime,
+    conversation: &ironclaw_composition::ConversationId,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
     let stdin_is_tty = std::io::stdin().is_terminal();
@@ -344,14 +344,14 @@ fn print_repl_help() {
     eprintln!("  /quit  Exit the REPL");
 }
 
-fn print_reply(reply: &ironclaw_reborn_composition::AssistantReply) {
+fn print_reply(reply: &ironclaw_composition::AssistantReply) {
     match reply.text.as_deref() {
         Some(text) => println!("{text}"),
         None => eprintln!("{}", no_assistant_text_message(reply)),
     }
 }
 
-fn no_assistant_text_message(reply: &ironclaw_reborn_composition::AssistantReply) -> String {
+fn no_assistant_text_message(reply: &ironclaw_composition::AssistantReply) -> String {
     let summary = reply_without_text_summary(reply);
     let failure_category = reply
         .failure_category
@@ -364,18 +364,18 @@ fn no_assistant_text_message(reply: &ironclaw_reborn_composition::AssistantReply
     )
 }
 
-fn reply_without_text_summary(reply: &ironclaw_reborn_composition::AssistantReply) -> &'static str {
+fn reply_without_text_summary(reply: &ironclaw_composition::AssistantReply) -> &'static str {
     match reply.status {
-        ironclaw_reborn_composition::TurnStatus::Failed
-        | ironclaw_reborn_composition::TurnStatus::RecoveryRequired => {
+        ironclaw_composition::TurnStatus::Failed
+        | ironclaw_composition::TurnStatus::RecoveryRequired => {
             ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
                 reply.failure_category.as_deref(),
             )
         }
-        ironclaw_reborn_composition::TurnStatus::Cancelled => {
+        ironclaw_composition::TurnStatus::Cancelled => {
             "The run was cancelled before producing a reply."
         }
-        ironclaw_reborn_composition::TurnStatus::Completed => {
+        ironclaw_composition::TurnStatus::Completed => {
             "The run completed without producing an assistant reply."
         }
         _ => "The run has not produced an assistant reply yet.",
@@ -482,7 +482,7 @@ fn apply_credential_refresh_override(
 ///   a forgotten env var doesn't hang instead of erroring clearly.
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<Option<ironclaw_operator::ResolvedRebornLlm>> {
     let error = match ironclaw_operator::resolve_reborn_runtime_llm(config, config_file) {
@@ -514,10 +514,9 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
-        let store =
-            ironclaw_reborn_composition::open_standalone_secret_store(&runtime_storage_root)
-                .await
-                .map_err(anyhow::Error::from)?;
+        let store = ironclaw_composition::open_standalone_secret_store(&runtime_storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
         ironclaw_operator::LlmKeyStore::new(store)
             .exists(&provider_id)
             .await
@@ -602,7 +601,7 @@ pub(crate) fn build_runtime_input_with_options(
         match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
             Ok(shared_key) => {
                 runtime_input = runtime_input.with_ironhub_agent_shared_key(
-                    ironclaw_reborn_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
+                    ironclaw_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
                         .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
                 );
             }
@@ -622,12 +621,11 @@ pub(crate) fn build_runtime_input_with_options(
 }
 
 pub(crate) fn ironhub_manifest_url_from_env()
--> anyhow::Result<Option<ironclaw_reborn_composition::ironhub::IronhubManifestUrl>> {
+-> anyhow::Result<Option<ironclaw_composition::ironhub::IronhubManifestUrl>> {
     match std::env::var("IRONHUB_MANIFEST_URL") {
         Ok(manifest_url) => {
-            let manifest_url =
-                ironclaw_reborn_composition::ironhub::validated_manifest_url(&manifest_url)
-                    .context("IRONHUB_MANIFEST_URL is invalid")?;
+            let manifest_url = ironclaw_composition::ironhub::validated_manifest_url(&manifest_url)
+                .context("IRONHUB_MANIFEST_URL is invalid")?;
             Ok(Some(manifest_url))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -672,7 +670,7 @@ fn with_binary_host_extension_bindings_from_bundles(
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornHostBindings,
     pub(crate) profile: RebornProfile,
-    config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<ironclaw_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
@@ -736,13 +734,11 @@ pub(crate) fn build_services_input_with_options(
     // deployment that binds a required memory profile to `memory.disabled` or an
     // unverified third-party extension without an admin override fails startup
     // here, before the runtime is built.
-    let memory_binding_policy = ironclaw_reborn_composition::resolve_memory_binding_policy(
+    let memory_binding_policy = ironclaw_composition::resolve_memory_binding_policy(
         config_file.as_ref().and_then(|file| file.memory.as_ref()),
         composition_profile(profile),
     )?;
-    for diagnostic in
-        ironclaw_reborn_composition::memory_binding_diagnostics(&memory_binding_policy)
-    {
+    for diagnostic in ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy) {
         // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
         tracing::debug!(target: "ironclaw_reborn", "{diagnostic}");
     }
@@ -762,7 +758,7 @@ pub(crate) fn build_services_input_with_options(
             .and_then(|file| file.memory.as_ref())
             .and_then(|memory| memory.mem0_base_url.clone())
     });
-    let memory_provider_connection = ironclaw_reborn_composition::Mem0ConnectionConfig {
+    let memory_provider_connection = ironclaw_composition::Mem0ConnectionConfig {
         base_url: mem0_base_url,
         api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
         app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
@@ -810,7 +806,7 @@ fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     owner_id: &str,
     config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
     let workspace_root = std::env::current_dir()
         .context("failed to resolve current directory for hosted single-tenant workspace")?;
@@ -835,7 +831,7 @@ fn build_hosted_single_tenant_services_input(
 fn build_production_services_input(
     profile: RebornProfile,
     owner_id: &str,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
     RebornHostBindings::postgres_from_config_and_env(
         composition_profile(profile),
@@ -850,7 +846,7 @@ fn build_production_services_input(
 /// for the precedence rule.
 pub(crate) fn resolve_google_oauth_config_from_env(
     config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
     let env = GoogleOAuthEnvInputs::read(optional_nonempty_env);
     let config_google = config_file.and_then(|file| file.google.as_ref());
@@ -902,14 +898,14 @@ fn google_oauth_client_secret_from_store(
     let storage_root = local_runtime_storage_root(config, config.profile());
     // Boot may open/migrate local runtime state, but it can still avoid all
     // keychain/filesystem writes when no store exists yet.
-    if !ironclaw_reborn_composition::standalone_db_path(&storage_root).exists() {
+    if !ironclaw_composition::standalone_db_path(&storage_root).exists() {
         return Ok(None);
     }
     block_on_cli(async move {
-        let store = ironclaw_reborn_composition::open_standalone_secret_store(&storage_root)
+        let store = ironclaw_composition::open_standalone_secret_store(&storage_root)
             .await
             .map_err(anyhow::Error::from)?;
-        ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+        ironclaw_composition::GoogleOauthSecretStore::new(store)
             .read()
             .await
             .map_err(anyhow::Error::from)
@@ -953,7 +949,7 @@ fn resolve_google_oauth_config_state(
 #[cfg(test)]
 fn resolve_google_oauth_config_state_merged(
     env_lookup: impl FnMut(&str) -> Option<String>,
-    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    config_google: Option<&ironclaw_config::GoogleSection>,
     store_client_secret: Option<SecretString>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
     resolve_google_oauth_config_state_from_inputs(
@@ -991,7 +987,7 @@ impl GoogleOAuthEnvInputs {
 
     fn resolved_public_fields(
         &self,
-        config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+        config_google: Option<&ironclaw_config::GoogleSection>,
     ) -> (Option<String>, Option<String>) {
         let client_id = self
             .reborn_client_id
@@ -1013,7 +1009,7 @@ impl GoogleOAuthEnvInputs {
 
 fn resolve_google_oauth_public_config_state(
     env: &GoogleOAuthEnvInputs,
-    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    config_google: Option<&ironclaw_config::GoogleSection>,
 ) -> Option<GoogleOAuthConfigState> {
     match env.resolved_public_fields(config_google) {
         (Some(_), Some(_)) => None,
@@ -1025,7 +1021,7 @@ fn resolve_google_oauth_public_config_state(
 
 fn resolve_google_oauth_config_state_with_store_loader(
     env: GoogleOAuthEnvInputs,
-    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    config_google: Option<&ironclaw_config::GoogleSection>,
     load_store_client_secret: impl FnOnce() -> anyhow::Result<Option<SecretString>>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
     let should_read_store = resolve_google_oauth_public_config_state(&env, config_google).is_none()
@@ -1040,7 +1036,7 @@ fn resolve_google_oauth_config_state_with_store_loader(
 
 fn resolve_google_oauth_config_state_from_inputs(
     env: GoogleOAuthEnvInputs,
-    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    config_google: Option<&ironclaw_config::GoogleSection>,
     store_client_secret: Option<SecretString>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
     let client_id = env
@@ -1163,9 +1159,7 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) fn default_owner_id(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> &str {
+pub(crate) fn default_owner_id(config_file: Option<&ironclaw_config::RebornConfigFile>) -> &str {
     config_file
         .and_then(|file| file.identity.as_ref())
         .and_then(|identity| identity.default_owner.as_deref())
@@ -1226,8 +1220,8 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
 
 pub(crate) fn read_config_file(
     config: &RebornBootConfig,
-) -> anyhow::Result<Option<ironclaw_reborn_config::RebornConfigFile>> {
-    use ironclaw_reborn_config::RebornConfigFile;
+) -> anyhow::Result<Option<ironclaw_config::RebornConfigFile>> {
+    use ironclaw_config::RebornConfigFile;
     let path = config.home().config_file_path();
     let file = RebornConfigFile::load(&path).map_err(anyhow::Error::from)?;
     if let Some(parsed) = &file {
@@ -1243,7 +1237,7 @@ pub(crate) fn read_config_file(
 // CLI-local operator config only. Product/WebUI identity must come from
 // trusted host installation/binding resolution, not inbound payloads.
 fn runtime_identity(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> RebornRuntimeIdentity {
     let default = RebornRuntimeIdentity::reborn_cli();
     let Some(identity) = config_file.and_then(|file| file.identity.as_ref()) else {
@@ -1264,9 +1258,7 @@ fn runtime_identity(
     }
 }
 
-fn regex_skill_activation_enabled(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> bool {
+fn regex_skill_activation_enabled(config_file: Option<&ironclaw_config::RebornConfigFile>) -> bool {
     config_file
         .and_then(|file| file.skills.as_ref())
         .and_then(|skills| skills.regex_activation_enabled)
@@ -1275,7 +1267,7 @@ fn regex_skill_activation_enabled(
 
 pub(crate) fn effective_profile(
     config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornProfile> {
     // Env wins over file. `RebornBootConfig` already parsed/validated env,
     // so if the variable is present we keep that value.
@@ -1296,7 +1288,7 @@ pub(crate) fn effective_profile(
 }
 
 fn reject_unsupported_runtime_sections(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
     profile: RebornProfile,
 ) -> anyhow::Result<()> {
@@ -1413,7 +1405,7 @@ fn resolve_worker_count(
 /// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
 /// accepts), so the unlimited sentinel stays the way to ask for "no bound".
 ///
-/// `ironclaw_runner`'s `scheduler_permit_count` additionally saturates at the
+/// `ironclaw_turn_runner`'s `scheduler_permit_count` additionally saturates at the
 /// ceiling as an infallible backstop for direct composition callers; this gate
 /// is the operator-facing fail-loud half of that defense.
 fn ensure_worker_count_within_ceiling(
@@ -1463,7 +1455,7 @@ fn apply_worker_count_env_override(
 }
 
 fn runner_settings(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
     let mut settings = TurnRunnerSettings::default();
     if let Some(runner) = config_file.and_then(|file| file.runner.as_ref()) {
@@ -1535,12 +1527,12 @@ fn runner_settings(
 mod tests {
     use std::{collections::HashMap, sync::MutexGuard};
 
-    use ironclaw_reborn_composition::TriggerFireAccessPolicy;
-    use ironclaw_reborn_composition::{
+    use ironclaw_composition::TriggerFireAccessPolicy;
+    use ironclaw_composition::{
         KeepaliveSweepSettings, RebornCompositionProfile, RebornHostBindings, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    use ironclaw_reborn_config::RebornBootConfig;
+    use ironclaw_config::RebornBootConfig;
     use secrecy::SecretString;
 
     use super::apply_run_trigger_fire_access_policy;
@@ -1554,10 +1546,10 @@ mod tests {
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
-    use ironclaw_reborn_config::GoogleSection;
+    use ironclaw_config::GoogleSection;
     // Only the hosted-volume tests consume this.
     use super::local_runtime_storage_root;
-    use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+    use ironclaw_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
     struct RuntimeEnvGuard {
         // Fields drop in declaration order: restore the env before releasing
@@ -1578,8 +1570,8 @@ mod tests {
         }
     }
 
-    fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
-        ironclaw_reborn_config::RebornConfigFile::parse_text(
+    fn parse_runner_section(toml: &str) -> ironclaw_config::RebornConfigFile {
+        ironclaw_config::RebornConfigFile::parse_text(
             toml,
             &std::path::PathBuf::from("/test/config.toml"),
         )
@@ -2472,7 +2464,7 @@ regex_activation_enabled = false
         assert_eq!(
             local_runtime_storage_root(
                 &config,
-                ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
+                ironclaw_config::RebornProfile::HostedSingleTenantVolume,
             ),
             reborn_home.join("hosted-single-tenant-volume")
         );
@@ -2499,9 +2491,9 @@ regex_activation_enabled = false
     #[tokio::test]
     async fn local_profiles_initialize_their_runtime_storage_roots() {
         for profile in [
-            ironclaw_reborn_config::RebornProfile::Standalone,
-            ironclaw_reborn_config::RebornProfile::StandaloneUnrestricted,
-            ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
+            ironclaw_config::RebornProfile::Standalone,
+            ironclaw_config::RebornProfile::StandaloneUnrestricted,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume,
         ] {
             let (_temp, config) = boot_config_with_config_toml("local-dev", "");
             let root = local_runtime_storage_root(&config, profile);
@@ -2513,7 +2505,7 @@ regex_activation_enabled = false
         }
 
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-        let hosted = ironclaw_reborn_config::RebornProfile::HostedSingleTenant;
+        let hosted = ironclaw_config::RebornProfile::HostedSingleTenant;
         let root = local_runtime_storage_root(&config, hosted);
         initialize_local_runtime_storage_root(&config, hosted)
             .await
@@ -2522,11 +2514,11 @@ regex_activation_enabled = false
 
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
         let blocked_root =
-            local_runtime_storage_root(&config, ironclaw_reborn_config::RebornProfile::Standalone);
+            local_runtime_storage_root(&config, ironclaw_config::RebornProfile::Standalone);
         std::fs::write(&blocked_root, "not a directory").expect("block runtime directory");
         let error = initialize_local_runtime_storage_root(
             &config,
-            ironclaw_reborn_config::RebornProfile::Standalone,
+            ironclaw_config::RebornProfile::Standalone,
         )
         .await
         .expect_err("a file at the storage root must fail closed");
@@ -3452,10 +3444,10 @@ enabled = true
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
-        let user_id = ironclaw_reborn_composition::host_api::UserId::new("run-trigger-user")
-            .expect("user id");
-        let agent_id = ironclaw_reborn_composition::host_api::AgentId::new("run-trigger-agent")
-            .expect("agent id");
+        let user_id =
+            ironclaw_composition::host_api::UserId::new("run-trigger-user").expect("user id");
+        let agent_id =
+            ironclaw_composition::host_api::AgentId::new("run-trigger-agent").expect("agent id");
 
         let runtime_input = apply_run_trigger_fire_access_policy(runtime_input, &config)
             .await
@@ -4194,15 +4186,15 @@ poll_interval_secs = 15
         // this test holds the process-wide env lock, serializing every other
         // env-mutating test behind an interactive system service.
         std::fs::write(
-            storage_root.join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+            storage_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
             "00112233445566778899aabbccddeeff".repeat(2),
         )
         .expect("seed cached master key");
         block_on_cli(async move {
-            let store = ironclaw_reborn_composition::open_standalone_secret_store(&storage_root)
+            let store = ironclaw_composition::open_standalone_secret_store(&storage_root)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+            ironclaw_composition::GoogleOauthSecretStore::new(store)
                 .put(secrecy::SecretString::from(
                     "GOCSPX-store-wiring-test".to_string(),
                 ))

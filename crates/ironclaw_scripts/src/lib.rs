@@ -14,7 +14,7 @@ use std::{
 };
 
 use futures_util::FutureExt as _;
-use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
+use ironclaw_extension_registry::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     http::{
         CapabilityHostHttpRequest, RuntimeHttpEgress, RuntimeHttpEgressError,

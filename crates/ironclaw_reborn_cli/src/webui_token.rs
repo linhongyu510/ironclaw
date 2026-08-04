@@ -446,7 +446,7 @@ pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
 /// check [`env_token_is_active`] against the same name `serve` resolves
 /// against.
 pub(crate) fn resolve_env_token_var_name(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> &str {
     config_file
         .and_then(|file| file.webui.as_ref())
@@ -480,8 +480,8 @@ pub(crate) enum LoginLinkAnnouncement {
 /// see [`env_token_is_active`] — rather than silently treating it as
 /// inactive.
 pub(crate) fn resolve_login_link_announcement(
-    home: &ironclaw_reborn_config::RebornHome,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    home: &ironclaw_config::RebornHome,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<LoginLinkAnnouncement> {
     let env_var_name = resolve_env_token_var_name(config_file);
     if env_token_is_active(env_var_name)? {
@@ -519,9 +519,7 @@ fn validate_token_entropy(
 /// `serve`'s own default host:port constants. Shared by every caller that
 /// prints a login link (`onboard`, `status`) so the construction lives in
 /// one place.
-pub(crate) fn login_link(
-    home: &ironclaw_reborn_config::RebornHome,
-) -> anyhow::Result<Option<String>> {
+pub(crate) fn login_link(home: &ironclaw_config::RebornHome) -> anyhow::Result<Option<String>> {
     let token = read_token_file_checked(&webui_token_file_path(home.path()))?;
     Ok(token
         .filter(|contents| contents.trim().len() >= WEBUI_TOKEN_MIN_BYTES)

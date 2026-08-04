@@ -54,7 +54,7 @@ impl ConfigCommand {
 impl ConfigPathCommand {
     fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         let report =
-            ironclaw_reborn_config::RebornDoctorReport::from_config(context.boot_config().clone());
+            ironclaw_config::RebornDoctorReport::from_config(context.boot_config().clone());
         let home = context.boot_config().home();
 
         let config_path = home.config_file_path();

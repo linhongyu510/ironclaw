@@ -5,9 +5,9 @@ hooks across the Reborn loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
-  those stay in `ironclaw_loop_host` and `ironclaw_runner`.
+  those stay in `ironclaw_loop_host` and `ironclaw_turn_runner`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
-  `ironclaw_runner::loop_driver_host` and consumes types from this crate.
+  `ironclaw_turn_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute
   here once their module bytes are resolved, but the extension installer remains
   the authority for sourcing those bytes.
@@ -17,10 +17,10 @@ hooks across the Reborn loop. It does not own:
 ```
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
-ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
+ironclaw_turn_runner      -> depends on ironclaw_hooks for host composition (follow-up)
 ```
 
-Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
+Architecture test in `ironclaw_architecture_tests::tests::reborn_dependency_boundaries`
 proves the `ironclaw_turns -> ironclaw_hooks` edge stays absent.
 
 ## Trust model
@@ -69,7 +69,7 @@ type-level fact that an `Installed`-tier installer cannot accept a
 `PrivilegedBeforeCapabilityHook`.
 
 What the type system **does not** enforce is *origin*. If loader code inside
-`ironclaw_runner` (or any other internal crate) reads a hook from the
+`ironclaw_turn_runner` (or any other internal crate) reads a hook from the
 extension registry and accidentally routes it through
 `install_builtin_before_capability`, the trust-class ↔ impl-tier pairing at
 the registry-binding boundary breaks — the dispatcher will happily install
@@ -184,10 +184,10 @@ call sites should reach for `with_hook_dispatcher_factory` for real per-run
 isolation.
 
 Cross-run isolation was described here as covered by
-`crates/ironclaw_runner/tests/hooks_integration.rs` with the tests
+`crates/ironclaw_turn_runner/tests/hooks_integration.rs` with the tests
 `per_build_dispatcher_state_does_not_leak_across_runs` and
 `legacy_with_hook_dispatcher_shares_state_across_builds`. **None of those
-exist** (`ls crates/ironclaw_runner/tests/`; `rg` for either name returns only
+exist** (`ls crates/ironclaw_turn_runner/tests/`; `rg` for either name returns only
 this file). The intended semantic — a fresh dispatcher per build has an
 un-poisoned slot and re-applies the fail-closed deny, while the legacy
 `with_hook_dispatcher` adapter shares state across builds — is currently

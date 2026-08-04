@@ -71,7 +71,7 @@ def _write_repo(root: Path) -> None:
         'pub const WEBUI_V2_PATTERN_LIST_PROJECTS: &str = "/api/webchat/v2/projects";\n',
         encoding="utf-8",
     )
-    openai_dir = root / "crates/ironclaw_reborn_openai_compat/src"
+    openai_dir = root / "crates/ironclaw_openai_compat/src"
     openai_dir.mkdir(parents=True)
     (openai_dir / "descriptors.rs").write_text(
         'pub const OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE: &str = "/api/v1/responses";\n'

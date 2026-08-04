@@ -2,10 +2,10 @@
 //! (PROPOSAL §6.1.3).
 //!
 //! [`AdminUserService`] is a dependency-inversion port: its only production
-//! implementation lives in `ironclaw_reborn_composition`, over the identity
+//! implementation lives in `ironclaw_composition`, over the identity
 //! user-directory and the per-user secret store. It was declared inside
-//! `ironclaw_product` so product and WebUI would not have to depend on
-//! `ironclaw_reborn_identity` — the right inversion in the wrong crate, since
+//! `ironclaw_assistant` so product and WebUI would not have to depend on
+//! `ironclaw_identity` — the right inversion in the wrong crate, since
 //! `ironclaw_extension_host` reads the same directory to resolve a channel
 //! actor's admin role and had to depend on product to do it.
 //!

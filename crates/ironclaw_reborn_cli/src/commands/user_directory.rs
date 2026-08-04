@@ -1,7 +1,7 @@
 //! Host [`UserDirectory`] for the WebChat v2 SSO login surface.
 //!
 //! Thin adapter over the canonical Reborn identity resolver
-//! ([`RebornIdentityResolver`](ironclaw_reborn_composition::RebornIdentityResolver),
+//! ([`RebornIdentityResolver`](ironclaw_composition::RebornIdentityResolver),
 //! reached through the composition service): it applies the operator's
 //! email-domain admission policy (fail-closed), then delegates identity
 //! resolution/persistence to the canonical resolver as an `oauth`-surface
@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_reborn_composition::host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_composition::host_api::{TenantId, UserId};
+use ironclaw_composition::{
     ExternalSubjectId, ProviderKind, RebornIdentityError, RebornIdentityResolver,
     ResolveExternalIdentity, SurfaceKind,
 };
@@ -166,7 +166,7 @@ mod tests {
     fn shared_resolver() -> Arc<dyn RebornIdentityResolver> {
         // In-memory filesystem-backed resolver via the composition test-support
         // helper; no durable substrate needed for the admission/tenant tests.
-        ironclaw_reborn_composition::open_reborn_identity_resolver(
+        ironclaw_composition::open_reborn_identity_resolver(
             &TenantId::new("tenant-test").expect("tenant"),
         )
     }

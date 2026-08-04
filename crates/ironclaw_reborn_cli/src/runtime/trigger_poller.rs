@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ironclaw_reborn_composition::TriggerPollerSettings;
+use ironclaw_composition::TriggerPollerSettings;
 
 use crate::operator_env::{strict_bool_env_var, strict_env_var, truncate_env_value_for_display};
 
@@ -47,7 +47,7 @@ const MAX_FIRES_PER_TICK: u32 = 1000;
 /// (in `ironclaw_triggers`); the CLI layer keeps the guard here so an invalid
 /// config fails at boot-config parse rather than at first poller spawn.
 pub(super) fn trigger_poller_settings(
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<TriggerPollerSettings> {
     // Layer 3: compiled default. `enabled` is on by default for the local
@@ -150,13 +150,13 @@ pub(super) fn trigger_poller_settings(
 mod tests {
     use super::super::test_env::{EnvGuard, lock_runtime_env};
     use super::{RuntimeInputCaller, trigger_poller_settings};
-    use ironclaw_reborn_config::TriggerPollerConfigSection;
+    use ironclaw_config::TriggerPollerConfigSection;
     use std::time::Duration;
 
     fn make_config_with_trigger_poller(
         section: TriggerPollerConfigSection,
-    ) -> ironclaw_reborn_config::RebornConfigFile {
-        ironclaw_reborn_config::RebornConfigFile {
+    ) -> ironclaw_config::RebornConfigFile {
+        ironclaw_config::RebornConfigFile {
             trigger_poller: Some(section),
             ..Default::default()
         }

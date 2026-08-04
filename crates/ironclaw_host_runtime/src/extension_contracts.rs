@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, ExtensionDiscovery, ExtensionError, ExtensionRegistry,
     HostApiContractRegistry, ManifestV2Error, TolerantBoundedDiscovery,
 };
@@ -79,7 +79,7 @@ where
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         root,
-        ironclaw_extensions::ManifestSource::InstalledLocal,
+        ironclaw_extension_registry::ManifestSource::InstalledLocal,
         host_port_catalog,
         &contracts,
     )
@@ -124,7 +124,7 @@ where
     ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded(
         fs,
         root,
-        ironclaw_extensions::ManifestSource::InstalledLocal,
+        ironclaw_extension_registry::ManifestSource::InstalledLocal,
         &host_port_catalog,
         contracts,
         max_extensions,

@@ -132,7 +132,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigReactivationError};
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
         ExtensionManifestRef, MembershipDeactivation,
@@ -463,7 +463,7 @@ mod tests {
         for (manifest_toml, id) in manifests {
             let record = ExtensionManifestRecord::from_toml(
                 *manifest_toml,
-                ironclaw_extensions::ManifestSource::HostBundled,
+                ironclaw_extension_registry::ManifestSource::HostBundled,
                 &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
                 None,
                 &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
@@ -480,7 +480,7 @@ mod tests {
                         ExtensionManifestRef::new(extension_id, None),
                         Vec::new(),
                         chrono::Utc::now(),
-                        ironclaw_extensions::InstallationOwner::Tenant,
+                        ironclaw_extension_registry::InstallationOwner::Tenant,
                     )
                     .expect("installation"),
                 )

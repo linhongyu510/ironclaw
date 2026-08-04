@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ironclaw_config::{LlmSlotSelection, RebornBootConfig};
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
@@ -34,7 +35,6 @@ use ironclaw_product_contracts::operator_llm::{
     SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
-use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::llm_admin::llm_catalog::{apply_stored_api_key, resolve_against_registry};
@@ -1330,6 +1330,7 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_config::{RebornHome, RebornProfile};
     use ironclaw_filesystem::{
         Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
         ScopedFilesystem,
@@ -1340,7 +1341,6 @@ mod tests {
         path::{MountAlias, VirtualPath},
     };
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
-    use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{SecretMaterial, SecretStore};
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
@@ -2331,9 +2331,8 @@ mod tests {
         crate::llm_admin::provider_admin::RebornProviderAdmin::new(boot.clone())
             .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
             .expect("persist active selection");
-        let config_file =
-            ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
-                .expect("load config file");
+        let config_file = ironclaw_config::RebornConfigFile::load(&boot.home().config_file_path())
+            .expect("load config file");
 
         let resolved =
             crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())

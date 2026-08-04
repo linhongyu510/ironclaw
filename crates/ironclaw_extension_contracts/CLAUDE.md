@@ -39,7 +39,7 @@ number is checked against `src/lib.rs`, not incremented by hand):
 
 ## What must never be here
 
-The registry or installation stores (`ironclaw_extensions`); lifecycle
+The registry or installation stores (`ironclaw_extension_registry`); lifecycle
 execution, binding orchestration, or ingress routing
 (`ironclaw_extension_host`); product workflow; WASM/MCP mechanics; vendor names
 (the specificity scanner polices this crate like any other); any implementation
@@ -82,7 +82,7 @@ failures.
 ## Admission tests
 
 Three architecture tests hold the line, all runnable with
-`cargo test -p ironclaw_architecture`:
+`cargo test -p ironclaw_architecture_tests`:
 
 - `reborn_dependency_boundaries.rs` — the §11.2.3 internal-dependency allowlist
   (`ironclaw_host_api` only, an allowlist so a future edge cannot slip past a
@@ -114,7 +114,7 @@ names its UI projections explicitly), and the one type `hosted_mcp` structurally
 needs — `LifecyclePackageId` — stayed on this side in the new `lifecycle_id`
 module, with `package_lifecycle` importing it from below. The alternative,
 dragging `hosted_mcp` up into `product_contracts` with the projections, would
-have handed `ironclaw_mcp`, `ironclaw_extensions`, and `ironclaw_auth` a
+have handed `ironclaw_mcp`, `ironclaw_extension_registry`, and `ironclaw_auth` a
 product-tier edge — exactly what §6.1.2 exists to prevent.
 
 ## Resolved placements (WS1.4)

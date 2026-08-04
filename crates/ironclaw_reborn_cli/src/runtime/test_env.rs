@@ -16,7 +16,7 @@
 //! To make "exactly one lock" hold beyond this crate too, [`lock_runtime_env`]
 //! does not own a crate-local mutex — it delegates to the canonical
 //! workspace-wide [`ironclaw_common::env_helpers::lock_env`], the same
-//! `ENV_MUTEX` that `ironclaw_reborn_composition` (which these tests build
+//! `ENV_MUTEX` that `ironclaw_composition` (which these tests build
 //! services against), `ironclaw_llm`, `ironclaw_auth`, and the `src/` crate
 //! already serialize on. So a future env-mutating test anywhere in this binary
 //! that reaches for the canonical lock still serializes against these — it

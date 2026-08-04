@@ -18,7 +18,7 @@
 - Host-owned extension contract discovery: `default_host_api_contract_registry`, `default_host_port_catalog`, `discover_extensions_with_default_host_api_contracts*` (`extension_contracts`). Product-specific manifest contracts are added by the owning composition/product layer.
 - Obligation handling: `BuiltinObligationHandler`/`BuiltinObligationServices`, `ProcessObligationLifecycleStore`, and the secret-injection/network-policy stores (`obligations`).
 - The runtime process port `RuntimeProcessPort`/`HostProcessPort` + command execution types (`process_port`) and memory-context builders (`memory_context`).
-- Production validation of the `TurnRunWakeNotifier` handle consumed by `ironclaw_runner` (`ProductionWiringComponent::TurnRunWakeNotifier`, `src/services/production_wiring.rs`); scheduler/executor ownership lives in that runner-side crate.
+- Production validation of the `TurnRunWakeNotifier` handle consumed by `ironclaw_turn_runner` (`ProductionWiringComponent::TurnRunWakeNotifier`, `src/services/production_wiring.rs`); scheduler/executor ownership lives in that runner-side crate.
 - Low-level mediation by composing `ironclaw_network`/`ironclaw_secrets`/`ironclaw_resources` (egress, redaction, secret leases, accounting) — never duplicating that logic in runtime crates.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
@@ -30,7 +30,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_host_runtime`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes

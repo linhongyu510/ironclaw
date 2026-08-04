@@ -1,5 +1,5 @@
 use clap::Args;
-use ironclaw_reborn_composition::reborn_runtime_readiness_snapshot;
+use ironclaw_composition::reborn_runtime_readiness_snapshot;
 
 use crate::context::RebornCliContext;
 use crate::runtime::RuntimeInputOptions;

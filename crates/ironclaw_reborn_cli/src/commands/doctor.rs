@@ -1,8 +1,6 @@
 use clap::Args;
-use ironclaw_reborn_composition::{
-    RebornRuntimeComponentStatus, reborn_runtime_readiness_snapshot,
-};
-use ironclaw_reborn_config::{RebornConfigFile, RebornDoctorReport};
+use ironclaw_composition::{RebornRuntimeComponentStatus, reborn_runtime_readiness_snapshot};
+use ironclaw_config::{RebornConfigFile, RebornDoctorReport};
 
 use crate::context::RebornCliContext;
 use crate::dto::{CheckCategory, CheckOutcome, DoctorCheck, DoctorDto, DoctorSummary};

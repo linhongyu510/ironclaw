@@ -6,6 +6,11 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_assistant::{
+    ActionPhase, ConversationBindingService, IdempotencyDecision, IdempotencyLedger,
+    ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
+    ResolveBindingRequest, ResolvedBinding,
+};
 use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     error::HostApiError,
@@ -13,11 +18,6 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
-};
-use ironclaw_product::{
-    ActionPhase, ConversationBindingService, IdempotencyDecision, IdempotencyLedger,
-    ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
-    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::action::ActionFingerprintKey;
 use serde::{Serialize, de::DeserializeOwned};
@@ -413,9 +413,9 @@ struct StoredHarnessReplyTarget {
     tenant_id: TenantId,
     actor_user_id: UserId,
     thread_id: ThreadId,
-    adapter_id: ironclaw_product::ProductAdapterId,
-    installation_id: ironclaw_product::AdapterInstallationId,
-    external_conversation_ref: ironclaw_product::ExternalConversationRef,
+    adapter_id: ironclaw_assistant::ProductAdapterId,
+    installation_id: ironclaw_assistant::AdapterInstallationId,
+    external_conversation_ref: ironclaw_assistant::ExternalConversationRef,
     route_kind: ProductConversationRouteKind,
 }
 

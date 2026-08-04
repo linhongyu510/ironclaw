@@ -40,8 +40,8 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-pub use ironclaw_product::RebornChannelConnectStrategy;
-pub use ironclaw_product::{
+pub use ironclaw_assistant::RebornChannelConnectStrategy;
+pub use ironclaw_assistant::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
@@ -49,8 +49,8 @@ pub use ironclaw_product_contracts::account_setup::{
     ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
 };
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
-pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
-pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_turn_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
+pub use ironclaw_turn_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -124,7 +124,7 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use ironclaw_reborn_identity::{
+pub use ironclaw_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
 };

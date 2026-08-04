@@ -6,4 +6,4 @@
 - Preserve session isolation by scope/provider/url and keep session ids validated before reuse.
 - Resource reservations supplied by host/runtime dispatch must be reconciled or released exactly once; do not create secondary reservations when a prepared reservation is present.
 - Surface only stable, sanitized client/runtime error categories. Do not expose upstream URLs with secrets, raw credentials, response bodies, or transport internals in runtime-visible errors.
-- Keep MCP protocol concerns here; extension discovery belongs in `ironclaw_extensions`, network enforcement in `ironclaw_network`/host runtime egress, and product workflow outside this crate.
+- Keep MCP protocol concerns here; extension discovery belongs in `ironclaw_extension_registry`, network enforcement in `ironclaw_network`/host runtime egress, and product workflow outside this crate.

@@ -11,7 +11,7 @@ fn main() -> BuildResult<()> {
     let repo_root = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .ok_or_else(|| build_error("ironclaw_reborn_composition lives under crates/"))?;
+        .ok_or_else(|| build_error("ironclaw_composition lives under crates/"))?;
     embed_reborn_skills(repo_root)
 }
 

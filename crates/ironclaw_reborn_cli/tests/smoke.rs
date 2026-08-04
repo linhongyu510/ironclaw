@@ -598,7 +598,7 @@ fn run_reborn_webui_builds_frontend_before_cargo() {
 fn docker_reborn_config_defaults_to_standalone() {
     let config = std::fs::read_to_string(workspace_root().join("docker/reborn/config.toml"))
         .expect("docker reborn config");
-    let parsed = ironclaw_reborn_config::RebornConfigFile::parse_text(
+    let parsed = ironclaw_config::RebornConfigFile::parse_text(
         &config,
         &workspace_root().join("docker/reborn/config.toml"),
     )
@@ -621,7 +621,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
     let config =
         std::fs::read_to_string(workspace_root().join("docker/reborn/config.production.toml"))
             .expect("docker reborn production config");
-    let parsed = ironclaw_reborn_config::RebornConfigFile::parse_text(
+    let parsed = ironclaw_config::RebornConfigFile::parse_text(
         &config,
         &workspace_root().join("docker/reborn/config.production.toml"),
     )
@@ -635,7 +635,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
     let storage = parsed.storage.expect("docker config must have [storage]");
     assert_eq!(
         storage.backend,
-        Some(ironclaw_reborn_config::StorageBackend::Postgres)
+        Some(ironclaw_config::StorageBackend::Postgres)
     );
     assert_eq!(
         storage.url_env.as_deref(),
@@ -4625,7 +4625,7 @@ fn spawn_chat_completion_stub() -> (String, std::sync::mpsc::Receiver<Option<Str
             // message` call) — it sends `"stream": true` and expects an SSE
             // body, not a plain JSON one. Detect it and answer accordingly,
             // mirroring `start_nearai_auth_capture_server` in
-            // `ironclaw_reborn_composition`'s runtime tests.
+            // `ironclaw_composition`'s runtime tests.
             let wants_stream = serde_json::from_slice::<serde_json::Value>(&body)
                 .ok()
                 .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
@@ -5023,7 +5023,7 @@ fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) 
 /// call site for the same rationale).
 fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     std::fs::write(
-        reborn_home.join(ironclaw_reborn_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        reborn_home.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
         ironclaw_secrets::keychain::generate_master_key_hex(),
     )
     .expect("seed cached master key dotfile");
@@ -5035,7 +5035,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     let key = key.to_string();
     let reborn_home = reborn_home.to_path_buf();
     seed_rt.block_on(async move {
-        let store = ironclaw_reborn_composition::open_standalone_secret_store(&reborn_home)
+        let store = ironclaw_composition::open_standalone_secret_store(&reborn_home)
             .await
             .expect("open standalone secret store");
         ironclaw_operator::LlmKeyStore::new(store)
@@ -5134,13 +5134,13 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
         // Target is `ironclaw` (the bin's normalized crate name, not
         // the `ironclaw_reborn_cli` package this test itself compiles as).
-        // `ironclaw_reborn_composition=debug` is also needed to observe
+        // `ironclaw_composition=debug` is also needed to observe
         // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
         // that's the mechanism that actually swaps the placeholder gateway
         // for the stored-key-backed openai provider (PR #6174 item A).
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -5338,13 +5338,13 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         // late-attached path also lands on cloud.
         .env_remove("NEARAI_API_KEY")
         .env_remove("NEARAI_BASE_URL")
-        // `key_applied` is emitted by `ironclaw_reborn_composition`'s
+        // `key_applied` is emitted by `ironclaw_composition`'s
         // `RebornLlmReloadAdapter::reload`, not the `ironclaw_reborn_cli`
         // binary crate — the default filter caps that crate at `info`, so
         // it must be named explicitly.
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -7136,7 +7136,7 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
         "release Docker publishing must not restore worker or dispatch ironclaw-dind"
     );
     assert!(
-        workspace_manifest.contains("name = \"ironclaw_reborn_integration_tests\"")
+        workspace_manifest.contains("name = \"ironclaw_integration_tests\"")
             && workspace_manifest.contains("[package.metadata.dist]\ndist = false")
             && workspace_manifest.contains("packages = [\"ironclaw\"]")
             && workspace_manifest.contains("allow-dirty = [\"ci\"]")

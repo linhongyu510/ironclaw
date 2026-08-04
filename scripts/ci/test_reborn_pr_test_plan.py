@@ -25,7 +25,7 @@ def metadata() -> dict:
     return {
         "workspace_members": ["root", "alpha", "beta", "gamma"],
         "packages": [
-            {"id": "root", "name": "ironclaw_reborn_integration_tests", "manifest_path": root},
+            {"id": "root", "name": "ironclaw_integration_tests", "manifest_path": root},
             {"id": "alpha", "name": "alpha", "manifest_path": alpha},
             {"id": "beta", "name": "beta", "manifest_path": beta},
             {"id": "gamma", "name": "gamma", "manifest_path": gamma},
@@ -422,7 +422,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
         self.assertIn(
-            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
             "\\\n      --ignore-rust-version",
             lane_runner,
         )
@@ -432,7 +432,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
             "\\\n      --ignore-rust-version -- --nocapture",
             lane_runner,
         )

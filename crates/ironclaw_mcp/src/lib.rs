@@ -18,7 +18,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
 use ironclaw_host_api::{

@@ -15,7 +15,7 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
 - Keep commands side-effect free unless the command name and issue explicitly require mutation.
 - Use `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`; do not write current v1 state.
 - no v1 runtime imports. (The `ironclaw_legacy` root package, its `src/` tree, and `ironclaw_engine` have all been deleted, so this is now unenforceable-by-construction rather than a live hazard.)
-- Do not add workspace dependencies beyond the current `[dependencies]` set without an architecture test update and explicit PR rationale. That set is `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, `ironclaw_webui` (host-owned WebUI serve lifecycle), `ironclaw_operator` (operator/admin implementation), `ironclaw_host_api` (neutral provider DTO contracts), `ironclaw_auth` (auth-owned contracts used by binary-assembled first-party wiring), `ironclaw_product_contracts` and `ironclaw_extension_contracts` (neutral product/extension DTO contracts), and the binary-supplied extension packages `ironclaw_extension_host`, `ironclaw_extension_manager` (the extension-management product face split out of the host in WS2.4 — the `extension` and `ironhub` commands render it), `ironclaw_extension_support`, `ironclaw_slack_extension`, `ironclaw_telegram_extension` (the binary is the only place concrete extensions may be linked). Re-derive with `grep -n '^ironclaw' crates/ironclaw_reborn_cli/Cargo.toml`. Provider registry/model UX should enter through the operator/admin facade, not a separate CLI-only path; product-auth workflow should enter through auth-owned contracts rather than composition-owned facades.
+- Do not add workspace dependencies beyond the current `[dependencies]` set without an architecture test update and explicit PR rationale. That set is `ironclaw_composition`, `ironclaw_config`, `ironclaw_trace_commons`, `ironclaw_webui` (host-owned WebUI serve lifecycle), `ironclaw_operator` (operator/admin implementation), `ironclaw_host_api` (neutral provider DTO contracts), `ironclaw_auth` (auth-owned contracts used by binary-assembled first-party wiring), `ironclaw_product_contracts` and `ironclaw_extension_contracts` (neutral product/extension DTO contracts), and the binary-supplied extension packages `ironclaw_extension_host`, `ironclaw_extension_manager` (the extension-management product face split out of the host in WS2.4 — the `extension` and `ironhub` commands render it), `ironclaw_extension_support`, `ironclaw_slack_extension`, `ironclaw_telegram_extension` (the binary is the only place concrete extensions may be linked). Re-derive with `grep -n '^ironclaw' crates/ironclaw_reborn_cli/Cargo.toml`. Provider registry/model UX should enter through the operator/admin facade, not a separate CLI-only path; product-auth workflow should enter through auth-owned contracts rather than composition-owned facades.
 
 ## Adding a command
 
@@ -27,7 +27,7 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
 6. If the command can touch state, assert it uses Reborn home only and does not create/read v1 DB/settings/secrets.
 7. Run:
    - `cargo test -p ironclaw`
-   - `cargo test -p ironclaw_architecture reborn`
+   - `cargo test -p ironclaw_architecture_tests reborn`
    - `cargo clippy -p ironclaw --all-targets -- -D warnings`
 
 ## The `serve` subcommand
@@ -53,7 +53,7 @@ in `tests/smoke.rs`, alongside the serve smoke tests
 
 The descriptor-level "all v2 routes are actually mounted" regression
 lives at the composition layer in
-`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`
+`crates/ironclaw_composition/tests/webui_v2_serve.rs`
 (`every_webui_v2_descriptor_is_mounted_on_composed_app`), not here —
 that test drives the same `webui_v2_app` the CLI's `serve` hands to
 `serve_webui_v2`, so a route that's declared in `webui_v2_routes()` but

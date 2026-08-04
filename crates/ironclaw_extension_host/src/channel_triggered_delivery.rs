@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_assistant::{
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveryDefaultScope,
     OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-};
-use ironclaw_product::{
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};

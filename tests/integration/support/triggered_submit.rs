@@ -175,7 +175,7 @@ impl RebornIntegrationHarness {
             .ok_or("triggered submit requires a harness binding with an agent id")?;
 
         let (materialized_prompt, turn_scope) =
-            ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test(
+            ironclaw_composition::test_support::materialize_trigger_prompt_for_test(
                 conversations.clone(),
                 thread_service,
                 default_agent_id,

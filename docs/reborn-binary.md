@@ -671,9 +671,9 @@ Run these before changing Reborn CLI behavior:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw
-cargo test -p ironclaw_reborn_config
-cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
-cargo test -p ironclaw_architecture reborn
+cargo test -p ironclaw_config
+cargo test -p ironclaw_turn_runner model_slots_are_exposed_in_cli_display_order
+cargo test -p ironclaw_architecture_tests reborn
 cargo clippy -p ironclaw --all-targets -- -D warnings
 cargo run -q -p ironclaw --bin ironclaw -- --help
 # channels/hooks/logs are disabled — these are expected to exit non-zero

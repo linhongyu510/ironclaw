@@ -27,7 +27,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
-ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
+ironclaw_config = { path = "../ironclaw_config" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 nix = { version = "0.31", default-features = false, features = ["process"] }

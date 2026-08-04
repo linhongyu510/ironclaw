@@ -3,14 +3,14 @@
 //!
 //! [`super::set::ConfigSetCommand`] is the only consumer of the alias/shape
 //! machinery in this module. The Google remediation text itself has moved to
-//! `ironclaw_reborn_config::google_remediation_text` (this module just
+//! `ironclaw_config::google_remediation_text` (this module just
 //! re-exports it as [`google_remediation_text`]) so
-//! `ironclaw_reborn_composition::extension_host::gsuite`'s "not configured"
+//! `ironclaw_composition::extension_host::gsuite`'s "not configured"
 //! tool-result error can share the exact same wording without depending on
 //! this crate — `ironclaw_reborn_cli` sits above `composition` in the
 //! dependency graph (`cli` depends on `composition`, never the reverse), so
 //! composition-layer code cannot import CLI modules directly, but both
-//! already depend on `ironclaw_reborn_config`.
+//! already depend on `ironclaw_config`.
 
 /// Where a `config set` value physically lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub(super) enum ShapeVerdict {
 /// Validate `value`'s shape for `key`, independent of the
 /// secret/non-secret destination check (that one lives inline in
 /// `set.rs::set_value_key` via `reject_inline_secret` from
-/// `ironclaw_reborn_config`).
+/// `ironclaw_config`).
 pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
     match key {
         ConfigKey::GoogleClientId => {
@@ -159,12 +159,12 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
 
 /// BYO (bring-your-own) console-steps remediation text for Google OAuth
 /// setup, printed by `config set` guidance. Delegates to
-/// `ironclaw_reborn_config::google_remediation_text` — the single shared
+/// `ironclaw_config::google_remediation_text` — the single shared
 /// source of this text — so this crate's re-export point stays a stable
 /// call site for `set.rs` even though the wording itself lives lower in the
 /// dependency graph. See the module doc for why the text moved.
 pub(super) fn google_remediation_text() -> String {
-    ironclaw_reborn_config::google_remediation_text()
+    ironclaw_config::google_remediation_text()
 }
 
 /// Slack remediation text: per Correction A in the PR-C plan, Slack has

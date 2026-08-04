@@ -2573,7 +2573,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ironclaw_authorization",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "serde",
@@ -2606,7 +2606,7 @@ dependencies = [
  "futures",
  "hex",
  "ironclaw_common",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_secrets",
@@ -2650,8 +2650,8 @@ dependencies = [
  "chrono",
  "ironclaw_approvals",
  "ironclaw_authorization",
- "ironclaw_events",
- "ironclaw_extensions",
+ "ironclaw_event_log",
+ "ironclaw_extension_registry",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_processes",
@@ -2709,7 +2709,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_host_api",
  "ironclaw_memory",
  "ironclaw_turns",
@@ -2734,7 +2734,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_events"
+name = "ironclaw_event_log"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2763,7 +2763,7 @@ dependencies = [
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_conversations",
- "ironclaw_extensions",
+ "ironclaw_extension_registry",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
@@ -2774,8 +2774,8 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_product",
- "ironclaw_reborn_config",
+ "ironclaw_assistant",
+ "ironclaw_config",
  "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_secrets",
@@ -2801,7 +2801,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_extensions"
+name = "ironclaw_extension_registry"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2901,7 +2901,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_host_api",
  "ironclaw_prompt_envelope",
  "ironclaw_turns",
@@ -2960,8 +2960,8 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
- "ironclaw_events",
- "ironclaw_extensions",
+ "ironclaw_event_log",
+ "ironclaw_extension_registry",
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_extension_support",
@@ -2975,8 +2975,8 @@ dependencies = [
  "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
- "ironclaw_reborn_event_store",
- "ironclaw_reborn_traces",
+ "ironclaw_event_store",
+ "ironclaw_trace_commons",
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
@@ -3021,8 +3021,8 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_processes",
  "ironclaw_libsql_runtime",
- "ironclaw_reborn_composition",
- "ironclaw_reborn_event_store",
+ "ironclaw_composition",
+ "ironclaw_event_store",
  "ironclaw_resources",
  "ironclaw_secrets",
  "ironclaw_triggers",
@@ -3124,7 +3124,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "ironclaw_extensions",
+ "ironclaw_extension_registry",
  "ironclaw_host_api",
  "ironclaw_resources",
  "serde_json",
@@ -3202,8 +3202,8 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_llm",
- "ironclaw_product",
- "ironclaw_reborn_config",
+ "ironclaw_assistant",
+ "ironclaw_config",
  "ironclaw_safety",
  "ironclaw_secrets",
  "libc",
@@ -3257,7 +3257,7 @@ dependencies = [
  "blake3",
  "chrono",
  "futures",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -3269,7 +3269,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_product"
+name = "ironclaw_assistant"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3284,15 +3284,15 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
- "ironclaw_events",
- "ironclaw_extensions",
+ "ironclaw_event_log",
+ "ironclaw_extension_registry",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
  "ironclaw_host_api",
  "ironclaw_loop_host",
  "ironclaw_outbound",
- "ironclaw_reborn_traces",
- "ironclaw_runner",
+ "ironclaw_trace_commons",
+ "ironclaw_turn_runner",
  "ironclaw_safety",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -3332,7 +3332,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3352,9 +3352,9 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_extension_host",
- "ironclaw_extensions",
+ "ironclaw_extension_registry",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
  "ironclaw_hooks",
@@ -3372,15 +3372,15 @@ dependencies = [
  "ironclaw_operator",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_product",
+ "ironclaw_assistant",
  "ironclaw_projects",
- "ironclaw_reborn_config",
- "ironclaw_reborn_event_store",
- "ironclaw_reborn_identity",
- "ironclaw_reborn_openai_compat",
- "ironclaw_reborn_traces",
+ "ironclaw_config",
+ "ironclaw_event_store",
+ "ironclaw_identity",
+ "ironclaw_openai_compat",
+ "ironclaw_trace_commons",
  "ironclaw_resources",
- "ironclaw_runner",
+ "ironclaw_turn_runner",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
@@ -3413,7 +3413,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_config"
+name = "ironclaw_config"
 version = "0.1.0"
 dependencies = [
  "fs4",
@@ -3425,13 +3425,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_event_store"
+name = "ironclaw_event_store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "deadpool-postgres",
  "hex",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "libsql",
@@ -3451,7 +3451,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_identity"
+name = "ironclaw_identity"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3467,7 +3467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_openai_compat"
+name = "ironclaw_openai_compat"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -3481,7 +3481,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product",
+ "ironclaw_assistant",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3492,7 +3492,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_traces"
+name = "ironclaw_trace_commons"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3541,7 +3541,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_runner"
+name = "ironclaw_turn_runner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3552,7 +3552,7 @@ dependencies = [
  "ironclaw_agent_loop",
  "ironclaw_approvals",
  "ironclaw_common",
- "ironclaw_events",
+ "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_hooks",
  "ironclaw_host_api",
@@ -3603,7 +3603,7 @@ name = "ironclaw_scripts"
 version = "0.1.0"
 dependencies = [
  "futures-util",
- "ironclaw_extensions",
+ "ironclaw_extension_registry",
  "ironclaw_host_api",
  "ironclaw_resources",
  "serde_json",
@@ -3775,8 +3775,8 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
- "ironclaw_product",
- "ironclaw_reborn_openai_compat",
+ "ironclaw_assistant",
+ "ironclaw_openai_compat",
  "jsonwebtoken",
  "lru",
  "parking_lot",

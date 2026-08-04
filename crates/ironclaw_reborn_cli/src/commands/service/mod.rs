@@ -721,7 +721,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
         let context = RebornCliContext::from_boot_config(
-            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+            ironclaw_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         );
         let platform = ServicePlatform::detect().expect("detect must resolve on macOS/Linux");
@@ -874,7 +874,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
         let context = RebornCliContext::from_boot_config(
-            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+            ironclaw_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         );
         let invocation = serve_invocation().expect("serve invocation");
@@ -947,7 +947,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
         let context = RebornCliContext::from_boot_config(
-            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+            ironclaw_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         );
         let invocation = serve_invocation().expect("serve invocation");

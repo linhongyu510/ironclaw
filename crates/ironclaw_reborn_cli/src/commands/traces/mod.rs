@@ -12,8 +12,8 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use ironclaw_reborn_traces::client::{TraceClientHost, TraceClientScope};
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_trace_commons::client::{TraceClientHost, TraceClientScope};
+use ironclaw_trace_commons::contribution::{
     ConsentScope, CreditSummary, RecordedTraceContributionOptions, StandingTraceContributionPolicy,
     TraceChannel, TraceContributionAcceptance, TraceContributionEnvelope, TraceCreditEvent,
     TraceCreditEventKind, TraceSubmissionReceipt, TraceSubmissionStatusUpdate,
@@ -94,7 +94,7 @@ enum TracesSubcommand {
         upload_token_invite_code: Option<String>,
 
         /// Upload claim issuer timeout in milliseconds
-        #[arg(long, default_value_t = ironclaw_reborn_traces::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS)]
+        #[arg(long, default_value_t = ironclaw_trace_commons::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS)]
         upload_token_issuer_timeout_ms: u64,
 
         /// Include locally redacted user/assistant message text
@@ -497,7 +497,7 @@ struct TraceQueueStatusDiagnostics {
     min_submission_score: f32,
     credit_notice_interval_hours: u32,
     selected_tools_count: usize,
-    queue: ironclaw_reborn_traces::contribution::TraceQueueDiagnostics,
+    queue: ironclaw_trace_commons::contribution::TraceQueueDiagnostics,
     credit_summary: CreditSummary,
 }
 
@@ -557,7 +557,7 @@ fn opt_out(user_scope: Option<&str>) -> anyhow::Result<()> {
         // the instance-wide enrollment (inherited by every user without a
         // personal enrollment); flipping it here would disenroll the entire
         // instance to opt out one user.
-        ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
+        ironclaw_trace_commons::contribution::opt_out_user_scope(&runtime_scope)?;
         println!("Trace contribution disabled for user scope: {runtime_scope}");
         println!(
             "The instance-level enrollment (if any) is unchanged; other users keep contributing."
@@ -569,7 +569,7 @@ fn opt_out(user_scope: Option<&str>) -> anyhow::Result<()> {
     let mut policy = read_policy()?;
     policy.enabled = false;
     write_policy(&policy)?;
-    ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
+    ironclaw_trace_commons::contribution::opt_out_user_scope(&runtime_scope)?;
     println!("Trace contribution opt-in disabled. Queued envelopes remain local.");
     println!("Runtime/web trace scope disabled: {runtime_scope}");
     println!(
@@ -590,11 +590,11 @@ async fn enroll_instance(
     include_tool_payloads: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let consents = ironclaw_reborn_traces::onboarding::OnboardConsents {
+    let consents = ironclaw_trace_commons::onboarding::OnboardConsents {
         include_message_text,
         include_tool_payloads,
     };
-    let outcome = ironclaw_reborn_traces::onboarding::onboard_instance(invite, consents)
+    let outcome = ironclaw_trace_commons::onboarding::onboard_instance(invite, consents)
         .await
         .map_err(|e| anyhow::anyhow!("instance enrollment failed: {e}"))?;
 
@@ -721,7 +721,7 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
         policy.credit_notice_interval_hours
     );
     let queued_count = match normalized_scope.as_deref() {
-        Some(scope) => ironclaw_reborn_traces::contribution::queued_trace_envelope_paths_for_scope(
+        Some(scope) => ironclaw_trace_commons::contribution::queued_trace_envelope_paths_for_scope(
             Some(scope),
         )?
         .len(),
@@ -1890,12 +1890,12 @@ fn queue_dir() -> PathBuf {
 ///
 /// Delegates to the crate that owns the layout rather than re-deriving
 /// `<base>/trace_contributions` here: this used to read
-/// `ironclaw_reborn_traces::paths::ironclaw_base_dir().join("trace_contributions")`
+/// `ironclaw_trace_commons::paths::ironclaw_base_dir().join("trace_contributions")`
 /// through a re-export module that existed only to hide a
 /// `ironclaw_common` dependency (PROPOSAL §6.4.14). `trace_contribution_dir_for_scope(None)`
 /// resolves to the identical path and keeps the layout knowledge in one place.
 fn trace_contribution_dir() -> PathBuf {
-    ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(None)
+    ironclaw_trace_commons::contribution::trace_contribution_dir_for_scope(None)
 }
 
 fn read_policy() -> anyhow::Result<StandingTraceContributionPolicy> {

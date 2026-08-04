@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use ironclaw_reborn_composition::RebornIdentityResolver;
-use ironclaw_reborn_composition::host_api::TenantId;
+use ironclaw_composition::RebornIdentityResolver;
+use ironclaw_composition::host_api::TenantId;
 use ironclaw_webui::{
     CompositeAuthenticator, PublicRouteMount, SessionAuthenticator, SignedSessionLoginConfig,
     WebuiAuthenticator, build_signed_session_login, empty_webui_v2_auth_providers_mount,
@@ -241,7 +241,7 @@ mod tests {
 
         let surface = build_webui_auth_surface(
             Some(sso),
-            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+            Some(ironclaw_composition::open_reborn_identity_resolver(
                 &TenantId::new("sso-bootstrap-tenant").expect("tenant"),
             )),
             TenantId::new("sso-bootstrap-tenant").expect("tenant"),

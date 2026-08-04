@@ -587,7 +587,7 @@ fn finish_reason_paths_match_real_rig_response_types() {
 /// Precedence at the caller: what the provider reported outranks what the
 /// body looks like. A truncated or filtered response that *also* carried
 /// tool calls must not be laundered into `ToolUse` — the tool arguments
-/// may be cut off mid-JSON, and `ironclaw_runner`'s model gateway only
+/// may be cut off mid-JSON, and `ironclaw_turn_runner`'s model gateway only
 /// accepts provider tool calls when the finish reason is `ToolUse`/`Stop`.
 #[test]
 fn provider_finish_reason_outranks_response_shape() {

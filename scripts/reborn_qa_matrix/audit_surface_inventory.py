@@ -148,7 +148,7 @@ def api_surfaces(repo_root: Path) -> list[Surface]:
             repo_root=repo_root,
         ),
         *_descriptor_patterns(
-            repo_root / "crates/ironclaw_reborn_openai_compat/src/descriptors.rs",
+            repo_root / "crates/ironclaw_openai_compat/src/descriptors.rs",
             kind="openai_compat_api_pattern",
             repo_root=repo_root,
         ),

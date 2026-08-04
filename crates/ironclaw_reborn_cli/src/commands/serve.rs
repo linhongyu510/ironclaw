@@ -5,17 +5,17 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory;
-use ironclaw_extension_host::extension_ingress::extension_ingress_route_mount;
-use ironclaw_reborn_composition::build_openai_compat_route_mount;
-use ironclaw_reborn_composition::host_api::{
+use ironclaw_composition::build_openai_compat_route_mount;
+use ironclaw_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_reborn_composition::{
+use ironclaw_composition::{
     RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessPolicy, build_reborn_runtime,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory;
+use ironclaw_extension_host::extension_ingress::extension_ingress_route_mount;
 use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
     RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
@@ -70,7 +70,7 @@ struct SignedSessionTokenMinter {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+impl ironclaw_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         // `false`: this session is for the admin-created `user_id`, not the
         // operator. Stamping `true` would let any admin-created user (even
@@ -133,7 +133,7 @@ impl ServeCommand {
         let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
-            ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
+            ironclaw_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
         if let Some(file) = config_file.as_ref() {
             reject_legacy_slack_config(file, &boot_config.home().config_file_path())?;
@@ -876,7 +876,7 @@ fn canonical_host_name(host: &str) -> &str {
 /// grant into an `IdentityMembershipTriggerFireChecker` that resolves the
 /// creator against the canonical identity directory and denies a suspended,
 /// wrong-tenant, or unknown creator (see `crate::trigger_fire_access` in
-/// `ironclaw_reborn_composition`). A merely-authenticated non-member therefore
+/// `ironclaw_composition`). A merely-authenticated non-member therefore
 /// cannot fire; only an active member can.
 fn trigger_fire_access_policy(
     trigger_poller_enabled: bool,
@@ -904,7 +904,7 @@ fn trigger_fire_access_policy(
 /// is not rejected: the flag is unused, but existing installs may still
 /// carry it and must keep booting.
 fn reject_legacy_slack_config(
-    config_file: &ironclaw_reborn_config::RebornConfigFile,
+    config_file: &ironclaw_config::RebornConfigFile,
     config_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     let Some(slack) = config_file.slack.as_ref() else {
@@ -958,7 +958,7 @@ fn resolve_webui_default_agent(
 /// `present_unicode_env_var`).
 fn resolve_webui_user_id_raw(
     env_user_id_var: &str,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<String> {
     Ok(present_unicode_env_var(env_user_id_var)?
         .filter(|value| !value.is_empty())
@@ -1255,7 +1255,7 @@ mod tests {
         // before the guard drops.
         unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "env-user") };
 
-        let config_file = ironclaw_reborn_config::RebornConfigFile {
+        let config_file = ironclaw_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1276,7 +1276,7 @@ mod tests {
         // SAFETY: serialized by the shared crate process-env lock.
         unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
 
-        let config_file = ironclaw_reborn_config::RebornConfigFile {
+        let config_file = ironclaw_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1295,7 +1295,7 @@ mod tests {
         // before the guard drops.
         unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "") };
 
-        let config_file = ironclaw_reborn_config::RebornConfigFile {
+        let config_file = ironclaw_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1408,7 +1408,7 @@ slack_user_id = "U123"
 "#,
         )
         .expect("write config");
-        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+        let config_file = ironclaw_config::RebornConfigFile::load(&config_path)
             .expect("config file loads")
             .expect("config exists");
 
@@ -1434,7 +1434,7 @@ slack_user_id = "U123"
             "api_version = \"ironclaw.runtime/v1\"\n\n[slack]\nenabled = true\n",
         )
         .expect("write config");
-        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+        let config_file = ironclaw_config::RebornConfigFile::load(&config_path)
             .expect("config file loads")
             .expect("config exists");
         reject_legacy_slack_config(&config_file, &config_path)
@@ -1592,24 +1592,22 @@ slack_user_id = "U123"
     async fn webui_serve_wires_product_auth_callback_into_runtime_services() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_product_auth_callback_origin(
-            ironclaw_reborn_composition::local_filesystem_build_input(
+            ironclaw_composition::local_filesystem_build_input(
                 "oauth-owner",
                 dir.path().join("standalone"),
             ),
             "http://127.0.0.1:3000",
         )
         .expect("product-auth callback wiring");
-        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        let runtime = ironclaw_composition::build_reborn_runtime(
+            ironclaw_composition::RebornRuntimeInput::from_build_input(services_input),
         )
         .await
         .expect("reborn runtime builds");
 
         assert!(
-            ironclaw_reborn_composition::product_auth_challenge_provider(
-                &runtime.product_auth_for_test()
-            )
-            .is_some(),
+            ironclaw_composition::product_auth_challenge_provider(&runtime.product_auth_for_test())
+                .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1619,7 +1617,7 @@ slack_user_id = "U123"
     async fn webui_serve_wires_product_auth_callback_with_canonical_host_origin() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_product_auth_callback_origin(
-            ironclaw_reborn_composition::local_filesystem_build_input(
+            ironclaw_composition::local_filesystem_build_input(
                 "oauth-owner",
                 dir.path().join("standalone"),
             ),
@@ -1632,17 +1630,15 @@ slack_user_id = "U123"
             .expect("canonical callback origin"),
         )
         .expect("product-auth callback wiring");
-        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        let runtime = ironclaw_composition::build_reborn_runtime(
+            ironclaw_composition::RebornRuntimeInput::from_build_input(services_input),
         )
         .await
         .expect("reborn runtime builds");
 
         assert!(
-            ironclaw_reborn_composition::product_auth_challenge_provider(
-                &runtime.product_auth_for_test()
-            )
-            .is_some(),
+            ironclaw_composition::product_auth_challenge_provider(&runtime.product_auth_for_test())
+                .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1669,24 +1665,22 @@ slack_user_id = "U123"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_product_auth_callback_origin(
-            ironclaw_reborn_composition::local_filesystem_build_input(
+            ironclaw_composition::local_filesystem_build_input(
                 "oauth-owner",
                 dir.path().join("standalone"),
             ),
             &callback_origin,
         )
         .expect("product-auth callback wiring");
-        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        let runtime = ironclaw_composition::build_reborn_runtime(
+            ironclaw_composition::RebornRuntimeInput::from_build_input(services_input),
         )
         .await
         .expect("reborn runtime builds");
 
         assert!(
-            ironclaw_reborn_composition::product_auth_challenge_provider(
-                &runtime.product_auth_for_test()
-            )
-            .is_some(),
+            ironclaw_composition::product_auth_challenge_provider(&runtime.product_auth_for_test())
+                .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");

@@ -10,7 +10,7 @@
   - `crates/ironclaw_extension_contracts/CLAUDE.md` — it declares the external
     actor/conversation ref pair this crate binds on (added 2026-08-02; the dep
     arrived with the WS5 unification and this list did not).
-  - `crates/ironclaw_product/CLAUDE.md`
+  - `crates/ironclaw_assistant/CLAUDE.md`
   - `docs/reborn/contracts/events-projections.md`
 
 ## What This Crate Owns
@@ -46,13 +46,13 @@
   sealed `TrustedTriggerSubmitRequest`, so it covers every
   `TrustedTriggerFireSubmitter` rather than only the one wired here (moved
   2026-08-04, PROPOSAL §6.4.2; the absent dependency is pinned by
-  `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`).
+  `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`).
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_conversations`
 - Backend parity check when durable adapters change: run crate tests with all relevant features and DB harness settings.
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

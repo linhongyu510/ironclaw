@@ -128,7 +128,7 @@ boundary. The current rule is codified in
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
    - `ironclaw_conversations::conversation_state_store::save_state` and
-     `ironclaw_product::filesystem_ledger`
+     `ironclaw_assistant::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.

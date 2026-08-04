@@ -20,7 +20,7 @@ of creating a Slack app and pasting a token.
 ## The three OAuth halves in Reborn product-auth (and Slack's divergence)
 
 Extension credentials (`source = product_auth_account`) use the product-auth
-OAuth system in `crates/ironclaw_auth` + `crates/ironclaw_reborn_composition`.
+OAuth system in `crates/ironclaw_auth` + `crates/ironclaw_composition`.
 Three parts, each currently assuming "standard OAuth" that Slack violates:
 
 | Half | Anchor | Slack divergence |
@@ -53,14 +53,14 @@ Three parts, each currently assuming "standard OAuth" that Slack violates:
   prefix `ics1.`, permissive scope validation).
 - Export new items from `lib.rs`.
 
-### 2. `crates/ironclaw_reborn_composition/src/oauth_provider_client.rs`
+### 2. `crates/ironclaw_composition/src/oauth_provider_client.rs`
 - Add `TokenResponseShape { Standard, SlackAuthedUser }` and a field on
   `HostOAuthProviderSpec` (default `Standard` for Google/Notion → no behavior
   change). `parse_token_response` becomes shape-aware: for `SlackAuthedUser`,
   deserialize `authed_user.{access_token,scope}` and check top-level `ok`.
 - Slack has no refresh token by default → `refresh_token = None`, no expiry.
 
-### 3. `crates/ironclaw_reborn_composition/src/slack_personal_oauth.rs` (new)
+### 3. `crates/ironclaw_composition/src/slack_personal_oauth.rs` (new)
 - `slack_personal_provider_spec() -> HostOAuthProviderSpec` (token endpoint,
   `secret_handle_prefix = "slack_personal"`, `resource: None`,
   `exchange_scope_policy: FallbackToRequested`, `token_response_shape:

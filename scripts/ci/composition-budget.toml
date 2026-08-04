@@ -1,10 +1,10 @@
-# Composition mass budget — ratchet gate for the ironclaw_reborn_composition crate.
+# Composition mass budget — ratchet gate for the ironclaw_composition crate.
 #
 # Enforced by scripts/ci/check-composition-budget.sh (CI: .github/workflows/code_style.yml;
 # local: scripts/pre-commit-safety.sh when composition files are staged).
 #
 # WHY THIS EXISTS
-#   ironclaw_reborn_composition's charter is service-graph *assembly*
+#   ironclaw_composition's charter is service-graph *assembly*
 #   (build_*/with_* wiring) — see .claude/skills/ironclaw-reborn-architecture-review.
 #   In practice it has accreted behavior (slack delivery, product_auth, extension
 #   lifecycle, projections) and is now ~27% of ALL production crate code. The
@@ -12,7 +12,7 @@
 #   mass piling up *inside* one crate. This gate is that missing guard.
 #
 # THE METRIC
-#   observed_bp = 10000 * (LOC of crates/ironclaw_reborn_composition/src/**.rs)
+#   observed_bp = 10000 * (LOC of crates/ironclaw_composition/src/**.rs)
 #                       / (LOC of all crates/*/src/**.rs)
 #   Production src only, in basis points (1 bp = 0.01 percentage point).
 #   Test-only FILES are excluded from both numerator and denominator (basenames

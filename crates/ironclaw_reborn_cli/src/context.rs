@@ -1,4 +1,4 @@
-use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_config::RebornBootConfig;
 
 /// Per-invocation context shared by Reborn CLI commands.
 #[derive(Debug, Clone)]

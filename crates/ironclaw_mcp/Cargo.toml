@@ -10,7 +10,7 @@ layer = "runtimes"
 [dependencies]
 async-trait = "0.1"
 futures-util = "0.3"
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources" }

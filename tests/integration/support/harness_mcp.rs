@@ -10,7 +10,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
     ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };

@@ -112,7 +112,7 @@ fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::dispatch_with_host_remediation(
         RuntimeDispatchErrorKind::OperationFailed,
         None,
-        ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
+        ironclaw_config::HostRemediationText::GoogleNotConfigured.text(),
     )
 }
 
@@ -177,7 +177,7 @@ fn gsuite_error(
                         "Google OAuth is configured but the provider rejected the credentials"
                             .to_string(),
                     ),
-                    ironclaw_reborn_config::HostRemediationText::GoogleBackendAuth.text(),
+                    ironclaw_config::HostRemediationText::GoogleBackendAuth.text(),
                 )
             }
             _ => FirstPartyCapabilityError::new(error.kind()),
@@ -285,12 +285,12 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extension_support::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
-    use ironclaw_reborn_composition::{
+    use ironclaw_composition::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, RuntimeDispatchErrorKind, Timestamp,
         host_api::{InvocationId, ResourceScope, UserId},
     };
+    use ironclaw_extension_support::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
 
     use super::*;
 

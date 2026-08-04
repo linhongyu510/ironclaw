@@ -17,7 +17,7 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_hooks::dispatch::HOOK_DENY_PREDICATE_CODE;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
@@ -35,7 +35,7 @@ struct RecordingTrajectoryObserver {
     results: Mutex<Vec<(String, String, serde_json::Value)>>,
 }
 
-impl ironclaw_reborn_composition::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+impl ironclaw_composition::RebornTrajectoryObserver for RecordingTrajectoryObserver {
     fn on_capability_input(
         &self,
         call_id: &str,

@@ -26,11 +26,11 @@ eula = false
 [features]
 # Compile in the (off-by-default) mem0 third-party memory provider so an
 # `ironclaw-reborn` binary can point the compose-time [memory] binding at a
-# self-hosted mem0 OSS server. Mirrors the same feature on `ironclaw_reborn_composition`;
+# self-hosted mem0 OSS server. Mirrors the same feature on `ironclaw_composition`;
 # without it a default binary carries no mem0 code or its reqwest/rustls
 # transport and a mem0 binding fails closed.
 memory-mem0 = [
-    "ironclaw_reborn_composition/memory-mem0",
+    "ironclaw_composition/memory-mem0",
 ]
 # Feature bar 4 (dev-only seam): compile the loopback-only OAuth provider
 # endpoint constructor used by hermetic standalone E2E tests. Activation also
@@ -55,9 +55,9 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
-ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
-ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_composition = { path = "../ironclaw_composition", version = "0.1.0" }
+ironclaw_config = { path = "../ironclaw_config", version = "0.1.0" }
+ironclaw_trace_commons = { path = "../ironclaw_trace_commons", version = "0.1.0" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
 ironclaw_extension_manager = { path = "../ironclaw_extension_manager", version = "0.1.0" }
 # DEL-7: the binary is the one generic-side crate allowed to link the concrete
@@ -100,7 +100,7 @@ libc = "0.2"
 # is available when building this crate's tests. Production code uses the
 # runtime-owned `RebornRuntime::open_reborn_identity_resolver` accessor
 # instead. Feature-unifies with the `[dependencies]` entry above.
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_composition = { path = "../ironclaw_composition", version = "0.1.0", features = ["test-support"] }
 # Canonical workspace-wide process-env test lock. Env-mutating unit tests in
 # this crate serialize on `ironclaw_common::env_helpers::lock_env()` — the same
 # mutex the composition/llm/auth crates and `src/` use — so no crate defines a
@@ -118,7 +118,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", feat
 # `keychain::generate_master_key_hex`); production onboarding code only ever
 # touches secrets through `ironclaw_operator::LlmKeyStore`'s facade
 # (`put_plaintext`), so this stays a dev-only dependency — see
-# `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
+# `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 toml = "1.1"
 

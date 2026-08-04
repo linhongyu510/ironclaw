@@ -556,7 +556,7 @@ def is_test_only_path(path: str) -> bool:
     ``src/**/test_support.rs`` is the repo-wide convention for a
     ``#[cfg(feature = "test-support")] pub mod test_support;`` module
     (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
-    ``ironclaw_product``, ``ironclaw_reborn_composition``). The
+    ``ironclaw_assistant``, ``ironclaw_composition``). The
     ``test-support`` feature is enabled
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
@@ -1224,7 +1224,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
         # gated, ships zero bytes in production. Exempt by exact filename only.
         self.assertTrue(
-            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+            is_test_only_path("crates/ironclaw_composition/src/test_support.rs")
         )
         # Directory-module form: src/test_support/**.rs is also exempt, so
         # growing a test_support module never needs another change here.
@@ -1771,12 +1771,12 @@ class CheckNoPanicsTests(unittest.TestCase):
         """
         roots = shipping_reborn_source_roots(
             self._shipping_metadata(
-                normal_dependency_dir="crates/substrates/ironclaw_events"
+                normal_dependency_dir="crates/substrates/ironclaw_event_log"
             )
         )
 
         self.assertIn(
-            (REPO_ROOT / "crates/substrates/ironclaw_events/src/lib.rs").resolve(),
+            (REPO_ROOT / "crates/substrates/ironclaw_event_log/src/lib.rs").resolve(),
             roots,
         )
 

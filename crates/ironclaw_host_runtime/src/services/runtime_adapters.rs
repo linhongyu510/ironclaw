@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     ids::UserId,

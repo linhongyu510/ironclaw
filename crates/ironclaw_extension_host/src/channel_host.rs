@@ -23,6 +23,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_assistant::ProjectFilesystemReader;
+use ironclaw_assistant::{
+    ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
+    DeliveryCoordinator, IdempotencyLedger, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    StaticProductInstallationResolver,
+};
 use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
@@ -43,16 +53,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
-use ironclaw_product::ProjectFilesystemReader;
-use ironclaw_product::{
-    ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    StaticProductInstallationResolver,
-};
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvelope};
 use ironclaw_product_contracts::prompt_source::{
@@ -76,7 +76,7 @@ const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 fn admin_configuration_fields(
-    resolved: &ironclaw_extensions::ResolvedExtensionManifest,
+    resolved: &ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> Vec<RecipeSecretField> {
     resolved
         .admin_configuration
@@ -417,7 +417,7 @@ impl HostedChannelSource {
         }
     }
 
-    fn resolved(&self) -> &ironclaw_extensions::ResolvedExtensionManifest {
+    fn resolved(&self) -> &ironclaw_extension_registry::ResolvedExtensionManifest {
         match self {
             Self::Deployment(binding) => binding.resolved.as_ref(),
             Self::Active(active) => active.resolved.as_ref(),
@@ -802,7 +802,7 @@ impl GenericChannelHostAssembly {
         ));
         workflow = workflow
             .with_product_command_admission_service(Arc::new(
-                ironclaw_product::DirectConversationCommandAdmission::new(
+                ironclaw_assistant::DirectConversationCommandAdmission::new(
                     channel.commands.iter().map(String::as_str),
                     command_roles,
                 )
@@ -1003,7 +1003,7 @@ impl GenericChannelHostAssembly {
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationBindingService>;
         let binding =
-            ironclaw_product::ProductConversationBindingService::new(conversations, resolver);
+            ironclaw_assistant::ProductConversationBindingService::new(conversations, resolver);
         Ok((
             Arc::new(binding) as Arc<dyn ConversationBindingService>,
             workflow_state,
@@ -1158,8 +1158,8 @@ struct TriggeredNoopConversationBindingService;
 impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn resolve_binding(
         &self,
-        _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ProductSurfaceFailure> {
+        _request: ironclaw_assistant::ResolveBindingRequest,
+    ) -> Result<ironclaw_assistant::ResolvedBinding, ProductSurfaceFailure> {
         Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -1167,8 +1167,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
 
     async fn lookup_binding(
         &self,
-        _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ProductSurfaceFailure> {
+        _request: ironclaw_assistant::ResolveBindingRequest,
+    ) -> Result<ironclaw_assistant::ResolvedBinding, ProductSurfaceFailure> {
         Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })

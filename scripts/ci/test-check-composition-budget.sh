@@ -90,13 +90,13 @@ pad_inventory() {  # crates_dir
 make_fixture() {
     local dir="$1" comp_lines="$2" other_lines="$3"
     rm -rf "${dir}"
-    mkdir -p "${dir}/ironclaw_reborn_composition/src" "${dir}/other_crate/src"
-    write_manifest "${dir}/ironclaw_reborn_composition" ironclaw_reborn_composition
+    mkdir -p "${dir}/ironclaw_composition/src" "${dir}/other_crate/src"
+    write_manifest "${dir}/ironclaw_composition" ironclaw_composition
     write_manifest "${dir}/other_crate" other_crate
     pad_inventory "${dir}"
     # `|| true`: `yes | head` makes `yes` exit with SIGPIPE (141), which under
     # `set -e`+`pipefail` would abort the harness. The file is fully written.
-    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_reborn_composition/src/lib.rs" || true
+    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_composition/src/lib.rs" || true
     { yes 'let _ = 2;' | head -n "${other_lines}"; } > "${dir}/other_crate/src/lib.rs" || true
 }
 
@@ -121,7 +121,7 @@ EOF
 }
 
 run_gate() {
-    COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+    COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
     CRATES_ROOT="${tmp}/crates" \
     BUDGET_FILE="${tmp}/budget.toml" \
     capture bash "${gate}"
@@ -196,7 +196,7 @@ assert_contains "C8b reports schema error not crash" "${CAP_OUT}" "ceiling_bp mu
 # C8c: test-only FILES are excluded from the metric. Add a big tests.rs to the
 # composition fixture; the observed share must stay 30.00% (3000 bp), unchanged.
 make_fixture "${tmp}/crates" 3000 7000
-printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_reborn_composition/src/tests.rs"
+printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_composition/src/tests.rs"
 budget true 3000 30; run_gate
 assert_rc       "C8c test file excluded exits 0"   0 "${CAP_RC}"
 assert_contains "C8c share ignores tests.rs"       "${CAP_OUT}" "30.00% (3000 bp)"
@@ -204,7 +204,7 @@ make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture for later cases
 
 # C9: --print never fails and reports the share.
 budget true 100 0; run_gate  # ceiling absurdly low, but --print ignores it
-COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
 CRATES_ROOT="${tmp}/crates" \
 BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}" --print
@@ -215,7 +215,7 @@ assert_contains "C9 --print shows share"  "${CAP_OUT}" "composition share: 30.00
 # D. Dispatch (Arc<dyn>) sub-metric.
 # ---------------------------------------------------------------------------
 make_fixture "${tmp}/crates" 3000 7000
-comp_src="${tmp}/crates/ironclaw_reborn_composition/src"
+comp_src="${tmp}/crates/ironclaw_composition/src"
 # 10 Arc<dyn> sites in a production file.
 printf 'let x: Arc<dyn Foo> = y;\n%.0s' $(seq 1 10) > "${comp_src}/dispatch.rs"
 
@@ -261,7 +261,7 @@ rm -rf "${comp_src}/dispatch.rs" "${comp_src}/slack" "${comp_src}/extension_host
 # T. Tree-shape independence (WS10 / #6963).
 #
 # The gate used to key its numerator to the literal
-# crates/ironclaw_reborn_composition/src path and its denominator to
+# crates/ironclaw_composition/src path and its denominator to
 # crates/*/src. Under the target-architecture family move both stop matching.
 # The denominator failure is loud (the den_loc guard); the NUMERATOR failure is
 # silent — a partial move leaves the denominator healthy, so the gate reported
@@ -301,7 +301,7 @@ assert_contains "T2 nested denominator is real"    "${CAP_OUT}" "3000 LOC of 100
 rm -rf "${tmp}/partial"
 make_fixture "${tmp}/partial/crates" 3000 7000
 mkdir -p "${tmp}/partial/crates/app"
-mv "${tmp}/partial/crates/ironclaw_reborn_composition" "${tmp}/partial/crates/app/"
+mv "${tmp}/partial/crates/ironclaw_composition" "${tmp}/partial/crates/app/"
 budget true 3000 30; run_discovered "${tmp}/partial/crates"
 assert_rc       "T3 partial move exits 0"          0 "${CAP_RC}"
 assert_contains "T3 partial move keeps measuring"  "${CAP_OUT}" "30.00% (3000 bp)"
@@ -310,17 +310,17 @@ assert_contains "T3 partial move keeps measuring"  "${CAP_OUT}" "30.00% (3000 bp
 #     repoint, not a 0.00% pass.
 rm -rf "${tmp}/renamed"
 make_fixture "${tmp}/renamed/crates" 3000 7000
-mv "${tmp}/renamed/crates/ironclaw_reborn_composition" "${tmp}/renamed/crates/ironclaw_composition"
+mv "${tmp}/renamed/crates/ironclaw_composition" "${tmp}/renamed/crates/ironclaw_composition"
 budget true 3000 30; run_discovered "${tmp}/renamed/crates"
 assert_rc       "T4 renamed crate exits 1"         1 "${CAP_RC}"
-assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_reborn_composition'"
+assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_composition'"
 
 # T5: NEGATIVE — an inventory below the discovery floor must refuse rather than
 #     measure a truncated tree.
 rm -rf "${tmp}/thin"
-mkdir -p "${tmp}/thin/crates/ironclaw_reborn_composition/src"
-write_manifest "${tmp}/thin/crates/ironclaw_reborn_composition" ironclaw_reborn_composition
-printf 'let _ = 1;\n' > "${tmp}/thin/crates/ironclaw_reborn_composition/src/lib.rs"
+mkdir -p "${tmp}/thin/crates/ironclaw_composition/src"
+write_manifest "${tmp}/thin/crates/ironclaw_composition" ironclaw_composition
+printf 'let _ = 1;\n' > "${tmp}/thin/crates/ironclaw_composition/src/lib.rs"
 budget true 3000 30; run_discovered "${tmp}/thin/crates"
 assert_rc       "T5 thin inventory exits 1"        1 "${CAP_RC}"
 assert_contains "T5 thin inventory refuses"        "${CAP_OUT}" "crate discovery failed"
@@ -341,7 +341,7 @@ assert_contains "T6 zero numerator refuses"        "${CAP_OUT}" "composition LOC
 # T7: NEGATIVE — CRATES_ROOT that is not a `crates` directory must be refused
 #     rather than silently discovering the wrong tree.
 budget true 3000 30
-COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
 CRATES_ROOT="${tmp}" \
 BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}"

@@ -1,5 +1,5 @@
 use clap::Args;
-use ironclaw_reborn_composition::{
+use ironclaw_composition::{
     RebornRuntimeComponentStatus, reborn_model_slot_names, reborn_runtime_readiness_snapshot,
 };
 
@@ -109,7 +109,7 @@ fn apply_service_suppression(
 /// classification. Returns `None` when Google OAuth is either fully
 /// unconfigured or fully configured; only the partial case is reported.
 fn resolve_google_oauth_degraded(
-    config: &ironclaw_reborn_config::RebornBootConfig,
+    config: &ironclaw_config::RebornBootConfig,
 ) -> anyhow::Result<Option<String>> {
     Ok(
         crate::runtime::resolve_google_oauth_config_state_from_env(config)?.and_then(|state| {
@@ -157,10 +157,10 @@ fn resolve_service_state() -> ServiceStateDto {
 ///   treating it as inactive, which would let `status` disagree with `serve`
 ///   about which credential source is live.
 fn resolve_login_link_and_note(
-    home: &ironclaw_reborn_config::RebornHome,
+    home: &ironclaw_config::RebornHome,
     config_path: &std::path::Path,
 ) -> anyhow::Result<(Option<String>, Option<String>)> {
-    let config_file = ironclaw_reborn_config::RebornConfigFile::load(config_path)?;
+    let config_file = ironclaw_config::RebornConfigFile::load(config_path)?;
     Ok(
         match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref())? {
             crate::webui_token::LoginLinkAnnouncement::Link(link) => (Some(link), None),
@@ -274,7 +274,7 @@ fn kv(w: &mut impl Write, key: &str, value: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::context::RebornCliContext;
-    use ironclaw_reborn_composition::RebornRuntimeComponentStatus;
+    use ironclaw_composition::RebornRuntimeComponentStatus;
 
     #[test]
     fn status_dto_builds_without_config_file() {
@@ -401,7 +401,7 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         )
         .expect("write Google config");
         let storage_root = crate::runtime::local_runtime_storage_root(config, config.profile());
-        let db_path = ironclaw_reborn_composition::standalone_db_path(&storage_root);
+        let db_path = ironclaw_composition::standalone_db_path(&storage_root);
         std::fs::create_dir_all(&db_path).expect("create database-path tripwire");
 
         let dto = build_status_dto_with_service_state(&context, ServiceStateDto::Unknown)

@@ -401,11 +401,11 @@ impl RebornIntegrationGroupBuilder {
         // so the service's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -433,11 +433,11 @@ impl RebornIntegrationGroupBuilder {
         // `RebornServices`, keyed to the group's dispatch scope.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -463,11 +463,11 @@ impl RebornIntegrationGroupBuilder {
         .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id

@@ -108,7 +108,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("crates/ironclaw_webui/src/lib.rs", True),
     # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
     # every one of these.
-    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
     ("docs/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
@@ -231,7 +231,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "crates/ironclaw_llm/src/lib.rs",
-            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
@@ -243,13 +243,13 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         anchor="ironclaw_reborn_cli",
         kind="regex",
         crates=(
-            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
             ("ironclaw_reborn_cli", "src/main.rs"),
-            ("ironclaw_reborn_config", "src/lib.rs"),
-            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+            ("ironclaw_config", "src/lib.rs"),
+            ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),
         in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
         out_of_scope=(
@@ -257,7 +257,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # and is deliberately NOT triggered by every crate.
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
-            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
         ),
     ),

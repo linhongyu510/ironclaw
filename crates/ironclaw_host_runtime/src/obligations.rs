@@ -16,7 +16,7 @@ use ironclaw_capabilities::{
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     AuditSink, EventSink, RuntimeEvent, SecurityAuditEvent, SecurityAuditSink, SecurityBoundary,
     SecurityDecision,
 };
@@ -2484,7 +2484,7 @@ const _: fn(&RuntimeSecretInjectionEntry) = |entry| {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use ironclaw_events::InMemoryAuditSink;
+    use ironclaw_event_log::InMemoryAuditSink;
     use ironclaw_host_api::{
         action::{NetworkScheme, NetworkTargetPattern},
         capability::CapabilitySet,
@@ -2883,7 +2883,7 @@ mod tests {
 
     #[tokio::test]
     async fn leak_detector_block_records_security_audit_event_through_complete_dispatch() {
-        use ironclaw_events::{
+        use ironclaw_event_log::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
         };
         use ironclaw_host_api::{
@@ -2982,7 +2982,7 @@ mod tests {
         // a `String` member on the struct. The check below is therefore a
         // documentation-only assertion: it locks the field set at the
         // value level for future readers, but the real guard is the type
-        // shape in `ironclaw_events::security_audit`.
+        // shape in `ironclaw_event_log::security_audit`.
         //
         //   pub struct SecurityAuditEvent {
         //       pub boundary: SecurityBoundary,

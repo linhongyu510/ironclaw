@@ -34,7 +34,7 @@
 
 - Fast local check: `cargo test -p ironclaw_triggers`
 - Lint check: `cargo clippy -p ironclaw_triggers --all-targets --all-features -- -D warnings`
-- Boundary check after dependency changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

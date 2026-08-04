@@ -44,7 +44,7 @@
   `ironclaw_product_contracts` and implemented here. Do not add a trait here
   that a product-tier caller must name — that is the inversion the WS5 operator
   row removed.
-- **`ironclaw_product`.** There is no dependency on it, and there must not be:
+- **`ironclaw_assistant`.** There is no dependency on it, and there must not be:
   operator is product's sibling, not its consumer. Enforced twice —
   `reborn_operator_port_inversion.rs` (through `cargo metadata`) and the
   `ironclaw_operator` `BoundaryRule` in `reborn_dependency_boundaries.rs`.
@@ -58,11 +58,11 @@
 
 ## Do Not Move In Here
 
-- Product workflow, admission, delivery, or bindings — `ironclaw_product`.
+- Product workflow, admission, delivery, or bindings — `ironclaw_assistant`.
 - Runtime/lane machinery (host runtime, MCP, wasm, scripts, turns, runner,
   loop host) — the boundary rule forbids all of them.
-- Transports (`ironclaw_webui`, `ironclaw_reborn_openai_compat`) and the
-  assembly root (`ironclaw_reborn_composition`).
+- Transports (`ironclaw_webui`, `ironclaw_openai_compat`) and the
+  assembly root (`ironclaw_composition`).
 - Extension lifecycle or catalog logic — `ironclaw_extension_host`.
 
 ## Known Debt

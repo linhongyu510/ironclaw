@@ -163,7 +163,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "named critical product invariant" \
-  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "crates/ironclaw_assistant/src/run_delivery/observer.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -382,7 +382,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_runner/CLAUDE.md" \
+  "crates/ironclaw_turn_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -399,7 +399,7 @@ has_reborn_tests=true"
 assert_scope \
   "mixed tests and reborn" \
   "tests/e2e/scenarios/test_live_flow.py
-crates/ironclaw_reborn_composition/src/lib.rs" \
+crates/ironclaw_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true

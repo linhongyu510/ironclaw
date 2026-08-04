@@ -5,7 +5,7 @@
 //! declares immutable setup metadata once, and the crate that hosts that
 //! account answers "is this user connected?" through
 //! [`AccountConnectionStatusSource`]. The declaration registry itself is
-//! product-owned mutable state and stays in `ironclaw_product`; what lives
+//! product-owned mutable state and stays in `ironclaw_assistant`; what lives
 //! here is the descriptor it stores, the sanitized error classes it reports,
 //! and the probe port `ironclaw_extension_host` implements over its pairing
 //! service.

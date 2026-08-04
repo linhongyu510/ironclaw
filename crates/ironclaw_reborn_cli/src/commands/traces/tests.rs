@@ -2,7 +2,7 @@ use super::*;
 use crate::cli::Cli;
 use crate::commands::Command;
 use clap::Parser;
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_trace_commons::contribution::{
     ConsentMetadata, ContributorMetadata, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata, ResidualPiiRisk,
     TRACE_CONTRIBUTION_POLICY_VERSION, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceCard,
@@ -543,7 +543,7 @@ fn opt_in_writes_runtime_owner_policy_and_normalizes_selected_tools() {
     let runtime_scope = format!("trace-cli-runtime-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(
-        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+        ironclaw_trace_commons::contribution::trace_contribution_dir_for_scope(Some(
             &runtime_scope,
         ))
         .join("policy.json"),
@@ -560,7 +560,7 @@ fn opt_in_writes_runtime_owner_policy_and_normalizes_selected_tools() {
         upload_token_workload_token_env: None,
         upload_token_invite_code: None,
         upload_token_issuer_timeout_ms:
-            ironclaw_reborn_traces::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
+            ironclaw_trace_commons::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
         include_message_text: true,
         include_tool_payloads: false,
         scope: TraceScopeArg::DebuggingEvaluation,
@@ -729,7 +729,7 @@ fn opt_in_persists_invite_code_when_set() {
     let runtime_scope = format!("trace-cli-invite-persist-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(
-        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+        ironclaw_trace_commons::contribution::trace_contribution_dir_for_scope(Some(
             &runtime_scope,
         ))
         .join("policy.json"),
@@ -746,7 +746,7 @@ fn opt_in_persists_invite_code_when_set() {
         upload_token_workload_token_env: None,
         upload_token_invite_code: Some("INV-PILOT-001".to_string()),
         upload_token_issuer_timeout_ms:
-            ironclaw_reborn_traces::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
+            ironclaw_trace_commons::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
         include_message_text: true,
         include_tool_payloads: false,
         scope: TraceScopeArg::DebuggingEvaluation,
@@ -771,7 +771,7 @@ fn opt_in_persists_invite_code_when_set() {
     // Confirm the on-disk scoped policy.json deserializes to the same field —
     // this guards against silent serde-skip regressions for the invite code.
     let scoped_policy_path =
-        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+        ironclaw_trace_commons::contribution::trace_contribution_dir_for_scope(Some(
             &runtime_scope,
         ))
         .join("policy.json");
@@ -790,7 +790,7 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     let runtime_scope = format!("trace-cli-invite-diagnostic-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(
-        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+        ironclaw_trace_commons::contribution::trace_contribution_dir_for_scope(Some(
             &runtime_scope,
         ))
         .join("policy.json"),
@@ -802,7 +802,7 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
         .set_ingestion_endpoint("https://trace.example.com/v1/traces")
         .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
         .set_upload_token_invite_code("INV-PILOT-001");
-    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+    ironclaw_trace_commons::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &configured_policy,
     )
@@ -822,7 +822,7 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
         .set_ingestion_endpoint("https://trace.example.com/v1/traces")
         .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
         .set_upload_token_invite_code("   ");
-    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+    ironclaw_trace_commons::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &whitespace_policy,
     )
@@ -839,7 +839,7 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
         .set_enabled(true)
         .set_ingestion_endpoint("https://trace.example.com/v1/traces")
         .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN");
-    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+    ironclaw_trace_commons::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &none_policy,
     )

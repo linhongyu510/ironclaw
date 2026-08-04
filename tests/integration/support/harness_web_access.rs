@@ -31,11 +31,13 @@ use std::{
 };
 
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_extension_support::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
     WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::EffectKind,
@@ -74,7 +76,7 @@ pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> 
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).
     let root = VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?;
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
@@ -678,7 +678,7 @@ fn channel_config_admin_idempotency_key(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
@@ -868,7 +868,7 @@ fields = [
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )

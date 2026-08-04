@@ -1,5 +1,5 @@
 //! Composition implementations of the generic run-delivery ports
-//! (`ironclaw_product::run_delivery`): approval-gate context from
+//! (`ironclaw_assistant::run_delivery`): approval-gate context from
 //! the projection layer, blocked-auth prompt views from the product-auth
 //! engine, and the auth-flow cancel bridge. All delivery *semantics* live in
 //! the generic components; these adapters only surface composition-owned
@@ -8,18 +8,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_assistant::{AuthChallengeProvider, AuthChallengeView, PairingAuthChallengeView};
 use ironclaw_auth::{AuthProductError, AuthProviderId};
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnGateRef, TurnScope};
 use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::UserId};
-use ironclaw_product::{AuthChallengeProvider, AuthChallengeView, PairingAuthChallengeView};
 use ironclaw_product_contracts::outbound::ApprovalPromptContextView;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 
-use ironclaw_product::auth_prompt_view_for_blocked_auth;
+use ironclaw_assistant::auth_prompt_view_for_blocked_auth;
 
 use crate::channel_pairing::ChannelPairingRegistry;
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
@@ -145,7 +145,7 @@ impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {
-        ironclaw_product::projection::approval_prompt_context_view(
+        ironclaw_assistant::projection::approval_prompt_context_view(
             Some(self.approval_requests.as_ref()),
             gate_ref,
             owner_user_id,
