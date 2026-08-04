@@ -625,14 +625,10 @@ pub fn write_trace_policy_for_scope(
 
 // ── Trace credential resolution (instance enrollment) ────────────────────────
 //
-// File-size justification (.claude/rules/architecture.md §5): this PR adds the
-// instance-enrollment resolver, account login-link, and account-traces sections
-// to an already-oversized module because they are tightly coupled to the
-// policy-read/scope-dir/claim-mint machinery that lives here (every helper
-// below calls into read_trace_policy_for_scope_at / trace_contribution_dir_* /
-// DefaultTraceUploadCredentialProvider); splitting them out first would have
-// meant exporting a wide private surface mid-feature. Decomposition of
-// contribution.rs is tracked in issue #4088.
+// Why credential resolution lives beside the policy/scope-dir helpers: every
+// resolver below calls read_trace_policy_for_scope_at /
+// trace_contribution_dir_* / DefaultTraceUploadCredentialProvider, so moving
+// it out would mean exporting a wide private surface for no gain.
 
 /// Resolved Trace Commons credentials for a (tenant, user): which local-state
 /// scope to use and the per-user subject (if any) to send to the server.

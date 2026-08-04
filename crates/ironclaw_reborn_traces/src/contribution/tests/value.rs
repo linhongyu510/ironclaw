@@ -150,5 +150,3 @@ async fn process_evaluator_labels_do_not_require_raw_content() {
         ]
     );
 }
-
-// ----- pilot allowlist invite_code integration ----------------------

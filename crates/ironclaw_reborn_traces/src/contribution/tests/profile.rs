@@ -412,10 +412,3 @@ async fn set_community_profile_rejects_invalid_handle_before_any_network_call() 
         .expect_err("oversized bio must be rejected");
     assert!(error.to_string().contains("at most 280 bytes"));
 }
-
-// --- resolve_trace_credentials tests ---
-// Isolation: each test uses its own tempdir passed to the private
-// `resolve_trace_credentials_at` core, so tests are fully isolated from
-// the global IRONCLAW_BASE_DIR and from each other (no shared state,
-// no cleanup needed).  The public `resolve_trace_credentials` is a thin
-// wrapper that supplies the real base dir — the core logic is tested here.

@@ -33,9 +33,12 @@ Items that only cross module lines inside `contribution` are `pub(crate)`, not
 
 ## Tests
 
-`src/contribution/tests/` mirrors the production charter one file per owner,
+`src/contribution/tests/` mirrors the production charter one module per owner,
 with shared fakes in `tests/support.rs`. Put a new test in the module whose
-behavior it pins. The architecture specificity gate treats any path component
+production owner it pins — a test for `policy.rs` goes in `tests/policy.rs`,
+not wherever it was convenient to write. The mapping is one-to-one except that
+`remote`'s four production modules are covered by `tests/claims.rs`,
+`tests/profile.rs`, `tests/account.rs` and `tests/credentials.rs`. The architecture specificity gate treats any path component
 named `tests` as test code, so vendor names are allowed there and are *not*
 allowed in the production submodules — except the two carve-outs named in
 `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`

@@ -394,5 +394,3 @@ fn upload_claim_request_omits_subject_when_none() {
     let json = serde_json::to_value(&req).unwrap();
     assert!(json.get("subject").is_none(), "subject omitted when None");
 }
-
-// --- mint_account_login_link_via_sink tests ---

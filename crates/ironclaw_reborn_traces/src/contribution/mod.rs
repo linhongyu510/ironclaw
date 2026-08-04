@@ -9,10 +9,13 @@
 //!
 //! The pipeline runs left to right: a turn is **captured**, **redacted**,
 //! **classified**, **scored**, **queued**, and finally **submitted**. Each
-//! stage owns one file, and the table below is the rule for where new code
-//! goes. Every item is re-exported from this module, so `contribution::X`
-//! stays the single public path for callers outside the crate — the
-//! submodules are private and are never named from outside.
+//! stage owns one **module**, and the table below is the rule for where new
+//! code goes. A module is usually one file; `remote` is a directory module
+//! (`remote/{claim,profile,account,client}.rs`) because its four concerns
+//! would otherwise exceed the file-size budget in `.claude/rules/architecture.md`
+//! §5. Every item is re-exported from this module, so `contribution::X` stays
+//! the single public path for callers outside the crate — the submodules are
+//! private and are never named from outside.
 //!
 //! | Module | Owns | Never contains |
 //! |---|---|---|

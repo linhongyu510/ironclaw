@@ -6,62 +6,6 @@ use uuid::Uuid;
 use crate::contribution::*;
 
 #[test]
-fn standing_policy_serde_back_compat_when_invite_code_missing() {
-    // Existing policy files written before the invite_code field landed
-    // must continue to parse unchanged.
-    let legacy_json = r#"{
-        "enabled": true,
-        "ingestion_endpoint": "https://example/v1/traces",
-        "bearer_token_env": "IRONCLAW_TRACE_SUBMIT_TOKEN",
-        "upload_token_issuer_url": "https://issuer.example/v1/trace-upload-claim",
-        "upload_token_issuer_allowed_hosts": ["issuer.example"],
-        "upload_token_audience": "trace-commons",
-        "upload_token_tenant_id": "tenant-a",
-        "upload_token_workload_token_env": "IRONCLAW_TRACE_WORKLOAD_TOKEN",
-        "upload_token_issuer_timeout_ms": 7000,
-        "include_message_text": false,
-        "include_tool_payloads": false,
-        "auto_submit_failed_traces": true,
-        "auto_submit_high_value_traces": true,
-        "selected_tools": [],
-        "require_manual_approval_when_pii_detected": true,
-        "min_submission_score": 0.35,
-        "credit_notice_interval_hours": 168,
-        "default_scope": "debugging_evaluation"
-    }"#;
-    let policy: StandingTraceContributionPolicy =
-        serde_json::from_str(legacy_json).expect("legacy policy parses");
-    assert!(policy.upload_token_invite_code.is_none());
-    assert!(policy.enabled);
-}
-#[test]
-fn standing_policy_serde_round_trips_invite_code_when_set() {
-    let policy =
-        StandingTraceContributionPolicy::default().set_upload_token_invite_code("INV-PILOT-001");
-    let serialized = serde_json::to_string(&policy).expect("serializes");
-    assert!(
-        serialized.contains("\"upload_token_invite_code\":\"INV-PILOT-001\""),
-        "serialized policy carries invite code: {serialized}"
-    );
-    let round: StandingTraceContributionPolicy =
-        serde_json::from_str(&serialized).expect("round trips");
-    assert_eq!(
-        round.upload_token_invite_code.as_deref(),
-        Some("INV-PILOT-001")
-    );
-}
-#[test]
-fn standing_policy_serde_omits_invite_code_when_none() {
-    // skip_serializing_if keeps existing-shape policies byte-identical
-    // for deployments that never configured an invite code.
-    let policy = StandingTraceContributionPolicy::default();
-    let serialized = serde_json::to_string(&policy).expect("serializes");
-    assert!(
-        !serialized.contains("upload_token_invite_code"),
-        "default policy must not emit upload_token_invite_code: {serialized}"
-    );
-}
-#[test]
 fn cache_key_distinguishes_different_invite_codes() {
     let make_policy = |invite: Option<&str>| {
         let policy = StandingTraceContributionPolicy::default()
@@ -268,29 +212,6 @@ fn cache_key_hashes_invite_code_with_sha256_prefix() {
         "cache key must include sha256-hashed invite code: {key}"
     );
 }
-#[test]
-fn legacy_policy_json_defaults_to_workload_token_env_auth() {
-    // Take the default policy's JSON and strip the two NEW fields to simulate
-    // a pre-upgrade policy file on disk.
-    let mut legacy = serde_json::to_value(StandingTraceContributionPolicy::default()).unwrap();
-    let obj = legacy.as_object_mut().unwrap();
-    obj.remove("auth_mode");
-    obj.remove("device_key_id");
-    let policy: StandingTraceContributionPolicy = serde_json::from_value(legacy).unwrap();
-    assert_eq!(policy.auth_mode, TraceUploadAuthMode::WorkloadTokenEnv);
-    assert!(policy.device_key_id.is_none());
-}
-#[test]
-fn device_key_policy_round_trips() {
-    let policy = StandingTraceContributionPolicy::default()
-        .set_auth_mode(TraceUploadAuthMode::DeviceKey)
-        .set_device_key_id("sha256:abc".to_string());
-    let json = serde_json::to_value(&policy).unwrap();
-    assert_eq!(json["auth_mode"], "device_key");
-    let back: StandingTraceContributionPolicy = serde_json::from_value(json).unwrap();
-    assert_eq!(back.auth_mode, TraceUploadAuthMode::DeviceKey);
-    assert_eq!(back.device_key_id.as_deref(), Some("sha256:abc"));
-}
 
 // --- DeviceKey auth mode tests for issuer_request_bearer ---
 #[tokio::test]
@@ -415,41 +336,46 @@ async fn workload_token_env_mode_reads_env_unchanged() {
 /// sets invite_code = None while WorkloadTokenEnv mode uses the policy value.
 #[test]
 fn invite_code_gated_by_auth_mode() {
+    // Asserts on the request `build_trace_upload_claim_issuer_request`
+    // actually produces. An earlier version of this test re-implemented the
+    // `match policy.auth_mode` expression and asserted against its own copy,
+    // so deleting the `DeviceKey => None` arm in production left it green.
+    let context = TraceUploadClaimContext::for_status_sync();
+
     // DeviceKey mode — invite_code must be None regardless of policy field.
     let policy_device_key = StandingTraceContributionPolicy::default()
         .set_auth_mode(TraceUploadAuthMode::DeviceKey)
         .set_upload_token_invite_code("should-not-appear".to_string());
-    let invite_code_device_key = match policy_device_key.auth_mode {
-        TraceUploadAuthMode::WorkloadTokenEnv => policy_device_key
-            .upload_token_invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        TraceUploadAuthMode::DeviceKey => None,
-    };
+    // Assert on the serialized body: that is what the issuer actually sees,
+    // so a field rename cannot hide a leak the way a struct-field read would.
+    let wire = serde_json::to_value(build_trace_upload_claim_issuer_request(
+        &policy_device_key,
+        &context,
+    ))
+    .expect("serialize claim request");
+    assert_eq!(
+        wire.get("invite_code"),
+        None,
+        "DeviceKey mode must not send invite_code: {wire}"
+    );
     assert!(
-        invite_code_device_key.is_none(),
-        "DeviceKey mode must not send invite_code"
+        !wire.to_string().contains("should-not-appear"),
+        "the policy's invite_code must not reach the wire in DeviceKey mode: {wire}"
     );
 
     // WorkloadTokenEnv mode — invite_code from policy should be forwarded.
     let policy_env = StandingTraceContributionPolicy::default()
         .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
         .set_upload_token_invite_code("invite-abc".to_string());
-    let invite_code_env = match policy_env.auth_mode {
-        TraceUploadAuthMode::WorkloadTokenEnv => policy_env
-            .upload_token_invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        TraceUploadAuthMode::DeviceKey => None,
-    };
+    let wire = serde_json::to_value(build_trace_upload_claim_issuer_request(
+        &policy_env,
+        &context,
+    ))
+    .expect("serialize claim request");
     assert_eq!(
-        invite_code_env.as_deref(),
+        wire.get("invite_code").and_then(|value| value.as_str()),
         Some("invite-abc"),
-        "WorkloadTokenEnv mode must forward invite_code from policy"
+        "WorkloadTokenEnv mode must forward invite_code from policy: {wire}"
     );
 }
 

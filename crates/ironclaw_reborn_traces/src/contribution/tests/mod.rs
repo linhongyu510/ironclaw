@@ -9,6 +9,7 @@ mod credentials;
 mod flush;
 mod maintenance;
 mod notice;
+mod policy;
 mod privacy;
 mod profile;
 mod records;
