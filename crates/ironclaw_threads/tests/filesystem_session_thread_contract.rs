@@ -25,7 +25,10 @@ use ironclaw_filesystem::{
     TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
-    ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{
+        AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
+        UserId,
+    },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
 };
@@ -37,13 +40,103 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
+
+fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
+    ProviderToolCallReferenceEnvelope {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: call_id.to_string(),
+        provider_tool_name: ProviderToolName::new("builtin__result_read")
+            .expect("provider tool name"),
+        capability_id: CapabilityId::new("builtin.result_read").unwrap(),
+        arguments: serde_json::json!({"offset": 0}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    }
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_result_ref() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-shared-continuation", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-shared-continuation");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-shared-continuation").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first_call = provider_call_reference("call_1");
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page").unwrap(),
+            provider_call: Some(first_call.clone()),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page replay").unwrap(),
+            provider_call: Some(first_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("second page").unwrap(),
+            provider_call: Some(provider_call_reference("call_2")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.message_id, first.message_id);
+    assert_ne!(second.message_id, first.message_id);
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .count(),
+        2
+    );
+}
 
 #[tokio::test]
 async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
