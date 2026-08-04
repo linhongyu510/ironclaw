@@ -77,7 +77,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// composition could roughly quadruple untouched. `[gate].loc_ceiling` is the
 /// bound that actually constrains, and the assertion below keeps it armed and
 /// consistent the same way the share ceiling is kept.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 44_021;
+///
+/// ✎ Re-recorded 44_021 → 44_392 on 2026-08-04 with the manifest's matching
+/// re-seed: #7062 landed +371 production LOC of composition wiring between
+/// this record's seeding and this branch's merge of `main` @ `be33ae138f`,
+/// and the nudge-window assertion below correctly refused a ceiling that
+/// moved without its record (371 > 200). Measured on the merged tree with
+/// `bash scripts/ci/check-composition-budget.sh --print`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 44_392;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
