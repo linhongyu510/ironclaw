@@ -459,6 +459,28 @@ fn is_test_module_file(path: &Path) -> bool {
             .any(|component| component.as_os_str() == "tests")
 }
 
+/// Refuse a symlink encountered by either ownership walk.
+///
+/// `DirEntry::file_type()` reports the **link's** type without following it, so
+/// a symlink pointing at a source directory is neither `is_dir()` nor an `.rs`
+/// file — the walk would step over the whole subtree and the gate would report
+/// clean on source it never opened. That is the same "uninspected reads as
+/// absent" failure the fail-closed reads above exist to prevent.
+///
+/// Rejecting is chosen over following: following needs canonical-root
+/// containment plus cycle detection to be safe, and neither crate scanned here
+/// has ever contained a symlink. If one is ever wanted, this panic is where the
+/// decision gets made deliberately rather than silently.
+fn reject_symlink(file_type: &std::fs::FileType, path: &Path) {
+    assert!(
+        !file_type.is_symlink(),
+        "{path:?} is a symlink; the composition ownership walks do not follow \
+         symlinks, and stepping over one would let the gate report clean on a \
+         subtree it never read. Replace it with a real path, or teach both walks \
+         to follow links with canonical-root and cycle protection."
+    );
+}
+
 /// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
 fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
@@ -480,6 +502,7 @@ fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
             let file_type = entry
                 .file_type()
                 .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            reject_symlink(&file_type, &path);
             if file_type.is_dir() {
                 stack.push(path);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
@@ -684,6 +707,7 @@ fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
             let file_type = entry
                 .file_type()
                 .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            reject_symlink(&file_type, &path);
             if file_type.is_dir() {
                 if path.file_name().and_then(|name| name.to_str()) == Some("target") {
                     continue;
@@ -820,6 +844,30 @@ mod markdown_include_scan_tests {
                 "const P: &str = include_str!(\"policy.toml\");\nconst Q: &str = \"../prompt.md\";"
             )
             .is_empty()
+        );
+    }
+
+    /// A symlinked subtree used to be stepped over silently by both walks,
+    /// because `DirEntry::file_type()` reports the link, not its target.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subtree_fails_the_walk_instead_of_being_skipped() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::fs::write(real.join("a.rs"), "// nothing\n").expect("write source");
+        std::os::unix::fs::symlink(&real, root.path().join("linked")).expect("symlink");
+
+        let panicked = std::panic::catch_unwind(|| super::rust_sources(root.path()));
+        assert!(
+            panicked.is_err(),
+            "a symlinked subtree must fail the walk, not be skipped"
+        );
+
+        let panicked = std::panic::catch_unwind(|| super::markdown_assets(root.path()));
+        assert!(
+            panicked.is_err(),
+            "a symlinked subtree must fail the markdown walk too"
         );
     }
 
