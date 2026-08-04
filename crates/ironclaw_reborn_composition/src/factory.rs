@@ -46,8 +46,8 @@ use crate::outbound::{
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, workspace_mount_view,
+    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
+    workspace_mount_view,
 };
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
@@ -349,7 +349,9 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
-    pub(crate) workspace_mounts: MountView,
+    /// The deployment's single workspace scoping decision, read by every
+    /// workspace write lane (grants, approval leases, attachment handles).
+    pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
@@ -714,12 +716,18 @@ fn open_postgres_pool_from_source(
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
     match source {
         PostgresPoolSource::Prebuilt(pool) => Ok(pool),
+        // The event store hands back the workspace's `PostgresConnectionPool`
+        // carrier; composition is the one app-layer crate chartered to hold the
+        // driver itself (PROPOSAL §11.2.6), and it needs the driver pool to
+        // build `PostgresRootFilesystem` and the auth refresh lock. Unwrap once,
+        // here, rather than letting the driver type back into a signature.
         PostgresPoolSource::Config(connection) => Ok(
             ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
                 connection.url,
                 connection.pool_max_size,
                 connection.tls_options,
-            )?,
+            )?
+            .into_driver(),
         ),
     }
 }

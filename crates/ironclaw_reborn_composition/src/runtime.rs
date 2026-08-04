@@ -407,8 +407,17 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
+// below, so the imports carry the same gate. Without it, any build that
+// compiles this crate as a *dependency* without `test-support` — e.g. the
+// PR clippy lane when the changed-package set is `{ironclaw,
+// ironclaw_reborn_config}` — sees three unused imports and fails `-D
+// warnings`. See #7119.
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::admin_users::AdminUserService;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
@@ -582,6 +591,9 @@ pub struct RebornRuntime {
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    /// The deployment's single workspace scoping decision, carried so the WebUI
+    /// attachment handle addresses the same subtree as agent tool writes.
+    pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -729,7 +741,7 @@ pub(crate) struct InteractionServiceTestParts {
     approval_requests: Arc<crate::factory::ComposedApprovalRequestStore>,
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
-    workspace_mounts: MountView,
+    workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
@@ -1366,16 +1378,10 @@ impl RebornRuntime {
     fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let extension_filesystem = &self.extension_filesystem;
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
+        crate::runtime_mounts::read_write_workspace_filesystem(
+            &self.extension_filesystem,
+            &self.workspace_mount_policy,
         )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(extension_filesystem),
-            attachment_mounts,
-        )))
     }
 
     /// Seed a bare `secret_handle` secret for an owner scope so keyed
@@ -1471,7 +1477,9 @@ impl RebornRuntime {
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
-            ironclaw_operator::LlmKeyStore::new(self.secret_store()),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                self.secret_store(),
+            )),
         )))
     }
 
@@ -4096,7 +4104,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             boot_config.clone(),
             Arc::clone(&reload_parts.reload_handle),
             Arc::clone(&reload_parts.session),
-            ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store)),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
         );
         if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
         {
@@ -4167,6 +4177,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
@@ -4520,7 +4531,9 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         return Ok(None);
     };
 
-    let keys = ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store));
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        Arc::clone(&services.secret_store),
+    ));
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await
