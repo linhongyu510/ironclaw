@@ -77,26 +77,49 @@ impl PrivacyFilterAdapter for FailingPrivacyFilterAdapter {
         })
     }
 }
+/// Sets a **real** process environment variable for the life of the guard and
+/// restores the previous value on drop.
+///
+/// The process environment is global, so the guard holds
+/// `ironclaw_common::env_helpers::lock_env()` for its whole lifetime: without
+/// it, two tests mutating the environment on different threads race, which is
+/// undefined behavior on Rust 1.82+ regardless of whether they name the same
+/// variable. The lock field is declared last so it is released *after*
+/// `Drop::drop` has restored the value.
+///
+/// The real process environment is required rather than
+/// `env_helpers::set_runtime_env`'s overlay: the sidecar isolation test needs
+/// a value a **child process** would inherit, to prove
+/// `CommandPrivacyFilterAdapter` clears it.
 pub(super) struct EnvVarRestore {
     pub(super) name: &'static str,
     pub(super) previous: Option<String>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 impl EnvVarRestore {
     pub(super) fn set(name: &'static str, value: &str) -> Self {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
         let previous = std::env::var(name).ok();
-        // SAFETY: This test-scoped guard restores the variable in Drop.
-        // The sidecar isolation test needs a real process environment
-        // value to prove `CommandPrivacyFilterAdapter` clears child env.
+        // SAFETY: serialized by the env lock held for this guard's lifetime,
+        // and restored in Drop before that lock is released.
         unsafe {
             std::env::set_var(name, value);
         }
-        Self { name, previous }
+        Self {
+            name,
+            previous,
+            _env_lock,
+        }
     }
 }
 impl Drop for EnvVarRestore {
     fn drop(&mut self) {
-        // SAFETY: Restoring the exact test-scoped variable keeps process
-        // environment mutation bounded to this guard's lifetime.
+        // The `lock_env()` guard taken in `set` is still held for this whole
+        // body — `_env_lock` is a field, so it is released only after `drop`
+        // returns.
+        //
+        // SAFETY: that lock serializes this restore against every other test
+        // that mutates the process environment.
         unsafe {
             if let Some(previous) = self.previous.as_ref() {
                 std::env::set_var(self.name, previous);

@@ -381,10 +381,19 @@ async fn device_key_auth_mode_revoke_context_self_signs_workload_jwt() {
     assert_eq!(header.kid.as_deref(), Some(promoted.device_key_id.as_str()));
 }
 #[tokio::test]
+// Holding the env lock across the await is the point: the variable must stay
+// set for the whole request, and `#[tokio::test]` drives this future on a
+// current-thread runtime, so the guard never moves between threads.
+#[allow(clippy::await_holding_lock)]
 async fn workload_token_env_mode_reads_env_unchanged() {
-    // Use a uniquely named env var so other tests cannot interfere.
+    // Serialize against every other test that touches the process
+    // environment: a unique name avoids *logical* interference, but
+    // concurrent setenv/getenv is undefined behavior on Rust 1.82+ whatever
+    // the names are.
+    let _env_lock = ironclaw_common::env_helpers::lock_env();
     let env_var = "IRONCLAW_TEST_WORKLOAD_TOKEN_UNIQUE_9f3a2b1c";
-    // SAFETY: test-only; uniquely named var not read by any other test.
+    // SAFETY: test-only, uniquely named, and serialized by the env lock held
+    // for the rest of this test.
     unsafe {
         std::env::set_var(env_var, "test-bearer-xyz");
     }
