@@ -1276,7 +1276,7 @@ async fn privately_registered_definition_survives_restart_and_installs_without_r
         "restart must preserve installed-list isolation: {extensions:#?}",
     );
 
-    restored
+    let denial = restored
         .lifecycle_service
         .execute(
             lifecycle_product_context(operator_scope),
@@ -1286,6 +1286,7 @@ async fn privately_registered_definition_survives_restart_and_installs_without_r
         )
         .await
         .expect_err("operator cannot join a restored custom MCP by guessing its package id");
+    assert_eq!(denial.code, ProductSurfaceErrorCode::InvalidRequest);
 
     assert!(
         restored
@@ -1490,6 +1491,21 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         "a custom hosted MCP registration must not grant visibility or membership to another user"
     );
 
+    let guessed_projection = services
+        .lifecycle_service
+        .project_package(
+            lifecycle_product_context(operator_scope.clone()),
+            fixture_package_ref(),
+        )
+        .await
+        .expect_err(
+            "a user who guesses the package ref must not project another user's custom MCP",
+        );
+    assert_eq!(
+        guessed_projection.code,
+        ProductSurfaceErrorCode::InvalidRequest,
+    );
+
     let creator_list = services
         .lifecycle_service
         .execute(
@@ -1531,15 +1547,16 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
     let guessed_install = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(operator_scope),
+            lifecycle_product_context(operator_scope.clone()),
             LifecycleProductAction::ExtensionInstall {
                 package_ref: fixture_package_ref(),
             },
         )
-        .await;
-    assert!(
-        guessed_install.is_err(),
-        "a user who guesses the package ref must not join another user's custom MCP"
+        .await
+        .expect_err("a user who guesses the package ref must not join another user's custom MCP");
+    assert_eq!(
+        guessed_install.code,
+        ProductSurfaceErrorCode::InvalidRequest,
     );
 
     let installation_store = services.extension_management.installation_store_for_test();
@@ -1590,9 +1607,63 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         ]),
         "only the registering user belongs to the custom MCP installation"
     );
+
+    let operator_search_after_install = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope.clone()),
+            LifecycleProductAction::ExtensionSearch {
+                query: "Fixture MCP".to_string(),
+            },
+        )
+        .await
+        .expect("tenant operator searches after the creator installs the custom MCP");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+        operator_search_after_install.payload
+    else {
+        panic!("search returns extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "installing a custom MCP must not widen its catalog visibility to another user"
+    );
+
+    let guessed_projection_after_creator_install = services
+        .lifecycle_service
+        .project_package(
+            lifecycle_product_context(operator_scope.clone()),
+            fixture_package_ref(),
+        )
+        .await
+        .expect_err(
+            "a user who guesses the package ref must not project the creator's installed custom MCP",
+        );
+    assert_eq!(
+        guessed_projection_after_creator_install.code,
+        ProductSurfaceErrorCode::InvalidRequest,
+    );
+
+    let guessed_install_after_creator_install = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect_err(
+            "a user who guesses the package ref must not join after the creator installs it",
+        );
+    assert_eq!(
+        guessed_install_after_creator_install.code,
+        ProductSurfaceErrorCode::InvalidRequest,
+    );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_custom_mcp_registration_leaves_exactly_one_managed_definition() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::NoAuth,

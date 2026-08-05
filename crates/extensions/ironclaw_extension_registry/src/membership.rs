@@ -177,5 +177,12 @@ mod tests {
             ),
             Err(ManagedUserMembershipError::EmptyManagers)
         );
+        assert_eq!(
+            ManagedUserMembership::with_managers_and_members(
+                BTreeSet::from([admin]),
+                BTreeSet::new(),
+            ),
+            Err(ManagedUserMembershipError::EmptyMembers)
+        );
     }
 }

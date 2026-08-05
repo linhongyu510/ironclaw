@@ -137,13 +137,13 @@ fn hosted_mcp_registration_does_not_enter_installation_lifecycle() {
         .find("pub async fn register(")
         .expect("hosted MCP registration entry point");
     let register_end = source[register_start..]
-        .find("async fn existing_registration_response(")
+        .find("pub async fn prepare_if_pending(")
         .map(|offset| register_start + offset)
-        .expect("registration helper boundary");
-    let register = &source[register_start..register_end];
+        .expect("installation preparation boundary");
+    let registration_pipeline = &source[register_start..register_end];
 
     assert!(
-        register.contains("admit_package_definition("),
+        registration_pipeline.contains("admit_package_definition("),
         "registration must durably admit a package definition"
     );
     for forbidden in [
@@ -153,7 +153,7 @@ fn hosted_mcp_registration_does_not_enter_installation_lifecycle() {
         "operation_lock.lock(",
     ] {
         assert!(
-            !register.contains(forbidden),
+            !registration_pipeline.contains(forbidden),
             "registration must not enter the installation lifecycle through `{forbidden}`"
         );
     }

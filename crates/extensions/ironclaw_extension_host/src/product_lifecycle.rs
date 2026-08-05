@@ -638,12 +638,10 @@ impl ExtensionLifecycleManager {
         let activation_errors = self.installation_activation_errors().await?;
         let mut summaries = Vec::new();
         for extension in extensions {
-            if let Some(summary) = self
-                .search_summary(&extension, credential_gate, caller, &activation_errors)
-                .await?
-            {
-                summaries.push(summary);
-            }
+            summaries.push(
+                self.search_summary(&extension, credential_gate, caller, &activation_errors)
+                    .await?,
+            );
         }
         let count = summaries.len();
         // The top-level phase of a multi-item search response is neutral; each
@@ -925,7 +923,7 @@ impl ExtensionLifecycleManager {
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
         activation_errors: &std::collections::HashMap<ExtensionId, String>,
-    ) -> Result<Option<LifecycleSearchExtensionSummary>, ProductOperationFailure> {
+    ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
         let installation = self.search_installation(&extension.package.id).await?;
@@ -934,19 +932,19 @@ impl ExtensionLifecycleManager {
             // caller (#5459 P1) — same masking as list/project.
             .filter(|installation| installation.owner().visible_to(caller));
         let Some(installation) = installation else {
-            return Ok(Some(LifecycleSearchExtensionSummary {
+            return Ok(LifecycleSearchExtensionSummary {
                 summary,
                 installation_phase: None,
-            }));
+            });
         };
         let has_last_error = activation_errors.contains_key(installation.extension_id());
         let phase =
             search_installation_phase(extension, &installation, credential_gate, has_last_error)
                 .await?;
-        Ok(Some(LifecycleSearchExtensionSummary {
+        Ok(LifecycleSearchExtensionSummary {
             summary,
             installation_phase: Some(phase),
-        }))
+        })
     }
 
     async fn search_installation(

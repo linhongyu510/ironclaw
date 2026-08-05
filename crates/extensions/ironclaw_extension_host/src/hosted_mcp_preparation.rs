@@ -11,7 +11,7 @@ use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, RegisterH
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
     ExtensionInstallationStorePort, ExtensionLifecycleService, ExtensionManifestRecord,
-    ExtensionPackage, ManifestSource, RegisteredPackageDefinition,
+    ExtensionPackage, ManifestSource, PackageDefinitionAudience, RegisteredPackageDefinition,
 };
 use ironclaw_host_api::{
     dispatch::CredentialStageError,
@@ -165,8 +165,10 @@ impl HostedMcpPreparationService {
             None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
         };
         let registered = RegisteredPackageDefinition::managed_by(definition, caller);
-        let available = crate::hosted_mcp_manifest::available_package(registered.definition())?
-            .with_definition_audience(registered.audience())?;
+        let available = crate::hosted_mcp_manifest::available_registered_package(
+            registered.definition(),
+            registered.audience(),
+        )?;
         match self
             .installation_store
             .admit_package_definition(registered)
@@ -206,8 +208,10 @@ impl HostedMcpPreparationService {
         {
             return Err(crate::hosted_mcp_manifest::name_unavailable());
         }
-        let available = crate::hosted_mcp_manifest::available_package(definition)?
-            .with_definition_audience(existing.audience())?;
+        let available = crate::hosted_mcp_manifest::available_registered_package(
+            definition,
+            existing.audience(),
+        )?;
         self.catalog
             .write()
             .await
@@ -682,12 +686,13 @@ impl HostedMcpPreparationService {
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         }
         if finalized.manifest().source == ManifestSource::UserRegistered {
+            let available = self
+                .user_registered_available_package(&finalized, installation)
+                .await?;
             self.catalog
                 .write()
                 .await
-                .extend(AvailableExtensionCatalog::from_packages(vec![
-                    crate::hosted_mcp_manifest::available_package(&finalized)?,
-                ]));
+                .extend(AvailableExtensionCatalog::from_packages(vec![available]));
         }
         self.sync_lifecycle_package(extension_id).await?;
         Ok(None)
@@ -759,7 +764,12 @@ impl HostedMcpPreparationService {
             )
             .await
             .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let enriched_package = crate::hosted_mcp_manifest::available_package(&enriched)?;
+        let enriched_package = if enriched.manifest().source == ManifestSource::UserRegistered {
+            self.user_registered_available_package(&enriched, installation)
+                .await?
+        } else {
+            crate::hosted_mcp_manifest::available_package(&enriched)?
+        };
         let package = enriched_package.package.clone();
         self.catalog
             .write()
@@ -769,6 +779,46 @@ impl HostedMcpPreparationService {
             ]));
         self.sync_lifecycle_package(extension_id).await?;
         Ok(package)
+    }
+
+    /// Rebuild a user-registered catalog projection from its durable audience.
+    ///
+    /// Manifest enrichment replaces the package projection during installation
+    /// preparation. Reapplying the persisted definition audience here keeps
+    /// that installation-only transition from widening definition visibility.
+    /// Legacy installations created before definition rows existed derive the
+    /// same narrow audience from their installation membership.
+    async fn user_registered_available_package(
+        &self,
+        manifest: &ExtensionManifestRecord,
+        installation: &ExtensionInstallation,
+    ) -> Result<crate::AvailableExtensionPackage, ProductOperationFailure> {
+        let registered = self
+            .installation_store
+            .get_registered_package_definition(manifest.extension_id())
+            .await
+            .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        if registered.as_ref().is_some_and(|registered| {
+            registered.definition().extension_id() != manifest.extension_id()
+                || registered.definition().manifest().source != ManifestSource::UserRegistered
+        }) {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "registered hosted MCP definition does not match its prepared manifest"
+                    .to_string(),
+            });
+        }
+        let audience = match registered
+            .as_ref()
+            .map(RegisteredPackageDefinition::audience)
+        {
+            Some(PackageDefinitionAudience::Managed(membership)) => {
+                PackageDefinitionAudience::Managed(membership.clone())
+            }
+            Some(PackageDefinitionAudience::LegacyOwnerless) | None => {
+                crate::lifecycle_restore::legacy_installed_definition_audience(installation)?
+            }
+        };
+        crate::hosted_mcp_manifest::available_registered_package(manifest, &audience)
     }
 
     async fn prepare_oauth_manifest(

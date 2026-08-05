@@ -119,10 +119,6 @@ impl RegisteredPackageDefinition {
         &self.definition
     }
 
-    pub fn into_definition(self) -> ExtensionManifestRecord {
-        self.definition
-    }
-
     pub fn audience(&self) -> &PackageDefinitionAudience {
         &self.audience
     }

@@ -385,7 +385,10 @@ pub(crate) fn available_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::UserRegistered,
-        catalog_visibility: CatalogVisibility::Tenant,
+        // A registered definition is never tenant-visible by default. Its
+        // durable audience must be applied before catalog admission; missed
+        // application fails closed instead of leaking the definition.
+        catalog_visibility: CatalogVisibility::UnscopedUserRegistered,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds: surface_kinds_from_manifest_record(record, id)?,
@@ -396,6 +399,15 @@ pub(crate) fn available_package(
         oauth_setup_override: None,
         search_aliases: Vec::new(),
     })
+}
+
+/// Construct a catalog-ready user-registered package with its durable
+/// definition audience applied atomically.
+pub(crate) fn available_registered_package(
+    record: &ExtensionManifestRecord,
+    audience: &ironclaw_extension_registry::PackageDefinitionAudience,
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
+    available_package(record)?.with_definition_audience(audience)
 }
 
 #[cfg(test)]

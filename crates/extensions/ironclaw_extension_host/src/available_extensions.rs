@@ -149,6 +149,10 @@ pub struct AvailableExtensionPackage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogVisibility {
     Tenant,
+    /// A user-registered package projection whose durable definition audience
+    /// has not been applied yet. It must remain invisible rather than falling
+    /// back to tenant-wide discovery.
+    UnscopedUserRegistered,
     Members(UserMembership),
 }
 
@@ -156,6 +160,7 @@ impl CatalogVisibility {
     fn visible_to(&self, caller: &UserId) -> bool {
         match self {
             Self::Tenant => true,
+            Self::UnscopedUserRegistered => false,
             Self::Members(membership) => membership.contains(caller),
         }
     }
@@ -169,7 +174,7 @@ pub struct AdminConfigurationCatalogUse {
 }
 
 impl AvailableExtensionPackage {
-    pub fn with_definition_audience(
+    pub(crate) fn with_definition_audience(
         mut self,
         audience: &PackageDefinitionAudience,
     ) -> Result<Self, ProductOperationFailure> {
@@ -2456,6 +2461,18 @@ handle = "web_token"
             hidden.to_string(),
             "invalid binding request: available extension was not found"
         );
+    }
+
+    #[test]
+    fn ownerless_definition_cannot_be_projected_into_catalog_visibility() {
+        let error = test_extension_package()
+            .with_definition_audience(&PackageDefinitionAudience::LegacyOwnerless)
+            .expect_err("legacy ownerless definitions require an explicit compatibility policy");
+
+        assert!(matches!(
+            error,
+            ProductOperationFailure::InvalidBindingRequest { .. }
+        ));
     }
 
     #[tokio::test]

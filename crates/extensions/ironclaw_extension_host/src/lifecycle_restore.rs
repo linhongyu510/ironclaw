@@ -67,8 +67,8 @@ pub async fn restore_extension_lifecycle_state(
                 );
                 legacy_installed_definition_audience(&installation)?
             };
-            let available = crate::hosted_mcp_manifest::available_package(manifest)?
-                .with_definition_audience(&audience)?;
+            let available =
+                crate::hosted_mcp_manifest::available_registered_package(manifest, &audience)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
             catalog_registered_user_extension_ids
                 .insert(installation.extension_id().as_str().to_string());
@@ -145,7 +145,7 @@ pub async fn restore_extension_lifecycle_state(
     Ok(())
 }
 
-fn legacy_installed_definition_audience(
+pub(crate) fn legacy_installed_definition_audience(
     installation: &ExtensionInstallation,
 ) -> Result<PackageDefinitionAudience, ProductOperationFailure> {
     let member_user_ids = installation.owner().members().ok_or_else(|| {
@@ -190,9 +190,7 @@ async fn restore_registered_only_definitions(
             continue;
         }
         let audience = restored_definition_audience(registered, legacy_tenant_owner);
-        match crate::hosted_mcp_manifest::available_package(manifest)
-            .and_then(|available| available.with_definition_audience(&audience))
-        {
+        match crate::hosted_mcp_manifest::available_registered_package(manifest, &audience) {
             Ok(available) => {
                 catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
             }

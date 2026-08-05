@@ -20,8 +20,6 @@ use ironclaw_host_api::{
 };
 use thiserror::Error;
 
-mod definition_admission;
-
 /// Extension manifest and registry failures.
 #[derive(Debug, Error)]
 pub enum ExtensionError {
@@ -188,6 +186,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
 
 mod admin_configuration;
 mod canonicalization;
+mod definition_admission;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
