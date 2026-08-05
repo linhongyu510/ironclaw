@@ -2,10 +2,12 @@
 //!
 //! Hosted-MCP **registration** is its own pipeline: it validates a
 //! user-supplied endpoint, authenticates to it, discovers its tools, and only
-//! then hands the shared extension lifecycle a *complete* package —
-//! indistinguishable from a bundled one — for persistence as an inactive,
-//! creator-owned installation. Everything about "registered but not yet
-//! discovered" belongs inside that pipeline.
+//! then admits a *complete* package definition — indistinguishable from a
+//! bundled one — into the catalog with definition-level caller visibility.
+//! Registration must not create an installation, installation membership,
+//! setup checkpoint, activation, or publication. Everything about "registered
+//! but not yet discovered" belongs inside that pipeline; only a later explicit
+//! install action may enter the shared extension lifecycle.
 //!
 //! The shared lifecycle (install → configure → activate → execute → remove)
 //! runs for every extension: gmail, slack, github, telegram. It must not learn
@@ -115,14 +117,46 @@ fn registration_boundary_allowlist_ratchets_down_only() {
         ALLOWLIST.len() <= baseline,
         "registration-boundary ALLOWLIST grew to {} entries (baseline {}): this list is \
          shrink-only. Registration owns endpoint validation, MCP-server auth, discovery, retry, \
-         and any not-yet-discovered state; the shared lifecycle receives only a complete \
-         package. Move the concept into the registration pipeline rather than allowlisting a \
+         definition admission, and any not-yet-discovered state; the shared lifecycle begins \
+         only on an explicit install action. Move the concept into the registration pipeline rather than allowlisting a \
          new pair. If the owner has approved a deliberate carve-out, raise \
          REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE in the same PR with the rationale in the PR \
          body.",
         ALLOWLIST.len(),
         REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE
     );
+}
+
+#[test]
+fn hosted_mcp_registration_does_not_enter_installation_lifecycle() {
+    let path = workspace_root()
+        .join("crates/extensions/ironclaw_extension_host/src/hosted_mcp_preparation.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let register_start = source
+        .find("pub async fn register(")
+        .expect("hosted MCP registration entry point");
+    let register_end = source[register_start..]
+        .find("async fn existing_registration_response(")
+        .map(|offset| register_start + offset)
+        .expect("registration helper boundary");
+    let register = &source[register_start..register_end];
+
+    assert!(
+        register.contains("admit_package_definition("),
+        "registration must durably admit a package definition"
+    );
+    for forbidden in [
+        "prepare_install(",
+        "upsert_manifest_and_installation(",
+        "activate_membership(",
+        "operation_lock.lock(",
+    ] {
+        assert!(
+            !register.contains(forbidden),
+            "registration must not enter the installation lifecycle through `{forbidden}`"
+        );
+    }
 }
 
 #[test]

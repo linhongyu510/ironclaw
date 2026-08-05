@@ -612,7 +612,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(
         registration.phase,
         ironclaw_extension_contracts::state::InstallationState::Installed,
-        "registration persists a private inactive installation: {registration:#?}",
+        "the shared lifecycle response vocabulary uses a neutral installed phase for the definition-only registration response: {registration:#?}",
     );
     assert!(
         server
@@ -631,18 +631,39 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     let registered_definition = services
         .extension_management
         .installation_store_for_test()
-        .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
         .await
-        .expect("installed manifest readback")
+        .expect("registered definition readback")
         .expect("registration persists the resolved definition with its membership");
     assert!(matches!(
         registered_definition
+            .definition()
             .resolved()
             .mcp
             .as_ref()
             .map(|mcp| &mcp.registration_auth),
         Some(HostedMcpAuthSelection::NoAuth)
     ));
+    let caller =
+        ironclaw_host_api::ids::UserId::new("hosted-mcp-user").expect("registering user id");
+    assert_eq!(
+        registered_definition.audience().manager_user_ids(),
+        Some(&std::collections::BTreeSet::from([caller.clone()])),
+    );
+    assert_eq!(
+        registered_definition.audience().member_user_ids(),
+        Some(&std::collections::BTreeSet::from([caller])),
+    );
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .list_installations()
+            .await
+            .expect("installation readback")
+            .is_empty(),
+        "registration must not create an installation",
+    );
     assert!(
         services
             .extension_management
@@ -1143,7 +1164,7 @@ async fn legacy_no_auth_manifest_rejected_by_server_resets_to_auth_selection() {
 }
 
 #[tokio::test]
-async fn privately_registered_inactive_mcp_survives_restart_and_activates_without_reregistration() {
+async fn privately_registered_definition_survives_restart_and_installs_without_reregistration() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::NoAuth,
         vec![HostedMcpTool::read_only("search", json!("ok"))],
@@ -1157,21 +1178,33 @@ async fn privately_registered_inactive_mcp_survives_restart_and_activates_withou
         false,
     )
     .await;
-    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-registered-only");
+    let creator_scope = webui_gate_resource_scope_for_owner("hosted-mcp-creator");
+    let operator_scope = webui_gate_resource_scope_for_owner("hosted-mcp-registered-only");
     services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(scope.clone()),
+            lifecycle_product_context(creator_scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
                 request: automatic_request(),
             },
         )
         .await
-        .expect("registration persists a private inactive installation");
+        .expect("registration persists a private definition");
 
-    // Deliberately never activate. Rebuild services over the same durable
-    // backing (simulated restart) and confirm the creator's installation
-    // aggregate restores the private definition without publishing tools.
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .list_installations()
+            .await
+            .expect("installation-store readback")
+            .is_empty(),
+        "registration must remain definition-only",
+    );
+
+    // Deliberately never install. Rebuild services over the same durable
+    // backing and confirm the private definition restores without publishing
+    // tools or synthesizing an installation.
     let restored = rebuild_lifecycle_test_services_with_auth_provider(
         &services,
         "hosted-mcp-registered-only",
@@ -1186,7 +1219,7 @@ async fn privately_registered_inactive_mcp_survives_restart_and_activates_withou
     let search = restored
         .lifecycle_service
         .execute(
-            lifecycle_product_context(scope.clone()),
+            lifecycle_product_context(creator_scope.clone()),
             LifecycleProductAction::ExtensionSearch {
                 query: "Fixture MCP".to_string(),
             },
@@ -1203,6 +1236,90 @@ async fn privately_registered_inactive_mcp_survives_restart_and_activates_withou
         "a privately registered hosted MCP must survive restart for its creator: {extensions:#?}",
     );
 
+    let operator_search = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope.clone()),
+            LifecycleProductAction::ExtensionSearch {
+                query: "Fixture MCP".to_string(),
+            },
+        )
+        .await
+        .expect("operator searches after another user's registration is restored");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = operator_search.payload
+    else {
+        panic!("search returns extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "restart must not widen a restored custom MCP to the tenant operator: {extensions:#?}",
+    );
+
+    let operator_list = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("operator lists extensions after another user's registration is restored");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = operator_list.payload
+    else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "restart must preserve installed-list isolation: {extensions:#?}",
+    );
+
+    restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect_err("operator cannot join a restored custom MCP by guessing its package id");
+
+    assert!(
+        restored
+            .extension_management
+            .installation_store_for_test()
+            .list_installations()
+            .await
+            .expect("restored installation-store readback")
+            .is_empty(),
+        "restore must not synthesize an installation for a registered definition",
+    );
+
+    let registered = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_registered_package_definition(
+            &ExtensionId::new("mcp-fixture").expect("fixture extension id"),
+        )
+        .await
+        .expect("restored definition readback")
+        .expect("restored registered definition");
+    let creator =
+        ironclaw_host_api::ids::UserId::new("hosted-mcp-creator").expect("creator user id");
+    assert_eq!(
+        registered.audience().manager_user_ids(),
+        Some(&std::collections::BTreeSet::from([creator.clone()])),
+        "restart must preserve exactly the registering manager",
+    );
+    assert_eq!(
+        registered.audience().member_user_ids(),
+        Some(&std::collections::BTreeSet::from([creator])),
+        "restart must preserve exactly the registering visible member",
+    );
+
     assert!(
         restored
             .extension_management
@@ -1210,14 +1327,14 @@ async fn privately_registered_inactive_mcp_survives_restart_and_activates_withou
             .await
             .expect("active capability projection")
             .is_empty(),
-        "an inactive registered installation must not publish tools after restart",
+        "a registered definition must not publish tools after restart",
     );
 
-    let installed = install_fixture(&restored, scope).await;
+    let installed = install_fixture(&restored, creator_scope).await;
     assert_eq!(
         installed.phase,
         ironclaw_extension_contracts::state::InstallationState::Active,
-        "the restored private installation activates without re-registration: {installed:#?}",
+        "the restored private definition installs without re-registration: {installed:#?}",
     );
 }
 
@@ -1294,12 +1411,12 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         false,
     )
     .await;
-    let admin_scope = webui_gate_resource_scope_for_owner("tenant-admin");
-    let member_scope = webui_gate_resource_scope_for_owner("tenant-member");
+    let operator_scope = webui_gate_resource_scope_for_owner("tenant-admin");
+    let creator_scope = webui_gate_resource_scope_for_owner("tenant-member");
     let registration = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(admin_scope.clone()),
+            lifecycle_product_context(creator_scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
                 request: automatic_request(),
             },
@@ -1309,7 +1426,7 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
     assert!(matches!(
         registration.payload,
         Some(LifecycleProductPayload::ExtensionInstall {
-            installed: true,
+            installed: false,
             ..
         })
     ));
@@ -1318,30 +1435,30 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
     services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(member_scope.clone()),
+            lifecycle_product_context(operator_scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
                 request: automatic_request(),
             },
         )
         .await
-        .expect_err("user B cannot claim user A's exact custom MCP registration");
+        .expect_err("tenant operator cannot claim another user's custom MCP registration");
     assert_eq!(
         server.requests().len(),
         requests_before_foreign_retry,
         "foreign re-registration is rejected from membership before endpoint egress"
     );
 
-    let admin_search = services
+    let creator_search = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(admin_scope.clone()),
+            lifecycle_product_context(creator_scope.clone()),
             LifecycleProductAction::ExtensionSearch {
                 query: "Fixture MCP".to_string(),
             },
         )
         .await
-        .expect("user A searches their registered definition");
-    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = admin_search.payload
+        .expect("creator searches their registered definition");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = creator_search.payload
     else {
         panic!("search returns extension summaries")
     };
@@ -1352,17 +1469,17 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         "the registering user must retain visibility of their custom hosted MCP"
     );
 
-    let member_search = services
+    let operator_search = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(member_scope.clone()),
+            lifecycle_product_context(operator_scope.clone()),
             LifecycleProductAction::ExtensionSearch {
                 query: "Fixture MCP".to_string(),
             },
         )
         .await
-        .expect("user B searches the shared tenant catalog");
-    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = member_search.payload
+        .expect("tenant operator searches the shared tenant catalog");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = operator_search.payload
     else {
         panic!("search returns extension summaries")
     };
@@ -1373,10 +1490,48 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         "a custom hosted MCP registration must not grant visibility or membership to another user"
     );
 
+    let creator_list = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(creator_scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("creator lists their installed extensions");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = creator_list.payload
+    else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "registration alone must not place the custom MCP in the creator's installed list"
+    );
+
+    let operator_list = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(operator_scope.clone()),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("tenant operator lists installed extensions");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = operator_list.payload
+    else {
+        panic!("list returns installed extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "tenant operators must not enumerate another user's custom MCP"
+    );
+
     let guessed_install = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(member_scope),
+            lifecycle_product_context(operator_scope),
             LifecycleProductAction::ExtensionInstall {
                 package_ref: fixture_package_ref(),
             },
@@ -1387,15 +1542,43 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
         "a user who guesses the package ref must not join another user's custom MCP"
     );
 
-    let installation = services
-        .extension_management
-        .installation_store_for_test()
+    let installation_store = services.extension_management.installation_store_for_test();
+    assert!(
+        installation_store
+            .list_installations()
+            .await
+            .expect("installation-store readback")
+            .is_empty(),
+        "registration must not create installation membership",
+    );
+    let registered = installation_store
+        .get_registered_package_definition(
+            &ExtensionId::new("mcp-fixture").expect("fixture extension id"),
+        )
+        .await
+        .expect("registered-definition readback")
+        .expect("registered definition");
+    let creator =
+        ironclaw_host_api::ids::UserId::new("tenant-member").expect("registering user id");
+    assert_eq!(
+        registered.audience().manager_user_ids(),
+        Some(&std::collections::BTreeSet::from([creator.clone()])),
+        "registration initializes exactly the caller as explicit manager",
+    );
+    assert_eq!(
+        registered.audience().member_user_ids(),
+        Some(&std::collections::BTreeSet::from([creator.clone()])),
+        "registration initializes exactly the caller as visible member",
+    );
+
+    install_fixture(&services, creator_scope).await;
+    let installation = installation_store
         .list_installations()
         .await
         .expect("installation-store readback")
         .into_iter()
         .find(|installation| installation.extension_id().as_str() == "mcp-fixture")
-        .expect("registration creates the custom MCP installation membership");
+        .expect("explicit install creates the custom MCP installation membership");
     let members = installation
         .owner()
         .members()
@@ -1403,10 +1586,122 @@ async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user
     assert_eq!(
         members,
         &std::collections::BTreeSet::from([
-            ironclaw_host_api::ids::UserId::new("tenant-admin").expect("registering user id")
+            ironclaw_host_api::ids::UserId::new("tenant-member").expect("registering user id")
         ]),
         "only the registering user belongs to the custom MCP installation"
     );
+}
+
+#[tokio::test]
+async fn concurrent_custom_mcp_registration_leaves_exactly_one_managed_definition() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "tenant-operator",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let alice_scope = webui_gate_resource_scope_for_owner("alice");
+    let bob_scope = webui_gate_resource_scope_for_owner("bob");
+
+    let alice_registration = services.lifecycle_service.execute(
+        lifecycle_product_context(alice_scope.clone()),
+        LifecycleProductAction::ExtensionRegisterHostedMcp {
+            request: automatic_request(),
+        },
+    );
+    let bob_registration = services.lifecycle_service.execute(
+        lifecycle_product_context(bob_scope.clone()),
+        LifecycleProductAction::ExtensionRegisterHostedMcp {
+            request: automatic_request(),
+        },
+    );
+    let (alice_result, bob_result) = tokio::join!(alice_registration, bob_registration);
+
+    assert_ne!(
+        alice_result.is_ok(),
+        bob_result.is_ok(),
+        "exactly one concurrent caller must win registration: alice={alice_result:#?}, bob={bob_result:#?}",
+    );
+    let (winner, loser_scope, loser_error) = if alice_result.is_ok() {
+        (
+            "alice",
+            bob_scope,
+            bob_result.expect_err("bob must lose the conflicting registration"),
+        )
+    } else {
+        (
+            "bob",
+            alice_scope,
+            alice_result.expect_err("alice must lose the conflicting registration"),
+        )
+    };
+    assert_eq!(loser_error.code, ProductSurfaceErrorCode::InvalidRequest);
+
+    let installation_store = services.extension_management.installation_store_for_test();
+    assert!(
+        installation_store
+            .list_installations()
+            .await
+            .expect("installation-store readback")
+            .is_empty(),
+        "neither concurrent registration may create an installation",
+    );
+    let registered = installation_store
+        .get_registered_package_definition(
+            &ExtensionId::new("mcp-fixture").expect("fixture extension id"),
+        )
+        .await
+        .expect("registered-definition readback")
+        .expect("winning definition");
+    let winner = ironclaw_host_api::ids::UserId::new(winner).expect("winner user id");
+    assert_eq!(
+        registered.audience().manager_user_ids(),
+        Some(&std::collections::BTreeSet::from([winner.clone()])),
+        "the losing registration must not join the winner's manager set",
+    );
+    assert_eq!(
+        registered.audience().member_user_ids(),
+        Some(&std::collections::BTreeSet::from([winner])),
+        "the losing registration must not join the winner's visibility membership",
+    );
+
+    let loser_search = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(loser_scope.clone()),
+            LifecycleProductAction::ExtensionSearch {
+                query: "Fixture MCP".to_string(),
+            },
+        )
+        .await
+        .expect("loser searches the shared tenant catalog");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = loser_search.payload
+    else {
+        panic!("search returns extension summaries")
+    };
+    assert!(
+        extensions
+            .iter()
+            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
+        "the losing caller must not discover the winner's custom MCP",
+    );
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(loser_scope),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect_err("the losing caller cannot join by guessing the package id");
 }
 
 #[tokio::test]
@@ -2058,10 +2353,23 @@ async fn explicit_oauth_registration_uses_the_selected_client_profile() {
     let definition = services
         .extension_management
         .installation_store_for_test()
-        .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .get_registered_package_definition(
+            &ExtensionId::new("mcp-fixture").expect("extension id"),
+        )
         .await
-        .expect("installed-manifest lookup")
-        .expect("selected OAuth profile persists with the creator membership");
+        .expect("registered-definition lookup")
+        .expect("selected OAuth profile persists on the registered definition");
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .list_installations()
+            .await
+            .expect("installation listing succeeds")
+            .is_empty(),
+        "selecting an OAuth profile during registration must not install the extension"
+    );
+    let definition = definition.definition();
     assert!(matches!(
         definition.resolved().mcp.as_ref().map(|mcp| &mcp.registration_auth),
         Some(HostedMcpAuthSelection::OAuth {

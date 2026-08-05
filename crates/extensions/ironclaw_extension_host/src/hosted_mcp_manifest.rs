@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::available_extensions::CatalogVisibility;
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
@@ -40,9 +41,9 @@ pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> Lifecyc
         blockers: Vec::new(),
         message: Some("Hosted MCP registration accepted.".to_string()),
         payload: Some(LifecycleProductPayload::ExtensionInstall {
-            installed: true,
+            installed: false,
             visible_capability_ids: Vec::new(),
-            next_step: "The extension is installed privately but inactive. Call extension install to attempt activation."
+            next_step: "Install this registered extension through the ordinary lifecycle."
                 .to_string(),
         }),
     }
@@ -384,6 +385,7 @@ pub(crate) fn available_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::UserRegistered,
+        catalog_visibility: CatalogVisibility::Tenant,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds: surface_kinds_from_manifest_record(record, id)?,

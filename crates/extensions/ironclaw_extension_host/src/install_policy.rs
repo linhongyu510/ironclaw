@@ -12,9 +12,7 @@
 //! installation row's member set. Tenant-wide deployment state is owned by
 //! administrator configuration, not by lifecycle membership.
 
-use std::collections::BTreeSet;
-
-use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner, ManifestSource};
+use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
@@ -23,18 +21,6 @@ use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
 /// including one initiated by the operator, is private to the caller.
 pub fn derive_owner(caller: &UserId, _tenant_operator: &UserId) -> InstallationOwner {
     InstallationOwner::user(caller.clone())
-}
-
-/// User-registered packages are private to their explicit installation
-/// members. Other catalog sources retain the ordinary discover-and-join
-/// lifecycle behavior.
-pub fn package_visible_to_caller(
-    source: ManifestSource,
-    installation: Option<&ExtensionInstallation>,
-    caller: &UserId,
-) -> bool {
-    source != ManifestSource::UserRegistered
-        || installation.is_some_and(|installation| installation.owner().visible_to(caller))
 }
 
 /// Fail-closed visibility check for lifecycle mutations on an existing
@@ -75,18 +61,14 @@ pub fn decide_install_on_existing(
     match existing_owner {
         // A tenant-shared tool is already available to every caller.
         InstallationOwner::Tenant => Err(already_installed()),
-        InstallationOwner::Users { user_ids } => {
-            if user_ids.contains(caller) {
+        InstallationOwner::Users(membership) => {
+            if membership.contains(caller) {
                 Ok(existing_owner.clone())
             } else {
                 // JOIN: the caller becomes a member alongside the others.
-                let mut user_ids = user_ids.clone();
-                user_ids.insert(caller.clone());
-                Ok(InstallationOwner::users(user_ids).map_err(|error| {
-                    ProductOperationFailure::InvalidBindingRequest {
-                        reason: format!("installation owner update failed: {error}"),
-                    }
-                })?)
+                Ok(InstallationOwner::Users(
+                    membership.joined_by(caller).ok_or_else(already_installed)?,
+                ))
             }
         }
     }
@@ -111,24 +93,12 @@ pub fn decide_remove(
 ) -> Result<RemoveDecision, ProductOperationFailure> {
     match existing_owner {
         InstallationOwner::Tenant => Ok(RemoveDecision::TearDown),
-        InstallationOwner::Users { user_ids } => {
-            let remaining: BTreeSet<UserId> = user_ids
-                .iter()
-                .filter(|member| *member != caller)
-                .cloned()
-                .collect();
-            if remaining.is_empty() {
-                Ok(RemoveDecision::TearDown)
-            } else {
-                Ok(RemoveDecision::LeaveMembers(
-                    InstallationOwner::users(remaining).map_err(|error| {
-                        ProductOperationFailure::InvalidBindingRequest {
-                            reason: format!("installation owner update failed: {error}"),
-                        }
-                    })?,
-                ))
-            }
-        }
+        InstallationOwner::Users(membership) => match membership.without(caller) {
+            Some(remaining) => Ok(RemoveDecision::LeaveMembers(InstallationOwner::Users(
+                remaining,
+            ))),
+            None => Ok(RemoveDecision::TearDown),
+        },
     }
 }
 
@@ -138,7 +108,7 @@ pub fn decide_remove(
 pub fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallScope {
     match owner {
         InstallationOwner::Tenant => LifecycleInstallScope::Shared,
-        InstallationOwner::Users { .. } => LifecycleInstallScope::Private,
+        InstallationOwner::Users(_) => LifecycleInstallScope::Private,
     }
 }
 
@@ -200,32 +170,6 @@ mod tests {
                 "denial must mask the membership: {rendered}"
             );
         }
-    }
-
-    #[test]
-    fn user_registered_packages_are_visible_only_to_installation_members() {
-        let held = installation(members(&["alice"]));
-
-        assert!(package_visible_to_caller(
-            ManifestSource::UserRegistered,
-            Some(&held),
-            &user("alice")
-        ));
-        assert!(!package_visible_to_caller(
-            ManifestSource::UserRegistered,
-            Some(&held),
-            &user("bob")
-        ));
-        assert!(!package_visible_to_caller(
-            ManifestSource::UserRegistered,
-            None,
-            &user("alice")
-        ));
-        assert!(package_visible_to_caller(
-            ManifestSource::HostBundled,
-            None,
-            &user("bob")
-        ));
     }
 
     #[test]

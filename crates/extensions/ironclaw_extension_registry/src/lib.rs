@@ -192,13 +192,17 @@ pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
+mod membership;
 mod package;
 mod registry;
 pub mod resolved;
 pub mod v2;
 pub mod v3;
 
-pub use definition_admission::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
+pub use definition_admission::{
+    PackageDefinitionAdmissionOutcome, PackageDefinitionAudience, PackageDefinitionRetention,
+    RegisteredPackageDefinition,
+};
 pub use package::{CapabilityDescriptorSchemaMode, ExtensionPackage};
 
 pub use admin_configuration::{
@@ -243,6 +247,9 @@ pub use installations::{
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
+};
+pub use membership::{
+    EmptyUserMembership, ManagedUserMembership, ManagedUserMembershipError, UserMembership,
 };
 pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 

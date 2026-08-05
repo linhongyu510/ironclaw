@@ -196,7 +196,7 @@ pub use hosted_mcp_preparation::HostedMcpPreparationDependencies;
 pub use inbound_batches::FilesystemInboundBatchStore;
 pub use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
-    ensure_caller_may_operate, install_scope_for_owner, package_visible_to_caller,
+    ensure_caller_may_operate, install_scope_for_owner,
 };
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,

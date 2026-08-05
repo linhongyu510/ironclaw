@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest};
 use ironclaw_extension_registry::{
-    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort,
-    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, InstallationOwner,
-    ManifestSource, PackageDefinitionRetention,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStorePort, ExtensionLifecycleService, ExtensionManifestRecord,
+    ExtensionPackage, ManifestSource, RegisteredPackageDefinition,
 };
 use ironclaw_host_api::{
     dispatch::CredentialStageError,
@@ -95,12 +95,10 @@ impl HostedMcpPreparationService {
             LifecyclePackageKind::Extension,
             extension_id.as_str(),
         )?;
-        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         let caller = scope.user_id.clone();
         if let Some(existing) = self
             .installation_store
-            .get_installation(&installation_id)
+            .get_registered_package_definition(&extension_id)
             .await
             .map_err(crate::product_lifecycle::map_extension_installation_error)?
         {
@@ -166,37 +164,25 @@ impl HostedMcpPreparationService {
             )?,
             None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
         };
-        // Lock order invariant: catalog write guard BEFORE operation_lock,
-        // matching `ExtensionLifecycleManager::import_bundle` /
-        // `install` (see product_lifecycle.rs). Both paths share the same
-        // catalog and operation_lock, so acquiring them in a consistent
-        // order prevents an AB-BA deadlock across concurrent callers.
-        let mut catalog = self.catalog.write().await;
-        let _guard = self.operation_lock.lock().await;
-        if let Some(existing) = self
+        let registered = RegisteredPackageDefinition::managed_by(definition, caller);
+        let available = crate::hosted_mcp_manifest::available_package(registered.definition())?
+            .with_definition_audience(registered.audience())?;
+        match self
             .installation_store
-            .get_installation(&installation_id)
+            .admit_package_definition(registered)
             .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?
         {
-            return self
-                .existing_registration_response(
-                    existing,
-                    &request,
-                    &endpoint,
-                    &package_ref,
-                    &caller,
-                )
-                .await;
+            Ok(_) => {}
+            Err(ExtensionInstallationError::PackageDefinitionConflict { .. }) => {
+                return Err(crate::hosted_mcp_manifest::name_unavailable());
+            }
+            Err(error) => {
+                return Err(crate::product_lifecycle::map_extension_installation_error(
+                    error,
+                ));
+            }
         }
-        let definition = definition
-            .with_definition_retention(PackageDefinitionRetention::RemoveWithLastInstallation);
-        let available = crate::hosted_mcp_manifest::available_package(&definition)?;
-        let plan = crate::prepare_install(&available, InstallationOwner::user(caller), None)?;
-        self.installation_store
-            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
-            .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        let mut catalog = self.catalog.write().await;
         catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
         Ok(crate::hosted_mcp_manifest::registration_response(
             package_ref,
@@ -205,26 +191,27 @@ impl HostedMcpPreparationService {
 
     async fn existing_registration_response(
         &self,
-        existing: ExtensionInstallation,
+        existing: RegisteredPackageDefinition,
         request: &RegisterHostedMcpRequest,
         endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        if !existing.owner().visible_to(caller) {
+        if !existing.audience().visible_to(caller) {
             return Err(crate::hosted_mcp_manifest::name_unavailable());
         }
-        let definition = self
-            .installation_store
-            .get_manifest(existing.extension_id())
-            .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?
-            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        let definition = existing.definition();
         if definition.manifest().source != ManifestSource::UserRegistered
-            || !registration_request_matches(&definition, request, endpoint)
+            || !registration_request_matches(definition, request, endpoint)
         {
             return Err(crate::hosted_mcp_manifest::name_unavailable());
         }
+        let available = crate::hosted_mcp_manifest::available_package(definition)?
+            .with_definition_audience(existing.audience())?;
+        self.catalog
+            .write()
+            .await
+            .extend(AvailableExtensionCatalog::from_packages(vec![available]));
         Ok(crate::hosted_mcp_manifest::registration_response(
             package_ref.clone(),
         ))
