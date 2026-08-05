@@ -132,6 +132,11 @@ test("RegistryTab renders only real installed extensions with management actions
   assert.equal(registryCards.length, 2);
   assert.equal(registryCards[0][2], registryOnlyInstalled);
   assert.equal(registryCards[0][3], "Installed");
+  assert.equal(
+    registryCards[0][4],
+    onInstall,
+    "registry-only installed entries retain the idempotent install/activate action"
+  );
   assert.equal(registryCards[1][2], availableEntry);
   assert.equal(registryCards[1][3], onInstall);
 });

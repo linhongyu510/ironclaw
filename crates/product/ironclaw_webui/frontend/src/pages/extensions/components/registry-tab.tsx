@@ -164,6 +164,7 @@ export function RegistryTab({
                   key={entry.id}
                   entry={entry.entry}
                   statusLabel={t("extensions.installed")}
+                  onInstall={onInstall}
                   isBusy={isBusy}
                 />
               )
