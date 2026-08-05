@@ -63,13 +63,13 @@ use ironclaw_assistant::{
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
     ProductSetupExtensionRequest, ProductStatusCommandInput, ProductSubmitTurnRequest,
     ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
+    ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
     RebornExecuteProductCommandResponse, RebornExtensionListResponse, RebornExtensionSurface,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
@@ -177,6 +177,7 @@ use ironclaw_product_contracts::product_wire::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState,
 };
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
