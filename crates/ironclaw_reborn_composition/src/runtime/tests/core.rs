@@ -139,7 +139,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_runtime_policy(standalone_runtime_policy())
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: None,
     }]);
@@ -1978,13 +1978,15 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2127,13 +2129,15 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     let config = ironclaw_llm::LlmConfig {
@@ -2630,13 +2634,15 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    ironclaw_operator::LlmKeyStore::new(services.secret_store())
-        .put(
-            "nearai",
-            ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
-        )
-        .await
-        .expect("stored key seeded");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        services.secret_store(),
+    ))
+    .put(
+        "nearai",
+        ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
+    )
+    .await
+    .expect("stored key seeded");
     drop(services);
 
     // Provider selection lives entirely in config.toml (mirrors an
@@ -2946,15 +2952,15 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
 struct RecordingSandboxTransport;
 
 #[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
         &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
+        _request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: String::new(),
             saved_output: None,
             exit_code: 0,
@@ -5300,11 +5306,47 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
         .expect("production channel-host attachment lander has write authority");
 
     assert_eq!(refs.len(), 1);
+    // A single-user deployment keeps the shared workspace root, so an inbound
+    // attachment stays where its host aliases and browser look for it.
+    assert_landed_under(
+        &runtime,
+        &refs[0],
+        "/projects/workspace",
+        "standalone channel attachment",
+    )
+    .await;
     lander
         .rollback(&thread_scope, &refs)
         .await
         .expect("production channel-host attachment lander has batch rollback authority");
     runtime.shutdown().await.expect("runtime shutdown");
+}
+
+/// Assert the landed attachment's bytes are physically readable under
+/// `expected_root` on the composed filesystem — the placement claim the
+/// scoped-view read ports cannot make, because they resolve through the very
+/// mount view under test.
+async fn assert_landed_under(
+    runtime: &crate::RebornRuntime,
+    landed: &ironclaw_common::AttachmentRef,
+    expected_root: &str,
+    label: &str,
+) {
+    use ironclaw_filesystem::RootFilesystem;
+
+    let storage_key = landed
+        .storage_key
+        .as_deref()
+        .expect("landed attachment carries a storage_key");
+    let relative = storage_key
+        .strip_prefix("/workspace/")
+        .expect("attachment storage keys are workspace-scoped");
+    let path = ironclaw_host_api::path::VirtualPath::new(format!("{expected_root}/{relative}"))
+        .expect("composed attachment path");
+    assert!(
+        runtime.extension_filesystem.read_file(&path).await.is_ok(),
+        "{label} should be readable at {path:?}"
+    );
 }
 
 async fn query_webui_extension_setup(

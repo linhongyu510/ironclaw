@@ -1565,7 +1565,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -1580,9 +1580,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -1876,7 +1874,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -1891,9 +1889,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -2423,7 +2419,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2436,9 +2432,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -2674,7 +2668,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2687,9 +2681,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -2759,7 +2751,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2774,9 +2766,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -2962,7 +2952,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2977,9 +2967,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -3300,7 +3288,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3315,9 +3303,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -3731,7 +3717,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3746,9 +3732,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
             capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
@@ -3889,7 +3873,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4157,7 +4141,7 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -4368,7 +4352,7 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -4750,7 +4734,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4763,9 +4747,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -4856,7 +4838,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -4880,9 +4862,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -5106,7 +5086,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -5130,9 +5110,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
@@ -5228,7 +5206,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -5252,9 +5230,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
-            approval_settings: Arc::new(
-                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-            ),
+            approval_settings: Arc::new(ironclaw_approvals::EmptyApprovalSettingsProvider),
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
