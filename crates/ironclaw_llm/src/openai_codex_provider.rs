@@ -230,6 +230,9 @@ impl OpenAiCodexProvider {
                     None
                 });
 
+            // silent-ok: the bounded provider error body is diagnostic only;
+            // status-based classification remains authoritative if reading it
+            // times out or fails.
             let response_body = tokio::time::timeout(
                 Duration::from_secs(5),
                 crate::error::read_bounded_provider_error_body(response),

@@ -343,6 +343,7 @@ impl<M: CompletionModel> RigAdapter<M> {
 
     /// Enable rig-core streaming for a provider whose live request path has
     /// been validated against its upstream API.
+    #[cfg(test)]
     pub(crate) fn with_native_streaming(mut self) -> Self {
         self.native_streaming = true;
         self
@@ -2222,6 +2223,88 @@ mod tests {
                 cached_input_tokens: 0,
             })
         }
+    }
+
+    #[derive(Clone)]
+    struct MaxTokensCompletionModel {
+        expected_max_tokens: Option<u64>,
+    }
+
+    impl CompletionModel for MaxTokensCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            assert_eq!(request.max_tokens, self.expected_max_tokens);
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("ok")),
+                usage: RigUsage::new(),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                }),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "streaming path must not be used".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_applies_provider_default_max_tokens() {
+        const DEFAULT_MAX_TOKENS: u32 = 8192;
+        let adapter = RigAdapter::new(
+            MaxTokensCompletionModel {
+                expected_max_tokens: Some(u64::from(DEFAULT_MAX_TOKENS)),
+            },
+            "default-max-tokens",
+        )
+        .with_default_max_tokens(DEFAULT_MAX_TOKENS);
+
+        let response = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect("completion uses provider default max_tokens");
+
+        assert_eq!(response.content, "ok");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_explicit_max_tokens_over_provider_default() {
+        let adapter = RigAdapter::new(
+            MaxTokensCompletionModel {
+                expected_max_tokens: Some(4096),
+            },
+            "explicit-max-tokens",
+        )
+        .with_default_max_tokens(8192);
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("hello")], Vec::new())
+            .with_max_tokens(4096);
+
+        let response = adapter
+            .complete_with_tools(request)
+            .await
+            .expect("tool completion preserves explicit max_tokens");
+
+        assert_eq!(response.content.as_deref(), Some("ok"));
     }
 
     #[derive(Clone)]
