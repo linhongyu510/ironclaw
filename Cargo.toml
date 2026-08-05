@@ -6,7 +6,7 @@ exclude = [
     # needs libclang + a C toolchain). Its §5 home is `tools/`, beside the
     # stress harness — WS7 relocated it out of `crates/`, which after the
     # family moves holds exactly the ten family directories (PROPOSAL §5,
-    # §12.13 D-P).
+    # §12.13 D-O).
     "tools/ironclaw_silk_decoder",
     # The root `fuzz/` package was deleted in WS8: it declared
     # `[dependencies.ironclaw] path = ".."` and fuzzed `ironclaw::safety` /

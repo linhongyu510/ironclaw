@@ -47,7 +47,7 @@ directories had in common with the silk decoder (also `exclude`d from the root
 workspace, also never built here), so one rule covered both; the silk-decoder
 half was a latent-bug fix that arrived with it. WS7 then moved that helper out
 of `crates/` entirely (`tools/ironclaw_silk_decoder`, PROPOSAL §5 / §12.13
-D-P), so it is now excluded by *scope* rather than by the `[workspace]` rule
+D-O), so it is now excluded by *scope* rather than by the `[workspace]` rule
 and the guest components are the rule's remaining members. The rule stays: it
 is what keeps a future `[workspace]`-rooted directory under `crates/` out of
 the denominators.
