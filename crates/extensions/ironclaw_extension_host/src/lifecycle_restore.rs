@@ -58,7 +58,7 @@ pub async fn restore_extension_lifecycle_state(
             let audience = if let Some(registered) =
                 registered_by_extension.get(manifest.extension_id().as_str())
             {
-                restored_definition_audience(registered, legacy_tenant_owner)
+                restored_installed_definition_audience(registered.audience(), &installation)?
             } else {
                 tracing::warn!(
                     extension_id = manifest.extension_id().as_str(),
@@ -143,6 +143,24 @@ pub async fn restore_extension_lifecycle_state(
     )
     .await?;
     Ok(())
+}
+
+fn restored_installed_definition_audience(
+    audience: &PackageDefinitionAudience,
+    installation: &ExtensionInstallation,
+) -> Result<PackageDefinitionAudience, ProductOperationFailure> {
+    match audience {
+        PackageDefinitionAudience::Managed(membership) => {
+            Ok(PackageDefinitionAudience::Managed(membership.clone()))
+        }
+        PackageDefinitionAudience::LegacyOwnerless => {
+            tracing::warn!(
+                extension_id = installation.extension_id().as_str(),
+                "restoring ownerless registered definition from installation membership"
+            );
+            legacy_installed_definition_audience(installation)
+        }
+    }
 }
 
 pub(crate) fn legacy_installed_definition_audience(
@@ -481,9 +499,13 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 #[cfg(test)]
 mod tests {
-    use super::{map_extension_error, map_extension_installation_error};
+    use super::{
+        map_extension_error, map_extension_installation_error,
+        restored_installed_definition_audience,
+    };
     use ironclaw_extension_registry::{
-        ExtensionError, ExtensionInstallationError, InstallationOwner, PackageDefinitionAudience,
+        ExtensionError, ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+        ExtensionManifestRef, InstallationOwner, PackageDefinitionAudience,
     };
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -563,6 +585,34 @@ effects = ["network", "use_secret"]
             ironclaw_extension_registry::PackageRootBinding::Virtual,
         )
         .expect("fixture manifest parses")
+    }
+
+    #[test]
+    fn installed_ownerless_definition_restores_from_installation_membership() {
+        let owner = ironclaw_host_api::ids::UserId::new("legacy-owner").expect("valid owner");
+        let operator =
+            ironclaw_host_api::ids::UserId::new("tenant-operator").expect("valid operator");
+        let record = fixture_record("mcp-legacy-owner", "legacy owner fixture");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(record.extension_id().as_str()).expect("installation id"),
+            record.extension_id().clone(),
+            ExtensionManifestRef::new(
+                record.extension_id().clone(),
+                record.manifest_hash().cloned(),
+            ),
+            Vec::new(),
+            chrono::Utc::now(),
+            InstallationOwner::user(owner.clone()),
+        )
+        .expect("legacy user-owned installation");
+
+        let restored = restored_installed_definition_audience(
+            &PackageDefinitionAudience::LegacyOwnerless,
+            &installation,
+        )
+        .expect("installed legacy audience derives from installation membership");
+        assert!(restored.visible_to(&owner));
+        assert!(!restored.visible_to(&operator));
     }
 
     /// Install may reuse a definition already registered in the catalog, but
