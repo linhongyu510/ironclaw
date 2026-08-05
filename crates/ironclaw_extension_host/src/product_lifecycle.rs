@@ -86,56 +86,6 @@ use crate::{
     install_scope_for_owner,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExtensionActivationState {
-    Installed,
-    Enabled,
-    Disabled,
-}
-
-trait ExtensionInstallationActivationCompat {
-    fn activation_state(&self) -> ExtensionActivationState;
-}
-
-impl ExtensionInstallationActivationCompat for ExtensionInstallation {
-    fn activation_state(&self) -> ExtensionActivationState {
-        match ExtensionInstallation::persisted_activation_state(self) {
-            PersistedExtensionActivationState::Installed => ExtensionActivationState::Installed,
-            PersistedExtensionActivationState::Disabled => ExtensionActivationState::Disabled,
-            PersistedExtensionActivationState::Enabled => ExtensionActivationState::Enabled,
-        }
-    }
-}
-
-#[async_trait]
-trait ExtensionInstallationStoreActivationCompat {
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError>;
-}
-
-#[async_trait]
-impl<T> ExtensionInstallationStoreActivationCompat for T
-where
-    T: ironclaw_extensions::ExtensionInstallationStorePort + ?Sized,
-{
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError> {
-        let state = match state {
-            ExtensionActivationState::Installed => PersistedExtensionActivationState::Installed,
-            ExtensionActivationState::Disabled => PersistedExtensionActivationState::Disabled,
-            ExtensionActivationState::Enabled => PersistedExtensionActivationState::Enabled,
-        };
-        self.set_persisted_activation_state(installation_id, state)
-            .await
-    }
-}
-
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
@@ -1445,7 +1395,7 @@ impl ExtensionLifecycleManager {
             package_ref,
             &extension_id,
             &installation_id,
-            installation.activation_state(),
+            installation.persisted_activation_state(),
             package,
         )
         .await
@@ -1456,10 +1406,10 @@ impl ExtensionLifecycleManager {
         package_ref: LifecyclePackageRef,
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
-        previous_state: ExtensionActivationState,
+        previous_state: PersistedExtensionActivationState,
         active_package: ExtensionPackage,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        if previous_state == ExtensionActivationState::Enabled
+        if previous_state == PersistedExtensionActivationState::Enabled
             && self
                 .active_extensions
                 .snapshot()
@@ -1480,7 +1430,10 @@ impl ExtensionLifecycleManager {
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
             .installation_store
-            .set_activation_state(installation_id, ExtensionActivationState::Enabled)
+            .set_persisted_activation_state(
+                installation_id,
+                PersistedExtensionActivationState::Enabled,
+            )
             .await
         {
             if let Err(rollback_error) = self.disable_lifecycle_package(extension_id).await {
@@ -1493,7 +1446,7 @@ impl ExtensionLifecycleManager {
             return Err(map_extension_installation_error(error));
         }
         if let Err(error) = self.active_extensions.publish(&active_package) {
-            if previous_state != ExtensionActivationState::Enabled
+            if previous_state != PersistedExtensionActivationState::Enabled
                 && let Err(rollback_error) = self.disable_lifecycle_package(extension_id).await
             {
                 return Err(compensation_failure(
@@ -1504,7 +1457,7 @@ impl ExtensionLifecycleManager {
             }
             if let Err(cleanup_error) = self
                 .installation_store
-                .set_activation_state(installation_id, previous_state)
+                .set_persisted_activation_state(installation_id, previous_state)
                 .await
             {
                 return Err(compensation_failure(
@@ -1529,7 +1482,7 @@ impl ExtensionLifecycleManager {
                     cleanup_error,
                 ));
             }
-            if previous_state != ExtensionActivationState::Enabled {
+            if previous_state != PersistedExtensionActivationState::Enabled {
                 // Best-effort unwind: the state restore below is the critical
                 // step, so a disable failure here is logged, not propagated
                 // (returning early would skip the activation-state restore).
@@ -1542,7 +1495,7 @@ impl ExtensionLifecycleManager {
             }
             if let Err(cleanup_error) = self
                 .installation_store
-                .set_activation_state(installation_id, previous_state)
+                .set_persisted_activation_state(installation_id, previous_state)
                 .await
             {
                 return Err(compensation_failure(
@@ -2106,9 +2059,9 @@ impl ExtensionLifecycleManager {
             let restore_package = lifecycle_package.as_ref().or(active_package.as_ref());
             if let Some(package) = restore_package {
                 let previous_state = if active_package.is_some() {
-                    ExtensionActivationState::Enabled
+                    PersistedExtensionActivationState::Enabled
                 } else {
-                    ExtensionActivationState::Installed
+                    PersistedExtensionActivationState::Installed
                 };
                 if let Err(restore_error) = self
                     .restore_lifecycle_package(package, previous_state)
@@ -2207,7 +2160,7 @@ impl ExtensionLifecycleManager {
                 }
             }
         }
-        let previous_state = installation.activation_state();
+        let previous_state = installation.persisted_activation_state();
         let lifecycle_package = match self.lifecycle_package(&extension_id).await {
             Ok(package) => package,
             Err(error) => {
@@ -2235,7 +2188,10 @@ impl ExtensionLifecycleManager {
             .unwrap_or_else(|| lifecycle_package.clone());
         if let Err(error) = self
             .installation_store
-            .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
+            .set_persisted_activation_state(
+                &installation_id,
+                PersistedExtensionActivationState::Disabled,
+            )
             .await
         {
             let original_error = map_extension_installation_error(error);
@@ -2264,7 +2220,7 @@ impl ExtensionLifecycleManager {
             }
             if let Err(cleanup_error) = self
                 .installation_store
-                .set_activation_state(&installation_id, previous_state)
+                .set_persisted_activation_state(&installation_id, previous_state)
                 .await
             {
                 return Err(compensation_failure(
@@ -2302,7 +2258,7 @@ impl ExtensionLifecycleManager {
             }
             if let Err(cleanup_error) = self
                 .installation_store
-                .set_activation_state(&installation_id, previous_state)
+                .set_persisted_activation_state(&installation_id, previous_state)
                 .await
             {
                 return Err(compensation_failure(
@@ -2351,7 +2307,7 @@ impl ExtensionLifecycleManager {
             }
             if let Err(restore_error) = self
                 .installation_store
-                .set_activation_state(&installation_id, previous_state)
+                .set_persisted_activation_state(&installation_id, previous_state)
                 .await
                 .map_err(map_extension_installation_error)
             {
@@ -2555,7 +2511,7 @@ impl ExtensionLifecycleManager {
     async fn restore_lifecycle_package(
         &self,
         package: &ExtensionPackage,
-        previous_state: ExtensionActivationState,
+        previous_state: PersistedExtensionActivationState,
     ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         lifecycle
@@ -2563,13 +2519,14 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_error)?;
         match previous_state {
-            ExtensionActivationState::Enabled => {
+            PersistedExtensionActivationState::Enabled => {
                 lifecycle
                     .enable(&package.id)
                     .await
                     .map_err(map_extension_error)?;
             }
-            ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
+            PersistedExtensionActivationState::Installed
+            | PersistedExtensionActivationState::Disabled => {
                 lifecycle
                     .disable(&package.id)
                     .await
@@ -2592,9 +2549,9 @@ impl ExtensionLifecycleManager {
     fn restore_active_publication(
         &self,
         package: &ExtensionPackage,
-        previous_state: ExtensionActivationState,
+        previous_state: PersistedExtensionActivationState,
     ) -> Result<(), ProductOperationFailure> {
-        if previous_state == ExtensionActivationState::Enabled {
+        if previous_state == PersistedExtensionActivationState::Enabled {
             self.active_extensions.publish(package)?;
         }
         Ok(())
@@ -2735,7 +2692,9 @@ impl crate::ChannelConfigReactivation for ExtensionLifecycleManager {
             else {
                 return Ok(());
             };
-            if installation.activation_state() != ExtensionActivationState::Enabled {
+            if installation.persisted_activation_state()
+                != PersistedExtensionActivationState::Enabled
+            {
                 return Ok(());
             }
             let Some(host) = self.generic_host.get() else {
@@ -2984,19 +2943,19 @@ pub(crate) fn extension_ids_from_package_ref(
 /// still surfaces `Failed` while the host record carries the reason.
 /// `Configured` is derived one layer up from credential readiness.
 fn installation_state_for_activation(
-    state: ExtensionActivationState,
+    state: PersistedExtensionActivationState,
     has_last_error: bool,
 ) -> InstallationState {
     match state {
-        ExtensionActivationState::Enabled => {
+        PersistedExtensionActivationState::Enabled => {
             if has_last_error {
                 InstallationState::Failed
             } else {
                 InstallationState::Active
             }
         }
-        ExtensionActivationState::Disabled => InstallationState::Disabled,
-        ExtensionActivationState::Installed => {
+        PersistedExtensionActivationState::Disabled => InstallationState::Disabled,
+        PersistedExtensionActivationState::Installed => {
             if has_last_error {
                 InstallationState::Failed
             } else {
@@ -3042,7 +3001,7 @@ fn installation_state_for_installation(
     if !has_activatable_surface && !has_last_error {
         return InstallationState::Installed;
     }
-    installation_state_for_activation(installation.activation_state(), has_last_error)
+    installation_state_for_activation(installation.persisted_activation_state(), has_last_error)
 }
 
 async fn search_installation_phase(

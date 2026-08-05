@@ -808,6 +808,9 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
             "ironclaw_host_runtime",
             "ironclaw_product",
             "ironclaw_reborn_composition",
+            // #7198: the release-pair coordinator invokes the extensions-owned
+            // snapshot importer; it does not decode or rewrite its wire format.
+            "ironclaw_release_migration",
         ],
     },
     DowngradePin {
