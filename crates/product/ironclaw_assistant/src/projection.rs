@@ -25,7 +25,6 @@ use ironclaw_event_streams::{
 };
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
     RedactedString,
@@ -38,6 +37,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneSink;
+use ironclaw_loop_host::SkillActivationObserver;
 use ironclaw_outbound::OutboundStateStore;
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,

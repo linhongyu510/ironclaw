@@ -18,7 +18,6 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ProjectionStreamError,
     ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     runtime::RuntimeKind,
@@ -27,6 +26,7 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
     LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
 };
+use ironclaw_loop_host::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
