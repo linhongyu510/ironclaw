@@ -40,7 +40,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -168,8 +168,8 @@ jobs:
           # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
           # without either one needing to be conditional.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
@@ -257,8 +257,8 @@ jobs:
           # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
           # without either one needing to be conditional.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm

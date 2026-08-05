@@ -210,8 +210,8 @@ jobs:
           # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
           # without either one needing to be conditional.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
