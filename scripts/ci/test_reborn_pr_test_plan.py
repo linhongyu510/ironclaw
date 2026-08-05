@@ -793,6 +793,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
             "scripts/codebase-graph.sh",
+            "tests/test_smoke_release_binary.py",
+            "tests/test_release_upgrade_canary.py",
             ".gitignore",
         ):
             with self.subTest(path=path):

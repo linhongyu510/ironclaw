@@ -188,6 +188,11 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
     "scripts/codebase-graph.sh",
+    # Release artifact harness self-tests are run by Code Style's fast
+    # deterministic checks. They validate the release workflow and packaged
+    # binary lifecycle, not a Reborn Rust test lane.
+    "tests/test_smoke_release_binary.py",
+    "tests/test_release_upgrade_canary.py",
     # Container build/startup inputs. `platform-and-compat.yml` keys
     # `has_docker_risk` off the Dockerfile pair and owns the image build;
     # `docker/reborn/entrypoint.sh` is additionally exercised by the shipping
