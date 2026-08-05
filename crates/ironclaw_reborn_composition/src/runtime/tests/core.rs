@@ -635,12 +635,14 @@ use rust_decimal_macros::dec;
 use crate::RebornRuntimeProcessBinding;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
-    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
-    TriggerPollerSettings,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
 };
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
+use ironclaw_triggers::{
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError,
+};
 
 use super::{RebornSkillActivationSource, build_reborn_runtime};
 

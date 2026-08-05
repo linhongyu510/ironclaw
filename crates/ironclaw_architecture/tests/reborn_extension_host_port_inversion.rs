@@ -203,7 +203,9 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
 ///
-/// **WS2.5 took it 9 -> 5.** Four rows fell together, all by the same move: the
+/// **This batch took it 9 -> 2, in two moves.**
+///
+/// *WS2.5 took 9 -> 5.* Four rows fell together, all by the same move: the
 /// port-facing vocabulary went to the crate that owns it, and product maps at
 /// its boundary. `channel_connection.rs` and `product_lifecycle.rs` speak
 /// `ironclaw_auth::{ChannelConnectionService, ChannelAuthAccountState}` and the
@@ -212,23 +214,27 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// `ironclaw_auth::product_prompt` for the challenge family and
 /// `ironclaw_product_contracts::approval_prompt` for the approval projection.
 ///
-/// ✎ **Union on the batch-2 merge, 2026-08-05: 0.** The D-A factory port took
-/// the two `assembly` rows and batch-2 (#7174, merged via #7181) took the three
-/// `adapter-registry` rows — each branch's survivors were exactly the other's
-/// discharges, so the union ledger is empty and the flip is unblocked.
-/// **The §12.11 D-A factory port then took it 5 -> 3.** Both `assembly` rows
-/// fell together and by the same move: the per-extension product cone is now
-/// built by `ChannelWorkflowFactory` (declared in `ironclaw_product_contracts`,
-/// implemented by `ironclaw_product::RebornChannelWorkflowFactory`, injected
-/// through `GenericChannelHostDeps`), and the proactive half by
+/// *WS5 then took 5 -> 2.* The whole `adapter-registry` class went with the
+/// `[product_adapter.*]` manifest surface: `product_adapter_section` moved out
+/// of `ironclaw_product::adapter_registry` into
+/// `ironclaw_extension_contracts`, so `available_extensions.rs`,
+/// `channel_lifecycle.rs`, and `host_api_contracts.rs` now name the contracts
+/// crate rather than product.
+///
+/// **The §12.11 D-A factory port took the last two, 2 -> 0 (2026-08-05).** Both
+/// `assembly` rows fell together and by the same move: the per-extension
+/// product cone is now built by `ChannelWorkflowFactory` (declared in
+/// `ironclaw_product_contracts`, implemented by
+/// `ironclaw_product::RebornChannelWorkflowFactory`, injected through
+/// `GenericChannelHostDeps`), and the proactive half by
 /// `ironclaw_outbound::TriggeredRunDelivery` — declared beside the
 /// triggered-delivery vocabulary it already carries, the same placement rule
 /// WS2.5 applied to the auth ports. `channel_host.rs` states the shape and
 /// consumes the result; `channel_triggered_delivery.rs` routes a fire to a
-/// driver composition built. Neither constructs a product type.
-///
-/// The three survivors are exactly one class and it is not vocabulary:
-/// `adapter-registry` (CHECKLIST WS5's `product` narrows row).
+/// driver composition built. Neither constructs a product type. (The two
+/// halves landed on different branches — the D-A port on the #7202 line, the
+/// adapter-registry move via #7181 — and their union emptied the ledger, which
+/// is what released the manifest edge and the layer flip.)
 const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 0;
 
 /// Workspace package metadata, resolved once per test binary.
