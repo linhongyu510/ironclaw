@@ -530,7 +530,7 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
-    let admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner> =
+    let admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
@@ -866,7 +866,7 @@ pub(super) async fn build_backend_production(
         .filter_map(|manifest| {
             channel_extension_bindings
                 .iter()
-                .find(|binding| binding.extension_id == manifest.id.as_str())
+                .find(|binding| binding.extension_id == manifest.id)
                 .map(|binding| {
                     ironclaw_extension_host::DeploymentChannelBinding::new(
                         Arc::clone(manifest),

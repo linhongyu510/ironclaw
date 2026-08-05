@@ -25,7 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
-pub mod adapter_registry;
+mod admin_user_directory;
 mod approval_interaction;
 mod approval_prompt;
 mod auth_continuation;
@@ -33,6 +33,7 @@ mod auth_interaction;
 mod automation_product_service;
 mod automation_thread_metadata;
 mod binding_ref;
+mod blocked_auth_resume;
 mod channel_workflow;
 mod command_admission;
 mod command_dispatch;
@@ -54,6 +55,7 @@ mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
+mod process_gate_turn_view;
 mod product_surface_inbound;
 mod project_create_capability;
 mod project_service;
@@ -68,6 +70,9 @@ pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create
 pub use project_service::RebornProjectService;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
+pub use admin_user_directory::{
+    AdminSecretProvisioner, RebornAdminUserDirectory, RejectingAdminApiTokenMinter,
+};
 pub use approval_interaction::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
@@ -112,6 +117,7 @@ pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
     RebornChannelWorkflowServices, channel_conversation_services,
 };
+pub use blocked_auth_resume::BlockedAuthResumeFanout;
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
 // workflow factory hands a live binding service back to a caller that sits
@@ -135,6 +141,7 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 pub use ironclaw_product_contracts::binding::{
     ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
     route_kind_for_inbound_payload,
@@ -172,8 +179,6 @@ pub use scoped_fs::{
 };
 
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
-pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
-pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,

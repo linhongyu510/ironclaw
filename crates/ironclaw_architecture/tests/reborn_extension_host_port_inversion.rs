@@ -197,25 +197,7 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 /// trait residue above), `adapter-registry` (manifest projection, owned by
 /// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
 /// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
-const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
-    (
-        "available_extensions.rs",
-        "adapter-registry: product_adapter_sections manifest projection \
-         (owned by CHECKLIST WS5's product-narrows row; the strategy-alias \
-         half of this row fell to #7143's import repoint)",
-    ),
-    (
-        "channel_lifecycle.rs",
-        "adapter-registry: PRODUCT_ADAPTER_HOST_API_ID section filter (the \
-         strategy-alias half fell to #7143's import repoint)",
-    ),
-    (
-        "host_api_contracts.rs",
-        "adapter-registry: registers product's \
-         register_product_adapter_host_api_contract into the manifest contract \
-         registry (owned by CHECKLIST WS5's product-narrows row)",
-    ),
-];
+const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[];
 
 /// Ceiling on the reference ledger. Only ever moves down — growing the frozen
 /// list past it needs this constant raised in the same PR, which is the
@@ -230,6 +212,10 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// `ironclaw_auth::product_prompt` for the challenge family and
 /// `ironclaw_product_contracts::approval_prompt` for the approval projection.
 ///
+/// ✎ **Union on the batch-2 merge, 2026-08-05: 0.** The D-A factory port took
+/// the two `assembly` rows and batch-2 (#7174, merged via #7181) took the three
+/// `adapter-registry` rows — each branch's survivors were exactly the other's
+/// discharges, so the union ledger is empty and the flip is unblocked.
 /// **The §12.11 D-A factory port then took it 5 -> 3.** Both `assembly` rows
 /// fell together and by the same move: the per-extension product cone is now
 /// built by `ChannelWorkflowFactory` (declared in `ironclaw_product_contracts`,
@@ -243,7 +229,7 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 ///
 /// The three survivors are exactly one class and it is not vocabulary:
 /// `adapter-registry` (CHECKLIST WS5's `product` narrows row).
-const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 3;
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 0;
 
 /// Workspace package metadata, resolved once per test binary.
 ///
