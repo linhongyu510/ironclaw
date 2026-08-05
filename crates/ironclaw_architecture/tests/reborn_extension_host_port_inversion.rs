@@ -208,7 +208,9 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
 ///
-/// **WS2.5 took it 9 -> 5.** Four rows fell together, all by the same move: the
+/// **This batch took it 9 -> 2, in two moves.**
+///
+/// *WS2.5 took 9 -> 5.* Four rows fell together, all by the same move: the
 /// port-facing vocabulary went to the crate that owns it, and product maps at
 /// its boundary. `channel_connection.rs` and `product_lifecycle.rs` speak
 /// `ironclaw_auth::{ChannelConnectionService, ChannelAuthAccountState}` and the
@@ -217,9 +219,17 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// `ironclaw_auth::product_prompt` for the challenge family and
 /// `ironclaw_product_contracts::approval_prompt` for the approval projection.
 ///
-/// The five survivors are exactly two classes and neither is vocabulary: three
-/// `adapter-registry` rows (CHECKLIST WS5's `product` narrows row) and two
-/// `assembly` rows (§12.11 D-A's factory port, unstarted).
+/// *WS5 then took 5 -> 2.* The whole `adapter-registry` class went with the
+/// `[product_adapter.*]` manifest surface: `product_adapter_section` moved out
+/// of `ironclaw_product::adapter_registry` into
+/// `ironclaw_extension_contracts`, so `available_extensions.rs`,
+/// `channel_lifecycle.rs`, and `host_api_contracts.rs` now name the contracts
+/// crate rather than product.
+///
+/// The two survivors are one class — `assembly` — and neither is vocabulary:
+/// `channel_host.rs` (which also still carries a `port` blocker) and
+/// `channel_triggered_delivery.rs`, both inside §12.11 D-A's factory-port
+/// scope, unstarted.
 const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 2;
 
 /// Workspace package metadata, resolved once per test binary.
