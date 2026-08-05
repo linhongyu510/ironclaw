@@ -8,7 +8,7 @@ columns.
 
 `ironclaw_release_migration` owns the bounded release-pair lease, ordered
 cross-domain transforms, read-back checks, and redacted completion evidence.
-`ironclaw_reborn_composition` only wires that service into startup and keeps
+`ironclaw_composition` only wires that service into startup and keeps
 extension restoration and every background writer behind its completion
 barrier. The owning domain crates remain responsible for their persisted wire
 transforms.

@@ -1,6 +1,6 @@
 use super::*;
 use super::{oauth_channel::*, proof_code_channel::*};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     AdminConfigurationField, ExtensionAdminConfigurationDescriptor, ExtensionInstallation,
     ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
     ExtensionManifestRef, InstallationOwner, ManifestHash, ManifestSource, PackageRootBinding,

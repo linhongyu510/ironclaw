@@ -16,7 +16,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::external::ExternalActorBindingEpoch;
-use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionInstallationStorePort};
+use ironclaw_extension_registry::{AdminConfigurationGroupId, ExtensionInstallationStorePort};
 use ironclaw_filesystem::{
     FileType, FilesystemError, Filter, Page, RootFilesystem, VersionedEntry,
 };

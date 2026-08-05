@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use chrono::Utc;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extension_registry::ExtensionInstallationStore;
 use ironclaw_filesystem::{FileType, Filter, Page, RecordKind, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::path::VirtualPath;
 use serde::{Deserialize, Serialize};
@@ -380,7 +380,7 @@ where
             let target_idempotency = virtual_path(&format!(
                 "/tenants/{tenant}/shared/channel-extensions/{extension}/product-workflow/idempotency"
             ))?;
-            let idempotency = ironclaw_product::migrate_idempotency_ledger_root(
+            let idempotency = ironclaw_assistant::migrate_idempotency_ledger_root(
                 filesystem,
                 &source_idempotency,
                 &target_idempotency,
