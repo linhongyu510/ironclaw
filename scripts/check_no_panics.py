@@ -1213,9 +1213,14 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("crates/foo/src/nested/tests.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_test.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/auth_tests.rs"))
+        # A real repository path, because this branch of `is_test_only_path`
+        # READS the file to confirm the `#[cfg(test)] mod` declaration. It
+        # therefore has to name where the crate actually sits — the family
+        # directory (PROPOSAL §5) — or the assertion silently measures a
+        # missing file.
         self.assertTrue(
             is_test_only_path(
-                "crates/ironclaw_processes/src/journal_store/state_tests.rs"
+                "crates/kernel/ironclaw_processes/src/journal_store/state_tests.rs"
             )
         )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
@@ -1224,7 +1229,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
         # gated, ships zero bytes in production. Exempt by exact filename only.
         self.assertTrue(
-            is_test_only_path("crates/ironclaw_composition/src/test_support.rs")
+            is_test_only_path("crates/app/ironclaw_composition/src/test_support.rs")
         )
         # Directory-module form: src/test_support/**.rs is also exempt, so
         # growing a test_support module never needs another change here.

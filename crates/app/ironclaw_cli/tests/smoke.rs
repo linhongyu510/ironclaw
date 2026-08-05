@@ -81,6 +81,53 @@ fn workspace_root() -> PathBuf {
     panic!("no workspace root above {}", env!("CARGO_MANIFEST_DIR"));
 }
 
+/// The repo-relative directory of the crate whose directory basename is `name`,
+/// discovered by walking `crates/` for the outermost directory owning a
+/// `Cargo.toml`.
+///
+/// The assertions below compare against *repository paths* written into the
+/// Dockerfile and the release workflows, and those paths carry the crate's
+/// family (`crates/product/ironclaw_webui`, PROPOSAL §5). A literal
+/// `crates/<crate>` would make every one of them false at once, so the
+/// expectation is derived from the tree instead. Absent or ambiguous is a
+/// panic, never an empty answer.
+fn crate_directory(name: &str) -> String {
+    fn walk(root: &Path, directory: &Path, name: &str, found: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !path.is_dir() || file_name == "target" || file_name.starts_with('.') {
+                continue;
+            }
+            if path.join("Cargo.toml").is_file() {
+                if file_name == name {
+                    found.push(
+                        path.strip_prefix(root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+                // Outermost wins: never descend into a crate we already matched
+                // (`ironclaw_safety/fuzz`, the `wasm-src/` guests).
+                continue;
+            }
+            walk(root, &path, name, found);
+        }
+    }
+
+    let root = workspace_root();
+    let mut found = Vec::new();
+    walk(&root, &root.join("crates"), name, &mut found);
+    match found.as_slice() {
+        [only] => only.clone(),
+        other => panic!("expected exactly one crate directory named {name:?}, found {other:?}"),
+    }
+}
+
 #[cfg(unix)]
 fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -300,7 +347,7 @@ fn dockerfile_reborn_builds_without_backend_feature_flags() {
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
-            && dockerfile.contains("crates/ironclaw_webui/frontend"),
+            && dockerfile.contains(&format!("{}/frontend", crate_directory("ironclaw_webui"))),
         "Dockerfile must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
     );
     assert!(
@@ -350,9 +397,12 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
-    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/Cargo.toml"))
-        .expect("Reborn CLI manifest")
-        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(
+        root.join(crate_directory("ironclaw_cli"))
+            .join("Cargo.toml"),
+    )
+    .expect("Reborn CLI manifest")
+    .replace("\r\n", "\n");
     let dist_build_setup = std::fs::read_to_string(root.join(".github/dist-build-setup.yml"))
         .expect("cargo-dist build setup")
         .replace("\r\n", "\n");
@@ -6980,12 +7030,18 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
     let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("workspace manifest")
         .replace("\r\n", "\n");
-    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/Cargo.toml"))
-        .expect("Reborn CLI manifest")
-        .replace("\r\n", "\n");
-    let wix_manifest = std::fs::read_to_string(root.join("crates/ironclaw_cli/wix/main.wxs"))
-        .expect("Reborn WiX manifest")
-        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(
+        root.join(crate_directory("ironclaw_cli"))
+            .join("Cargo.toml"),
+    )
+    .expect("Reborn CLI manifest")
+    .replace("\r\n", "\n");
+    let wix_manifest = std::fs::read_to_string(
+        root.join(crate_directory("ironclaw_cli"))
+            .join("wix/main.wxs"),
+    )
+    .expect("Reborn WiX manifest")
+    .replace("\r\n", "\n");
 
     let release_job = |job_name: &str| {
         let job_marker = format!("  {job_name}:\n");
