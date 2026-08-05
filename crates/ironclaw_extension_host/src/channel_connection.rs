@@ -361,10 +361,17 @@ impl ChannelConnectionService for GenericChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         caller: ProductSurfaceCaller,
-    ) -> Result<HashMap<String, bool>, ProductSurfaceError> {
+    ) -> Result<HashMap<ExtensionId, bool>, ProductSurfaceError> {
         let entries = self.connection_entries().await?;
         let mut connections = HashMap::with_capacity(entries.len());
         for entry in &entries {
+            // The port is keyed by `ExtensionId`. An entry id that is not valid
+            // extension vocabulary could never be matched by a caller lookup, so
+            // it is skipped rather than inserted under a key nothing can reach —
+            // the same rule the discovery walk above already applies.
+            let Ok(key) = ExtensionId::new(&entry.extension_id) else {
+                continue;
+            };
             let connected = if caller.tenant_id != self.tenant_id {
                 false
             } else if let Some(pairing) = self.pairing_service_for(&entry.extension_id) {
@@ -383,7 +390,7 @@ impl ChannelConnectionService for GenericChannelConnectionService {
                     None => false,
                 }
             };
-            connections.insert(entry.extension_id.clone(), connected);
+            connections.insert(key, connected);
         }
         Ok(connections)
     }
@@ -391,7 +398,7 @@ impl ChannelConnectionService for GenericChannelConnectionService {
     async fn caller_channel_account_states(
         &self,
         caller: ProductSurfaceCaller,
-    ) -> Result<HashMap<String, ChannelAuthAccountState>, ProductSurfaceError> {
+    ) -> Result<HashMap<ExtensionId, ChannelAuthAccountState>, ProductSurfaceError> {
         let Some(reader) = &self.account_status_reader else {
             return Ok(HashMap::new());
         };
@@ -401,6 +408,10 @@ impl ChannelConnectionService for GenericChannelConnectionService {
         let entries = self.connection_entries().await?;
         let mut states = HashMap::new();
         for entry in &entries {
+            // Same keying rule as `caller_channel_connections`.
+            let Ok(key) = ExtensionId::new(&entry.extension_id) else {
+                continue;
+            };
             // The first provider whose account the caller holds decides the
             // vendor account state (length ≤ 1 today). `active_flow_status`
             // stays `None`: the mid-flow `authenticating` signal is projected
@@ -415,7 +426,7 @@ impl ChannelConnectionService for GenericChannelConnectionService {
             }
             if let Some(account_status) = account_status {
                 states.insert(
-                    entry.extension_id.clone(),
+                    key,
                     ChannelAuthAccountState {
                         account_status: Some(account_status),
                         active_flow_status: None,
@@ -429,13 +440,16 @@ impl ChannelConnectionService for GenericChannelConnectionService {
     async fn disconnect_channel_for_caller(
         &self,
         caller: ProductSurfaceCaller,
-        channel: &str,
+        channel: &ExtensionId,
     ) -> Result<(), ProductSurfaceError> {
         if caller.tenant_id != self.tenant_id {
             return Ok(());
         }
         let entries = self.connection_entries().await?;
-        let Some(entry) = entries.iter().find(|entry| entry.extension_id == channel) else {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.extension_id == channel.as_str())
+        else {
             return Ok(());
         };
         if let Some(pairing) = self.pairing_service_for(&entry.extension_id) {
@@ -536,6 +550,12 @@ mod tests {
     const VENDOR: &str = "acmechat";
     const EXTENSION: &str = "acmechat";
 
+    /// The port is keyed by `ExtensionId`; these tests drive it through the
+    /// same typed identity production callers use.
+    fn extension_key() -> ExtensionId {
+        ExtensionId::new(EXTENSION).expect("EXTENSION is valid extension vocabulary")
+    }
+
     fn tenant() -> TenantId {
         TenantId::new("tenant:test").expect("tenant")
     }
@@ -608,11 +628,11 @@ mod tests {
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(EXTENSION.to_string(), true)])
+            HashMap::from([(extension_key(), true)])
         );
 
         service
-            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .disconnect_channel_for_caller(caller.clone(), &extension_key())
             .await
             .expect("disconnect succeeds");
 
@@ -649,7 +669,7 @@ mod tests {
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup after disconnect"),
-            HashMap::from([(EXTENSION.to_string(), false)])
+            HashMap::from([(extension_key(), false)])
         );
 
         // Retry convergence for extension removal: `remove_extension` runs
@@ -658,7 +678,7 @@ mod tests {
         // disconnected. That repeat disconnect must stay an idempotent
         // no-op success, not an error that would wedge the removal retry.
         service
-            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .disconnect_channel_for_caller(caller.clone(), &extension_key())
             .await
             .expect("repeat disconnect for a disconnected caller is an idempotent no-op");
         assert_eq!(
@@ -681,7 +701,7 @@ mod tests {
 
         assert!(
             service
-                .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+                .disconnect_channel_for_caller(caller.clone(), &extension_key())
                 .await
                 .is_err(),
             "vendor cleanup failure must fail the disconnect"
@@ -691,7 +711,7 @@ mod tests {
                 .caller_channel_connections(caller)
                 .await
                 .expect("connection lookup after failed disconnect"),
-            HashMap::from([(EXTENSION.to_string(), true)]),
+            HashMap::from([(extension_key(), true)]),
             "identity binding must remain until vendor cleanup succeeds"
         );
         assert_eq!(identity_store.deletes(), Vec::new());
@@ -710,7 +730,7 @@ mod tests {
 
         assert!(
             service
-                .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+                .disconnect_channel_for_caller(caller.clone(), &extension_key())
                 .await
                 .is_err(),
             "credential cleanup failure must fail the disconnect"
@@ -720,7 +740,7 @@ mod tests {
                 .caller_channel_connections(caller)
                 .await
                 .expect("connection lookup after failed disconnect"),
-            HashMap::from([(EXTENSION.to_string(), true)]),
+            HashMap::from([(extension_key(), true)]),
             "identity binding must remain until credential cleanup succeeds, so the removal retry re-runs the full disconnect"
         );
         assert_eq!(identity_store.deletes(), Vec::new());
@@ -738,7 +758,7 @@ mod tests {
                 .caller_channel_connections(caller())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(EXTENSION.to_string(), false)])
+            HashMap::from([(extension_key(), false)])
         );
     }
 
@@ -765,10 +785,10 @@ mod tests {
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(EXTENSION.to_string(), false)])
+            HashMap::from([(extension_key(), false)])
         );
         service
-            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .disconnect_channel_for_caller(caller.clone(), &extension_key())
             .await
             .expect("disconnect succeeds without a connection scope");
         assert_eq!(
@@ -806,14 +826,17 @@ mod tests {
                 .caller_channel_connections(foreign_caller.clone())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(EXTENSION.to_string(), false)])
+            HashMap::from([(extension_key(), false)])
         );
         service
-            .disconnect_channel_for_caller(foreign_caller, EXTENSION)
+            .disconnect_channel_for_caller(foreign_caller, &extension_key())
             .await
             .expect("foreign tenant disconnect is a no-op");
         service
-            .disconnect_channel_for_caller(caller(), "unknown-channel")
+            .disconnect_channel_for_caller(
+                caller(),
+                &ExtensionId::new("unknown-channel").expect("valid extension id"),
+            )
             .await
             .expect("unknown channel disconnect is a no-op");
         assert!(credential_cleanup.requests().is_empty());
@@ -852,7 +875,7 @@ mod tests {
             .await
             .expect("account states");
         let state = states
-            .get(EXTENSION)
+            .get(&extension_key())
             .expect("vendor account state projected");
         assert_eq!(
             state.account_status,
@@ -1063,11 +1086,11 @@ team_id = "/team/id"
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
-            HashMap::from([(EXTENSION.to_string(), true)])
+            HashMap::from([(extension_key(), true)])
         );
 
         service
-            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .disconnect_channel_for_caller(caller.clone(), &extension_key())
             .await
             .expect("disconnect succeeds");
 
