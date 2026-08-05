@@ -4040,8 +4040,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .filter_map(|binding| {
                 let codec = binding.preference_target_codec.clone()?;
                 workflow_factory
-                    .triggered_run_delivery(&binding.extension_id, codec)
-                    .map(|driver| (binding.extension_id.clone(), driver))
+                    .triggered_run_delivery(binding.extension_id.as_str(), codec)
+                    .map(|driver| (binding.extension_id.as_str().to_owned(), driver))
             })
             .collect();
         let generic_trigger_hook: Arc<
