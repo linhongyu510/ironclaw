@@ -206,7 +206,7 @@ fn render(path: &Path, root: &Path) -> String {
 fn governed_names(root: &Path) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
-        &crate_dir(&root, OWNER).join("src"),
+        &crate_dir(root, OWNER).join("src"),
         TYPE_KEYWORDS,
         &is_rust_identifier,
         &[],
@@ -275,7 +275,7 @@ fn product_contracts_are_defined_only_in_their_owning_crate() {
 fn single_import_path_names(root: &Path) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
-        &crate_dir(&root, OWNER).join("src"),
+        &crate_dir(root, OWNER).join("src"),
         &["trait "],
         &is_rust_identifier,
         &[],
