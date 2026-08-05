@@ -15,6 +15,12 @@ Every concern that follows from "an extension is an installable package", short 
 | [`packages/slack`](./packages/slack) | `products` | Slack channel extension for IronClaw Reborn (#3857) |
 | [`packages/telegram`](./packages/telegram) | `products` | Telegram channel extension for IronClaw Reborn: Bot API protocol engine + ChannelAdapter (#3285) |
 
+`packages/` also holds the **data-only** packages (`github/`, `gmail/`,
+`google-*/`, `web-access/`, `notion-mcp/`, `nearai-mcp/`, …): manifest, prompts,
+schemas, committed `wasm/`, and an excluded `wasm-src/` guest. A package gets
+its own crate only when it needs one — a channel adapter, a provider surface
+such as `[memory]`, or a heavy native dependency (PROPOSAL §5).
+
 ## Rules that outrank this file
 
 - **Full charter, boundaries, dependency direction, and security posture:** [`docs/reborn/target-architecture/families/extensions.md`](../../docs/reborn/target-architecture/families/extensions.md).

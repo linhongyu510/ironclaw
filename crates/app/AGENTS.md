@@ -7,9 +7,9 @@ The assembly root, the shipped artifact, the boot-configuration leaf, and the en
 | Crate | Layer | Charter |
 | --- | --- | --- |
 | [`ironclaw_architecture_tests`](./ironclaw_architecture_tests) | `app` | the enforcement suite (test-only crate) |
-| [`ironclaw_cli`](./ironclaw_cli) | `app` | the shipped binary: commands, `serve`, concrete-extension binding tables, registrars |
-| [`ironclaw_composition`](./ironclaw_composition) | `app` | Composition-root production composition root |
-| [`ironclaw_config`](./ironclaw_config) | `substrates` | Boot configuration contracts |
+| [`ironclaw_cli`](./ironclaw_cli) | `app` | the shipped binary: commands, `serve`, concrete-extension binding tables, registrars — the one directory whose name and package name differ (`ironclaw`, PROPOSAL §5.1) |
+| [`ironclaw_composition`](./ironclaw_composition) | `app` | THE assembly root: deployment selection and service-graph wiring only |
+| [`ironclaw_config`](./ironclaw_config) | `substrates` | boot configuration contracts (vendor sections removed) |
 
 ## Rules that outrank this file
 

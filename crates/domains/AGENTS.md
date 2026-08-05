@@ -19,6 +19,14 @@ IronClaw Reborn's typed business records and the services that own them: session
 | [`ironclaw_trace_commons`](./ironclaw_trace_commons) | `substrates` | Trace Commons client: envelope, redaction, queue, credits |
 | [`ironclaw_triggers`](./ironclaw_triggers) | `substrates` | Scheduled trigger domain and source-provider contracts |
 
+**Not here, on purpose:** `ironclaw_projects` is still at
+`crates/ironclaw_projects`. §5 has no row for it because §12.10 folds it into
+`ironclaw_identity` as a `projects` module; WS7 measured that merge and skipped
+it (two consumer crates and five files, not the single wiring site the audit
+counted, plus a `SAME_LAYER_EDGE_BASELINE` decrement and a
+`CRATE_LAYER_ORIGINS` row deletion). It is carried as a §5 delta with that
+finding as its citation.
+
 ## Rules that outrank this file
 
 - **Full charter, boundaries, dependency direction, and security posture:** [`docs/reborn/target-architecture/families/domains.md`](../../docs/reborn/target-architecture/families/domains.md).
