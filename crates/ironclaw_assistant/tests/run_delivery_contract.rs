@@ -13,22 +13,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_assistant::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
-    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
-    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
-    VerifiedInbound,
-};
-use ironclaw_assistant::{
-    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-};
-use ironclaw_assistant::{
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
-};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
@@ -47,6 +31,22 @@ use ironclaw_outbound::{
     DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
     TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+};
+use ironclaw_assistant::{
+    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
+    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
+    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    VerifiedInbound,
+};
+use ironclaw_assistant::{
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver,
+};
+use ironclaw_assistant::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::delivery::{
@@ -412,15 +412,17 @@ struct StaticBindingService {
 }
 
 #[async_trait]
-impl ironclaw_assistant::ConversationBindingService for StaticBindingService {
+impl ironclaw_product_contracts::binding::ProductBindingResolver for StaticBindingService {
     async fn resolve_binding(
         &self,
         _request: ironclaw_assistant::ResolveBindingRequest,
-    ) -> Result<ironclaw_assistant::ResolvedBinding, ironclaw_assistant::ProductSurfaceFailure>
-    {
+    ) -> Result<
+        ironclaw_assistant::ResolvedBinding,
+        ironclaw_product_contracts::error::ProductOperationFailure,
+    > {
         if self.fail {
             return Err(
-                ironclaw_assistant::ProductSurfaceFailure::BindingResolutionFailed {
+                ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );
@@ -431,11 +433,13 @@ impl ironclaw_assistant::ConversationBindingService for StaticBindingService {
     async fn lookup_binding(
         &self,
         _request: ironclaw_assistant::ResolveBindingRequest,
-    ) -> Result<ironclaw_assistant::ResolvedBinding, ironclaw_assistant::ProductSurfaceFailure>
-    {
+    ) -> Result<
+        ironclaw_assistant::ResolvedBinding,
+        ironclaw_product_contracts::error::ProductOperationFailure,
+    > {
         if self.fail {
             return Err(
-                ironclaw_assistant::ProductSurfaceFailure::BindingResolutionFailed {
+                ironclaw_product_contracts::error::ProductOperationFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );
@@ -1818,8 +1822,11 @@ fn trigger_context() -> TriggerCommunicationContext {
     }
 }
 
-fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
-    TriggeredRunDeliveryRequest {
+fn triggered_request(
+    run_id: TurnRunId,
+    project_scoped: bool,
+) -> ironclaw_outbound::TriggeredRunDeliveryRequest {
+    ironclaw_outbound::TriggeredRunDeliveryRequest {
         run_id,
         scope: binding_scope(),
         creator_user_id: user(),

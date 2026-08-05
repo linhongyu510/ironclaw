@@ -5,6 +5,9 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+use ironclaw_extension_host::FirstPartyPackageBundle;
+use ironclaw_operator::OperatorLogLayer;
+use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use ironclaw_composition::TriggerFireAccessPolicy;
 use ironclaw_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_composition::hosted_single_tenant_runtime_policy;
@@ -16,9 +19,6 @@ use ironclaw_composition::{
 use ironclaw_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
 };
-use ironclaw_extension_host::FirstPartyPackageBundle;
-use ironclaw_operator::OperatorLogLayer;
-use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
@@ -514,13 +514,16 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&runtime_storage_root)
-            .await
-            .map_err(anyhow::Error::from)?;
-        ironclaw_operator::LlmKeyStore::new(store)
-            .exists(&provider_id)
-            .await
-            .map_err(anyhow::Error::from)
+        let store =
+            ironclaw_composition::open_standalone_secret_store(&runtime_storage_root)
+                .await
+                .map_err(anyhow::Error::from)?;
+        ironclaw_operator::LlmKeyStore::new(
+            ironclaw_composition::RuntimeOperatorSecretValueStore::shared(store),
+        )
+        .exists(&provider_id)
+        .await
+        .map_err(anyhow::Error::from)
     })?;
     if !has_stored_key {
         return Err(error.into());
@@ -624,8 +627,9 @@ pub(crate) fn ironhub_manifest_url_from_env()
 -> anyhow::Result<Option<ironclaw_composition::ironhub::IronhubManifestUrl>> {
     match std::env::var("IRONHUB_MANIFEST_URL") {
         Ok(manifest_url) => {
-            let manifest_url = ironclaw_composition::ironhub::validated_manifest_url(&manifest_url)
-                .context("IRONHUB_MANIFEST_URL is invalid")?;
+            let manifest_url =
+                ironclaw_composition::ironhub::validated_manifest_url(&manifest_url)
+                    .context("IRONHUB_MANIFEST_URL is invalid")?;
             Ok(Some(manifest_url))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -738,7 +742,9 @@ pub(crate) fn build_services_input_with_options(
         config_file.as_ref().and_then(|file| file.memory.as_ref()),
         composition_profile(profile),
     )?;
-    for diagnostic in ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy) {
+    for diagnostic in
+        ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy)
+    {
         // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
         tracing::debug!(target: "ironclaw_reborn", "{diagnostic}");
     }
@@ -1159,7 +1165,9 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) fn default_owner_id(config_file: Option<&ironclaw_config::RebornConfigFile>) -> &str {
+pub(crate) fn default_owner_id(
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> &str {
     config_file
         .and_then(|file| file.identity.as_ref())
         .and_then(|identity| identity.default_owner.as_deref())
@@ -1258,7 +1266,9 @@ fn runtime_identity(
     }
 }
 
-fn regex_skill_activation_enabled(config_file: Option<&ironclaw_config::RebornConfigFile>) -> bool {
+fn regex_skill_activation_enabled(
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> bool {
     config_file
         .and_then(|file| file.skills.as_ref())
         .and_then(|skills| skills.regex_activation_enabled)
@@ -3444,10 +3454,10 @@ enabled = true
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
-        let user_id =
-            ironclaw_composition::host_api::UserId::new("run-trigger-user").expect("user id");
-        let agent_id =
-            ironclaw_composition::host_api::AgentId::new("run-trigger-agent").expect("agent id");
+        let user_id = ironclaw_composition::host_api::UserId::new("run-trigger-user")
+            .expect("user id");
+        let agent_id = ironclaw_composition::host_api::AgentId::new("run-trigger-agent")
+            .expect("agent id");
 
         let runtime_input = apply_run_trigger_fire_access_policy(runtime_input, &config)
             .await

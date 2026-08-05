@@ -24,10 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_composition::{
-    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProcessBinding, ResolveExternalIdentity, SurfaceKind,
-    build_reborn_runtime,
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
 use ironclaw_host_api::{
     ids::TenantId,
@@ -36,9 +34,11 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort,
+use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_composition::{
+    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProcessBinding, ResolveExternalIdentity, SurfaceKind,
+    build_reborn_runtime,
 };
 
 #[path = "support/first_party.rs"]

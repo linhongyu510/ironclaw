@@ -129,7 +129,7 @@ impl RebornIntegrationHarness {
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {
@@ -214,7 +214,7 @@ impl RebornIntegrationHarness {
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {

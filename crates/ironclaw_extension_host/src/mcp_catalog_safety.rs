@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use ironclaw_extension_registry::HostedMcpDiscoveredTool;
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool;
 use ironclaw_safety::{InjectionScanner, InjectionWarning, Severity};
 
 const MAX_FINDINGS: usize = 16;

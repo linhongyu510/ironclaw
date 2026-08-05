@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_assistant::ChannelConnectionService;
+use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},

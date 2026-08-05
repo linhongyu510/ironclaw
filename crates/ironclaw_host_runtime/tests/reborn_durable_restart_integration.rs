@@ -51,7 +51,7 @@ use ironclaw_processes::{
     ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::{
+use ironclaw_sandbox::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{

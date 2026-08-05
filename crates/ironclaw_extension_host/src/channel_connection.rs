@@ -20,10 +20,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_assistant::{ChannelAuthAccountState, ChannelConnectionService};
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountStatus, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, ChannelAuthAccountState,
+    ChannelConnectionService, CredentialAccountStatus, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, TenantId},
@@ -1002,7 +1002,7 @@ team_id = "/team/id"
         let record = ExtensionManifestRecord::from_toml(
             DISCOVERED_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,
@@ -1150,7 +1150,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
         let record = ExtensionManifestRecord::from_toml(
             PAIRING_CHANNEL_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,

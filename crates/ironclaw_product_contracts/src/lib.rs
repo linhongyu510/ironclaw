@@ -34,8 +34,12 @@
 
 pub mod account_setup;
 pub mod action;
+pub mod actor_identity;
 pub mod admin_users;
+pub mod approval_prompt;
+pub mod binding;
 pub mod channel_config;
+pub mod channel_workflow;
 pub mod command;
 pub mod delivery;
 pub mod descriptors;
@@ -46,6 +50,7 @@ pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
 pub mod operator_llm;
+pub mod operator_secrets;
 pub mod operator_service;
 pub mod operator_tools;
 pub mod outbound;

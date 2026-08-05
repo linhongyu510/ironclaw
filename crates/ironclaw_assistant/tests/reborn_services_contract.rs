@@ -21,6 +21,35 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
+use ironclaw_auth::{
+    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
+    CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
+};
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
+use ironclaw_extension_contracts::{
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
+};
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
+};
+use ironclaw_host_api::{
+    capability::{EffectKind, PermissionMode},
+    ids::{
+        ActivityId, AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId,
+        ResultRef, SecretHandle, TenantId, ThreadId, UserId,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    resource::ResourceScope,
+    result_meta::{ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    scope::Principal,
+};
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -33,21 +62,20 @@ use ironclaw_assistant::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationListRequest, AutomationProductService, ChannelAuthAccountState,
-    ChannelConnectionRequirement, ChannelConnectionService, CommandResultView,
-    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
-    EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    AutomationListRequest, AutomationProductService, ChannelConnectionRequirement,
+    CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
+    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
+    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
@@ -118,35 +146,6 @@ use ironclaw_assistant::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
-use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
-use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountStatus,
-};
-use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
-use ironclaw_extension_contracts::{
-    state::{InstallationState, LifecyclePublicState},
-    surface::CapabilitySurfaceKind,
-};
-use ironclaw_host_api::attachment::InboundAttachment;
-use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
-};
-use ironclaw_host_api::{
-    capability::{EffectKind, PermissionMode},
-    ids::{
-        ActivityId, AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId,
-        ResultRef, SecretHandle, TenantId, ThreadId, UserId,
-    },
-    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
-    resource::ResourceScope,
-    result_meta::{ResultProgress, TerminateHint},
-    safe_summary::SafeSummary,
-    scope::Principal,
-};
-use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
@@ -954,8 +953,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_assistant::ProductSurfaceFailure>
-    {
+    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_assistant::ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })

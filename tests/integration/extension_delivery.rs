@@ -57,16 +57,6 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_assistant::{
-    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
-    UserMessagePayload, VerifiedInbound,
-};
-use ironclaw_assistant::{
-    ConversationBindingService, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings,
-};
-use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
@@ -95,9 +85,19 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
+use ironclaw_assistant::{
+    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
+    UserMessagePayload, VerifiedInbound,
+};
+use ironclaw_assistant::{
+    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+};
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
@@ -391,7 +391,7 @@ fn delivery_run_services(
 /// binding service the registered sink uses) — so the scripted model
 /// gateway can be registered for the run's scope up front.
 async fn preresolve_vendor_turn_scope(
-    binding_service: &Arc<dyn ConversationBindingService>,
+    binding_service: &Arc<dyn ProductBindingResolver>,
     adapter: &dyn ChannelAdapter,
     adapter_id: &str,
     installation_id: &str,
@@ -722,7 +722,7 @@ async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
     services: &RebornRuntime,
     extension_id: &str,
-) -> Arc<dyn ConversationBindingService> {
+) -> Arc<dyn ProductBindingResolver> {
     let registry = services
         .extension_ingress_parts()
         .expect("composition built the generic ingress")
@@ -1523,9 +1523,8 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let installation_store = services
         .extension_installation_store_for_test()
         .expect("extension delivery profile carries the lifecycle store");
-    let installation_id =
-        ironclaw_extension_registry::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
-            .expect("Telegram installation id");
+    let installation_id = ironclaw_extension_registry::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
+        .expect("Telegram installation id");
     let installation = installation_store
         .get_installation(&installation_id)
         .await

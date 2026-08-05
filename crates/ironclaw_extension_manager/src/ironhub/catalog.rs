@@ -282,7 +282,7 @@ fn validate_manifest_artifacts(
             )));
         }
         for (path, schema) in &entry.schemas {
-            ironclaw_extension_registry::ExtensionAssetPath::new(path.clone()).map_err(
+            ironclaw_extension_contracts::runtime::ExtensionAssetPath::new(path.clone()).map_err(
                 |error| {
                     catalog(format!(
                         "tool '{}' publishes an invalid schema path: {error}",

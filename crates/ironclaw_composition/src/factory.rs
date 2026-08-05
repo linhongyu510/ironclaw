@@ -331,7 +331,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_dm_target_store:
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_assistant::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) skill_mounts: MountView,
@@ -366,7 +366,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) trigger_conversation_services: RebornFilesystemConversationServices,
     /// Pre-minted scheduler wake wiring for the production composition path.
@@ -716,13 +716,19 @@ fn open_postgres_pool_from_source(
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
     match source {
         PostgresPoolSource::Prebuilt(pool) => Ok(pool),
-        PostgresPoolSource::Config(connection) => {
-            Ok(ironclaw_event_store::open_postgres_pool_with_tls_options(
+        // The event store hands back the workspace's `PostgresConnectionPool`
+        // carrier; composition is the one app-layer crate chartered to hold the
+        // driver itself (PROPOSAL §11.2.6), and it needs the driver pool to
+        // build `PostgresRootFilesystem` and the auth refresh lock. Unwrap once,
+        // here, rather than letting the driver type back into a signature.
+        PostgresPoolSource::Config(connection) => Ok(
+            ironclaw_event_store::open_postgres_pool_with_tls_options(
                 connection.url,
                 connection.pool_max_size,
                 connection.tls_options,
-            )?)
-        }
+            )?
+            .into_driver(),
+        ),
     }
 }
 

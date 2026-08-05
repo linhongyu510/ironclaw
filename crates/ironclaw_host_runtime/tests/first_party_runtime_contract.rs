@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
-    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    ExtensionRegistry, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;

@@ -12,7 +12,7 @@
 //!   [`ProductSurface`].
 //! - [`InboundTurnService`] / [`DefaultInboundTurnService`] — the narrower
 //!   user-message path that coordinates binding + turn submission.
-//! - [`ConversationBindingService`] — resolves external adapter refs to
+//! - [`ProductBindingResolver`] — resolves external adapter refs to
 //!   canonical Reborn identifiers.
 //! - [`ProductConversationBindingService`] — bridges product adapter bindings to
 //!   `ironclaw_conversations` using trusted installation configuration for
@@ -25,16 +25,16 @@
 #![forbid(unsafe_code)]
 
 mod action;
-pub mod adapter_registry;
+mod admin_user_directory;
 mod approval_interaction;
 mod approval_prompt;
 mod auth_continuation;
 mod auth_interaction;
-mod auth_prompt;
 mod automation_product_service;
 mod automation_thread_metadata;
-mod binding;
 mod binding_ref;
+mod blocked_auth_resume;
+mod channel_workflow;
 mod command_admission;
 mod command_dispatch;
 mod commands;
@@ -55,7 +55,7 @@ mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
-mod product_auth_prompt;
+mod process_gate_turn_view;
 mod product_surface_inbound;
 mod project_create_capability;
 mod project_service;
@@ -66,11 +66,13 @@ mod scoped_fs;
 mod steering;
 mod workflow;
 
-pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 pub use project_service::RebornProjectService;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
+pub use admin_user_directory::{
+    AdminSecretProvisioner, RebornAdminUserDirectory, RejectingAdminApiTokenMinter,
+};
 pub use approval_interaction::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
@@ -100,19 +102,31 @@ pub use auth_interaction::{
     ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };
-pub use auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, PairingAuthChallengeView,
-    auth_prompt_view_for_blocked_auth,
-};
+// `AuthChallengeProvider`, `AuthChallengeView`, `BlockedAuthFlowCanceller`,
+// `PairingAuthChallengeView` and `auth_prompt_view_for_blocked_auth` moved to
+// `ironclaw_auth::product_prompt` (WS2.5): every type in their signatures is
+// auth's own vocabulary, and the extension host implements the challenge port.
+// No re-export here — consumers import from the owner
+// (`.claude/rules/type-placement.md`).
 pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
 };
-pub use binding::{
-    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding, route_kind_for_inbound_payload,
+pub use channel_workflow::{
+    ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
+    RebornChannelWorkflowServices, channel_conversation_services,
 };
+pub use blocked_auth_resume::BlockedAuthResumeFanout;
+// The conversation-binding family moved to
+// `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
+// workflow factory hands a live binding service back to a caller that sits
+// below product, so the port had to be declared at the boundary. The value
+// DTOs keep their product import path — they are wire vocabulary this crate
+// already re-exports ~120 of — but `ProductBindingResolver` deliberately
+// does NOT: it is a port, and `reborn_product_contract_location_scan.rs`
+// grants a port exactly one import path. Consumers import the trait from the
+// contracts crate.
 pub use command_admission::DirectConversationCommandAdmission;
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService,
@@ -127,14 +141,21 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
+pub use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    route_kind_for_inbound_payload,
+};
 // `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
 // moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
 // grants no second import path (`reborn_product_contract_location_scan.rs`).
+// `ProductActorUserResolutionRequest`, `ProductActorUserResolver` and
+// `ResolvedProductActorUser` left for the same reason and under the same rule:
+// `ironclaw_product_contracts::actor_identity` (WS2.5).
 pub use conversation_binding::{
-    ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ResolvedProductActorUser, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
@@ -158,8 +179,6 @@ pub use scoped_fs::{
 };
 
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
-pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
-pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
@@ -286,9 +305,11 @@ pub use policy::{
 };
 pub use run_delivery::{
     DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, triggered_run_delivery_settings,
 };
+// `TriggeredRunDeliveryRequest` is deliberately absent: it moved to
+// `ironclaw_outbound` with the `TriggeredRunDelivery` port it crosses
+// (§12.11 D-A), so the generic post-submit hook below product can name it.
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.
@@ -308,8 +329,8 @@ pub use reborn_services::{
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY_ID,
     AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, AutomationListRequest,
-    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
-    ChannelConnectionService, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,

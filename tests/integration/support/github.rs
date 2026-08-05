@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_extension_registry::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
 };
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::EffectKind,
+    host_port::default_host_port_catalog,
     ids::{CapabilityId, ExtensionId, SecretHandle},
     path::VirtualPath,
 };
-use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 type GithubSupportResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
