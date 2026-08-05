@@ -101,7 +101,11 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print`, not derived by subtracting the diff.
 /// ✎ Union re-record 2026-08-04: the two WS6 evictions above are disjoint and
 /// their deltas add exactly on the merged batch — 45_127 − 2_189 − 2_439 = 40_499.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_499;
+/// ✎ Re-recorded 40_499 → 40_702 on 2026-08-05 for the rc1 → 1.1 release-pair
+/// startup barrier. The +203 LOC are composition-owned assembly for lease
+/// ordering, domain-store injection, fail-closed startup, and report commit;
+/// cross-domain migration policy remains in `ironclaw_release_migration`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_702;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
