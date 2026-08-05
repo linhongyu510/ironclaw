@@ -1719,11 +1719,16 @@ fn env_flag_presence_survives_a_non_utf8_value() {
         use std::os::unix::ffi::OsStringExt as _;
 
         const NAME: &str = "IRONCLAW_TRIGGERS_ENV_PRESENCE_FIXTURE";
+
+        // Process env is global: hold the workspace env mutex across the
+        // mutation so parallel tests in this binary cannot race the fixture.
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
         assert!(!env_flag_present(NAME), "fixture variable must start unset");
 
         // Not valid UTF-8.
         let invalid = std::ffi::OsString::from_vec(vec![0x66, 0x80, 0x6f]);
-        // SAFETY: single-threaded fixture over a variable no other test reads.
+        // SAFETY: guarded by `lock_env()` above, over a variable no other
+        // test reads.
         unsafe { std::env::set_var(NAME, &invalid) };
         assert!(
             std::env::var(NAME).is_err(),
