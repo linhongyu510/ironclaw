@@ -2123,6 +2123,22 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         inbound.binding.agent_id.clone(),
         inbound.binding.project_id.clone(),
     );
+    // The denied read is exercised through the authenticated WebUI route too,
+    // so the HTTP error mapping and handler boundary are covered, not only the
+    // product-surface service call.
+    let (denied_status, _, denied_bytes) = get_raw(
+        mount_webui_v2_router(webui_services.clone(), other_user.clone()),
+        &attachment_path,
+    )
+    .await;
+    assert_eq!(denied_status, StatusCode::NOT_FOUND);
+    assert!(
+        !denied_bytes
+            .windows(b"DATA".len())
+            .any(|window| window == b"DATA"),
+        "a denied WebUI request must not disclose attachment bytes"
+    );
+
     let denied = webui_services
         .read_attachment(
             other_user,
