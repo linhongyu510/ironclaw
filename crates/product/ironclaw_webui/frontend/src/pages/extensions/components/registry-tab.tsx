@@ -151,7 +151,6 @@ export function RegistryTab({
                 <ExtensionCard
                   key={entry.id}
                   ext={entry.extension || entry.entry}
-                  onInstall={onInstall}
                   onConfigure={onConfigure}
                   onRemove={onRemove}
                   isBusy={isBusy}
@@ -164,7 +163,6 @@ export function RegistryTab({
                   key={entry.id}
                   entry={entry.entry}
                   statusLabel={t("extensions.installed")}
-                  onInstall={onInstall}
                   isBusy={isBusy}
                 />
               )
