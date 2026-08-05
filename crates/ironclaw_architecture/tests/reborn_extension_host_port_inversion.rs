@@ -815,7 +815,7 @@ fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger(
         violations.join("\n")
     );
     assert!(
-        found.len() <= EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
+        found.len() == EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
         "the product-reference ledger is shrink-only: {} files > baseline {}",
         found.len(),
         EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE
