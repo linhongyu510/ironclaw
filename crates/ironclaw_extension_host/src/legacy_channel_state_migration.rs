@@ -16,6 +16,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use ironclaw_extension_contracts::external::ExternalActorBindingEpoch;
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionInstallationStorePort};
 use ironclaw_filesystem::{
     FileType, FilesystemError, Filter, Page, RootFilesystem, VersionedEntry,
@@ -1077,8 +1078,7 @@ async fn migrate_slack_identities(
             continue;
         }
         if let Some(epoch) = &record.epoch {
-            ironclaw_conversations::ExternalActorBindingEpoch::new(epoch.clone())
-                .map_err(log_malformed)?;
+            ExternalActorBindingEpoch::new(epoch.clone()).map_err(log_malformed)?;
         }
         if record.disconnected_at.is_some() {
             return Err(Rc1ChannelStateMigrationError::Malformed);
@@ -1216,8 +1216,7 @@ async fn migrate_telegram_identities(
         if !record.active {
             continue;
         }
-        ironclaw_conversations::ExternalActorBindingEpoch::new(record.epoch.clone())
-            .map_err(log_malformed)?;
+        ExternalActorBindingEpoch::new(record.epoch.clone()).map_err(log_malformed)?;
         let provider_user_id = rewrite_installation_prefix(
             &record.provider_user_id,
             old_installation.as_deref(),

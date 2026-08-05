@@ -1161,10 +1161,23 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
+    // The inline-secret guard's vendor token prefixes. Repointed (not added)
+    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
+    // `ironclaw_extensions::host_api::product_adapter`; the guard stayed with
+    // the raw-TOML parse stage, so the entries moved file and nothing else.
+    // The schema half that went to `ironclaw_extension_contracts` carries no
+    // vendor name — its fixtures were rewritten generically rather than carved,
+    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
     (
-        "crates/ironclaw_product/src/adapter_registry.rs",
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "github",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
         "telegram",
     ),
     (
@@ -1201,7 +1214,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // forbidden outright, so the example was rewritten generically rather than
     // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
-    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
     // One-release compatibility adapter: exact rc1 provider wires must be
     // named to preserve setup, identities, routes, and pairing disposition.
     // Generic storage/copy primitives remain vendor-neutral; delete these two
@@ -1419,11 +1431,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "slack",
     ),
     (
@@ -1667,10 +1679,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the batch union is **123** — #7161's conversions repoint entries in place
 /// and add none.
 ///
-/// ✎ **123 → 125 (#7198).** The exact rc1 Slack and Telegram wire adapters
-/// add two one-release compatibility carve-outs. Delete both after the
-/// documented rc1 rollback window expires.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
+/// ✎ **Merged-tree recount (#7198 + current main).** The exact rc1 Slack and
+/// Telegram wire adapters add two one-release compatibility carve-outs. This
+/// value is measured on the merged tree; delete both entries with the adapter
+/// after the documented rc1 rollback window expires.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 124;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
