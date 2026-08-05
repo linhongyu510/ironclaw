@@ -134,6 +134,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "app/",
         decided_in: "WS6",
     },
+    SameLayerEdge {
+        crate_name: "ironclaw_reborn_composition",
+        dependency_name: "ironclaw_release_migration",
+        layer: "app",
+        owner: "app/",
+        decided_in: "WS6",
+    },
     // ---- contracts ----
     SameLayerEdge {
         crate_name: "ironclaw_extension_contracts",
@@ -659,7 +666,11 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 72;
+// #7178 introduces one deliberate app-level coordinator so release-pair
+// migration policy does not inflate the production composition root. The
+// dependency is one-way: composition invokes the coordinator; the coordinator
+// has no composition dependency.
+const SAME_LAYER_EDGE_BASELINE: usize = 73;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -727,6 +738,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_reborn_identity", "substrates"),
     ("ironclaw_reborn_integration_tests", "app"),
     ("ironclaw_reborn_openai_compat", "products"),
+    ("ironclaw_release_migration", "app"),
     ("ironclaw_reborn_traces", "substrates"),
     ("ironclaw_resources", "kernel"),
     // Promoted kernel -> loops. Moving UP narrows reach; no pin owed.
