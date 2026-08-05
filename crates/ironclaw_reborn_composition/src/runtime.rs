@@ -116,7 +116,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -676,7 +676,7 @@ pub struct RebornRuntime {
     /// profiles carry. Moved here from `RebornRuntimeStores` at build time so
     /// `RebornRuntime::shutdown` can cancel any spawned background workers
     /// alongside every other owned worker.
-    pub(crate) sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings,
+    pub(crate) sandbox_runtime_bindings: crate::sandbox::SandboxRuntimeBindings,
 }
 
 impl ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime
@@ -2388,7 +2388,7 @@ impl RebornRuntime {
         // profile — `shutdown_all` on an all-`None` `SandboxRuntimeBindings`
         // returns immediately.
         self.sandbox_runtime_bindings
-            .shutdown_all(crate::sandbox_reaper_task::SANDBOX_REAPER_SHUTDOWN_TIMEOUT)
+            .shutdown_all(crate::sandbox::SANDBOX_REAPER_SHUTDOWN_TIMEOUT)
             .await;
         self.trace_flush_worker.shutdown().await;
         if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
@@ -2906,8 +2906,9 @@ pub async fn build_reborn_runtime(
 }
 
 pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, RebornRuntimeError> {
-    let (runtime, _) = build_runtime_with_resource_governor(input).await?;
-    Ok(runtime)
+    build_runtime_with_resource_governor(input)
+        .await
+        .map(|(runtime, _)| runtime)
 }
 
 pub(crate) async fn build_runtime_with_resource_governor(
@@ -3336,12 +3337,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,

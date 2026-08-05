@@ -45,9 +45,11 @@ struct FrozenPathCount {
 /// unconditionally, so the constructors have real callers in every build and
 /// the suppressions are not merely moved — they are unnecessary. The file's
 /// two `test-support` methods (`test_verified`/`test_verified_for_tenant`)
-/// stay and keep their entry. (The `WS0_` prefix records when the baseline was
-/// *captured*, by #6936; deletions that lower it come from WS8 and, here,
-/// WS1.5.)
+/// stay and keep their entry. Lowered again to **79/266** when the wired
+/// sandbox attribution, certificate-authority, and credential-firewall paths
+/// shed eight suppressions, including the last attribution test-support
+/// member. (The `WS0_` prefix records when the baseline was captured by
+/// #6936.)
 ///
 /// The per-path checks already refuse growth *within* a listed file and refuse
 /// staleness. These two totals close the remaining door: adding a **new** path
@@ -56,8 +58,8 @@ struct FrozenPathCount {
 /// more line in a long list. Both only ever move down; lower them in the same
 /// PR that deletes debt (CHECKLIST WS8 flips `dead_code`/`unreachable_pub` on
 /// workspace-wide once this inventory is gone).
-const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 80;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 277;
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 266;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -105,20 +107,20 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
-        count: 4,
+        count: 1,
     },
     // Same W6 retirement trigger as the `ca.rs` entry above.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
-        count: 5,
+        count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
-        count: 4,
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
@@ -142,7 +144,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_reborn_composition/src/factory.rs",
-        count: 9,
+        count: 8,
     },
     FrozenPathCount {
         category: "test-support",
@@ -304,12 +306,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/obligations.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {

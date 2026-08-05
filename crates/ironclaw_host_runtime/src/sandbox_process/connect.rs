@@ -18,7 +18,7 @@
 //! **Wired into production.** [`connect_docker_with_retry`] is the connect
 //! path both real production callers use:
 //! [`super::RebornScopedSandboxCommandTransport::connect`] (called by
-//! `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`,
+//! `ironclaw_reborn_composition::user_sandbox_process_binding`,
 //! the sandbox exec-transport boot path) and
 //! `ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`
 //! (before entering the reaper loop). A Docker daemon that never becomes
@@ -29,7 +29,7 @@
 //! non-blocking diagnostic by design (see its own doc: "not a gate that
 //! blocks boot"), meant for a startup log line or health endpoint that
 //! `ironclaw_reborn_composition` has not built; the two call sites that
-//! exist (`sandbox_composition.rs`, `sandbox_boot.rs`) are both
+//! exist (`sandbox/lifecycle.rs`, `sandbox/factory.rs`) are both
 //! `#[cfg(test)]` Docker-availability skip-gates for their own tests.
 
 #[cfg(unix)]

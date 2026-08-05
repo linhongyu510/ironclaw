@@ -1,5 +1,5 @@
 //! Composition-tier proof that the `hosted-single-tenant-volume-sandboxed`
-//! profile resolves a per-user tenant-sandbox scope identity, not a shared
+//! profile resolves a per-user user-sandbox scope identity, not a shared
 //! singleton — the wiring half of the cross-tenant isolation invariant in
 //! `.claude/rules/safety-and-sandbox.md` ("Process and shell execution: real
 //! OS isolation, per tenant"). The companion real-Docker crate-tier test
@@ -11,7 +11,7 @@
 //!
 //! Uses a recording fake `SandboxCommandTransport` (same pattern as
 //! `ProductionReadySandboxTransport` in `facade_factory.rs`) wired through
-//! `RebornRuntimeProcessBinding::tenant_sandbox`, so no container is ever
+//! `RebornRuntimeProcessBinding::user_sandbox`, so no container is ever
 //! launched.
 
 use std::sync::{Arc, Mutex};
@@ -28,7 +28,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RebornSandboxScopeKey, RuntimeProcessError,
-    SHELL_CAPABILITY_ID, SandboxCommandTransport, TenantSandboxProcessPort, sandbox_network_policy,
+    SHELL_CAPABILITY_ID, SandboxCommandTransport, UserSandboxProcessPort, sandbox_network_policy,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeInput, RebornRuntimeProcessBinding,
@@ -166,19 +166,19 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
     let dir = tempfile::tempdir().unwrap();
 
     let transport = Arc::new(RecordingSandboxTransport::default());
-    let process_port = Arc::new(TenantSandboxProcessPort::new(transport.clone()));
+    let process_port = Arc::new(UserSandboxProcessPort::new(transport.clone()));
     // Bypass the approval gate the sandboxed profile's real policy carries
     // (`AskWrites`) so the shell invocation reaches the process port
     // directly — the thing under test is scope forwarding through
-    // composition's `TenantSandbox` binding, not the approval pipeline,
-    // which is covered elsewhere. `process_backend` stays `TenantSandbox`,
+    // composition's `UserSandbox` binding, not the approval pipeline,
+    // which is covered elsewhere. `process_backend` stays `UserSandbox`,
     // the real value under test.
     let mut policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
         .expect("sandboxed profile policy resolves");
     assert_eq!(
         policy.process_backend.as_str(),
-        "tenant_sandbox",
-        "sanity: the profile under test must resolve TenantSandbox process backend"
+        "user_sandbox",
+        "sanity: the profile under test must resolve UserSandbox process backend"
     );
     policy.approval_policy = ApprovalPolicy::Minimal;
 
@@ -190,12 +190,12 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
     )
     .expect("sandboxed profile build input resolves with the master key env set")
     .with_runtime_policy(policy)
-    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port))
-    .with_sandbox_workspaces_root(dir.path().to_path_buf());
+    .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(process_port))
+    .with_sandbox_runtime_support_for_test(dir.path().to_path_buf());
 
     let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
         .await
-        .expect("sandboxed profile runtime builds with a wired TenantSandbox binding");
+        .expect("sandboxed profile runtime builds with a wired UserSandbox binding");
     let host_runtime = runtime
         .host_runtime_for_test()
         .expect("sandboxed profile composes a host runtime");
@@ -253,7 +253,7 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
     assert_ne!(scopes[0].user_id, scopes[1].user_id);
     assert_ne!(
         key_a, key_b,
-        "composition must forward each user's own scope through the shared TenantSandbox \
+        "composition must forward each user's own scope through the shared UserSandbox \
          binding, not collapse both users onto one shared sandbox scope identity: {:?} vs {:?}",
         scopes[0], scopes[1]
     );

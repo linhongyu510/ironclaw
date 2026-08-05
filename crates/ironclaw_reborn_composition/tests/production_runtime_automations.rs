@@ -11,10 +11,6 @@
 //! Gated on `libsql` because the production-runtime path under test requires
 //! the libsql substrate.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::{AgentId, TenantId, UserId},
     runtime_policy::{
@@ -22,43 +18,18 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort,
-};
 use ironclaw_product::{
     AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::views::RebornViewPage;
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProcessBinding, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
 };
+use std::sync::Arc;
 
 #[path = "support/first_party.rs"]
 mod first_party_support;
-
-// ─── minimal sandbox transport stub ──────────────────────────────────────────
-
-#[derive(Debug)]
-struct RecordingSandboxTransport;
-
-#[async_trait]
-impl SandboxCommandTransport for RecordingSandboxTransport {
-    async fn run_command(
-        &self,
-        _request: CommandExecutionRequest,
-    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        Ok(CommandExecutionOutput {
-            output: String::new(),
-            saved_output: None,
-            exit_code: 0,
-            sandboxed: true,
-            duration: Duration::ZERO,
-        })
-    }
-}
 
 // ─── test ─────────────────────────────────────────────────────────────────────
 
@@ -92,15 +63,12 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::None,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
-        })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
-        ))),
+        }),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-automation-prod-tenant".to_string(),

@@ -69,9 +69,11 @@ fn far_future() -> Instant {
 /// for why the end-to-end properties belong there, not here.
 pub(crate) struct Fixture {
     pub(crate) swap: SandboxCredentialSwap,
+    pub(crate) runtime: SandboxCredentialRuntime,
     pub(crate) token: String,
     pub(crate) tenant_id: TenantId,
     pub(crate) user_id: UserId,
+    pub(crate) invocation_id: InvocationId,
     /// Keeps the staged grant alive — `StagedObligationLease::drop` revokes
     /// it (see that type's doc). `pub(crate)` (not `_`-only-private) so a
     /// caller outside this module, like `tls_intercept`'s CR-004 test, can
@@ -100,6 +102,7 @@ pub(crate) fn fixture(
     let firewall = Arc::new(SandboxCredentialFirewall::new());
     let injections = RuntimeSecretInjectionStore::new();
     let scope = scope_for(&tenant_id, &user_id);
+    let invocation_id = scope.invocation_id;
     let capability = CapabilityId::new("sandbox.shell").unwrap();
     let handle = SecretHandle::new("github-token").unwrap();
     injections
@@ -124,17 +127,32 @@ pub(crate) fn fixture(
             std::time::Duration::from_secs(600),
         ),
     );
+    let runtime = SandboxCredentialRuntime::from_parts(registry, firewall, injections);
     Fixture {
-        swap: SandboxCredentialSwap::new(registry, firewall, injections),
+        swap: runtime.credential_swap(),
+        runtime,
         token,
         tenant_id,
         user_id,
+        invocation_id,
         lease,
     }
 }
 
+fn identity<'a>(
+    tenant_id: &'a TenantId,
+    user_id: &'a UserId,
+    invocation_id: InvocationId,
+) -> SandboxCredentialConnectionIdentity<'a> {
+    SandboxCredentialConnectionIdentity {
+        tenant_id,
+        user_id,
+        invocation_id,
+    }
+}
+
 fn head_with(token: &str, method: &str, path: &str) -> Vec<u8> {
-    format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: token {token}\r\n\r\n")
+    format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer {token}\r\n\r\n")
         .into_bytes()
 }
 
@@ -144,7 +162,11 @@ fn rewrite(fixture: &Fixture, head: &[u8]) -> String {
         .rewrite_request_head(
             head,
             HOST,
-            Some((&fixture.tenant_id, &fixture.user_id)),
+            Some(identity(
+                &fixture.tenant_id,
+                &fixture.user_id,
+                fixture.invocation_id,
+            )),
             far_future(),
         )
         .expect("attributed lookup within deadline must not be a connection denial");
@@ -158,6 +180,94 @@ fn a_matching_grant_substitutes_the_real_secret_for_the_placeholder() {
 
     assert!(rewritten.contains(REAL_SECRET));
     assert!(!rewritten.contains(&fixture.token));
+}
+
+#[test]
+fn static_http_basic_payload_is_substituted_without_request_signing() {
+    let fixture = fixture("basic", "basic", policy("/", NetworkMethod::Get));
+    let head = format!(
+        "GET / HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Basic {}\r\n\r\n",
+        fixture.token
+    );
+
+    let rewritten = rewrite(&fixture, head.as_bytes());
+    assert!(rewritten.contains(&format!("Authorization: Basic {REAL_SECRET}")));
+    assert!(!rewritten.contains(&fixture.token));
+}
+
+#[test]
+fn placeholder_in_arbitrary_header_is_stripped_never_substituted() {
+    let fixture = fixture("github", "github", policy("/", NetworkMethod::Get));
+    let head = format!(
+        "GET / HTTP/1.1\r\nHost: {HOST}\r\nX-Api-Key: {}\r\n\r\n",
+        fixture.token
+    );
+
+    let rewritten = rewrite(&fixture, head.as_bytes());
+    assert!(!rewritten.contains(REAL_SECRET));
+    assert!(!rewritten.contains(&fixture.token));
+}
+
+#[test]
+fn placeholder_in_request_path_is_stripped_never_substituted() {
+    let fixture = fixture("github", "github", policy("/", NetworkMethod::Get));
+    let head = format!("GET /{} HTTP/1.1\r\nHost: {HOST}\r\n\r\n", fixture.token);
+
+    let rewritten = rewrite(&fixture, head.as_bytes());
+    assert!(!rewritten.contains(REAL_SECRET));
+    assert!(!rewritten.contains(&fixture.token));
+}
+
+#[test]
+fn duplicate_authorization_fields_are_ambiguous_and_strip() {
+    let fixture = fixture("github", "github", policy("/", NetworkMethod::Get));
+    let head = format!(
+        "GET / HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer {}\r\nAuthorization: Basic ignored\r\n\r\n",
+        fixture.token
+    );
+
+    let rewritten = rewrite(&fixture, head.as_bytes());
+    assert!(!rewritten.contains(REAL_SECRET));
+    assert!(!rewritten.contains(&fixture.token));
+}
+
+#[test]
+fn overlapping_live_bindings_strip_instead_of_choosing_one_nondeterministically() {
+    let fixture = fixture("github", "github", policy("/", NetworkMethod::Get));
+    let mut second_scope = scope_for(&fixture.tenant_id, &fixture.user_id);
+    second_scope.invocation_id = fixture.invocation_id;
+    let capability = CapabilityId::new("sandbox.shell.second").unwrap();
+    let second_handle = SecretHandle::new("github-token-second").unwrap();
+    fixture
+        .swap
+        .runtime
+        .secret_injections
+        .insert(
+            &second_scope,
+            &capability,
+            &second_handle,
+            SecretMaterial::from("second-real-secret"),
+        )
+        .expect("second staged material inserts");
+    let _second_lease = fixture.swap.runtime.firewall.stage(
+        &fixture.tenant_id,
+        &fixture.user_id,
+        StagedCredentialObligation::new(
+            StagedCredentialObligationSource {
+                scope: second_scope,
+                capability_id: capability,
+                provider_or_extension_id: provider("github"),
+                secret_handle: second_handle,
+            },
+            vec![policy("/", NetworkMethod::Get)],
+            std::time::Duration::from_secs(600),
+        ),
+    );
+
+    let rewritten = rewrite(&fixture, &head_with(&fixture.token, "GET", "/repos"));
+    assert!(!rewritten.contains(&fixture.token));
+    assert!(!rewritten.contains(REAL_SECRET));
+    assert!(!rewritten.contains("second-real-secret"));
 }
 
 /// The token belongs to a *different* provider than the staged grant. Both
@@ -215,7 +325,7 @@ fn a_placeholder_owned_by_another_user_is_stripped() {
         .rewrite_request_head(
             &head_with(&fixture.token, "GET", "/repos/x"),
             HOST,
-            Some((&other_tenant, &other_user)),
+            Some(identity(&other_tenant, &other_user, fixture.invocation_id)),
             far_future(),
         )
         .expect("a cross-user token is a grant decision, not a connection denial");
@@ -315,7 +425,11 @@ fn the_grant_denial_annotation_is_leak_scrubbed() {
         .rewrite_request_head(
             &head_with(&fixture.token, "GET", "/admin/keys"),
             &hostile_host,
-            Some((&fixture.tenant_id, &fixture.user_id)),
+            Some(identity(
+                &fixture.tenant_id,
+                &fixture.user_id,
+                fixture.invocation_id,
+            )),
             far_future(),
         )
         .expect("grant denial is a decision, not a connection denial");
@@ -345,7 +459,11 @@ fn rewritten_head_debug_never_prints_the_secret() {
         .rewrite_request_head(
             &head_with(&fixture.token, "GET", "/repos/x"),
             HOST,
-            Some((&fixture.tenant_id, &fixture.user_id)),
+            Some(identity(
+                &fixture.tenant_id,
+                &fixture.user_id,
+                fixture.invocation_id,
+            )),
             far_future(),
         )
         .expect("grant applies");

@@ -125,11 +125,11 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) google_oauth_backend_for_test: bool,
     /// W6 phase 2: when `true`, `new_with_options` (1) roots this harness's
     /// storage `TempDir` under `$HOME` instead of the system `$TMPDIR` (a
-    /// `TenantSandbox` container bind-mounts it — see
+    /// `UserSandbox` container bind-mounts it — see
     /// `sandbox_shell_identity`'s module doc for why the ambient `$TMPDIR`
     /// is unsafe there) and (2) builds the composition input through the
     /// `HostedSingleTenantVolumeSandboxed` profile with a real
-    /// `tenant_sandbox_process_binding` attached, instead of the plain
+    /// `user_sandbox_process_binding` attached, instead of the plain
     /// `local_dev_build_input` every other harness uses. Opt-in via
     /// `.with_sandboxed_shell()`; every other harness stays byte-identical.
     /// Only `profiles::sandbox_shell` sets this.
@@ -311,7 +311,7 @@ impl HostRuntimeHarnessOptions {
     }
 
     /// W6 phase 2: opt into the `$HOME`-rooted storage root and the
-    /// `HostedSingleTenantVolumeSandboxed` + `TenantSandbox` composition
+    /// `HostedSingleTenantVolumeSandboxed` + `UserSandbox` composition
     /// path. See [`Self::sandboxed_shell`]'s doc.
     pub(crate) fn with_sandboxed_shell(mut self) -> Self {
         self.sandboxed_shell = true;

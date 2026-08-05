@@ -23,7 +23,7 @@ pub enum RebornProfile {
     /// the full PostgreSQL production composition continues to mature.
     HostedSingleTenantVolume,
     /// Hosted single-tenant volume profile whose shell/process lane is a
-    /// tenant sandbox instead of unrestricted host execution.
+    /// user sandbox instead of unrestricted host execution.
     HostedSingleTenantVolumeSandboxed,
     /// Production startup. Future runtime composition must fail closed here if
     /// required durable services are absent.

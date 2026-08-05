@@ -323,14 +323,12 @@ pub(super) async fn build_backend_production(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
+        sandbox_enabled,
         workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port,
-        sandbox_activity,
-        sandbox_egress_proxy,
-        sandbox_attribution,
-        sandbox_workspaces_root,
+        sandbox,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -355,6 +353,13 @@ pub(super) async fn build_backend_production(
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
     } = context;
+    let sandbox_workspaces_root = sandbox
+        .as_ref()
+        .and_then(crate::sandbox::UserSandboxRuntimeBundle::host_workspace_root)
+        .map(std::path::Path::to_path_buf);
+    let sandbox_has_remote_workspace = sandbox
+        .as_ref()
+        .is_some_and(crate::sandbox::UserSandboxRuntimeBundle::has_remote_workspace);
     let deployment_is_local_single_user = matches!(
         production_wiring.runtime_policy.deployment,
         DeploymentMode::LocalSingleUser
@@ -395,7 +400,23 @@ pub(super) async fn build_backend_production(
     )?;
     let channel_egress_scope = turn_state_scope.clone();
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
-        if sandbox_workspaces_root.is_some() {
+        if sandbox_has_remote_workspace {
+            let no_workspace_mounts =
+                MountView::new(Vec::new()).map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("remote sandbox workspace policy is invalid: {error}"),
+                })?;
+            (
+                Arc::new(ScopedFilesystem::new(
+                    Arc::clone(&stores.filesystem),
+                    scoped_skill_context_mount_view,
+                )),
+                Arc::new(ScopedFilesystem::with_fixed_view(
+                    Arc::clone(&stores.filesystem),
+                    no_workspace_mounts,
+                )),
+                crate::runtime_mounts::WorkspaceMountPolicy::Unavailable,
+            )
+        } else if sandbox_workspaces_root.is_some() {
             let read_only_workspace_mounts =
                 sandbox_user_workspace_mount_view(&turn_state_scope, MountPermissions::read_only())
                     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -464,12 +485,17 @@ pub(super) async fn build_backend_production(
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
-    let capability_policy =
-        Arc::new(
-            builtin_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+    let runtime_policy = production_wiring.runtime_policy.clone();
+    let capability_policy = Arc::new(
+        builtin_capability_policy()
+            .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("capability policy is invalid: {error}"),
+            })?
+            .for_process_backend(runtime_policy.process_backend)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("capability policy is invalid for the process backend: {error}"),
             })?,
-        );
+    );
     let tool_permission_overrides = Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
@@ -487,7 +513,6 @@ pub(super) async fn build_backend_production(
             as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         persistent_approval_policies_for_settings,
     ));
-    let runtime_policy = production_wiring.runtime_policy.clone();
     let runtime_policy_for_return = Some(runtime_policy.clone());
     let authorizer = capability_authorizer(
         Some(&runtime_policy),
@@ -498,8 +523,11 @@ pub(super) async fn build_backend_production(
     let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
-    let extension_registry =
-        production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?;
+    let extension_registry = production_builtin_extension_registry(
+        process_backend,
+        false,
+        resolved_memory.package.as_ref(),
+    )?;
     let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,
@@ -704,10 +732,6 @@ pub(super) async fn build_backend_production(
     } else {
         services
     };
-    let is_sandboxed_profile = matches!(
-        &production_wiring.runtime_process_binding,
-        RebornRuntimeProcessBinding::TenantSandbox { .. }
-    );
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1241,16 +1265,13 @@ pub(super) async fn build_backend_production(
     } else {
         Arc::new(services.host_runtime_for_production(&wiring_config)?)
     };
-    let sandbox_runtime_bindings = crate::sandbox_composition::SandboxRuntimeBindings::build(
-        crate::sandbox_composition::SandboxProfileBindingInputs {
-            is_sandboxed_profile,
+    let sandbox_runtime_bindings = crate::sandbox::SandboxRuntimeBindings::build(
+        crate::sandbox::SandboxProfileBindingInputs {
+            is_sandboxed_profile: sandbox_enabled,
+            bundle: sandbox,
             local_runtime_identity: local_runtime_identity.as_ref(),
             resource_governor: Arc::clone(&production_resource_governor),
-            activity: sandbox_activity
-                .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
-            attribution: sandbox_attribution,
             owner_user_id: owner_user_id.clone(),
-            egress_proxy: sandbox_egress_proxy,
         },
     )
     .await?;
@@ -1271,7 +1292,6 @@ pub(super) async fn build_backend_production(
         persistent_approval_policies: Arc::clone(&stores.persistent_approval_policies),
         tool_permission_overrides: Arc::clone(&tool_permission_overrides),
         auto_approve_settings: Arc::clone(&auto_approve_settings),
-        #[cfg(any(test, feature = "test-support"))]
         capability_policy: Arc::clone(&capability_policy),
         outbound_preferences: outbound_stores.outbound_preferences,
         outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),

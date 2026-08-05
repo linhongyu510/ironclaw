@@ -179,10 +179,17 @@ fn validate_https_authorization_url(value: &str) -> Result<(), AuthProductError>
 
 uuid_id!(AuthFlowId);
 uuid_id!(CredentialAccountId);
+uuid_id!(CredentialPresentationBindingId);
+uuid_id!(GuestCredentialArtifactId);
 uuid_id!(AuthInteractionId);
 
 validated_string!(AuthProviderId, "auth provider id", 128);
 validated_string!(CredentialAccountLabel, "credential account label", 256);
+validated_string!(
+    CredentialPresentationProfileId,
+    "credential presentation profile id",
+    128
+);
 validated_string!(ProviderScope, "provider scope", 256);
 validated_string!(ProductActionRef, "product action ref", 256);
 validated_string!(LifecyclePackageRef, "lifecycle package ref", 256);

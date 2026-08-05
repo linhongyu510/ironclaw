@@ -1,14 +1,14 @@
 //! W6 phase 2 — the first harness-driven proof that a scripted `builtin.shell`
-//! turn dispatches into a REAL `TenantSandbox` Docker container, not the host
+//! turn dispatches into a REAL `UserSandbox` Docker container, not the host
 //! and not the inert `RecordingProcessPort`.
 //!
 //! Root cause this test exists to fix: `core_builtin_tools()`
 //! (`support/harness/profiles/core_builtin.rs`) hand-assembles a `HostRuntime`
-//! via `local_dev_host_runtime_with_http_egress` and never calls
+//! via the local-development helper and never calls
 //! `build_runtime`, so `.with_live_shell()`/`builtin.shell` on that path can
 //! only ever reach the unsandboxed host process port — the
 //! `HostedSingleTenantVolumeSandboxed` composition path
-//! (`ironclaw_reborn_composition::tenant_sandbox_process_binding`) had never
+//! (`ironclaw_reborn_composition::user_sandbox_process_binding`) had never
 //! been driven from the integration harness at all. This test wires a NEW
 //! profile (`support/harness/profiles/sandbox_shell.rs`) through
 //! `new_with_options`/`build_runtime` — the same production entry point
@@ -56,17 +56,19 @@ use serde_json::json;
 /// host" or "never ran at all" (the inert `RecordingProcessPort` records the
 /// command string but spawns nothing, so it could never print this marker).
 const IN_CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
+const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
 
-/// Docker label every `TenantSandbox` user container carries (the
+/// Docker label every `UserSandbox` user container carries (the
 /// `ironclaw_host_runtime::sandbox_process::exec_transport::LABEL_PREFIX`
 /// tenant label), fixed to `"tenant-itest"` for every harness build in this
 /// suite (see the module doc FINDING). Used to find/remove THIS suite's
 /// sandbox container by label rather than by a name this test cannot
 /// actually control.
 const ITEST_TENANT_LABEL_FILTER: &str = "label=ironclaw.tenant=tenant-itest";
+static REAL_CONTAINER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Proves the scripted `builtin.shell` call executed inside a real
-/// `TenantSandbox` container: the command only echoes [`IN_CONTAINER_MARKER`]
+/// `UserSandbox` container: the command only echoes [`IN_CONTAINER_MARKER`]
 /// when `/.dockerenv` exists, and separately reports the exec uid, which the
 /// sandbox always runs as the unprivileged `SANDBOX_EXEC_UID` (1000,
 /// `ironclaw_host_runtime::sandbox_process::exec_transport`), not the host
@@ -76,6 +78,9 @@ const ITEST_TENANT_LABEL_FILTER: &str = "label=ironclaw.tenant=tenant-itest";
 /// discriminating.
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
+    let _serial_guard = REAL_CONTAINER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     run_with_larger_stack(async {
         if !docker_gate::docker_available() {
             eprintln!(
@@ -118,8 +123,14 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                     "builtin.shell",
                     json!({
                         "command": format!(
-                            "test -f /.dockerenv && echo {IN_CONTAINER_MARKER}; id -u"
+                            "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && echo {IN_CONTAINER_MARKER}"
                         )
+                    }),
+                ),
+                RebornScriptedReply::tool_call(
+                    "builtin.shell",
+                    json!({
+                        "command": "cat /workspace/persistence-marker.txt; id -u"
                     }),
                 ),
                 RebornScriptedReply::text("ran in the sandbox"),
@@ -138,6 +149,12 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                 .await
                 .map_err(|error| format!("turn did not complete: {error}"))?;
 
+            h.assert_model_tools_contains("builtin__shell")
+                .await
+                .map_err(|error| format!("builtin.shell was not offered to the model: {error}"))?;
+            h.assert_tool_invoked("builtin.shell")
+                .await
+                .map_err(|error| format!("builtin.shell was not dispatched: {error}"))?;
             // Independent signal 1: `/.dockerenv` only exists inside a real
             // Docker container.
             h.assert_tool_result_contains(IN_CONTAINER_MARKER)
@@ -157,6 +174,13 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                     format!(
                         "shell command did not report the sandbox exec uid (1000), so it did not \
                      run as the sandbox user: {error}"
+                    )
+                })?;
+            h.assert_tool_result_contains(PERSISTENCE_MARKER)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "the second shell invocation could not read the first invocation's workspace marker after the retained container restart: {error}"
                     )
                 })?;
             h.assert_reply_contains("ran in the sandbox")

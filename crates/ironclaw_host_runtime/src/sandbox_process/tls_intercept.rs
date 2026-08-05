@@ -1,6 +1,6 @@
-//! TLS termination seam for the sandbox egress proxy — W6 phase 1 (design
-//! doc `docs/plans/2026-07-26-sandbox-credential-firewall-design.md` §4,
-//! §3.4, §3.5).
+//! TLS termination and credential-boundary seam for the sandbox egress proxy
+//! (design doc `docs/plans/2026-07-26-sandbox-credential-firewall-design.md`
+//! §4, §3.4, §3.5).
 //!
 //! Carved out of `egress_proxy.rs` from day one per the design doc's own
 //! guidance: that file already mixes DNS resolution, private-IP denial, and
@@ -16,26 +16,21 @@
 //! so an unbound host cannot be *passed* to this module's cert-minting
 //! path at all, not merely "shouldn't be" by caller convention.
 //!
-//! **Binding decision — phase 1 is a flat allowlist, not a binding model.**
+//! **Binding decision — a flat allowlist, not credential authority.**
 //! [`TlsInterceptConfig`] carries a plain `HashSet<String>` of hosts this
-//! proxy instance terminates TLS for. W12 (design doc §4) owns the real
-//! binding model (provider-scoped child records, UI, validation); this phase
-//! deliberately does not anticipate it — the design doc calls out per-command
-//! or per-binding predicates as its own, separately-justified follow-up, not
-//! something to build speculatively here.
+//! proxy instance terminates TLS for. Credential authority comes separately
+//! from the host-owned live window and canonical HTTP egress service; a bound
+//! host alone never grants access to secret material.
 //!
-//! **Phase 1 scope: forward the decrypted stream unchanged.** Preserved
-//! exactly when [`TlsInterceptConfig`]'s `credential_swap` is `None`.
-//!
-//! **Phase 2 scope: the credential swap.** When a
+//! **Credentialed host egress.** When a
 //! [`super::credential_swap::SandboxCredentialSwap`] is configured, the first
-//! decrypted request head is read (bounded by [`MAX_REQUEST_HEAD_BYTES`]),
-//! any `icsbx_` placeholder in it is resolved/authorized/substituted, and the
-//! rewritten head is what reaches the origin. The response direction is
-//! untouched. Ordering is load-bearing: the swap runs **before** the origin is
-//! dialed, so a CONNECTION-DENIAL means no origin socket is ever opened. See
-//! `credential_swap`'s module doc for the two-refusal contract and the
-//! keep-alive limitation.
+//! decrypted request head is read (bounded by [`MAX_REQUEST_HEAD_BYTES`]). A
+//! placeholder-bearing Basic/Bearer request is completed under strict V1
+//! framing and delegated to the canonical host HTTP egress service; that
+//! service alone injects real material, performs origin I/O, and sanitizes the
+//! response. Requests without a placeholder retain the direct origin relay.
+//! Ordering is load-bearing: credential authorization and host dispatch happen
+//! **before** this module's origin dial, so denial never opens that socket.
 //!
 //! **Fail closed.** Any failure — leaf mint, server handshake with the
 //! client, origin dial, or origin handshake — closes the connection. There
@@ -75,11 +70,18 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use super::ca::{LeafCertificate, SandboxCertificateAuthority, normalize_host};
-use super::credential_firewall::SandboxCredentialFirewallError;
+use super::credential_firewall::{
+    SandboxCredentialConnectionIdentity, SandboxCredentialFirewallError,
+};
+#[cfg(any(test, feature = "test-support"))]
+use super::credential_swap::SandboxCredentialRuntime;
 use super::credential_swap::SandboxCredentialSwap;
+use super::credential_swap::http_egress_adapter::{
+    SandboxProxyHttpAdapter, SandboxProxyHttpAdapterError,
+};
 
 /// Cap on the decrypted request head this seam will buffer before deciding a
-/// credential swap (W6 phase 2). Bounded because the bytes come from the
+/// credentialed host-egress decision. Bounded because the bytes come from the
 /// container: without a cap, a client that opens a request and never sends
 /// `\r\n\r\n` would grow a host-side buffer without limit. Exceeding it is
 /// fail-closed (the connection is refused), never "give up and forward it
@@ -120,9 +122,8 @@ fn ring_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// Errors from the TLS-termination seam. Every variant is a **fail-closed**
 /// signal to the caller: `egress_proxy::handle_connect` treats any `Err`
 /// here as "close the connection," never "fall back to a plaintext tunnel."
-#[allow(dead_code)] // consumed by W6; not wired yet
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TlsInterceptError {
+pub(in crate::sandbox_process) enum TlsInterceptError {
     #[error("sandbox tls intercept: failed to mint leaf certificate for {host}: {reason}")]
     LeafMintFailed { host: String, reason: String },
     #[error("sandbox tls intercept: failed to build server tls config: {0}")]
@@ -165,6 +166,10 @@ pub(crate) enum TlsInterceptError {
     /// is the container's own bytes.
     #[error("sandbox tls intercept: decrypted stream did not contain a complete request head")]
     MalformedRequestHead,
+    #[error("sandbox tls intercept: credentialed HTTP dispatch failed: {0}")]
+    CredentialedHttp(#[from] SandboxProxyHttpAdapterError),
+    #[error("sandbox tls intercept: credentialed HTTP adapter is not configured")]
+    CredentialedHttpAdapterMissing,
 }
 
 /// A [`TlsConnector`] whose trust store is guaranteed to be the real
@@ -186,7 +191,6 @@ pub(crate) enum TlsInterceptError {
 /// makes the mistake this type exists to prevent (an empty or permissive
 /// connector reaching `TlsInterceptConfig::new`) a compile error for any
 /// non-test caller, not merely a documented review requirement.
-#[allow(dead_code)] // consumed by W6; not wired to a production caller yet
 pub(crate) struct VerifiedOriginConnector(TlsConnector);
 
 impl VerifiedOriginConnector {
@@ -198,8 +202,7 @@ impl VerifiedOriginConnector {
     /// zero roots — that empty-store case is exactly the bug this type
     /// exists to make unrepresentable, so it must fail closed rather than
     /// hand back a connector that verifies against nothing.
-    #[allow(dead_code)] // consumed by W6; not wired to a production caller yet
-    pub(crate) fn from_system_roots() -> Result<Self, TlsInterceptError> {
+    pub(super) fn from_system_roots() -> Result<Self, TlsInterceptError> {
         let mut root_store = rustls::RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for error in &native.errors {
@@ -227,7 +230,6 @@ impl VerifiedOriginConnector {
     /// nothing. Split out so this branch is deterministically unit-testable
     /// without needing to fake `rustls_native_certs::load_native_certs`'s
     /// OS-level behavior.
-    #[allow(dead_code)] // consumed by W6; not wired to a production caller yet
     fn from_root_store(root_store: rustls::RootCertStore) -> Result<Self, TlsInterceptError> {
         if root_store.is_empty() {
             return Err(TlsInterceptError::TrustRootsUnavailable(
@@ -256,17 +258,6 @@ impl VerifiedOriginConnector {
         // relayed straight to an http/1.1 client.
         client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Self(TlsConnector::from(Arc::new(client_config))))
-    }
-
-    /// Test-only escape hatch: wrap an arbitrary connector (e.g. one
-    /// trusting only a fake origin's root, or trusting nothing at all, to
-    /// force the fail-closed path deterministically). `#[cfg(test)]` means
-    /// this constructor does not exist in a production build — a
-    /// production caller reaching for a permissive connector gets a
-    /// compile error, not a review comment.
-    #[cfg(test)]
-    pub(crate) fn for_test(connector: TlsConnector) -> Self {
-        Self(connector)
     }
 
     /// Named accessor for the wrapped connector, matching the crate's other
@@ -304,7 +295,7 @@ impl VerifiedOriginConnector {
 /// certificate against a real root store, this seam stops being a
 /// credential firewall and becomes a working, silent MITM against our own
 /// users' egress traffic to every "bound" host — the exact opposite of what
-/// W6 exists to build. `crates/ironclaw_architecture` also bans the escape
+/// credential boundary exists to enforce. `crates/ironclaw_architecture` also bans the escape
 /// hatches (`dangerous(`, `with_custom_certificate_verifier`,
 /// `RootCertStore::empty()`) from non-test code under
 /// `sandbox_process/`, so a caller can no longer route around this type and
@@ -336,22 +327,20 @@ impl ConfigIdentity {
     }
 }
 
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct TlsInterceptConfig {
     ca: SandboxCertificateAuthority,
     bound_hosts: HashSet<String>,
     origin_connector: VerifiedOriginConnector,
     identity: ConfigIdentity,
-    /// W6 phase 2. `None` reproduces phase 1 exactly: the decrypted stream is
-    /// relayed byte-for-byte with no parsing and no credential handling.
-    /// `Some` enables the placeholder → real-secret substitution described in
-    /// [`super::credential_swap`]. Production leaves this `None` today; it is
-    /// populated by future profile-gated wiring.
+    /// The production egress-proxy factory always supplies this pair. `None`
+    /// exists only while constructing the config and in focused TLS tests;
+    /// placeholder-bearing traffic fails closed unless both the swap and the
+    /// canonical host HTTP egress adapter are present.
     credential_swap: Option<SandboxCredentialSwap>,
+    credentialed_http: Option<SandboxProxyHttpAdapter>,
 }
 
 impl TlsInterceptConfig {
-    #[allow(dead_code)] // constructed by this module's tests; a production caller is future wiring
     pub(crate) fn new(
         ca: SandboxCertificateAuthority,
         bound_hosts: HashSet<String>,
@@ -371,36 +360,15 @@ impl TlsInterceptConfig {
             origin_connector,
             identity: ConfigIdentity::mint(),
             credential_swap: None,
+            credentialed_http: None,
         }
     }
 
-    /// Enables W6 phase 2's credential substitution on this config.
-    #[allow(dead_code)] // used by this module's tests; production wiring is future
+    /// Connects this TLS boundary to the shared sandbox credential runtime.
     pub(crate) fn with_credential_swap(mut self, swap: SandboxCredentialSwap) -> Self {
+        self.credentialed_http = Some(SandboxProxyHttpAdapter::new(swap.runtime_clone()));
         self.credential_swap = Some(swap);
         self
-    }
-
-    /// D1's predicate: is `host` one this proxy instance terminates TLS for?
-    /// Canonicalizes through the same [`normalize_host`] as
-    /// [`super::ca::SandboxCertificateAuthority::issue_leaf_for_host`] and
-    /// this module's own SNI conversion — case-insensitive (to match
-    /// `egress_proxy::host_allowed`'s own normalization) and whitespace-
-    /// insensitive, so this allowlist check, the leaf mint, and the SNI
-    /// value sent to the origin can never disagree about which host is
-    /// meant. Everything not in this set stays an opaque tunnel — see the
-    /// module doc's D1 section.
-    ///
-    /// Kept as a free-standing `bool` predicate (rather than folded into
-    /// [`bind`](Self::bind) alone) because `egress_proxy::handle_connect`'s
-    /// routing decision — "does this CONNECT target get the TLS-termination
-    /// path or the opaque tunnel path at all" — is a separate question from
-    /// "hand me proof I can mint a leaf for it," and this module's own tests
-    /// use it to assert the CA's leaf cache stays empty independent of ever
-    /// calling [`terminate_and_forward`].
-    #[allow(dead_code)] // consumed by W6; not wired yet
-    pub(crate) fn is_bound(&self, host: &str) -> bool {
-        normalize_host(host).is_some_and(|host| self.bound_hosts.contains(&host))
     }
 
     /// D1 enforced by construction, not a runtime branch: the **only**
@@ -417,11 +385,11 @@ impl TlsInterceptConfig {
     /// escape hatch, no bare-`String` overload for a production caller to
     /// reach for instead.
     ///
-    /// Routes through the identical [`normalize_host`] [`is_bound`](Self::
-    /// is_bound) and [`terminate_and_forward_core`]'s leaf mint/SNI both
-    /// use, so the allowlist check baked into the returned [`BoundHost`] and
-    /// the value actually threaded through cert minting and SNI can never
-    /// disagree about which host is meant.
+    /// Routes through the same [`normalize_host`] used by
+    /// [`terminate_and_forward_core`]'s leaf mint/SNI, so the allowlist check
+    /// baked into the returned [`BoundHost`] and the value actually threaded
+    /// through cert minting and SNI can never disagree about which host is
+    /// meant.
     ///
     /// The returned [`BoundHost`] also carries `self`'s [`ConfigIdentity`] —
     /// D1's proof is scoped to *this specific config instance*, not merely
@@ -429,7 +397,6 @@ impl TlsInterceptConfig {
     /// rejects a `BoundHost` whose identity does not match the config it is
     /// passed alongside, even if that other config's own allowlist happens
     /// to also contain the same host string.
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn bind(&self, host: &str) -> Option<BoundHost> {
         let host = normalize_host(host)?;
         self.bound_hosts.contains(&host).then_some(BoundHost {
@@ -438,21 +405,46 @@ impl TlsInterceptConfig {
         })
     }
 
-    /// Test/introspection seam: how many hosts this config's CA currently
-    /// holds a cached leaf certificate for — D1's assertion surface for "an
-    /// unbound host must never have a leaf minted for it," independent of
-    /// whether traffic merely *looked* like it flowed correctly.
-    #[cfg(test)]
-    #[allow(dead_code)] // consumed by W6; not wired yet
-    pub(crate) fn cached_leaf_count(&self) -> usize {
-        self.ca.cached_entry_count()
-    }
-
     /// This instance's [`ConfigIdentity`], minted once at construction.
     /// [`terminate_and_forward_core`]'s D1 check compares this against the
     /// identity carried by the [`BoundHost`] it was passed.
     fn identity(&self) -> ConfigIdentity {
         self.identity
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_support {
+    use super::*;
+
+    impl TlsInterceptConfig {
+        #[cfg(test)]
+        pub(crate) fn is_bound(&self, host: &str) -> bool {
+            normalize_host(host).is_some_and(|host| self.bound_hosts.contains(&host))
+        }
+
+        pub(crate) fn uses_sandbox_credential_runtime(
+            &self,
+            runtime: &SandboxCredentialRuntime,
+        ) -> bool {
+            self.credential_swap
+                .as_ref()
+                .is_some_and(|swap| swap.uses_runtime(runtime))
+        }
+
+        #[cfg(test)]
+        pub(crate) fn cached_leaf_count(&self) -> usize {
+            self.ca.cached_entry_count()
+        }
+    }
+
+    #[cfg(test)]
+    impl VerifiedOriginConnector {
+        /// Wraps a deterministic test connector without exposing a production
+        /// path around the platform trust-root constructor.
+        pub(crate) fn for_test(connector: TlsConnector) -> Self {
+            Self(connector)
+        }
     }
 }
 
@@ -486,7 +478,6 @@ impl TlsInterceptConfig {
 /// that: [`terminate_and_forward_core`] rejects the call
 /// (`TlsInterceptError::ConfigMismatch`, fail-closed, not a panic) unless it
 /// matches the config actually passed in.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct BoundHost {
     host: String,
     config_identity: ConfigIdentity,
@@ -516,15 +507,15 @@ impl BoundHost {
 /// `copy_bidirectional`'s steady-state relay: an idle-timeout/byte-ceiling
 /// policy for a live, decrypted proxy connection is a product decision (what
 /// counts as "idle," whether a byte cap is even correct for a general HTTPS
-/// relay that legitimately serves large downloads) that belongs with
-/// whichever PR gives this seam a production caller and a concurrency/fan-out
-/// policy to sit inside, not invented ad hoc here.
+/// relay that legitimately serves large downloads), not something this
+/// handshake-specific timeout should invent.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Terminates TLS from `client` using a leaf certificate minted for `host`,
 /// dials `dial_addr` and re-originates TLS to the real upstream (SNI =
-/// `host`), then relays the decrypted bytes unmodified (phase 1: no parsing,
-/// no injection — see the module doc). `leftover` is whatever bytes the
+/// `host`). Uncredentialed traffic is relayed byte-for-byte; a supported
+/// placeholder-bearing Basic/Bearer request is dispatched through canonical
+/// host HTTP egress before any direct origin dial. `leftover` is whatever bytes the
 /// egress proxy's `BufReader` had already buffered past the CONNECT
 /// request/`200` reply (the same "eager client" case `egress_proxy`'s own
 /// tunnel path already has to handle) — fed to the TLS acceptor before any
@@ -541,8 +532,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// origin socket again — no code path here ever falls through to a
 /// plaintext relay. `egress_proxy::handle_connect` must preserve that: log
 /// and close, never retry unencrypted.
-#[allow(dead_code)] // consumed by W6; not wired yet
-pub(crate) async fn terminate_and_forward(
+pub(super) async fn terminate_and_forward(
     client: TcpStream,
     leftover: Vec<u8>,
     host: BoundHost,
@@ -568,22 +558,15 @@ pub(crate) async fn terminate_and_forward(
 /// firewall lookup.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InterceptedConnection<'a> {
-    pub(crate) identity: Option<(
-        &'a ironclaw_host_api::ids::TenantId,
-        &'a ironclaw_host_api::ids::UserId,
-    )>,
+    pub(crate) identity: Option<SandboxCredentialConnectionIdentity<'a>>,
     pub(crate) deadline: std::time::Instant,
 }
 
 impl Default for InterceptedConnection<'_> {
-    /// The safe default for every call site that does not (yet) have a real
-    /// attribution outcome to pass: `identity: None`. Combined with
-    /// `credential_swap: None` on [`TlsInterceptConfig`] (phase 1's default),
-    /// this reproduces phase 1 exactly — the request-head read/rewrite step
-    /// in [`terminate_and_forward_core`] only ever runs when a
-    /// [`super::credential_swap::SandboxCredentialSwap`] is configured, so an
-    /// unattributed default identity is inert unless a caller has also opted
-    /// into phase 2.
+    /// Safe default for callers without a verified attribution result:
+    /// `identity: None`. Uncredentialed traffic remains ordinary relay
+    /// traffic, while any placeholder-bearing request fails closed at the
+    /// credential boundary.
     fn default() -> Self {
         Self {
             identity: None,
@@ -596,11 +579,10 @@ impl Default for InterceptedConnection<'_> {
 /// identity (`client`/`leftover`/`host`/`dial_addr`/`config`) and the SNI
 /// test seam (`sni_server_name`): the handshake timeout (parameterized so
 /// tests can drive the timeout branch with a short real duration — see
-/// [`terminate_and_forward_with_timeout`]'s doc) and W6 phase 2's per-
-/// connection swap inputs. Bundled into one struct — rather than two more
-/// bare parameters — to keep `terminate_and_forward_core` under clippy's
-/// too-many-arguments ceiling now that phase 2 added `connection` on top of
-/// the D1 `BoundHost`/`ConfigIdentity` hardening's existing argument count.
+/// [`terminate_and_forward_with_timeout`]'s doc) and the per-connection
+/// credential-attribution inputs. Bundled into one struct — rather than two
+/// more bare parameters — to keep `terminate_and_forward_core` under clippy's
+/// too-many-arguments ceiling.
 struct CoreCallOptions<'a> {
     handshake_timeout: Duration,
     connection: InterceptedConnection<'a>,
@@ -612,7 +594,6 @@ struct CoreCallOptions<'a> {
 /// [`HANDSHAKE_TIMEOUT`] wall-clock seconds or fighting tokio's paused/
 /// advanceable virtual clock against a task that also does real loopback
 /// socket I/O.
-#[allow(dead_code)] // consumed by W6; not wired yet
 async fn terminate_and_forward_with_timeout(
     client: TcpStream,
     leftover: Vec<u8>,
@@ -761,13 +742,13 @@ where
             })?
             .map_err(|error| TlsInterceptError::ClientHandshakeFailed(error.to_string()))?;
 
-    // W6 phase 2: read and rewrite the first request head BEFORE the origin is
-    // dialed. Ordering is load-bearing — a CONNECTION-DENIAL from the
-    // credential firewall must mean the origin socket is never opened at
-    // all, not "opened and then abandoned." `None` reproduces phase 1
-    // exactly: no request head is read here, and the decrypted stream is
-    // relayed byte-for-byte below via `copy_bidirectional`.
-    let rewritten_head = match &config.credential_swap {
+    // Read the first request head BEFORE the origin is dialed whenever the
+    // credential boundary is configured. Placeholder-bearing Basic/Bearer
+    // requests return through canonical host egress above; an uncredentialed
+    // request keeps its head byte-identical and uses the direct relay below.
+    // Ordering is load-bearing: credential denial must never open the origin
+    // socket. `None` is retained for focused bare-config tests.
+    let intercepted_head = match &config.credential_swap {
         None => None,
         Some(swap) => {
             let Some((head, trailing)) = read_request_head(&mut client_tls).await? else {
@@ -775,10 +756,36 @@ where
                 // forward, and no reason to dial the origin.
                 return Ok(());
             };
-            Some((
-                swap.rewrite_request_head(&head, &host, connection.identity, connection.deadline)?,
-                trailing,
-            ))
+            if swap.contains_syntactic_placeholder(&head) {
+                let adapter = config
+                    .credentialed_http
+                    .as_ref()
+                    .ok_or(TlsInterceptError::CredentialedHttpAdapterMissing)?;
+                let response = adapter
+                    .execute_intercepted(
+                        head,
+                        trailing,
+                        &mut client_tls,
+                        &host,
+                        connection.identity,
+                        connection.deadline,
+                    )
+                    .await?;
+                client_tls
+                    .write_all(&response)
+                    .await
+                    .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+                client_tls
+                    .flush()
+                    .await
+                    .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+                client_tls
+                    .shutdown()
+                    .await
+                    .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
+                return Ok(());
+            }
+            Some((head, trailing))
         }
     };
 
@@ -822,8 +829,7 @@ where
     })?
     .map_err(|error| TlsInterceptError::OriginHandshakeFailed(error.to_string()))?;
 
-    let (Some(swap), Some((rewritten_head, trailing))) = (&config.credential_swap, rewritten_head)
-    else {
+    let (Some(swap), Some((head, trailing))) = (&config.credential_swap, intercepted_head) else {
         copy_bidirectional(&mut client_tls, &mut origin_tls)
             .await
             .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
@@ -833,15 +839,12 @@ where
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
     let (mut origin_read, mut origin_write) = tokio::io::split(origin_tls);
     origin_write
-        .write_all(rewritten_head.bytes())
+        .write_all(&head)
         .await
         .map_err(|error| TlsInterceptError::RelayFailed(error.to_string()))?;
-    // Drop the rewritten head as soon as it is on the wire: it holds the real
-    // secret, and `SecretSlice`'s `Drop` zeroizes it.
-    drop(rewritten_head);
 
-    // `trailing` seeds the scrubbing relay so a request pipelined behind the
-    // first one is scrubbed, never swapped — see `read_request_head`'s doc.
+    // `trailing` seeds the scrubber so a placeholder in a later pipelined
+    // request cannot escape through the uncredentialed direct relay.
     let upstream = swap.relay_scrubbing_placeholders(trailing, &mut client_read, &mut origin_write);
     let downstream = async {
         tokio::io::copy(&mut origin_read, &mut client_write).await?;
@@ -922,7 +925,6 @@ fn build_sni_server_name(host: &str) -> Result<ServerName<'static>, TlsIntercept
 /// needed because a CONNECT tunnel already pins the intended host before
 /// this is called (see [`terminate_and_forward`]); the client's SNI, if
 /// present, is not consulted.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) fn build_server_config(
     leaf: &LeafCertificate,
 ) -> Result<rustls::ServerConfig, TlsInterceptError> {
@@ -953,7 +955,7 @@ pub(crate) fn build_server_config(
         .with_no_client_auth()
         .with_single_cert(chain, key)
         .map_err(|error| TlsInterceptError::ServerConfigFailed(error.to_string()))?;
-    // Pin ALPN to http/1.1 on this leg. W6 phase 2 parses HTTP/1.1 request
+    // Pin ALPN to http/1.1 on this leg. The credential boundary parses HTTP/1.1 request
     // heads out of the decrypted stream to do the credential swap — a
     // client that negotiated h2 would have its binary HPACK framing
     // misparsed as an HTTP/1.1 head, which could leave a credential
@@ -983,7 +985,6 @@ pub(crate) fn build_server_config(
 /// CONNECT request, which ends up sitting in the proxy's `BufReader` rather
 /// than the socket. Writes always delegate straight to the inner stream —
 /// only reads need the replay.
-#[allow(dead_code)] // consumed by W6; not wired yet
 struct LeadingBytes<S> {
     leftover: Vec<u8>,
     leftover_pos: usize,
@@ -991,7 +992,6 @@ struct LeadingBytes<S> {
 }
 
 impl<S> LeadingBytes<S> {
-    #[allow(dead_code)] // consumed by W6; not wired yet
     fn new(leftover: Vec<u8>, inner: S) -> Self {
         Self {
             leftover,

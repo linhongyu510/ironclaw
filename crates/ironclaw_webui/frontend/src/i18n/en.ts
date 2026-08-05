@@ -460,8 +460,6 @@ registerPack("en", {
   "settings.field.quietHoursEndDesc": "Hour (0–23) to end suppression",
   "settings.field.heartbeatTimezone": "Timezone",
   "settings.field.heartbeatTimezoneDesc": "IANA timezone for quiet hours",
-  "settings.field.sandboxEnabled": "Enable sandbox",
-  "settings.field.sandboxEnabledDesc": "Docker-based tool execution",
   "settings.field.sandboxPolicy": "Policy",
   "settings.field.sandboxPolicyDesc": "Container filesystem access level",
   "settings.field.sandboxTimeout": "Timeout",

@@ -12,33 +12,30 @@
 //! pass considered one and rejected it as the over-engineering this design
 //! explicitly guards against).
 //!
-//! **Why staged ahead of time, keyed by `(tenant_id, user_id)`.** The
-//! consumer of this chokepoint is the shared egress proxy (its
-//! connection-attribution resolver is W6 work, not built yet): it is
-//! invoked per-TCP-connection and can resolve a peer IP to a
-//! `{tenant, user}` (via `ConnectionAttributionResolver`), but
-//! it has no way to recover which *invocation* opened that connection —
-//! invocation identity simply is not present in anything the proxy can
-//! observe from a TCP peer address. So the chokepoint cannot be a
-//! request-time "ask which invocation this is" callback; it must be staged
-//! ahead of the connection, under the one key the proxy actually has.
+//! **Why staged ahead of time, keyed by `(tenant, user, invocation)`.** The
+//! shared egress proxy resolves `{tenant, user}` from the Docker peer and an
+//! opaque invocation identity from host-generated proxy credentials inherited
+//! by that sandbox exec. Neither value grants provider authority by itself;
+//! only their exact combination can select a live obligation staged before
+//! dispatch. This prevents accidental reuse of an inherited, closed window.
+//! It is not process isolation: same-UID processes in one persistent user
+//! container can inspect sibling process state, and the user sandbox remains
+//! the security principal while any invocation window is live.
 //!
 //! **Fail-closed, with two distinct outcomes** (§3.4): a request over an
 //! *established, attributed* connection with no live grant is a
-//! [`SandboxCredentialDecision::NoGrant`] — GRANT-DENIAL, D5's "strip the
-//! placeholder, forward the request bare, annotate output" — because the
-//! origin's own 401/403 is a better error than blocking a public clone.
+//! [`SandboxCredentialDecision::NoGrant`] — GRANT-DENIAL. Production
+//! placeholder-bearing HTTP requests fail before origin I/O; uncredentialed
+//! traffic remains an ordinary allowlisted relay.
 //! Everything else (attribution failed, or the lookup/callback did not
 //! complete before its deadline) is [`SandboxCredentialFirewallError`] —
 //! CONNECTION-DENIAL: deny the connection outright, never forward it. These
 //! are deliberately different error shapes so a caller cannot collapse them
 //! into a single fail-open branch by accident.
 //!
-//! **W8 is the chokepoint; W6 (proxy TLS termination) is the consumer, not
-//! built yet.** Nothing in this crate calls into
-//! [`SandboxCredentialFirewall`] today — it ships unwired, same as the
-//! proxy's connection-attribution resolver, until the proxy is wired to
-//! call it (profile-gated rollout per the design doc's PR strategy).
+//! The production TLS interception path calls this chokepoint before canonical
+//! host HTTP egress. Real credential material never leaves the host-side
+//! secret and obligation stores.
 
 use std::{
     collections::HashMap,
@@ -50,30 +47,40 @@ use std::{
 };
 
 use ironclaw_host_api::{
-    ids::{CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
+    ids::{CapabilityId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_secrets::CredentialTargetPolicy;
 
-/// The key the proxy can actually derive at connection time (see module
-/// doc): `(tenant_id, user_id)`, never an invocation id.
+/// Exact authority key derived from independent host-owned inputs: Docker
+/// attribution supplies tenant/user and proxy authentication supplies the
+/// invocation id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StagingKey {
     tenant_id: TenantId,
     user_id: UserId,
+    invocation_id: InvocationId,
 }
 
 impl StagingKey {
-    fn new(tenant_id: &TenantId, user_id: &UserId) -> Self {
+    fn new(tenant_id: &TenantId, user_id: &UserId, invocation_id: InvocationId) -> Self {
         Self {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
+            invocation_id,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SandboxCredentialConnectionIdentity<'a> {
+    pub(crate) tenant_id: &'a TenantId,
+    pub(crate) user_id: &'a UserId,
+    pub(crate) invocation_id: InvocationId,
+}
+
 /// A staged credential grant for one bound provider, entitling requests from
-/// its `(tenant_id, user_id)` to have their placeholder swapped for the real
+/// its `(tenant_id, user_id, invocation_id)` to have its placeholder resolved
 /// secret when the destination matches `allowed_targets` — mirrors
 /// `CredentialAccount::{secret_handles, allowed_targets}` narrowed to what a
 /// connection-attributed lookup can use (no per-request method/URL is known
@@ -85,7 +92,6 @@ impl StagingKey {
 /// — and now, structurally, even if the [`StagedObligationLease`] that owns
 /// it is never dropped (`std::mem::forget`); see [`MAX_GRANT_TTL`].
 #[derive(Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by W6 (proxy TLS termination + credential injection); not wired yet
 pub(crate) struct StagedCredentialObligation {
     /// Where the real secret material for this obligation was staged by the
     /// same capability dispatch that called
@@ -104,7 +110,6 @@ pub(crate) struct StagedCredentialObligation {
 /// Identity of the staged secret behind a [`StagedCredentialObligation`] —
 /// see that type's `source` field for why the stager supplies all of it.
 #[derive(Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct StagedCredentialObligationSource {
     pub(crate) scope: ResourceScope,
     pub(crate) capability_id: CapabilityId,
@@ -159,7 +164,6 @@ impl std::fmt::Debug for StagedCredentialObligation {
 pub(crate) const MAX_GRANT_TTL: Duration = Duration::from_secs(30 * 60);
 
 impl StagedCredentialObligation {
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn new(
         source: StagedCredentialObligationSource,
         allowed_targets: Vec<CredentialTargetPolicy>,
@@ -191,27 +195,22 @@ impl StagedCredentialObligation {
 /// GRANT-DENIAL lives here, not in [`SandboxCredentialFirewallError`],
 /// because it is not a failure of the firewall itself — the connection was
 /// validly attributed and the lookup completed on time; there is simply
-/// nothing staged (or it expired). The caller (future W6 proxy code) reacts
-/// to `NoGrant` by stripping the placeholder and forwarding the request
-/// bare, never by tearing down the connection (D5).
+/// nothing staged (or it expired). The production HTTP adapter treats a
+/// placeholder-bearing `NoGrant` as no authority and performs no origin I/O.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) enum SandboxCredentialDecision {
     /// One or more staged obligations are currently live for this
-    /// connection's `(tenant_id, user_id)` — never empty (an empty set
-    /// decays to `NoGrant`, see `authorize`). The per-user sandbox
-    /// concurrency ceiling (`ironclaw_host_api::resource::SandboxQuota`) is >1, so this is the normal
-    /// case, not a race: each concurrent invocation stages its own
-    /// obligation for possibly a different provider/binding, and all of
-    /// them stay live simultaneously.
+    /// connection's `(tenant_id, user_id, invocation_id)` — never empty (an
+    /// empty set decays to `NoGrant`, see `authorize`). One invocation can
+    /// stage obligations for several provider bindings.
     ///
     /// The firewall deliberately does not pick one for the caller: per
     /// design doc §2.2/§3.3, obligations carry `allowed_targets`
     /// (`CredentialTargetPolicy`) that only the proxy can evaluate, because
     /// only the proxy has parsed the actual per-request method/URL — the
-    /// firewall's `authorize` is called with just a `(tenant_id, user_id)`
-    /// and no request target. So matching which obligation authorizes a
-    /// given destination is the caller's (W6's) job, via
+    /// firewall's `authorize` is called with connection identity and no
+    /// request target. So matching which obligation authorizes a given
+    /// destination is the caller's job, via
     /// `CredentialTargetPolicy::matches` against each entry in turn; the
     /// firewall's contract stops at "here is everything currently entitled
     /// for this principal." Also: §3.3 already accepts that any process
@@ -220,8 +219,7 @@ pub(crate) enum SandboxCredentialDecision {
     /// existing security envelope — it was already "all of this user's
     /// bindings," just previously expressed one obligation at a time.
     Grant(Vec<StagedCredentialObligation>),
-    /// GRANT-DENIAL: no live obligation for this `(tenant_id, user_id)`.
-    /// Strip the placeholder, forward the request bare, annotate output.
+    /// GRANT-DENIAL: no live obligation for this exact invocation identity.
     NoGrant,
 }
 
@@ -230,11 +228,10 @@ pub(crate) enum SandboxCredentialDecision {
 /// bare. Distinct from [`SandboxCredentialDecision::NoGrant`], which is safe
 /// to forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) enum SandboxCredentialFirewallError {
     /// The connection's peer could not be attributed to a `(tenant_id,
     /// user_id)` (attribution failure — duplicate IP, malformed labels, a
-    /// Docker query error; see the future W6 proxy's connection-attribution
+    /// Docker query error; see the proxy's connection-attribution
     /// resolver for its own fail-closed cases). There is no principal to
     /// authorize a lookup for.
     #[error(
@@ -255,15 +252,13 @@ pub(crate) enum SandboxCredentialFirewallError {
 /// module doc for why a port here would be the over-engineering this design
 /// already rejected.
 ///
-/// **Refcounted-set staging (not a single slot).** The per-user sandbox
-/// concurrency ceiling (`ironclaw_host_api::resource::SandboxQuota`) is >1: several invocations for
-/// the same `(tenant_id, user_id)` legitimately run at once, each staging
-/// its own obligation. `stage()` therefore *adds* an entry under a unique id
-/// rather than replacing whatever the key currently holds, and
+/// **Refcounted-set staging (not a single slot).** One invocation can stage
+/// several credential obligations. `stage()` therefore adds an entry under a
+/// unique id rather than replacing whatever the key currently holds, and
 /// [`SandboxCredentialFirewall::revoke`] removes only the one entry its
 /// caller's [`StagedObligationLease`] owns. A key's inner set is dropped
 /// entirely once its last entry is gone — there is never a stray empty
-/// collection left keyed by `(tenant_id, user_id)`.
+/// collection left keyed by `(tenant_id, user_id, invocation_id)`.
 ///
 /// This is a correction of an earlier single-slot design where `stage()`
 /// overwrote any existing entry for the key and `revoke()` removed the
@@ -271,7 +266,6 @@ pub(crate) enum SandboxCredentialFirewallError {
 /// which finished first silently delete a still-live sibling invocation's
 /// grant, just by dropping its own lease.
 #[derive(Default)]
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct SandboxCredentialFirewall {
     /// Eviction policy (bounded-resources rule,
     /// `.claude/rules/safety-and-sandbox.md`): an entry leaves its key's set
@@ -281,9 +275,9 @@ pub(crate) struct SandboxCredentialFirewall {
     /// which removes it before deciding. A key's set is removed from the
     /// outer map the moment it becomes empty by either path — the outer map
     /// never accumulates an empty entry. There is no size cap and no
-    /// periodic sweep: the key space is `(TenantId, UserId)` pairs, which an
-    /// attacker cannot cheaply mint, and the inner set is bounded by the
-    /// per-user sandbox concurrency ceiling, so the only failure mode
+    /// periodic sweep: staging keys are created only from host dispatch
+    /// scopes, not from proxy input, and the inner set is bounded by the
+    /// invocation's prepared obligations, so the only failure mode
     /// without lazy removal is a slow leak from callers who stage once and
     /// never return — not an unbounded-growth attack surface.
     staged: Mutex<HashMap<StagingKey, HashMap<StagedEntryId, StagedCredentialObligation>>>,
@@ -334,7 +328,6 @@ impl std::fmt::Debug for SandboxCredentialFirewall {
 }
 
 impl SandboxCredentialFirewall {
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -344,7 +337,7 @@ impl SandboxCredentialFirewall {
     /// `BuiltinObligationHandler::finish_prepare` staging network policy and
     /// secret injections ahead of dispatch in `obligations.rs`. Adds a new
     /// entry to the (possibly already non-empty) set staged for this
-    /// `(tenant_id, user_id)`; does not replace or disturb any existing
+    /// `(tenant_id, user_id, invocation_id)`; does not replace or disturb any existing
     /// entry for the same key — see the struct doc for why a single slot is
     /// wrong once concurrency >1 is the normal case.
     ///
@@ -353,7 +346,6 @@ impl SandboxCredentialFirewall {
     /// `self: &Arc<Self>` (mirroring `InMemoryCredentialBroker::mint_on_first_use`)
     /// because the returned lease needs to outlive this call and revoke
     /// through its own `Arc` clone of the firewall.
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn stage(
         self: &Arc<Self>,
         tenant_id: &TenantId,
@@ -361,7 +353,7 @@ impl SandboxCredentialFirewall {
         obligation: StagedCredentialObligation,
     ) -> StagedObligationLease {
         let entry_id = StagedEntryId(self.next_entry_id.fetch_add(1, Ordering::Relaxed));
-        let key = StagingKey::new(tenant_id, user_id);
+        let key = StagingKey::new(tenant_id, user_id, obligation.source.scope.invocation_id);
         self.lock()
             .entry(key.clone())
             .or_default()
@@ -404,7 +396,7 @@ impl SandboxCredentialFirewall {
     /// `identity` is the proxy's already-resolved attribution outcome for
     /// this connection — `None` means attribution failed (duplicate IP,
     /// malformed labels, a Docker query error, ...); this method does not
-    /// perform attribution itself — the future W6 proxy's
+    /// perform attribution itself — the proxy's
     /// connection-attribution resolver owns that. `deadline` is checked
     /// once, at entry: if it has already passed by the time this runs, the
     /// lookup is treated as timed out — CONNECTION-DENIAL, never forwarded
@@ -415,14 +407,14 @@ impl SandboxCredentialFirewall {
     /// below for why a single entry check suffices here).
     ///
     /// Returns every currently-live obligation for this `(tenant_id,
-    /// user_id)` as one [`SandboxCredentialDecision::Grant`] — see that
+    /// user_id, invocation_id)` as one [`SandboxCredentialDecision::Grant`] — see that
     /// variant's doc for why the firewall does not pick one itself.
     pub(crate) fn authorize(
         &self,
-        identity: Option<(&TenantId, &UserId)>,
+        identity: Option<SandboxCredentialConnectionIdentity<'_>>,
         deadline: Instant,
     ) -> Result<SandboxCredentialDecision, SandboxCredentialFirewallError> {
-        let Some((tenant_id, user_id)) = identity else {
+        let Some(identity) = identity else {
             return Err(SandboxCredentialFirewallError::AttributionFailed);
         };
         // Single check at the decision point. Everything below is a
@@ -436,7 +428,7 @@ impl SandboxCredentialFirewall {
             return Err(SandboxCredentialFirewallError::LookupTimedOut);
         }
 
-        let key = StagingKey::new(tenant_id, user_id);
+        let key = StagingKey::new(identity.tenant_id, identity.user_id, identity.invocation_id);
         let mut staged = self.lock();
         let now = Instant::now();
         let Some(entries) = staged.get_mut(&key) else {
@@ -482,9 +474,9 @@ impl SandboxCredentialFirewall {
 /// the same reason: relying on a caller to call `revoke()` explicitly on
 /// every exit path (success, error, timeout, panic) is exactly the
 /// discipline gap that shipped a Critical standing-grant leak in that
-/// sibling mechanism (PR #6689, `finish_lease`). Doing this now, while
-/// `stage()` has zero callers, is free; retrofitting it after W6 exists would
-/// mean auditing every one of its exit paths instead.
+/// sibling mechanism (PR #6689, `finish_lease`). The live static-window path
+/// holds this guard across dispatch and explicitly closes it on terminal
+/// lifecycle outcomes.
 ///
 /// The guard is the primary mechanism; [`SandboxCredentialFirewall::authorize`]'s
 /// lazy TTL reclamation and [`MAX_GRANT_TTL`] are the backstop for whatever
@@ -502,7 +494,6 @@ impl SandboxCredentialFirewall {
 /// lock. `MAX_GRANT_TTL`'s clamp in `StagedCredentialObligation::new` is the
 /// backstop for that case: even a stranded reference cannot hold the grant
 /// live past that ceiling.
-#[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct StagedObligationLease {
     firewall: Arc<SandboxCredentialFirewall>,
     /// The same key `stage()` inserted this entry under — stored once and
@@ -523,7 +514,7 @@ impl StagedObligationLease {
     /// Explicitly revokes the staged obligation now. Intended for the
     /// success and error exit paths, where the caller can revoke
     /// synchronously rather than waiting for `Drop`.
-    #[allow(dead_code)] // consumed by W6; not wired yet
+    #[allow(dead_code)] // Drop is the production revocation path; explicit revoke remains testable.
     pub(crate) fn revoke(mut self) {
         self.revoke_inner();
     }

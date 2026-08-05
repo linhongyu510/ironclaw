@@ -6,7 +6,7 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
@@ -80,7 +80,7 @@ pub struct CommandExecutionRequest {
     pub extra_env: HashMap<String, String>,
     /// Run the command detached and return immediately instead of waiting
     /// for completion. Only the sandboxed transport
-    /// ([`TenantSandboxProcessPort`]) supports this; [`HostProcessPort`]
+    /// ([`UserSandboxProcessPort`]) supports this; [`HostProcessPort`]
     /// rejects it since the unsandboxed host path has no container to
     /// outlive the request.
     pub background: bool,
@@ -114,7 +114,7 @@ pub trait RuntimeProcessPort: Send + Sync {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 }
 
-/// Transport for tenant-sandbox command execution.
+/// Transport for user-sandbox command execution.
 ///
 /// This trait intentionally hides Docker/daemon details from host-runtime tool
 /// code. Product adapters can implement it with the V1 sandbox daemon JSON-RPC
@@ -133,27 +133,27 @@ pub trait SandboxCommandTransport: Send + Sync {
 
 /// Tenant-isolated process port backed by a sandbox command transport.
 #[derive(Clone)]
-pub struct TenantSandboxProcessPort {
-    transport: std::sync::Arc<dyn SandboxCommandTransport>,
+pub struct UserSandboxProcessPort {
+    transport: Arc<dyn SandboxCommandTransport>,
 }
 
-impl std::fmt::Debug for TenantSandboxProcessPort {
+impl std::fmt::Debug for UserSandboxProcessPort {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("TenantSandboxProcessPort")
+            .debug_struct("UserSandboxProcessPort")
             .field("transport", &"<sandbox command transport>")
             .finish()
     }
 }
 
-impl TenantSandboxProcessPort {
-    pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
+impl UserSandboxProcessPort {
+    pub fn new(transport: Arc<dyn SandboxCommandTransport>) -> Self {
         Self { transport }
     }
 }
 
 #[async_trait]
-impl RuntimeProcessPort for TenantSandboxProcessPort {
+impl RuntimeProcessPort for UserSandboxProcessPort {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -458,9 +458,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_marks_output_sandboxed() {
+    async fn user_sandbox_process_port_marks_output_sandboxed() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport);
+        let port = UserSandboxProcessPort::new(transport);
 
         let output = port
             .run_command(CommandExecutionRequest {
@@ -481,9 +481,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_sets_default_timeout_on_transport_request() {
+    async fn user_sandbox_process_port_sets_default_timeout_on_transport_request() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -506,9 +506,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_clamps_timeout_over_cap_to_600() {
+    async fn user_sandbox_process_port_clamps_timeout_over_cap_to_600() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -531,9 +531,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_honors_timeout_within_range() {
+    async fn user_sandbox_process_port_honors_timeout_within_range() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -552,9 +552,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_output_limit_unset_defaults_to_64kib() {
+    async fn user_sandbox_process_port_output_limit_unset_defaults_to_64kib() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -576,9 +576,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_output_limit_over_cap_is_clamped_to_1mib() {
+    async fn user_sandbox_process_port_output_limit_over_cap_is_clamped_to_1mib() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -600,9 +600,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_output_limit_below_floor_is_clamped_up() {
+    async fn user_sandbox_process_port_output_limit_below_floor_is_clamped_up() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -624,8 +624,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_propagates_transport_error() {
-        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
+    async fn user_sandbox_process_port_propagates_transport_error() {
+        let port = UserSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
 
         let error = port
             .run_command(CommandExecutionRequest {
@@ -648,8 +648,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_propagates_transport_timeout() {
-        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(TimeoutSandboxTransport));
+    async fn user_sandbox_process_port_propagates_transport_timeout() {
+        let port = UserSandboxProcessPort::new(std::sync::Arc::new(TimeoutSandboxTransport));
 
         let error = port
             .run_command(CommandExecutionRequest {
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_truncates_transport_output() {
+    async fn user_sandbox_process_port_truncates_transport_output() {
         // With `output_limit_bytes: None` below, `run_command` clamps to
         // `SHELL_OUTPUT_LIMIT_DEFAULT_BYTES` (64KiB) — not
         // `process_output::COMMAND_MAX_OUTPUT_SIZE` (16KiB), which only
@@ -679,7 +679,7 @@ mod tests {
             requests: Mutex::new(Vec::new()),
             output: "x".repeat(SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize + 1),
         });
-        let port = TenantSandboxProcessPort::new(transport);
+        let port = UserSandboxProcessPort::new(transport);
 
         let output = port
             .run_command(CommandExecutionRequest {

@@ -326,13 +326,13 @@ is_sandbox_docker_path() {
     crates/ironclaw_host_runtime/src/sandbox_process/*)
       return 0
       ;;
-    crates/ironclaw_host_runtime/tests/cli_session_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_exec_transport_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_reaper_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_workspace_fs_parity_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_cross_tenant_escape.rs|crates/ironclaw_host_runtime/tests/support/docker_gate.rs)
+    crates/ironclaw_host_runtime/tests/cli_session_docker.rs|crates/ironclaw_host_runtime/tests/railway_sandbox_live.rs|crates/ironclaw_host_runtime/tests/sandbox_exec_transport_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_reaper_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_workspace_fs_parity_docker.rs|crates/ironclaw_host_runtime/tests/sandbox_cross_tenant_escape.rs|crates/ironclaw_host_runtime/tests/support/docker_gate.rs)
       return 0
       ;;
-    crates/ironclaw_reborn_composition/src/sandbox_*)
+    crates/ironclaw_reborn_composition/src/sandbox/*|crates/ironclaw_reborn_composition/src/sandbox_*)
       return 0
       ;;
-    tests/integration/reborn_sandbox_egress_proxy.rs|tests/integration/support/docker_gate.rs)
+    tests/integration/support/docker_gate.rs)
       return 0
       ;;
     docker/process-sandbox-entrypoint.sh|Dockerfile.process-sandbox)

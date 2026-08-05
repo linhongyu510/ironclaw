@@ -445,8 +445,6 @@ registerPack("zh-CN", {
   "settings.field.quietHoursEndDesc": "结束抑制的小时 (0–23)",
   "settings.field.heartbeatTimezone": "时区",
   "settings.field.heartbeatTimezoneDesc": "静默时段的 IANA 时区",
-  "settings.field.sandboxEnabled": "启用沙箱",
-  "settings.field.sandboxEnabledDesc": "基于 Docker 的工具执行",
   "settings.field.sandboxPolicy": "策略",
   "settings.field.sandboxPolicyDesc": "容器文件系统访问级别",
   "settings.field.sandboxTimeout": "超时",

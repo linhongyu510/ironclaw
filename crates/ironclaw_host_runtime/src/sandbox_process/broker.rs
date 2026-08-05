@@ -1,6 +1,7 @@
 use ironclaw_safety::params_contain_manual_credentials;
 
 use crate::RuntimeProcessError;
+use ironclaw_host_api::ids::InvocationId;
 
 use super::reject_nul;
 
@@ -57,14 +58,23 @@ pub(super) const SANDBOX_EGRESS_NETWORK_NAME: &str = "ironclaw-sandbox-egress";
 /// reason to build subnet auto-selection now.
 pub(super) const SANDBOX_EGRESS_NETWORK_SUBNET: &str = "10.200.0.0/24";
 
-/// Gateway address of [`SANDBOX_EGRESS_NETWORK_NAME`] — where the sandbox
-/// egress proxy (bound `0.0.0.0:0` host-side, see composition's
-/// `sandbox_egress_proxy_task.rs`) is reached from inside a container on
-/// this network. An `internal: true` network still bridges to the host at
-/// its own gateway IP; it just has no NAT/default route beyond the host.
+/// Gateway address of [`SANDBOX_EGRESS_NETWORK_NAME`] — where
+/// [`sandbox_egress_proxy_bind_addr`] binds the host-side proxy so containers
+/// on this network can reach it. An `internal: true` network still bridges
+/// to the host at its own gateway IP; it just has no NAT/default route beyond
+/// the host.
 pub(super) const SANDBOX_EGRESS_NETWORK_GATEWAY: &str = "10.200.0.1";
 
-/// Broker affordance exposed to tenant sandbox commands: an HTTP(S) proxy
+/// Host-side bind address for the production sandbox egress proxy. Binding
+/// directly to the Docker bridge gateway is both narrower than `0.0.0.0` and
+/// a topology readiness check: it fails when IronClaw and the Docker bridge
+/// live in different network namespaces (for example, a macOS process using
+/// Colima or an application container using a mounted Docker socket).
+pub(super) fn sandbox_egress_proxy_bind_addr() -> String {
+    format!("{SANDBOX_EGRESS_NETWORK_GATEWAY}:0")
+}
+
+/// Broker affordance exposed to user sandbox commands: an HTTP(S) proxy
 /// URL injected as `http_proxy`/`https_proxy` (and `IRONCLAW_REBORN_HTTP_PROXY`)
 /// env, requiring the container to join the pinned egress network
 /// ([`SANDBOX_EGRESS_NETWORK_NAME`]) instead of Docker's default bridge —
@@ -96,10 +106,44 @@ impl RebornSandboxNetworkBroker {
     }
 
     fn push_env(&self, env: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
+        self.push_env_with_url(env, self.proxy_url.as_str())
+    }
+
+    fn push_invocation_env(
+        &self,
+        env: &mut Vec<String>,
+        invocation_id: InvocationId,
+    ) -> Result<(), RuntimeProcessError> {
+        // This is a correlation/least-authority token, not a secret and not
+        // an isolation boundary between same-UID processes in the persistent
+        // user container. It prevents an old process from succeeding with
+        // only its inherited closed-window URL; the documented live-window
+        // threat envelope still treats the whole user sandbox as one
+        // principal while another invocation is active.
+        let mut proxy_url = url::Url::parse(self.proxy_url.as_str()).map_err(|_| {
+            RuntimeProcessError::ExecutionFailed(
+                "trusted sandbox network broker URL could not be parsed".to_string(),
+            )
+        })?;
+        proxy_url
+            .set_username(&invocation_id.to_string())
+            .map_err(|_| {
+                RuntimeProcessError::ExecutionFailed(
+                    "sandbox invocation proxy identity could not be encoded".to_string(),
+                )
+            })?;
+        self.push_env_with_url(env, proxy_url.as_str())
+    }
+
+    fn push_env_with_url(
+        &self,
+        env: &mut Vec<String>,
+        proxy_url: &str,
+    ) -> Result<(), RuntimeProcessError> {
         push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "brokered")?;
-        push_reserved_env(env, REBORN_HTTP_PROXY_ENV, self.proxy_url.as_str())?;
+        push_reserved_env(env, REBORN_HTTP_PROXY_ENV, proxy_url)?;
         for key in HTTP_PROXY_ENV_KEYS {
-            push_reserved_env(env, key, self.proxy_url.as_str())?;
+            push_reserved_env(env, key, proxy_url)?;
         }
         Ok(())
     }
@@ -112,6 +156,20 @@ pub(super) fn push_broker_env(
     reject_reserved_broker_env_overrides(env)?;
     if let Some(broker) = network_broker {
         broker.push_env(env)?;
+    } else {
+        push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "disabled")?;
+    }
+    Ok(())
+}
+
+pub(super) fn push_broker_env_for_invocation(
+    network_broker: Option<&RebornSandboxNetworkBroker>,
+    env: &mut Vec<String>,
+    invocation_id: InvocationId,
+) -> Result<(), RuntimeProcessError> {
+    reject_reserved_broker_env_overrides(env)?;
+    if let Some(broker) = network_broker {
+        broker.push_invocation_env(env, invocation_id)?;
     } else {
         push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "disabled")?;
     }
@@ -191,4 +249,49 @@ fn validate_broker_url(label: &str, value: &str) -> Result<(), RuntimeProcessErr
 
 fn broker_url_contains_manual_credentials(value: &str) -> bool {
     params_contain_manual_credentials(&serde_json::json!({ "url": value }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_proxy_binds_only_to_the_internal_network_gateway() {
+        assert_eq!(
+            sandbox_egress_proxy_bind_addr(),
+            format!("{SANDBOX_EGRESS_NETWORK_GATEWAY}:0")
+        );
+        assert_ne!(sandbox_egress_proxy_bind_addr(), "0.0.0.0:0");
+    }
+
+    #[test]
+    fn invocation_proxy_url_contains_only_opaque_invocation_authority() {
+        let invocation_id = InvocationId::new();
+        let mut env = Vec::new();
+        push_broker_env_for_invocation(
+            Some(&RebornSandboxNetworkBroker::from_port(18443)),
+            &mut env,
+            invocation_id,
+        )
+        .expect("host-owned proxy environment is valid");
+
+        for key in HTTP_PROXY_ENV_KEYS {
+            assert!(env.contains(&format!(
+                "{key}=http://{invocation_id}@{SANDBOX_EGRESS_NETWORK_GATEWAY}:18443/"
+            )));
+        }
+        assert!(env.iter().all(|entry| !entry.contains("Authorization")));
+    }
+
+    #[test]
+    fn caller_cannot_override_invocation_proxy_authority() {
+        let mut env = vec!["HTTPS_PROXY=http://attacker@example.com:8080".to_string()];
+        let error = push_broker_env_for_invocation(
+            Some(&RebornSandboxNetworkBroker::from_port(18443)),
+            &mut env,
+            InvocationId::new(),
+        )
+        .expect_err("reserved proxy variables must reject caller values");
+        assert!(error.to_string().contains("HTTPS_PROXY"));
+    }
 }

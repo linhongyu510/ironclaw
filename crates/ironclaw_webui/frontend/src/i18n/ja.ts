@@ -442,8 +442,6 @@ registerPack("ja", {
   "settings.field.quietHoursEndDesc": "抑制終了時刻（0–23）",
   "settings.field.heartbeatTimezone": "タイムゾーン",
   "settings.field.heartbeatTimezoneDesc": "静音時間の IANA タイムゾーン",
-  "settings.field.sandboxEnabled": "サンドボックスを有効化",
-  "settings.field.sandboxEnabledDesc": "Docker ベースのツール実行",
   "settings.field.sandboxPolicy": "ポリシー",
   "settings.field.sandboxPolicyDesc": "コンテナの FS アクセスレベル",
   "settings.field.sandboxTimeout": "タイムアウト",

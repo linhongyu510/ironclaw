@@ -45,7 +45,8 @@ use ironclaw_processes::{
 use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
-    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort,
+    CredentialAccountStatus, CredentialAccountStore, SecretLease, SecretLeaseId, SecretMaterial,
+    SecretMetadata, SecretStoreError, SecretStorePort,
 };
 use secrecy::ExposeSecret;
 
@@ -687,6 +688,7 @@ pub struct ProcessObligationLifecycleStore {
     observer_registered: AtomicBool,
     active_process_handoffs: Mutex<HashMap<ProcessObligationHandoffKey, ProcessId>>,
     cleaned_process_handoffs: Mutex<HashSet<ProcessObligationProcessKey>>,
+    sandbox_credential_runtime: Option<crate::SandboxCredentialRuntime>,
 }
 
 impl ProcessObligationLifecycleStore {
@@ -723,7 +725,16 @@ impl ProcessObligationLifecycleStore {
             observer_registered: AtomicBool::new(false),
             active_process_handoffs: Mutex::new(HashMap::new()),
             cleaned_process_handoffs: Mutex::new(HashSet::new()),
+            sandbox_credential_runtime: None,
         }
+    }
+
+    pub(crate) fn with_sandbox_credential_runtime(
+        mut self,
+        runtime: crate::SandboxCredentialRuntime,
+    ) -> Self {
+        self.sandbox_credential_runtime = Some(runtime);
+        self
     }
 
     pub(crate) fn set_resource_governor(&self, resource_governor: Arc<dyn ResourceGovernor>) {
@@ -945,6 +956,14 @@ impl ProcessObligationLifecycleStore {
     ) -> Result<(), ProcessError> {
         if self.process_handoff_cleaned(record)? {
             return Ok(());
+        }
+        if matches!(
+            record.capability_id.as_str(),
+            crate::first_party_tools::SHELL_CAPABILITY_ID
+                | crate::first_party_tools::CLI_SESSION_CAPABILITY_ID
+        ) && let Some(runtime) = &self.sandbox_credential_runtime
+        {
+            runtime.close_static_window(&record.scope, &record.capability_id);
         }
         let should_cleanup_handoffs = self.has_active_process_handoff(record)?
             || record.resource_reservation_id.is_some()
@@ -1285,6 +1304,8 @@ pub struct BuiltinObligationHandler {
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     sandbox_per_user_ceiling: Option<Arc<SandboxPerUserCeiling>>,
+    sandbox_credential_runtime: Option<crate::SandboxCredentialRuntime>,
+    sandbox_credential_accounts: Option<Arc<dyn CredentialAccountStore>>,
 }
 
 struct ResolvedSecretInjection {
@@ -1368,6 +1389,16 @@ impl BuiltinObligationHandler {
 
     pub fn with_sandbox_per_user_ceiling(mut self, ceiling: Arc<SandboxPerUserCeiling>) -> Self {
         self.sandbox_per_user_ceiling = Some(ceiling);
+        self
+    }
+
+    pub(crate) fn with_sandbox_static_credentials(
+        mut self,
+        runtime: crate::SandboxCredentialRuntime,
+        accounts: Arc<dyn CredentialAccountStore>,
+    ) -> Self {
+        self.sandbox_credential_runtime = Some(runtime);
+        self.sandbox_credential_accounts = Some(accounts);
         self
     }
 
@@ -1471,7 +1502,6 @@ impl BuiltinObligationHandler {
         let Some(secret_injections) = &self.secret_injections else {
             return Err(secret_obligation_failed());
         };
-
         let mut material = Vec::with_capacity(resolved.len());
         for resolved in resolved {
             // Use the same source scope the presence probe accepted: the caller's
@@ -1581,6 +1611,71 @@ impl BuiltinObligationHandler {
         Ok(())
     }
 
+    async fn stage_sandbox_static_credentials(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        if !matches!(
+            request.capability_id.as_str(),
+            crate::first_party_tools::SHELL_CAPABILITY_ID
+                | crate::first_party_tools::CLI_SESSION_CAPABILITY_ID
+        ) {
+            return Ok(());
+        }
+        let Some(runtime) = &self.sandbox_credential_runtime else {
+            return Ok(());
+        };
+        let Some(accounts) = &self.sandbox_credential_accounts else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_store) = &self.secret_store else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_injections) = &self.secret_injections else {
+            return Err(secret_obligation_failed());
+        };
+        let accounts = accounts
+            .accounts_for_scope(&request.context.resource_scope)
+            .await
+            .map_err(|_| secret_obligation_failed())?;
+        let mut grants = Vec::new();
+        for account in accounts {
+            if account.status != CredentialAccountStatus::Active
+                || account.secret_handles.len() != 1
+                || account.allowed_targets.is_empty()
+            {
+                continue;
+            }
+            let secret_handle = account.secret_handles[0].clone();
+            stage_credential_material(
+                secret_store.as_ref(),
+                secret_injections,
+                &account.scope,
+                &request.context.resource_scope,
+                request.capability_id,
+                &secret_handle,
+                &secret_handle,
+            )
+            .await
+            .map_err(|error| credential_stage_error_to_obligation_error(error, None))?;
+            grants.push(crate::sandbox_process::SandboxStaticCredentialGrant {
+                provider_or_extension_id: account.provider_or_extension_id,
+                secret_handle,
+                allowed_targets: account.allowed_targets,
+            });
+        }
+
+        let ttl = Duration::from_millis(request.estimate.wall_clock_ms.unwrap_or(300_000))
+            .saturating_add(Duration::from_secs(30));
+        runtime.open_static_window(
+            &request.context.resource_scope,
+            request.capability_id,
+            grants,
+            ttl,
+        );
+        Ok(())
+    }
+
     fn reserve_resource_obligation(
         &self,
         request: &CapabilityObligationRequest<'_>,
@@ -1631,6 +1726,7 @@ impl BuiltinObligationHandler {
         request: &CapabilityObligationRequest<'_>,
         resolved_secret_injections: &[ResolvedSecretInjection],
         network_policy: Option<NetworkPolicy>,
+        stage_sandbox_static_credentials: bool,
     ) -> Result<(), CapabilityObligationError> {
         if request
             .obligations
@@ -1643,6 +1739,9 @@ impl BuiltinObligationHandler {
         self.inject_secrets(request, resolved_secret_injections)
             .await?;
         self.inject_credential_accounts(request).await?;
+        if stage_sandbox_static_credentials {
+            self.stage_sandbox_static_credentials(request).await?;
+        }
 
         if let Some(policy) = network_policy {
             let Some(store) = &self.network_policies else {
@@ -1656,6 +1755,58 @@ impl BuiltinObligationHandler {
         }
 
         Ok(())
+    }
+
+    async fn prepare_outcome(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+        stage_sandbox_static_credentials: bool,
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
+        let unsupported = unsupported_obligations(request.phase, request.obligations);
+        if !unsupported.is_empty() {
+            return Err(CapabilityObligationError::Unsupported {
+                obligations: unsupported,
+            });
+        }
+
+        let network_policy = network_policy_obligation(request.obligations)?;
+        if network_policy.is_some() && self.network_policies.is_none() {
+            return Err(network_obligation_failed());
+        }
+        let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
+        let secret_handles = secret_injection_handles(request.obligations);
+        let resolved_secret_injections = self
+            .preflight_secret_injection(&request, &secret_handles)
+            .await?;
+        self.preflight_resource_ceiling(&request)?;
+        let resource_reservation = self.reserve_resource_obligation(&request)?;
+        let outcome = CapabilityObligationOutcome {
+            mounts: scoped_mounts,
+            resource_reservation,
+        };
+
+        if let Err(error) = self
+            .finish_prepare(
+                &request,
+                &resolved_secret_injections,
+                network_policy,
+                stage_sandbox_static_credentials,
+            )
+            .await
+        {
+            self.abort(CapabilityObligationAbortRequest {
+                phase: request.phase,
+                context: request.context,
+                capability_id: request.capability_id,
+                estimate: request.estimate,
+                obligations: request.obligations,
+                outcome: &outcome,
+            })
+            .await?;
+            return Err(error);
+        }
+
+        Ok(outcome)
     }
 
     async fn emit_audit_after(
@@ -1699,13 +1850,16 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             });
         }
         let outcome = self
-            .prepare(CapabilityObligationRequest {
-                phase: request.phase,
-                context: request.context,
-                capability_id: request.capability_id,
-                estimate: request.estimate,
-                obligations: request.obligations,
-            })
+            .prepare_outcome(
+                CapabilityObligationRequest {
+                    phase: request.phase,
+                    context: request.context,
+                    capability_id: request.capability_id,
+                    estimate: request.estimate,
+                    obligations: request.obligations,
+                },
+                false,
+            )
             .await?;
         if let Some(reservation) = &outcome.resource_reservation
             && let Err(error) = self.release_resource_reservation(reservation)
@@ -1726,46 +1880,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         &self,
         request: CapabilityObligationRequest<'_>,
     ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
-        let unsupported = unsupported_obligations(request.phase, request.obligations);
-        if !unsupported.is_empty() {
-            return Err(CapabilityObligationError::Unsupported {
-                obligations: unsupported,
-            });
-        }
-
-        let network_policy = network_policy_obligation(request.obligations)?;
-        if network_policy.is_some() && self.network_policies.is_none() {
-            return Err(network_obligation_failed());
-        }
-        let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
-        let secret_handles = secret_injection_handles(request.obligations);
-        let resolved_secret_injections = self
-            .preflight_secret_injection(&request, &secret_handles)
-            .await?;
-        self.preflight_resource_ceiling(&request)?;
-        let resource_reservation = self.reserve_resource_obligation(&request)?;
-        let outcome = CapabilityObligationOutcome {
-            mounts: scoped_mounts,
-            resource_reservation,
-        };
-
-        if let Err(error) = self
-            .finish_prepare(&request, &resolved_secret_injections, network_policy)
-            .await
-        {
-            self.abort(CapabilityObligationAbortRequest {
-                phase: request.phase,
-                context: request.context,
-                capability_id: request.capability_id,
-                estimate: request.estimate,
-                obligations: request.obligations,
-                outcome: &outcome,
-            })
-            .await?;
-            return Err(error);
-        }
-
-        Ok(outcome)
+        self.prepare_outcome(request, true).await
     }
 
     async fn abort(
@@ -1788,80 +1903,97 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         &self,
         request: CapabilityObligationCompletionRequest<'_>,
     ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
-        let unsupported = unsupported_completion_obligations(request.phase, request.obligations);
-        if !unsupported.is_empty() {
-            return Err(CapabilityObligationError::Unsupported {
-                obligations: unsupported,
-            });
-        }
-
-        let mut dispatch = request.dispatch.clone();
-        // Turn any base64 document payload into extracted text before redaction
-        // and the output-size obligations run, so the model gets bounded text
-        // (leak-scanned, size-checked) and the large base64 never survives.
-        dispatch.output = crate::document_output::extract_documents_in_output(
-            dispatch.capability_id.as_str(),
-            dispatch.output,
-        );
-        if request
-            .obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::RedactOutput))
-        {
-            dispatch.output = match redact_output(dispatch.output) {
-                Ok(value) => value,
-                Err(error) => {
-                    // Leak-detector blocked: record the boundary decision
-                    // before propagating. The event is payload-free by
-                    // construction — only the boundary, decision, and a
-                    // stable code reach the sink. The original output never
-                    // leaves the type system.
-                    if let Some(sink) = &self.security_audit_sink {
-                        let event = SecurityAuditEvent::new(
-                            SecurityBoundary::LeakDetector,
-                            SecurityDecision::Blocked,
-                            LEAK_REDACT_FAILED_CODE,
-                        )
-                        .with_capability_id(request.capability_id.clone())
-                        .with_scope(request.context.resource_scope.clone());
-                        sink.record(event);
-                    }
-                    return Err(error);
-                }
-            };
-            dispatch.display_preview = None;
-        }
-
-        let output_bytes = dispatch_output_bytes(&dispatch.output)?;
-        for obligation in request.obligations {
-            if let Obligation::EnforceResourceCeiling { ceiling } = obligation {
-                validate_supported_resource_ceiling(ceiling)?;
-                validate_usage_within_ceiling(&dispatch.usage, output_bytes, ceiling)?;
+        let result = async {
+            let unsupported =
+                unsupported_completion_obligations(request.phase, request.obligations);
+            if !unsupported.is_empty() {
+                return Err(CapabilityObligationError::Unsupported {
+                    obligations: unsupported,
+                });
             }
-        }
-        for obligation in request.obligations {
-            if let Obligation::EnforceOutputLimit { bytes } = obligation
-                && output_bytes > *bytes
+
+            let mut dispatch = request.dispatch.clone();
+            // Turn any base64 document payload into extracted text before redaction
+            // and the output-size obligations run, so the model gets bounded text
+            // (leak-scanned, size-checked) and the large base64 never survives.
+            dispatch.output = crate::document_output::extract_documents_in_output(
+                dispatch.capability_id.as_str(),
+                dispatch.output,
+            );
+            if request
+                .obligations
+                .iter()
+                .any(|obligation| matches!(obligation, Obligation::RedactOutput))
             {
-                return Err(output_obligation_failed());
+                dispatch.output = match redact_output(dispatch.output) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        // Leak-detector blocked: record the boundary decision
+                        // before propagating. The event is payload-free by
+                        // construction — only the boundary, decision, and a
+                        // stable code reach the sink. The original output never
+                        // leaves the type system.
+                        if let Some(sink) = &self.security_audit_sink {
+                            let event = SecurityAuditEvent::new(
+                                SecurityBoundary::LeakDetector,
+                                SecurityDecision::Blocked,
+                                LEAK_REDACT_FAILED_CODE,
+                            )
+                            .with_capability_id(request.capability_id.clone())
+                            .with_scope(request.context.resource_scope.clone());
+                            sink.record(event);
+                        }
+                        return Err(error);
+                    }
+                };
+                dispatch.display_preview = None;
             }
-        }
 
-        self.discard_staged_handoffs(
+            let output_bytes = dispatch_output_bytes(&dispatch.output)?;
+            for obligation in request.obligations {
+                if let Obligation::EnforceResourceCeiling { ceiling } = obligation {
+                    validate_supported_resource_ceiling(ceiling)?;
+                    validate_usage_within_ceiling(&dispatch.usage, output_bytes, ceiling)?;
+                }
+            }
+            for obligation in request.obligations {
+                if let Obligation::EnforceOutputLimit { bytes } = obligation
+                    && output_bytes > *bytes
+                {
+                    return Err(output_obligation_failed());
+                }
+            }
+
+            if request
+                .obligations
+                .iter()
+                .any(|obligation| matches!(obligation, Obligation::AuditAfter))
+            {
+                self.emit_audit_after(&request, output_bytes).await?;
+            }
+
+            Ok(dispatch)
+        }
+        .await;
+
+        let cleanup = self.discard_staged_handoffs(
             &request.context.resource_scope,
             request.capability_id,
             request.obligations,
-        )?;
+        );
 
-        if request
-            .obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::AuditAfter))
-        {
-            self.emit_audit_after(&request, output_bytes).await?;
+        match (result, cleanup) {
+            (Ok(dispatch), Ok(())) => Ok(dispatch),
+            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort terminal cleanup after obligation failure also failed"
+                );
+                Err(error)
+            }
         }
-
-        Ok(dispatch)
     }
 }
 
@@ -1897,6 +2029,20 @@ impl BuiltinObligationHandler {
             for handle in staged_secret_injection_handles(obligations) {
                 let _ = store
                     .take(scope, capability_id, &handle)
+                    .map_err(|_| secret_obligation_failed())?;
+            }
+        }
+
+        if matches!(
+            capability_id.as_str(),
+            crate::first_party_tools::SHELL_CAPABILITY_ID
+                | crate::first_party_tools::CLI_SESSION_CAPABILITY_ID
+        ) && let Some(runtime) = &self.sandbox_credential_runtime
+        {
+            runtime.close_static_window(scope, capability_id);
+            if let Some(store) = &self.secret_injections {
+                store
+                    .discard_for_capability(scope, capability_id)
                     .map_err(|_| secret_obligation_failed())?;
             }
         }
@@ -2547,7 +2693,7 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        action::{NetworkScheme, NetworkTargetPattern},
+        action::{NetworkMethod, NetworkScheme, NetworkTargetPattern},
         capability::CapabilitySet,
         dispatch::CapabilityDisplayOutputPreview,
         ids::{
@@ -2558,9 +2704,304 @@ mod tests {
         scope::ExecutionContext,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-    use ironclaw_secrets::SecretStore;
+    use ironclaw_secrets::{
+        CredentialAccount, CredentialAccountId, CredentialPathPolicy, CredentialTargetPolicy,
+        InMemoryCredentialBroker, RedactedJson, SecretStore,
+    };
 
     use super::*;
+
+    #[tokio::test]
+    async fn sandbox_shell_static_credential_window_is_scoped_to_prepare_lifecycle() {
+        let context = execution_context();
+        let capability_id = CapabilityId::new(crate::first_party_tools::SHELL_CAPABILITY_ID)
+            .expect("shell capability id");
+        let provider = ExtensionId::new("github").expect("provider id");
+        let handle = SecretHandle::new("github_token").expect("secret handle");
+        let target = CredentialTargetPolicy {
+            scheme: "https".to_string(),
+            host: "api.github.com".to_string(),
+            port: None,
+            path: CredentialPathPolicy::Prefix("/".to_string()),
+            methods: vec![NetworkMethod::Get],
+        };
+        let secret_store = Arc::new(SecretStore::ephemeral());
+        secret_store
+            .put(
+                context.resource_scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("real-github-token"),
+                None,
+            )
+            .await
+            .expect("store credential material");
+        let accounts = Arc::new(InMemoryCredentialBroker::new());
+        accounts
+            .put_account(CredentialAccount {
+                scope: context.resource_scope.clone(),
+                id: CredentialAccountId::new("github-default").expect("account id"),
+                provider_or_extension_id: provider.clone(),
+                label: "GitHub".to_string(),
+                status: CredentialAccountStatus::Active,
+                secret_handles: vec![handle],
+                allowed_targets: vec![target],
+                redacted_metadata: RedactedJson::new(serde_json::json!({})),
+                updated_at: Utc::now(),
+            })
+            .expect("store credential account");
+        let runtime = crate::SandboxCredentialRuntime::new();
+        let handler = BuiltinObligationHandler::new()
+            .with_secret_store(Arc::clone(&secret_store))
+            .with_secret_injection_store(runtime.secret_injection_store())
+            .with_sandbox_static_credentials(runtime.clone(), accounts.clone());
+        let placeholder = runtime
+            .placeholder_for(&context.resource_scope, &provider)
+            .expect("mint inert placeholder");
+        let obligations = [Obligation::RedactOutput];
+        let estimate = ResourceEstimate::default().set_wall_clock_ms(1_000);
+        let outcome = handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .expect("prepare shell credential window");
+
+        let request = format!(
+            "GET /user HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer {placeholder}\r\n\r\n"
+        );
+        let swapped = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("authorized request rewrite");
+        let swapped_text = String::from_utf8_lossy(swapped.bytes());
+        assert!(swapped_text.contains("Authorization: Bearer real-github-token"));
+        assert!(!swapped_text.contains(placeholder.as_str()));
+
+        handler
+            .abort(CapabilityObligationAbortRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                outcome: &outcome,
+            })
+            .await
+            .expect("abort revokes shell credential window");
+
+        let after_abort = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("grant denial strips placeholder");
+        let after_abort_text = String::from_utf8_lossy(after_abort.bytes());
+        assert!(!after_abort_text.contains("real-github-token"));
+        assert!(!after_abort_text.contains(placeholder.as_str()));
+
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .expect("prepare a second shell credential window");
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Sandbox,
+            output: serde_json::json!({"ok": true}),
+            display_preview: None,
+            usage: ResourceUsage::default(),
+            receipt: ironclaw_host_api::resource::ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ironclaw_host_api::resource::ReservationStatus::Released,
+                estimate: estimate.clone(),
+                actual: None,
+            },
+        };
+        handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("successful completion revokes shell credential window");
+        let after_completion = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("completed grant is denied and stripped");
+        let after_completion_text = String::from_utf8_lossy(after_completion.bytes());
+        assert!(!after_completion_text.contains("real-github-token"));
+        assert!(!after_completion_text.contains(placeholder.as_str()));
+
+        let output_limit_obligations = [Obligation::EnforceOutputLimit { bytes: 1 }];
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &output_limit_obligations,
+            })
+            .await
+            .expect("prepare a third shell credential window");
+        handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &output_limit_obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect_err("output-limit failure remains terminal");
+        let after_failed_completion = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("failed completion still revokes the grant");
+        let after_failed_completion_text = String::from_utf8_lossy(after_failed_completion.bytes());
+        assert!(!after_failed_completion_text.contains("real-github-token"));
+        assert!(!after_failed_completion_text.contains(placeholder.as_str()));
+
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &[],
+            })
+            .await
+            .expect("direct satisfy remains available without opening a sandbox window");
+        let after_satisfy = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("direct satisfy leaves no static grant");
+        assert!(!String::from_utf8_lossy(after_satisfy.bytes()).contains("real-github-token"));
+
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .expect("prepare a process-owned shell credential window");
+        let lifecycle = ProcessObligationLifecycleStore::new(
+            Arc::new(ironclaw_processes::in_memory_backed_process_store()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            runtime.secret_injection_store(),
+            Arc::new(InMemoryResourceGovernor::new()),
+        )
+        .with_sandbox_credential_runtime(runtime.clone());
+        let process_record = ProcessRecord {
+            process_id: ProcessId::new(),
+            parent_process_id: None,
+            invocation_id: context.resource_scope.invocation_id,
+            scope: context.resource_scope.clone(),
+            authenticated_actor_user_id: None,
+            extension_id: context.extension_id.clone(),
+            capability_id: capability_id.clone(),
+            runtime: RuntimeKind::Sandbox,
+            status: ironclaw_processes::ProcessStatus::Killed,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            estimated_resources: estimate.clone(),
+            resource_reservation_id: None,
+            authorized_continuation: None,
+            error_kind: Some("cancelled".to_string()),
+        };
+        lifecycle
+            .cleanup_record_obligations(&process_record, false)
+            .expect("terminal process cleanup revokes the static window");
+        let after_process_cleanup = runtime
+            .credential_swap()
+            .rewrite_request_head(
+                request.as_bytes(),
+                "api.github.com",
+                Some(
+                    crate::sandbox_process::SandboxCredentialConnectionIdentity {
+                        tenant_id: &context.resource_scope.tenant_id,
+                        user_id: &context.resource_scope.user_id,
+                        invocation_id: context.resource_scope.invocation_id,
+                    },
+                ),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("terminal process cleanup leaves no static grant");
+        assert!(
+            !String::from_utf8_lossy(after_process_cleanup.bytes()).contains("real-github-token")
+        );
+    }
 
     #[tokio::test]
     async fn runtime_secret_injection_store_prunes_expired_handoffs() {

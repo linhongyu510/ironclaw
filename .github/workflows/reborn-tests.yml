@@ -655,22 +655,22 @@ jobs:
           cache-to: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && 'type=gha,mode=max,scope=worker' || '' }}
 
       - name: Run host-runtime Docker unit tests
-        run: cargo test -p ironclaw_host_runtime --lib docker_tests:: -- --nocapture
+        run: |
+          cargo test -p ironclaw_host_runtime --lib docker_tests:: -- --nocapture
 
       - name: Run host-runtime Docker integration tests
         run: |
           cargo test -p ironclaw_host_runtime \
-            --test cli_session_docker \
             --test sandbox_exec_transport_docker \
             --test sandbox_reaper_docker \
             --test sandbox_workspace_fs_parity_docker \
             --test sandbox_cross_tenant_escape \
             -- --nocapture
 
-      - name: Run Reborn sandbox egress integration tests
+      - name: Run Reborn sandbox integration tests
         run: |
           cargo test -p ironclaw_reborn_integration_tests \
-            --test reborn_integration_sandbox_egress_proxy \
+            --test reborn_integration_sandbox_shell_turn \
             -- --nocapture
 
   reborn-integration-coverage:

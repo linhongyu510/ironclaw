@@ -20,10 +20,6 @@
 //! `libsql` because the production-runtime path under test requires the libSQL
 //! substrate.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::TenantId,
     runtime_policy::{
@@ -31,39 +27,14 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort,
-};
 use ironclaw_reborn_composition::{
     ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProcessBinding, ResolveExternalIdentity, SurfaceKind,
-    build_reborn_runtime,
+    RebornRuntimeInput, ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
 };
+use std::sync::Arc;
 
 #[path = "support/first_party.rs"]
 mod first_party_support;
-
-// ─── minimal sandbox transport stub (production requires a process binding) ───
-
-#[derive(Debug)]
-struct RecordingSandboxTransport;
-
-#[async_trait]
-impl SandboxCommandTransport for RecordingSandboxTransport {
-    async fn run_command(
-        &self,
-        _request: CommandExecutionRequest,
-    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        Ok(CommandExecutionOutput {
-            output: String::new(),
-            saved_output: None,
-            exit_code: 0,
-            sandboxed: true,
-            duration: Duration::ZERO,
-        })
-    }
-}
 
 /// A verified-email OAuth identity for `subject` under `tenant`. Email is held
 /// constant across tenants on purpose: the isolation assertion varies *only*
@@ -111,15 +82,12 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::None,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
-        })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
-        ))),
+        }),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "prod-identity-runtime-tenant".to_string(),

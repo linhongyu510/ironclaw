@@ -663,7 +663,7 @@ impl RebornIntegrationHarnessBuilder {
 
     /// W6 phase 2: wire `builtin.shell` through the real
     /// `HostedSingleTenantVolumeSandboxed` composition path with a real
-    /// `TenantSandbox` Docker process-port binding, so a scripted shell
+    /// `UserSandbox` Docker process-port binding, so a scripted shell
     /// command dispatches into an actual container instead of the host or the
     /// inert `RecordingProcessPort`. See `RebornCapabilityBackend::SandboxShellTools`.
     ///
@@ -676,8 +676,8 @@ impl RebornIntegrationHarnessBuilder {
     /// (this builder method does not skip — it fails the Docker connect).
     pub fn with_sandbox_shell_tools(
         mut self,
-        tenant_id: ironclaw_host_api::TenantId,
-        user_id: ironclaw_host_api::UserId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
+        user_id: ironclaw_host_api::ids::UserId,
     ) -> Self {
         self.capability = RebornCapabilityBackend::SandboxShellTools { tenant_id, user_id };
         self
@@ -1072,6 +1072,14 @@ impl RebornIntegrationHarness {
     /// inbound sink submits through this exact instance.
     pub(crate) fn product_surface_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
+    }
+
+    /// Production-composed runtime behind a real host-runtime harness profile.
+    /// Used only to seed external state that has no product onboarding API yet.
+    pub(crate) fn reborn_runtime_for_test(
+        &self,
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
+        self.capability_recorder.reborn_runtime_for_test()
     }
 
     /// A fresh binding-service instance over the GROUP-shared product

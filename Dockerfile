@@ -14,6 +14,37 @@
 
 FROM node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4 AS node_toolchain
 
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS railway_cli
+
+ARG TARGETARCH
+ARG RAILWAY_CLI_VERSION=5.30.4
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && case "$TARGETARCH" in \
+        amd64) \
+            railway_target="x86_64-unknown-linux-gnu"; \
+            railway_sha256="33addd7729e99291f329ac671b02e9fe14fec8b7d9cdc11be77569739dae5c0e" \
+            ;; \
+        arm64) \
+            railway_target="aarch64-unknown-linux-musl"; \
+            railway_sha256="11c24392e5e3551687c5e35ade2eec63e2ea7689603117de83f4f480dbb2d2a7" \
+            ;; \
+        *) \
+            echo "unsupported Railway CLI architecture: $TARGETARCH" >&2; \
+            exit 1 \
+            ;; \
+    esac \
+    && railway_archive="railway-v${RAILWAY_CLI_VERSION}-${railway_target}.tar.gz" \
+    && curl -fsSL \
+        "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_CLI_VERSION}/${railway_archive}" \
+        -o "/tmp/${railway_archive}" \
+    && echo "${railway_sha256}  /tmp/${railway_archive}" | sha256sum -c - \
+    && tar -xzf "/tmp/${railway_archive}" -C /tmp railway \
+    && install -m 0755 /tmp/railway /usr/local/bin/railway \
+    && railway --version
+
 FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS chef
 
 COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
@@ -93,6 +124,7 @@ RUN apt-get -o Acquire::Retries=3 update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
+COPY --from=railway_cli /usr/local/bin/railway /usr/local/bin/railway
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml

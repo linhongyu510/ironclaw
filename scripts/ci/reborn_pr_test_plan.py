@@ -78,6 +78,7 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "Dockerfile.process-sandbox",
     "crates/ironclaw_host_runtime/src/process_port.rs",
     "crates/ironclaw_host_runtime/tests/cli_session_docker.rs",
+    "crates/ironclaw_host_runtime/tests/railway_sandbox_live.rs",
     "crates/ironclaw_host_runtime/tests/sandbox_cross_tenant_escape.rs",
     "crates/ironclaw_host_runtime/tests/sandbox_exec_transport_docker.rs",
     "crates/ironclaw_host_runtime/tests/sandbox_reaper_docker.rs",
@@ -87,10 +88,14 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "crates/ironclaw_reborn_composition/src/input.rs",
     "crates/ironclaw_reborn_composition/src/production_runtime_policy.rs",
     "crates/ironclaw_reborn_config/src/profile.rs",
-    "tests/integration/reborn_sandbox_egress_proxy.rs",
+    "tests/integration/reborn_sandbox_shell_turn.rs",
+    "tests/integration/support/docker_gate.rs",
+    "tests/integration/support/harness/profiles/sandbox_shell.rs",
+    "tests/integration/support/sandbox_shell_identity.rs",
 }
 SANDBOX_DOCKER_PREFIXES = (
     "crates/ironclaw_host_runtime/src/sandbox_process",
+    "crates/ironclaw_reborn_composition/src/sandbox/",
     "crates/ironclaw_reborn_composition/src/sandbox_",
 )
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")

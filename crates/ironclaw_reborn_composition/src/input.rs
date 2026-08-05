@@ -11,10 +11,8 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
-use ironclaw_host_runtime::{
-    ConnectionAttributionResolver, SandboxActivityRegistry, TenantSandboxProcessPort,
-};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::ProcessConcurrencyLimits;
@@ -111,26 +109,26 @@ pub(crate) struct OAuthDcrCallbackConfig {
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
-    TenantSandbox {
-        process_port: Arc<TenantSandboxProcessPort>,
+    UserSandbox {
+        process_port: Arc<UserSandboxProcessPort>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
-    MissingTenantSandboxProcessPort,
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    MissingUserSandboxProcessPort,
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingTenantSandboxProcessPort => formatter.write_str(
-                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            Self::MissingUserSandboxProcessPort => formatter.write_str(
+                "production user-sandbox process backend requires a user sandbox process binding",
             ),
-            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+            Self::UnexpectedUserSandboxProcessPort { process_backend } => write!(
                 formatter,
-                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+                "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
             ),
         }
     }
@@ -141,8 +139,8 @@ impl RebornRuntimeProcessBinding {
         Self::default()
     }
 
-    pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
-        Self::TenantSandbox { process_port }
+    pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
+        Self::UserSandbox { process_port }
     }
 
     pub(crate) fn validate_for_production_policy(
@@ -150,15 +148,14 @@ impl RebornRuntimeProcessBinding {
         runtime_policy: &EffectiveRuntimePolicy,
     ) -> Result<(), RebornRuntimeProcessBindingError> {
         match (runtime_policy.process_backend, self) {
-            (
-                ProcessBackendKind::TenantSandbox,
-                RebornRuntimeProcessBinding::TenantSandbox { .. },
-            ) => Ok(()),
-            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
-                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::UserSandbox { .. }) => {
+                Ok(())
             }
-            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
-                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingUserSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::UserSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedUserSandboxProcessPort {
                     process_backend: runtime_policy.process_backend,
                 },
             ),
@@ -184,13 +181,9 @@ pub struct RebornHostBindings {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
-    pub(crate) sandbox_activity: Option<Arc<SandboxActivityRegistry>>,
-    pub(crate) sandbox_egress_proxy:
-        Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
-    pub(crate) sandbox_attribution: Option<Arc<ConnectionAttributionResolver>>,
-    /// Canonical parent used by both the container bind and the abstract
-    /// filesystem's per-caller `/workspace` leaf.
-    pub(crate) sandbox_workspaces_root: Option<PathBuf>,
+    /// Opaque provider-compatible sandbox family. Generic composition never
+    /// ferries Docker/Railway lifecycle parts independently.
+    pub(crate) sandbox: Option<crate::sandbox::UserSandboxRuntimeBundle>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -771,32 +764,15 @@ impl RebornHostBindings {
         self
     }
 
-    pub fn with_sandbox_activity_registry(
+    /// Installs the sandbox profile's opaque, composition-owned runtime
+    /// binding. Callers above composition must not unpack and ferry Docker,
+    /// attribution, credential, or background-task substrate handles.
+    pub fn with_user_sandbox_binding(
         mut self,
-        activity: Arc<SandboxActivityRegistry>,
+        binding: crate::sandbox::UserSandboxRuntimeBundle,
     ) -> Self {
-        self.sandbox_activity = Some(activity);
-        self
-    }
-
-    pub fn with_sandbox_egress_proxy_handle(
-        mut self,
-        egress_proxy: crate::sandbox_composition::SandboxEgressProxyRuntimeHandle,
-    ) -> Self {
-        self.sandbox_egress_proxy = Some(egress_proxy);
-        self
-    }
-
-    pub fn with_sandbox_attribution_resolver(
-        mut self,
-        attribution: Arc<ConnectionAttributionResolver>,
-    ) -> Self {
-        self.sandbox_attribution = Some(attribution);
-        self
-    }
-
-    pub fn with_sandbox_workspaces_root(mut self, sandbox_workspaces_root: PathBuf) -> Self {
-        self.sandbox_workspaces_root = Some(sandbox_workspaces_root);
+        self.runtime_process_binding = binding.process_binding();
+        self.sandbox = Some(binding);
         self
     }
 
@@ -958,10 +934,7 @@ impl RebornHostBindings {
             production_trust_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
-            sandbox_activity: None,
-            sandbox_egress_proxy: None,
-            sandbox_attribution: None,
-            sandbox_workspaces_root: None,
+            sandbox: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -1310,6 +1283,33 @@ fn validate_dcr_callback_origin(origin: &str) -> Result<(), AuthProductError> {
         return Err(AuthProductError::BackendUnavailable);
     }
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod sandbox_test_support {
+    use super::*;
+
+    impl RebornHostBindings {
+        /// Complete a recording sandbox binding without booting Docker.
+        pub fn with_sandbox_runtime_support_for_test(
+            mut self,
+            sandbox_workspaces_root: PathBuf,
+        ) -> Self {
+            let process_port = match &self.runtime_process_binding {
+                RebornRuntimeProcessBinding::UserSandbox { process_port } => {
+                    Arc::clone(process_port)
+                }
+                RebornRuntimeProcessBinding::None => return self,
+            };
+            self.sandbox = Some(
+                crate::sandbox::UserSandboxFactory::transport_managed_recording_for_test(
+                    process_port,
+                    sandbox_workspaces_root,
+                ),
+            );
+            self
+        }
+    }
 }
 
 #[cfg(test)]

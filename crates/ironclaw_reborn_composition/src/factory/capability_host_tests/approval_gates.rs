@@ -103,19 +103,21 @@ async fn standalone_ask_destructive_shell_invocation_blocks_then_resumes_with_on
 }
 
 #[tokio::test]
-async fn standalone_approved_shell_uses_injected_tenant_sandbox_process_port() {
+async fn sandbox_profile_approved_shell_uses_user_sandbox_process_port() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let transport = Arc::new(RecordingSandboxTransport::default());
-    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+    let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
         transport.clone(),
     ));
     let services = build_runtime_substrate(
-        crate::deployment::local_filesystem_build_input(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
             "sandbox-port-owner",
-            dir.path().join("standalone"),
+            dir.path().join("sandboxed"),
         )
-        .with_runtime_policy(tenant_sandbox_process_policy())
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port)),
+        .with_runtime_policy(user_sandbox_process_policy())
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(process_port))
+        .with_sandbox_runtime_support_for_test(dir.path().join("sandbox-workspaces")),
     )
     .await
     .expect("standalone services build"); // safety: test-only standalone fixture setup.
@@ -967,9 +969,9 @@ fn echo_dispatch_lease_approval() -> LeaseApproval {
     })
 }
 
-fn tenant_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+fn user_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     let mut policy = local_host_policy();
-    policy.process_backend = ironclaw_host_api::runtime_policy::ProcessBackendKind::TenantSandbox;
+    policy.process_backend = ironclaw_host_api::runtime_policy::ProcessBackendKind::UserSandbox;
     policy
 }
 

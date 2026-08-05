@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
 use super::doubles::ParkingCapabilityGate;
 use super::group::GroupCapability;
@@ -78,7 +78,7 @@ pub(super) enum RebornCapabilityBackend {
     BuiltinHttpToolsConfirmedHostMount,
     /// W6 phase 2: `builtin.shell` wired through the real
     /// `HostedSingleTenantVolumeSandboxed` composition path with a real
-    /// `TenantSandbox` Docker process-port binding — see
+    /// `UserSandbox` Docker process-port binding — see
     /// `harness::profiles::sandbox_shell`. `tenant_id`/`user_id` are minted
     /// fresh by the CALLING TEST (`sandbox_shell_identity`) so this backend
     /// never collides on a container name/workspace directory with a

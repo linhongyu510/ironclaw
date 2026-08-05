@@ -1,4 +1,4 @@
-//! Tenant-level concurrency ceiling for the `hosted-single-tenant-volume-sandboxed`
+//! Per-user concurrency ceiling for the `hosted-single-tenant-volume-sandboxed`
 //! profile (D3-2).
 //!
 //! `ironclaw_authorization::obligations_for_grant` already emits a
@@ -106,7 +106,7 @@ pub(crate) fn apply_sandbox_user_ceiling(
     governor: &Arc<dyn ResourceGovernor>,
     tenant_id: TenantId,
     // Kept on the signature (unused in the body) so the sole call site
-    // (`sandbox_composition.rs`) does not need churn; retained for the
+    // (`sandbox::lifecycle.rs`) does not need churn; retained for the
     // lazy per-user follow-up described above, which will need it again.
     _owner_user_id: UserId,
     max_concurrent: u32,

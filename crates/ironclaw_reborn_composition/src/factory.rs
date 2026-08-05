@@ -236,6 +236,8 @@ pub(crate) use production_backend_assembly::{
 pub(crate) use production_backend_assembly::{
     production_skill_management_mount_view, production_system_extensions_lifecycle_mount_view,
 };
+#[cfg(test)]
+use production_build_assembly::validate_sandbox_profile_bundle;
 use production_build_assembly::{
     FilesystemProductionHostRuntimeServices, RebornProductionBuildContext, build_production_shaped,
     planned_run_profile_resolver,
@@ -282,7 +284,6 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) outbound_delivery_targets:
@@ -422,7 +423,7 @@ pub(crate) struct RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
-    pub(crate) sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings,
+    pub(crate) sandbox_runtime_bindings: crate::sandbox::SandboxRuntimeBindings,
 }
 
 struct ChannelHostWiring {
@@ -1166,6 +1167,7 @@ fn insert_bound_memory_package(
 
 fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
+    include_sandbox_credentials: bool,
     memory_package: Option<&ironclaw_extensions::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
@@ -1190,11 +1192,10 @@ fn production_builtin_extension_registry(
             reason: format!("administrator configuration package is invalid: {error}"),
         }
     })?;
-    let package = extend_builtin_operator_config_package(package).map_err(|error| {
-        RebornBuildError::InvalidConfig {
+    let package = extend_builtin_operator_config_package(package, include_sandbox_credentials)
+        .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("operator configuration package is invalid: {error}"),
-        }
-    })?;
+        })?;
     let package = extend_builtin_outbound_preferences_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("outbound preferences package is invalid: {error}"),

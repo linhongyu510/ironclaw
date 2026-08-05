@@ -64,9 +64,19 @@ async fn main() {
     };
 
     eprintln!("egress_proxy_standalone: binding {bind_addr}, allowlist = {allowed_hosts}");
-    let binding = bind_sandbox_egress_proxy_with_tls_intercept(&bind_addr, policy)
-        .await
-        .expect("egress_proxy_standalone: bind failed");
+    // Standalone example, no Docker/composition wiring available here — runs
+    // with no attribution resolver, same as any other no-Docker caller: every
+    // intercepted connection's identity resolves to `None`, and the
+    // credential firewall fails closed the moment a request carries a
+    // placeholder.
+    let binding = bind_sandbox_egress_proxy_with_tls_intercept(
+        &bind_addr,
+        policy,
+        None,
+        ironclaw_host_runtime::SandboxCredentialRuntime::new(),
+    )
+    .await
+    .expect("egress_proxy_standalone: bind failed");
     std::fs::write(CA_BUNDLE_EXPORT_PATH, &binding.ca_bundle_pem)
         .expect("egress_proxy_standalone: writing the CA bundle export file failed");
     eprintln!(

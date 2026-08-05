@@ -814,31 +814,138 @@ fn build_standalone_local_runtime_services_input(
 /// db file against) where the sandbox transport bind-mounts per-scope tenant
 /// workspaces.
 const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
+const SANDBOX_PROVIDER_ENV: &str = "IRONCLAW_REBORN_SANDBOX_PROVIDER";
+const RAILWAY_SANDBOX_PROJECT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_PROJECT_ID";
+const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID";
+const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
+const RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES";
+const RAILWAY_SANDBOX_WORKER_IMAGE_ENV: &str = "IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxProvider {
+    Docker,
+    RailwayPreview,
+}
+
+fn sandbox_provider_from_env() -> Result<SandboxProvider, SandboxProcessBootError> {
+    match std::env::var(SANDBOX_PROVIDER_ENV) {
+        Ok(value) => sandbox_provider_from_raw(&value),
+        Err(std::env::VarError::NotPresent) => Ok(SandboxProvider::Docker),
+        Err(std::env::VarError::NotUnicode(_)) => Err(SandboxProcessBootError::InvalidProvider {
+            reason: format!("{SANDBOX_PROVIDER_ENV} must contain valid UTF-8"),
+        }),
+    }
+}
+
+fn sandbox_provider_from_raw(value: &str) -> Result<SandboxProvider, SandboxProcessBootError> {
+    match value.trim() {
+        "" | "docker" => Ok(SandboxProvider::Docker),
+        "railway-preview" => Ok(SandboxProvider::RailwayPreview),
+        other => Err(SandboxProcessBootError::InvalidProvider {
+            reason: format!(
+                "unsupported {SANDBOX_PROVIDER_ENV}={other:?}; expected docker or railway-preview"
+            ),
+        }),
+    }
+}
+
+fn railway_preview_config_from_env()
+-> Result<ironclaw_reborn_composition::RailwayPreviewSandboxConfig, SandboxProcessBootError> {
+    let project_id =
+        required_railway_sandbox_env(RAILWAY_SANDBOX_PROJECT_ENV, "RAILWAY_PROJECT_ID")?;
+    let environment_id =
+        required_railway_sandbox_env(RAILWAY_SANDBOX_ENVIRONMENT_ENV, "RAILWAY_ENVIRONMENT_ID")?;
+    if sandbox_env_value("RAILWAY_TOKEN")?.is_none()
+        && sandbox_env_value("RAILWAY_API_TOKEN")?.is_none()
+    {
+        return Err(SandboxProcessBootError::RailwayUnavailable {
+            reason: "RAILWAY_TOKEN or RAILWAY_API_TOKEN is required".to_string(),
+        });
+    }
+    let mut config =
+        ironclaw_reborn_composition::RailwayPreviewSandboxConfig::new(project_id, environment_id)
+            .map_err(|error| SandboxProcessBootError::RailwayUnavailable {
+            reason: error.to_string(),
+        })?;
+    if let Some(cli_path) = sandbox_env_value(RAILWAY_SANDBOX_CLI_PATH_ENV)? {
+        config = config.with_cli_path(cli_path);
+    }
+    if let Some(raw) = sandbox_env_value(RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV)? {
+        let minutes =
+            raw.parse::<u16>()
+                .map_err(|_| SandboxProcessBootError::RailwayUnavailable {
+                    reason: format!(
+                        "{RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV} must be an integer from 1 to 65535"
+                    ),
+                })?;
+        config = config.with_idle_timeout_minutes(minutes).map_err(|error| {
+            SandboxProcessBootError::RailwayUnavailable {
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    if let Some(worker_image) = sandbox_env_value(RAILWAY_SANDBOX_WORKER_IMAGE_ENV)? {
+        config = config.with_worker_image(worker_image).map_err(|error| {
+            SandboxProcessBootError::RailwayUnavailable {
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    Ok(config)
+}
+
+fn required_railway_sandbox_env(
+    preferred: &'static str,
+    railway_default: &'static str,
+) -> Result<String, SandboxProcessBootError> {
+    if let Some(value) = sandbox_env_value(preferred)? {
+        return Ok(value);
+    }
+    sandbox_env_value(railway_default)?.ok_or_else(|| SandboxProcessBootError::RailwayUnavailable {
+        reason: format!("{preferred} or {railway_default} is required"),
+    })
+}
+
+fn sandbox_env_value(name: &'static str) -> Result<Option<String>, SandboxProcessBootError> {
+    match std::env::var(name) {
+        Ok(value) => Ok((!value.trim().is_empty()).then(|| value.trim().to_string())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(SandboxProcessBootError::RailwayUnavailable {
+                reason: format!("{name} must contain valid UTF-8"),
+            })
+        }
+    }
+}
 
 /// Boot-time failure for the `hosted-single-tenant-volume-sandboxed`
-/// profile's tenant-sandbox process backend. Deliberately fail-closed: a
-/// profile that requests `TenantSandbox` never silently falls back to
+/// profile's user-sandbox process backend. Deliberately fail-closed: a
+/// profile that requests `UserSandbox` never silently falls back to
 /// `RebornRuntimeProcessBinding::None` (which would mean running shell
 /// commands unsandboxed on the host) — see `docs/safety-and-sandbox.md`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SandboxProcessBootError {
+    #[error("sandbox provider configuration is invalid: {reason}")]
+    InvalidProvider { reason: String },
     #[error(
-        "profile={profile} requires a reachable Docker daemon for its tenant-sandbox process \
+        "profile={profile} requires a reachable Docker daemon for its user-sandbox process \
          backend; refusing to boot with an unsandboxed fallback: {reason}"
     )]
     DockerUnreachable {
         profile: RebornProfile,
         reason: String,
     },
+    #[error("Railway preview sandbox configuration is unavailable: {reason}")]
+    RailwayUnavailable { reason: String },
 }
 
 /// Build the `hosted-single-tenant-volume-sandboxed` profile's services
 /// input: the same local-runtime storage assembly every standalone profile
-/// uses, plus a real `TenantSandbox` process-port binding backed by a live
+/// uses, plus a real `UserSandbox` process-port binding backed by a live
 /// Docker connection.
 ///
 /// The Docker connect and sandbox-transport construction themselves live in
-/// [`ironclaw_reborn_composition::tenant_sandbox_process_binding`], not
+/// [`ironclaw_reborn_composition::UserSandboxFactory`], not
 /// here: this crate's workspace dependencies are pinned to the
 /// composition/config/traces/webui facade set
 /// (`reborn_cli_binary_crate_stays_separate_from_v1_root` in
@@ -858,33 +965,28 @@ fn build_sandboxed_local_runtime_services_input(
 ) -> anyhow::Result<RebornHostBindings> {
     let sandbox_workspaces_root =
         local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-    // `tenant_sandbox_process_binding` always spawns its own egress-allowlist
-    // proxy and hands the resulting handle back on `TenantSandboxBinding`.
-    let connect = ironclaw_reborn_composition::tenant_sandbox_process_binding(
-        sandbox_workspaces_root.clone(),
-    );
-    let tenant_sandbox =
-        block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {
-            profile,
-            reason: error.to_string(),
-        })?;
+    let user_sandbox = match sandbox_provider_from_env()? {
+        SandboxProvider::Docker => {
+            let connect = ironclaw_reborn_composition::UserSandboxFactory::local_docker(
+                sandbox_workspaces_root.clone(),
+            );
+            block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {
+                profile,
+                reason: error.to_string(),
+            })?
+        }
+        SandboxProvider::RailwayPreview => {
+            tracing::warn!(
+                "Railway preview sandbox persistence requires exactly one IronClaw application replica; distributed per-user leases are not implemented"
+            );
+            ironclaw_reborn_composition::UserSandboxFactory::railway_preview(
+                railway_preview_config_from_env()?,
+            )
+        }
+    };
     let services_input =
         build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
-    // Carry the SAME `sandbox_workspaces_root` the container bind above was
-    // just constructed with, so composition's abstract-FS `/workspace`
-    // mount (`mount_sandbox_user_workspace_root`) roots at the identical
-    // host tree the container binds — see
-    // `RebornHostBindings::with_sandbox_workspaces_root`.
-    let services_input = services_input
-        .with_runtime_process_binding(tenant_sandbox.binding)
-        .with_sandbox_activity_registry(tenant_sandbox.activity)
-        .with_sandbox_attribution_resolver(tenant_sandbox.attribution)
-        .with_sandbox_workspaces_root(sandbox_workspaces_root);
-    let services_input = match tenant_sandbox.egress_proxy {
-        Some(egress_proxy) => services_input.with_sandbox_egress_proxy_handle(egress_proxy),
-        None => services_input,
-    };
-    Ok(services_input)
+    Ok(services_input.with_user_sandbox_binding(user_sandbox))
 }
 
 fn build_hosted_single_tenant_services_input(
@@ -1631,12 +1733,13 @@ mod tests {
     use super::test_env::EnvGuard;
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
-        RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
+        RuntimeInputOptions, SandboxProvider, apply_credential_refresh_override, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options,
+        initialize_local_runtime_storage_root, no_assistant_text_message,
+        protect_reborn_log_filter, railway_preview_config_from_env, resolve_google_oauth_config,
         resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
-        with_binary_host_extension_bindings_from_bundles,
+        sandbox_provider_from_raw, with_binary_host_extension_bindings_from_bundles,
     };
     use ironclaw_reborn_config::GoogleSection;
     // Only the hosted-volume tests consume this.
@@ -1668,6 +1771,109 @@ mod tests {
             &std::path::PathBuf::from("/test/config.toml"),
         )
         .expect("must parse")
+    }
+
+    #[test]
+    fn sandbox_provider_defaults_and_selects_railway_preview_explicitly() {
+        assert_eq!(
+            sandbox_provider_from_raw("").expect("blank preserves Docker default"),
+            SandboxProvider::Docker
+        );
+        assert_eq!(
+            sandbox_provider_from_raw("docker").expect("Docker provider parses"),
+            SandboxProvider::Docker
+        );
+        assert_eq!(
+            sandbox_provider_from_raw(" railway-preview ")
+                .expect("Railway preview provider parses"),
+            SandboxProvider::RailwayPreview
+        );
+    }
+
+    #[test]
+    fn sandbox_provider_rejects_unknown_values() {
+        let error = sandbox_provider_from_raw("host-shell")
+            .expect_err("unknown sandbox provider must fail closed");
+        assert!(error.to_string().contains("docker or railway-preview"));
+    }
+
+    #[test]
+    fn sandbox_provider_env_is_inert_for_non_sandbox_profiles() {
+        let _lock = lock_runtime_env();
+        let _provider = EnvGuard::set("IRONCLAW_REBORN_SANDBOX_PROVIDER", "not-a-provider");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("local-dev".into()),
+        )
+        .expect("boot config");
+
+        build_runtime_input(&config, RuntimeInputCaller::Run)
+            .expect("non-sandbox profile must not read or start a sandbox provider");
+    }
+
+    #[test]
+    fn sandbox_profile_rejects_invalid_provider_before_backend_boot() {
+        let _lock = lock_runtime_env();
+        let _provider = EnvGuard::set("IRONCLAW_REBORN_SANDBOX_PROVIDER", "not-a-provider");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume-sandboxed".into()),
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("sandbox profile must reject an invalid provider"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("docker or railway-preview"));
+    }
+
+    #[test]
+    fn valid_railway_preview_profile_builds_without_touching_docker() {
+        let _lock = lock_runtime_env();
+        let _provider = EnvGuard::set("IRONCLAW_REBORN_SANDBOX_PROVIDER", "railway-preview");
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-id");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-id");
+        let _token = EnvGuard::set("RAILWAY_TOKEN", "test-only-token");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume-sandboxed".into()),
+        )
+        .expect("boot config");
+
+        let railway = railway_preview_config_from_env().expect("Railway config resolves");
+        assert!(!format!("{railway:?}").contains("test-only-token"));
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+        );
+        assert_eq!(
+            services
+                .runtime_policy()
+                .expect("runtime policy")
+                .process_backend
+                .as_str(),
+            "user_sandbox"
+        );
     }
 
     #[test]

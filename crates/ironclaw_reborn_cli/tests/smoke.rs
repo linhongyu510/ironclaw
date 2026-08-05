@@ -299,6 +299,16 @@ fn dockerfile_reborn_builds_without_backend_feature_flags() {
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
         "Dockerfile must ship the hosted volume seed config: {dockerfile}"
     );
+    assert!(
+        dockerfile.contains("ARG RAILWAY_CLI_VERSION=5.30.4")
+            && dockerfile
+                .contains("COPY --from=railway_cli /usr/local/bin/railway /usr/local/bin/railway")
+            && dockerfile
+                .contains("33addd7729e99291f329ac671b02e9fe14fec8b7d9cdc11be77569739dae5c0e")
+            && dockerfile
+                .contains("11c24392e5e3551687c5e35ade2eec63e2ea7689603117de83f4f480dbb2d2a7"),
+        "Dockerfile must install a checksum-pinned Railway CLI for both supported image architectures: {dockerfile}"
+    );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
         .map(|(_, stage)| stage)
@@ -694,34 +704,41 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
 
 #[cfg(unix)]
 #[test]
-fn docker_reborn_entrypoint_rejects_ephemeral_railway_without_volume() {
+fn docker_reborn_entrypoint_rejects_ephemeral_standalone_railway_without_volume() {
     let temp = tempfile::tempdir().expect("tempdir");
     let bin_dir = temp.path().join("bin");
     fake_reborn_bin(&bin_dir);
     let reborn_home = temp.path().join("reborn-home");
-    write_reborn_config(&reborn_home, "local-dev");
 
-    let output = Command::new("/bin/sh")
-        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .env("PATH", fake_bin_path(&bin_dir))
-        .env("HOME", temp.path().join("home"))
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("RAILWAY_ENVIRONMENT", "production")
-        .output()
-        .expect("entrypoint should run");
+    for profile in ["local-dev", "hosted-single-tenant-volume-sandboxed"] {
+        write_reborn_config(&reborn_home, profile);
+        let output = Command::new("/bin/sh")
+            .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+            .env_clear()
+            .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+            .env("PATH", fake_bin_path(&bin_dir))
+            .env("HOME", temp.path().join("home"))
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .env("RAILWAY_ENVIRONMENT", "production")
+            .output()
+            .expect("entrypoint should run");
 
-    assert!(!output.status.success(), "entrypoint should fail closed");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Railway deployment using profile=local-dev requires a persistent volume"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true"),
-        "stderr: {stderr}"
-    );
+        assert!(
+            !output.status.success(),
+            "entrypoint should fail closed for profile={profile}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "Railway deployment using profile={profile} requires a persistent volume"
+            )),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true"),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3833,7 +3850,7 @@ fn run_rejects_invalid_profile() {
 
 /// Boot-path fail-closed test for the A2 `(deployment, backend)` matrix row
 /// (`docs/plans/2026-07-20-reborn-sandbox-plan.md` Workstream A2): the
-/// `hosted-single-tenant-volume-sandboxed` profile's `TenantSandbox` process
+/// `hosted-single-tenant-volume-sandboxed` profile's `UserSandbox` process
 /// backend now performs a real Docker connect during `ironclaw run` boot.
 /// Forces the daemon unreachable deterministically via
 /// `IRONCLAW_REBORN_DOCKER_HOST` (rather than relying on this machine simply
@@ -3877,6 +3894,127 @@ fn build_runtime_input_hosted_single_tenant_volume_sandboxed_fails_closed_withou
         stderr.contains("Docker"),
         "stderr should name Docker unreachability rather than silently falling back to an \
          unsandboxed process backend: {stderr}"
+    );
+}
+
+/// Regression for sandbox bootstrap rollback: a real `serve` process can
+/// acquire the VM-backed egress relay before a later composition validation
+/// fails. The failed process must remove that exact external relay before it
+/// exits, or every subsequent sandbox-profile boot is wedged behind the
+/// singleton relay name.
+#[test]
+fn sandboxed_serve_cleans_vm_relay_after_runtime_assembly_failure() {
+    if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
+        eprintln!(
+            "SKIP: IRONCLAW_REQUIRE_DOCKER_TESTS is unset; \
+             sandboxed_serve_cleans_vm_relay_after_runtime_assembly_failure requires real Docker"
+        );
+        return;
+    }
+
+    let docker_ready = Command::new("docker")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("docker info should start");
+    assert!(docker_ready.success(), "real Docker daemon is required");
+    let image_ready = Command::new("docker")
+        .args(["image", "inspect", "ironclaw-worker:latest"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("docker image inspect should start");
+    assert!(image_ready.success(), "ironclaw-worker:latest is required");
+
+    let relay_ids = || {
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "-q",
+                "--filter",
+                "label=ironclaw.sandbox-egress-relay=true",
+            ])
+            .output()
+            .expect("docker relay inspection should run");
+        assert!(
+            output.status.success(),
+            "docker relay inspection should succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("docker relay ids should be UTF-8")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        relay_ids().is_empty(),
+        "test requires no pre-existing IronClaw sandbox egress relay"
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let mut command = reborn_command();
+    command
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        // Deliberately reproduces the post-proxy failure: reborn_home is an
+        // ancestor of the default skill roots, so workspace/skill isolation
+        // rejects the build after sandbox bootstrap has acquired the relay.
+        .current_dir(&reborn_home)
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_PROFILE",
+            "hosted-single-tenant-volume-sandboxed",
+        )
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "sandbox-relay-cleanup-test-token-0123456789abcdef",
+        );
+    if let Some(docker_host) = std::env::var_os("DOCKER_HOST") {
+        command.env("IRONCLAW_REBORN_DOCKER_HOST", docker_host);
+    }
+    let output = command
+        .output()
+        .expect("sandboxed serve should run and fail");
+    assert!(
+        !output.status.success(),
+        "malformed workspace layout must fail composition"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("workspace root must not overlap default skill root"),
+        "test must reach the intended post-proxy composition failure: {stderr}"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let remaining = loop {
+        let remaining = relay_ids();
+        if remaining.is_empty() || std::time::Instant::now() >= deadline {
+            break remaining;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    if !remaining.is_empty() {
+        let cleanup = Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .args(&remaining)
+            .output()
+            .expect("failed-test relay cleanup should run");
+        assert!(
+            cleanup.status.success(),
+            "failed-test relay cleanup should succeed"
+        );
+    }
+    assert!(
+        remaining.is_empty(),
+        "failed sandbox runtime assembly orphaned VM relay container(s): {remaining:?}"
     );
 }
 

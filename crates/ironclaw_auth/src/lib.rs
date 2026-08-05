@@ -24,6 +24,7 @@ mod flow;
 mod ids;
 mod interaction;
 pub mod oauth;
+mod presentation;
 pub mod product_auth;
 mod provider;
 mod scope;
@@ -77,9 +78,10 @@ pub use flow::{
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
-    AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel, LifecyclePackageRef,
-    OAuthAuthorizationUrl, OpaqueStateHash, PkceVerifierHash, ProductActionRef, ProviderScope,
-    TurnRunRef,
+    AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
+    CredentialPresentationBindingId, CredentialPresentationProfileId, GuestCredentialArtifactId,
+    LifecyclePackageRef, OAuthAuthorizationUrl, OpaqueStateHash, PkceVerifierHash,
+    ProductActionRef, ProviderScope, TurnRunRef,
 };
 pub use interaction::{
     AuthInteractionService, ManualTokenSetupRequest, SecretSubmitRequest, SecretSubmitResult,
@@ -90,6 +92,12 @@ pub use oauth::{
     OAuthCallbackStateKind, OAuthClientId, OAuthProviderIdentity, OAuthProviderIdentitySubject,
     OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
     opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
+};
+pub use presentation::{
+    CreateCredentialPresentationBindingRequest, CredentialPresentationBinding,
+    CredentialPresentationBindingAuthority, CredentialPresentationBindingRepository,
+    CredentialPresentationBindingStatus, CredentialPresentationProfileCatalog,
+    CredentialPresentationProfileVersion,
 };
 pub use product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,

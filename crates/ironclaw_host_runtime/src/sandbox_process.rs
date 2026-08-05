@@ -1,4 +1,4 @@
-//! Reborn-native tenant sandbox command transport.
+//! Reborn-native user sandbox command transport.
 //!
 //! The transport derives host workspace and container identity from the full
 //! [`ResourceScope`]. It deliberately avoids the legacy project-only sandbox
@@ -14,11 +14,11 @@ use std::{
 
 use async_trait::async_trait;
 use bollard::Docker;
-use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
+use ironclaw_host_api::{ids::InvocationId, mount::MountView, resource::ResourceScope};
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort, process_output::sanitize_command_output_bytes,
+    UserSandboxProcessPort, process_output::sanitize_command_output_bytes,
 };
 
 mod attribution;
@@ -27,18 +27,22 @@ mod ca;
 mod connect;
 mod container_identity;
 mod credential_firewall;
+#[cfg(test)]
+pub(crate) use credential_firewall::SandboxCredentialConnectionIdentity;
 mod credential_swap;
 mod egress_proxy;
 mod exec_transport;
 mod key_codec;
 mod mounts;
 mod network_allowlist;
+mod railway;
 mod reaper;
 mod registry;
 mod scope_key;
 pub(crate) mod shell_limits;
 mod tls_intercept;
 mod user_key;
+mod worker_spec;
 
 use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
@@ -46,6 +50,8 @@ pub use attribution::ConnectionAttributionResolver;
 pub use broker::RebornSandboxNetworkBroker;
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use credential_swap::SandboxCredentialRuntime;
+pub(crate) use credential_swap::SandboxStaticCredentialGrant;
 pub use egress_proxy::{
     BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError, SandboxEgressProxyBinding,
     bind_sandbox_egress_proxy_with_tls_intercept,
@@ -55,11 +61,25 @@ pub use network_allowlist::{
     SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
     sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
+pub use railway::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
-use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use user_key::RebornSandboxUserKey;
+
+/// Creates or verifies the internal Docker network used by brokered sandbox
+/// egress. This initializes shared sandbox infrastructure only; it does not
+/// create or start a per-user sandbox container.
+pub async fn prepare_sandbox_egress_network() -> Result<(), RuntimeProcessError> {
+    let docker = connect_docker_with_retry().await?;
+    exec_transport::ensure_default_egress_network(&docker).await
+}
+
+/// Address on which the host-side proxy must listen to be reachable from the
+/// production internal sandbox network.
+pub fn sandbox_egress_proxy_bind_addr() -> String {
+    broker::sandbox_egress_proxy_bind_addr()
+}
 
 /// Docker label prefix for container metadata attached by
 /// [`RebornScopedSandboxCommandTransport`] — shared with [`reaper`] so the
@@ -174,7 +194,7 @@ impl RebornSandboxConfig {
     /// trust-distribution wiring
     /// (`crates/ironclaw_host_runtime/src/sandbox_process/ca.rs`'s module
     /// doc). Composition
-    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+    /// (`ironclaw_reborn_composition::sandbox_boot::user_sandbox_process_binding`)
     /// is the only production caller, threading the SAME bundle the egress
     /// proxy's `TlsInterceptConfig` mints leaf certificates from — a
     /// mismatched bundle here would make every bound-host CONNECT fail
@@ -235,6 +255,25 @@ impl RebornSandboxConfig {
         broker::push_broker_env(self.network_broker.as_ref(), &mut env)?;
         Ok(env)
     }
+
+    fn command_env_for_invocation(
+        &self,
+        extra_env: HashMap<String, String>,
+        invocation_id: InvocationId,
+    ) -> Result<Vec<String>, RuntimeProcessError> {
+        if !extra_env.is_empty() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "user sandbox does not accept caller-provided environment variables".to_string(),
+            ));
+        }
+        let mut env = Vec::new();
+        broker::push_broker_env_for_invocation(
+            self.network_broker.as_ref(),
+            &mut env,
+            invocation_id,
+        )?;
+        Ok(env)
+    }
 }
 
 #[derive(Clone)]
@@ -242,7 +281,6 @@ pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
-    background_jobs: Arc<BackgroundJobRegistry>,
     /// Gates the egress network's idempotent-but-not-free create attempt
     /// (see `exec_transport::ensure_egress_network_once`) to once per
     /// process instead of once per command dispatch.
@@ -252,7 +290,7 @@ pub struct RebornScopedSandboxCommandTransport {
     /// window to zero for the IP the recycled container releases (see
     /// `attribution`'s module doc, "W17"). Production composition always
     /// wires this via [`Self::with_attribution_resolver`]
-    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`);
+    /// (`ironclaw_reborn_composition::sandbox_boot::user_sandbox_process_binding`);
     /// `None` only for callers that construct a transport directly (tests,
     /// or a future non-sandboxed caller that has no attribution cache to
     /// invalidate).
@@ -287,7 +325,6 @@ impl RebornScopedSandboxCommandTransport {
             docker,
             config,
             activity: Arc::new(SandboxActivityRegistry::new()),
-            background_jobs: Arc::new(BackgroundJobRegistry::new()),
             network_ready: Arc::new(tokio::sync::OnceCell::new()),
             attribution: None,
         }
@@ -304,7 +341,7 @@ impl RebornScopedSandboxCommandTransport {
 
     /// Wires a shared attribution-cache invalidator (see
     /// [`Self::attribution`]'s doc). Composition
-    /// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+    /// (`ironclaw_reborn_composition::sandbox_boot::user_sandbox_process_binding`)
     /// is the production caller: it builds one
     /// [`attribution::ConnectionAttributionResolver::for_sandbox_egress`]
     /// instance and wires the SAME `Arc` here and into
@@ -317,22 +354,8 @@ impl RebornScopedSandboxCommandTransport {
         self
     }
 
-    /// Test-only introspection: whether — and which — attribution resolver
-    /// this transport was wired with. Mirrors the production call site
-    /// `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`
-    /// (`with_attribution_resolver` above), so a composition-tier test can
-    /// assert against a PRODUCTION-constructed transport that this is
-    /// `Some`, and (via `Arc::ptr_eq` against
-    /// `SandboxReaper::attribution_for_test`) that the reaper was wired with
-    /// the SAME instance rather than a second, independently constructed
-    /// one. Ships zero bytes in production binaries.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn attribution_for_test(&self) -> Option<Arc<attribution::ConnectionAttributionResolver>> {
-        self.attribution.clone()
-    }
-
-    pub fn into_process_port(self) -> TenantSandboxProcessPort {
-        TenantSandboxProcessPort::new(Arc::new(self))
+    pub fn into_process_port(self) -> UserSandboxProcessPort {
+        UserSandboxProcessPort::new(Arc::new(self))
     }
 
     /// Initializes (and returns) the per-user host workspace directory that
@@ -348,42 +371,45 @@ impl RebornScopedSandboxCommandTransport {
     ) -> Result<PathBuf, RuntimeProcessError> {
         let key = RebornSandboxUserKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
-        tokio::fs::create_dir_all(&workspace)
+        #[cfg(unix)]
+        {
+            let workspace_root = self.config.workspace_root.clone();
+            let workspace_mode = self.config.container_identity.workspace_mode();
+            tokio::task::spawn_blocking(move || {
+                prepare_workspace_unix(&workspace_root, &workspace, workspace_mode)
+            })
             .await
             .map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace could not be initialized: {error}"
+                    "sandbox workspace initialization task did not complete: {error}"
                 ))
-            })?;
-        set_sandbox_writable_permissions(
-            workspace.clone(),
-            self.config.container_identity.workspace_mode(),
-        )
-        .await?;
-        let home = workspace.join(".home");
-        tokio::fs::create_dir_all(&home).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace HOME could not be initialized: {error}"
-            ))
-        })?;
-        set_sandbox_writable_permissions(home.clone(), 0o700).await?;
-        // Pre-create npm's redirected global prefix (see
-        // `exec_transport::user_container_launch_config`'s NPM_CONFIG_PREFIX)
-        // so `npm install -g` never trips over a missing directory. It lives
-        // inside the already-0o700 `.home`, so no separate chmod is needed.
-        let npm_global = home.join(".npm-global");
-        tokio::fs::create_dir_all(&npm_global)
-            .await
-            .map_err(|error| {
+            })?
+        }
+
+        // Non-Unix hosts do not expose the dirfd-relative APIs used above.
+        // Preserve their existing directory-creation behavior explicitly;
+        // Unix ownership and mode changes have never applied on these hosts.
+        #[cfg(not(unix))]
+        {
+            tokio::fs::create_dir_all(&workspace)
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace could not be initialized: {error}"
+                    ))
+                })?;
+            let home = workspace.join(".home");
+            tokio::fs::create_dir_all(&home).await.map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace npm global prefix could not be initialized: {error}"
+                    "sandbox workspace HOME could not be initialized: {error}"
                 ))
             })?;
-        tokio::fs::canonicalize(&workspace).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace could not be resolved: {error}"
-            ))
-        })
+            tokio::fs::canonicalize(&workspace).await.map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace could not be resolved: {error}"
+                ))
+            })
+        }
     }
 
     fn resolve_container_workdir(
@@ -414,62 +440,139 @@ impl RebornScopedSandboxCommandTransport {
     }
 }
 
-/// Makes a host directory `prepare_workspace` just created reachable by
-/// the sandbox container's fixed non-root exec identity
-/// (`exec_transport::SANDBOX_EXEC_UID`/`GID`, uid 1000 —
-/// `exec_transport::SANDBOX_EXEC_USER` at the docker-exec layer).
-///
-/// Bind-mounting does not remap ownership: the directory keeps whatever uid
-/// *this host process* created it under, which will not generally be 1000.
-/// Under an owner-only `mode` (e.g. `0o700`), `docker exec -u sandbox`
-/// therefore cannot read/write it unless ownership is reassigned to match —
-/// so this `chown`s to the fixed sandbox uid/gid first, which makes `mode`'s
-/// *owner* bits the ones that actually govern sandbox access. That `chown`
-/// needs `CAP_CHOWN`/root on the host (expected of a production deployment
-/// that already manages the Docker socket directly); where it is
-/// unavailable — a local dev machine — this falls back to also granting the
-/// same access to `other`, so the sandbox identity (now neither the owner
-/// nor the group) can still reach the directory. That fallback trades
-/// host-level "only this uid" isolation for the directory still being
-/// usable at all, rather than silently leaving every sandboxed command
-/// unable to touch its own workspace.
-async fn set_sandbox_writable_permissions(
-    path: PathBuf,
-    mode: u32,
-) -> Result<(), RuntimeProcessError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let chown_target = path.clone();
-        let chowned = tokio::task::spawn_blocking(move || {
-            std::os::unix::fs::chown(
-                &chown_target,
-                Some(exec_transport::SANDBOX_EXEC_UID),
-                Some(exec_transport::SANDBOX_EXEC_GID),
+#[cfg(unix)]
+fn prepare_workspace_unix(
+    workspace_root: &Path,
+    workspace: &Path,
+    workspace_mode: u32,
+) -> Result<PathBuf, RuntimeProcessError> {
+    use std::{
+        ffi::{CString, OsStr},
+        fs::OpenOptions,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        },
+    };
+
+    fn execution_failed(context: &str, error: impl std::fmt::Display) -> RuntimeProcessError {
+        RuntimeProcessError::ExecutionFailed(format!("{context}: {error}"))
+    }
+
+    fn directory_name(name: &OsStr, context: &str) -> Result<CString, RuntimeProcessError> {
+        CString::new(name.as_bytes()).map_err(|error| execution_failed(context, error))
+    }
+
+    fn create_or_open_directory_at(
+        parent: &OwnedFd,
+        name: &OsStr,
+        create_mode: u32,
+        context: &str,
+    ) -> Result<OwnedFd, RuntimeProcessError> {
+        let name = directory_name(name, context)?;
+        // SAFETY: `parent` is a live directory descriptor and `name` is a
+        // NUL-terminated, single path component. Failure is checked below.
+        let mkdir_result = unsafe {
+            libc::mkdirat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                create_mode as libc::mode_t,
             )
-        })
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace chown task did not complete: {error}"
-            ))
-        })?
-        .is_ok();
+        };
+        if mkdir_result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(execution_failed(context, error));
+            }
+        }
+
+        // SAFETY: the same valid dirfd and CString are used for `openat`.
+        // O_NOFOLLOW rejects a symlink occupying this component, while the
+        // returned descriptor pins the verified directory against renames.
+        let raw_fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(execution_failed(context, std::io::Error::last_os_error()));
+        }
+        // SAFETY: `openat` returned a new owned descriptor on success.
+        Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+    }
+
+    fn set_sandbox_writable_permissions_fd(
+        directory: &OwnedFd,
+        mode: u32,
+        context: &str,
+    ) -> Result<(), RuntimeProcessError> {
+        // SAFETY: `directory` is an owned descriptor returned by an
+        // O_DIRECTORY|O_NOFOLLOW open. `fchown` cannot traverse a path.
+        let chowned = unsafe {
+            libc::fchown(
+                directory.as_raw_fd(),
+                exec_transport::SANDBOX_EXEC_UID,
+                exec_transport::SANDBOX_EXEC_GID,
+            )
+        } == 0;
+        // Preserve the existing local-development fallback when the host
+        // lacks permission to chown to the fixed sandbox uid/gid.
         let effective_mode = if chowned { mode } else { mode | 0o007 };
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(effective_mode))
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace permissions could not be set for {}: {error}",
-                    path.display()
-                ))
-            })?;
+        // SAFETY: `directory` remains live and verified as a directory.
+        if unsafe { libc::fchmod(directory.as_raw_fd(), effective_mode as libc::mode_t) } != 0 {
+            return Err(execution_failed(context, std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
+
+    std::fs::create_dir_all(workspace_root).map_err(|error| {
+        execution_failed("sandbox workspace root could not be initialized", error)
+    })?;
+    let canonical_root = std::fs::canonicalize(workspace_root)
+        .map_err(|error| execution_failed("sandbox workspace root could not be resolved", error))?;
+    let root_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&canonical_root)
+        .map_err(|error| execution_failed("sandbox workspace root could not be opened", error))?;
+    let mut directory = OwnedFd::from(root_file);
+    let relative_workspace = workspace.strip_prefix(workspace_root).map_err(|error| {
+        execution_failed("sandbox workspace escaped its configured root", error)
+    })?;
+    for component in relative_workspace.components() {
+        let Component::Normal(name) = component else {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox workspace path contains an invalid component".to_string(),
+            ));
+        };
+        directory = create_or_open_directory_at(
+            &directory,
+            name,
+            0o777,
+            "sandbox workspace child could not be initialized",
+        )?;
     }
-    Ok(())
+    set_sandbox_writable_permissions_fd(
+        &directory,
+        workspace_mode,
+        "sandbox workspace permissions could not be set",
+    )?;
+
+    let home = create_or_open_directory_at(
+        &directory,
+        OsStr::new(".home"),
+        0o700,
+        "sandbox workspace HOME could not be initialized",
+    )?;
+    set_sandbox_writable_permissions_fd(
+        &home,
+        0o700,
+        "sandbox workspace HOME permissions could not be set",
+    )?;
+
+    Ok(canonical_root.join(relative_workspace))
 }
 
 /// Redact secret-shaped content out of a sandboxed command's raw combined
@@ -491,6 +594,20 @@ fn redact_sandbox_command_output(raw_output: &str) -> String {
     sanitize_command_output_bytes(raw_output.as_bytes(), raw_output.to_string()).preview
 }
 
+#[cfg(any(test, feature = "test-support"))]
+mod test_support {
+    use super::*;
+
+    impl RebornScopedSandboxCommandTransport {
+        /// Test-only introspection for the production attribution wiring.
+        pub fn attribution_for_test(
+            &self,
+        ) -> Option<Arc<attribution::ConnectionAttributionResolver>> {
+            self.attribution.clone()
+        }
+    }
+}
+
 #[async_trait]
 impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
     async fn run_command(
@@ -498,6 +615,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_nul("sandbox command", &request.command)?;
+        reject_background_request(request.background)?;
         // Phase A scope narrowing: a persistent container's binds are fixed
         // at creation time from the flat per-user `/workspace` bind only
         // (`exec_transport::user_container_launch_config` always resolves
@@ -506,8 +624,21 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         // container, so it is rejected up front rather than silently
         // ignored.
         reject_non_workspace_mount_grants(request.mounts.as_ref())?;
+        // Reject caller-controlled environment before touching per-user state
+        // or provisioning a container. PR1 exposes no environment injection
+        // surface; only the fixed worker environment is permitted.
+        let env = self
+            .config
+            .command_env_for_invocation(request.extra_env, request.scope.invocation_id)?;
 
         let key = RebornSandboxUserKey::from_scope(&request.scope);
+        // Lifecycle mutation is serialized per user. Mark the invocation
+        // active while holding the same gate the reaper uses, then retain the
+        // RAII lease across container setup and exec. This closes both the
+        // concurrent-first-create race and reaper-vs-invocation teardown race
+        // without making unrelated users wait on each other.
+        let lifecycle_guard = self.activity.lock_user_lifecycle(&key).await;
+        let _invocation_lease = self.activity.begin_invocation(&key);
         let workspace = self.prepare_workspace(&request.scope).await?;
         let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
         // Clamp to `[SHELL_TIMEOUT_MIN_SECS, SHELL_TIMEOUT_MAX_SECS]` — the
@@ -525,46 +656,20 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
                 .output_limit_bytes
                 .unwrap_or(self.config.max_output_bytes as u64),
         ));
-        let env = self.config.command_env(request.extra_env)?;
-
         let container_id = exec_transport::ensure_container(
             &self.docker,
-            &self.config,
-            &key,
-            &request.scope.tenant_id,
-            &request.scope.user_id,
-            &workspace,
-            &self.network_ready,
-            self.attribution.as_deref(),
+            exec_transport::EnsureContainerRequest {
+                config: &self.config,
+                key: &key,
+                tenant_id: &request.scope.tenant_id,
+                user_id: &request.scope.user_id,
+                workspace: &workspace,
+                network_ready: &self.network_ready,
+                attribution: self.attribution.as_deref(),
+            },
         )
         .await?;
-
-        if request.background {
-            let command_preview = request.command.clone();
-            let launch = exec_transport::exec_background_in_container(
-                &self.docker,
-                &container_id,
-                workdir,
-                env,
-                request.command,
-            )
-            .await?;
-            self.background_jobs
-                .record(&key, launch.pid, command_preview);
-            self.activity.touch(&key);
-            return Ok(CommandExecutionOutput {
-                output: format!(
-                    "Started in background: pid {}, log {}",
-                    launch.pid, launch.log_path
-                ),
-                saved_output: None,
-                exit_code: 0,
-                sandboxed: true,
-                duration: Duration::from_secs(0),
-            });
-        }
-
-        let mut output = exec_transport::exec_in_container(
+        let execution = exec_transport::exec_in_container(
             &self.docker,
             &container_id,
             workdir,
@@ -573,48 +678,34 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             timeout,
             output_limit,
         )
-        .await?;
-        output.output = redact_sandbox_command_output(&output.output);
+        .await;
+        let stopped =
+            exec_transport::stop_container_after_command(&self.docker, &container_id).await;
+        drop(lifecycle_guard);
         self.activity.touch(&key);
-        self.reconcile_background_jobs(&container_id, &key).await;
-        output
-            .output
-            .push_str(&exec_transport::render_background_footer(
-                &self.background_jobs.jobs_for(&key),
-            ));
+
+        if let Err(stop_error) = stopped {
+            return Err(match execution {
+                Ok(_) => stop_error,
+                Err(execution_error) => RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox command failed ({execution_error}); container cleanup also failed ({stop_error})"
+                )),
+            });
+        }
+
+        let mut output = execution?;
+        output.output = redact_sandbox_command_output(&output.output);
         Ok(output)
     }
 }
 
-impl RebornScopedSandboxCommandTransport {
-    /// Cheap `ps -o pid=` sweep against the tracked background pids so a
-    /// process that has since exited drops off the footer instead of being
-    /// reported as still live forever.
-    async fn reconcile_background_jobs(&self, container_id: &str, key: &RebornSandboxUserKey) {
-        let tracked = self.background_jobs.jobs_for(key);
-        if tracked.is_empty() {
-            return;
-        }
-        let alive = exec_transport::exec_in_container(
-            &self.docker,
-            container_id,
-            ContainerWorkdir::workspace_root(),
-            Vec::new(),
-            "ps -o pid= --no-headers".to_string(),
-            Duration::from_secs(5),
-            4096,
-        )
-        .await;
-        let Ok(alive) = alive else {
-            return;
-        };
-        let alive_pids: Vec<u32> = alive
-            .output
-            .split_whitespace()
-            .filter_map(|token| token.trim().parse::<u32>().ok())
-            .collect();
-        self.background_jobs.drop_dead(key, &alive_pids);
+fn reject_background_request(background: bool) -> Result<(), RuntimeProcessError> {
+    if background {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "user sandbox does not support background commands in this release".into(),
+        ));
     }
+    Ok(())
 }
 
 /// Phase A scope-narrowing guard: persistent per-user containers only
@@ -722,6 +813,18 @@ mod shell_quote_tests {
 }
 
 #[cfg(test)]
+mod pr1_request_tests {
+    use super::*;
+
+    #[test]
+    fn background_execution_is_rejected_hermetically() {
+        let error = reject_background_request(true).expect_err("background must fail closed");
+        assert!(format!("{error}").contains("does not support background commands"));
+        assert!(reject_background_request(false).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_host_api::{
@@ -765,6 +868,54 @@ mod tests {
 
         assert_eq!(private.container_identity.workspace_mode(), 0o700);
         assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_workspace_rejects_symlinked_home_without_touching_target() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_root = temp.path().join("workspaces");
+        let scope = ResourceScope::system();
+        let workspace = RebornSandboxUserKey::from_scope(&scope).workspace_path(&workspace_root);
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let target = temp.path().join("host-target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let before = std::fs::metadata(&target).unwrap();
+        symlink(&target, workspace.join(".home")).unwrap();
+
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
+        let transport = RebornScopedSandboxCommandTransport::new(
+            docker,
+            RebornSandboxConfig::new(&workspace_root),
+        );
+
+        let error = transport.prepare_workspace(&scope).await.unwrap_err();
+        let after = std::fs::metadata(&target).unwrap();
+
+        assert!(
+            format!("{error}").contains("HOME could not be initialized"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(after.uid(), before.uid(), "target owner uid changed");
+        assert_eq!(after.gid(), before.gid(), "target owner gid changed");
+        assert_eq!(
+            after.permissions().mode() & 0o7777,
+            before.permissions().mode() & 0o7777,
+            "target mode changed"
+        );
+        assert!(
+            std::fs::symlink_metadata(workspace.join(".home"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the rejected symlink should not be replaced"
+        );
     }
 
     #[test]
@@ -862,6 +1013,24 @@ mod tests {
 
             assert!(format!("{error}").contains("reserved"), "{key}");
         }
+    }
+
+    #[test]
+    fn invocation_env_rejects_every_caller_provided_value() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
+        let error = config
+            .command_env_for_invocation(
+                HashMap::from([(
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    "must-remain-host-side".to_string(),
+                )]),
+                InvocationId::new(),
+            )
+            .expect_err("caller environment must never enter a sandbox invocation");
+
+        assert!(
+            format!("{error}").contains("does not accept caller-provided environment variables")
+        );
     }
 
     #[tokio::test]

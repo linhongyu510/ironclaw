@@ -891,35 +891,13 @@ async fn malformed_inputs_are_4xx_not_500() {
 // the admin secret provisioner are sourced from that graph. Gated on `libsql`
 // because the production-runtime path requires the libSQL substrate.
 
-#[derive(Debug)]
-struct RecordingSandboxTransport;
-
-#[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
-    async fn run_command(
-        &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
-    ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
-    > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
-            output: String::new(),
-            saved_output: None,
-            exit_code: 0,
-            sandboxed: true,
-            duration: std::time::Duration::ZERO,
-        })
-    }
-}
-
 fn production_effective_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
         requested_profile: RuntimeProfile::SecureDefault,
         resolved_profile: RuntimeProfile::SecureDefault,
         filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::None,
         network_mode: NetworkMode::Deny,
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
@@ -931,7 +909,7 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
 mod first_party_support;
 
 async fn build_admin_harness_production() -> AdminHarness {
-    use ironclaw_reborn_composition::{RebornCompositionProfile, RebornRuntimeProcessBinding};
+    use ironclaw_reborn_composition::RebornCompositionProfile;
 
     let root = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
@@ -951,10 +929,7 @@ async fn build_admin_harness_production() -> AdminHarness {
     )
     .expect("libSQL bindings")
     .with_first_party_bundles(first_party_support::test_first_party_bundles())
-    .with_runtime_policy(production_effective_policy())
-    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-        ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
-    )));
+    .with_runtime_policy(production_effective_policy());
     build_admin_harness_from(root, build_input).await
 }
 

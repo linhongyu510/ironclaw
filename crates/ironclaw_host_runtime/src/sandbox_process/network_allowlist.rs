@@ -1,4 +1,4 @@
-//! Default egress allowlist for the sandboxed (`TenantSandbox`) shell
+//! Default egress allowlist for the sandboxed (`UserSandbox`) shell
 //! profile.
 //!
 //! IronClaw's sandboxed shell needs outbound network access for ordinary
@@ -17,7 +17,7 @@
 //! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
 //! bound unconditionally by
 //! `crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs` (no
-//! operator-pointed external-proxy override — see `sandbox_boot.rs`'s doc),
+//! operator-pointed external-proxy override — see `sandbox/factory.rs`'s doc),
 //! and the topological guardrail that the container's Docker network is
 //! pinned `internal: true` with no default route off the host, so the proxy
 //! is the container's only path to the outside world.

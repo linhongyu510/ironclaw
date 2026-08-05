@@ -442,8 +442,6 @@ registerPack("uk", {
   "settings.field.quietHoursEndDesc": "Година (0–23) завершення приглушення",
   "settings.field.heartbeatTimezone": "Часовий пояс",
   "settings.field.heartbeatTimezoneDesc": "IANA часовий пояс для тихих годин",
-  "settings.field.sandboxEnabled": "Увімкнути sandbox",
-  "settings.field.sandboxEnabledDesc": "Виконання інструментів на основі Docker",
   "settings.field.sandboxPolicy": "Політика",
   "settings.field.sandboxPolicyDesc": "Рівень доступу контейнера до файлової системи",
   "settings.field.sandboxTimeout": "Таймаут",

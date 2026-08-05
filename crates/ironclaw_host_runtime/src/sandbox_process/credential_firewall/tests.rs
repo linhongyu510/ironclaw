@@ -27,6 +27,21 @@ fn far_future_deadline() -> Instant {
     Instant::now() + FAR_FUTURE
 }
 
+fn test_invocation_id() -> InvocationId {
+    InvocationId::from_uuid(uuid::Uuid::nil())
+}
+
+fn identity<'a>(
+    tenant_id: &'a TenantId,
+    user_id: &'a UserId,
+) -> SandboxCredentialConnectionIdentity<'a> {
+    SandboxCredentialConnectionIdentity {
+        tenant_id,
+        user_id,
+        invocation_id: test_invocation_id(),
+    }
+}
+
 /// Test-only source builder: most of this module's tests only care about the
 /// secret handle round-tripping, not the scope/capability/provider that
 /// accompany it in production — `credential_swap`'s own tests exercise the
@@ -44,7 +59,7 @@ fn source_for(
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: InvocationId::new(),
+            invocation_id: test_invocation_id(),
         },
         capability_id: CapabilityId::new("sandbox.shell").unwrap(),
         provider_or_extension_id: ExtensionId::new("github").unwrap(),
@@ -68,7 +83,7 @@ fn staged_obligation_is_retrievable_by_its_tenant_and_user() {
     );
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
 
     match decision {
@@ -80,6 +95,46 @@ fn staged_obligation_is_retrievable_by_its_tenant_and_user() {
             panic!("expected a grant for the exact (tenant, user) that staged it")
         }
     }
+}
+
+#[test]
+fn a_stale_invocation_cannot_borrow_a_later_live_window() {
+    let firewall = Arc::new(SandboxCredentialFirewall::new());
+    let tenant_id = tenant("tenant-a");
+    let user_id = user("user-a");
+    let stale_invocation = InvocationId::new();
+    let live_invocation = InvocationId::new();
+    let mut source = source_for(&tenant_id, &user_id, handle("github-token"));
+    source.scope.invocation_id = live_invocation;
+    let _lease = firewall.stage(
+        &tenant_id,
+        &user_id,
+        StagedCredentialObligation::new(source, allow_all_targets(), FAR_FUTURE),
+    );
+
+    let stale = firewall
+        .authorize(
+            Some(SandboxCredentialConnectionIdentity {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                invocation_id: stale_invocation,
+            }),
+            far_future_deadline(),
+        )
+        .expect("fully attributed stale invocation is a grant decision");
+    assert_eq!(stale, SandboxCredentialDecision::NoGrant);
+
+    let live = firewall
+        .authorize(
+            Some(SandboxCredentialConnectionIdentity {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                invocation_id: live_invocation,
+            }),
+            far_future_deadline(),
+        )
+        .expect("fully attributed live invocation is a grant decision");
+    assert!(matches!(live, SandboxCredentialDecision::Grant(_)));
 }
 
 /// GRANT-DENIAL: no obligation was ever staged for this (tenant, user).
@@ -94,7 +149,7 @@ fn no_staged_obligation_is_grant_denial_not_connection_denial() {
     let user_a = user("user-a");
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("an unstaged lookup is a decision, not a firewall error");
 
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
@@ -137,7 +192,7 @@ fn expired_deadline_denies_the_connection_even_when_a_grant_is_staged() {
         .expect("process has been running for at least 1 second by the time tests run");
 
     let error = firewall
-        .authorize(Some((&tenant_a, &user_a)), already_passed)
+        .authorize(Some(identity(&tenant_a, &user_a)), already_passed)
         .expect_err("a deadline that already passed must deny even with a live grant staged");
 
     assert_eq!(error, SandboxCredentialFirewallError::LookupTimedOut);
@@ -170,7 +225,7 @@ fn expired_obligation_is_grant_denial() {
     std::thread::sleep(Duration::from_millis(2));
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("expiry is a decision, not a firewall error");
 
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
@@ -196,7 +251,7 @@ fn revoke_removes_a_staged_obligation_before_its_ttl_expires() {
     lease.revoke();
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("revoked lookup is a decision, not a firewall error");
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
 }
@@ -221,14 +276,14 @@ fn user_b_cannot_retrieve_user_a_staged_obligation() {
     );
 
     let decision_for_b = firewall
-        .authorize(Some((&tenant_a, &user_b)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_b)), far_future_deadline())
         .expect("an unstaged (tenant, user) is a decision, not a firewall error");
     assert_eq!(decision_for_b, SandboxCredentialDecision::NoGrant);
 
     // Sanity: user A's own lookup still resolves — proves the isolation
     // above is real key-scoping, not a bug that denies everyone.
     let decision_for_a = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("user a's own lookup must still succeed");
     assert!(matches!(
         decision_for_a,
@@ -267,7 +322,7 @@ fn expired_obligation_is_removed_from_staging_map_on_read() {
     );
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("expiry is a decision, not a firewall error");
 
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
@@ -298,7 +353,10 @@ fn same_user_id_under_a_different_tenant_is_isolated() {
     );
 
     let decision = firewall
-        .authorize(Some((&tenant_b, &shared_user)), far_future_deadline())
+        .authorize(
+            Some(identity(&tenant_b, &shared_user)),
+            far_future_deadline(),
+        )
         .expect("an unstaged (tenant, user) is a decision, not a firewall error");
 
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
@@ -397,7 +455,7 @@ fn dropping_a_stale_lease_does_not_revoke_a_newer_grant_for_the_same_key() {
     // the last entry left for this key, the key itself must be gone.
     drop(lease_new);
     let decision_after_newest_drop = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
     assert_eq!(
         decision_after_newest_drop,
@@ -428,7 +486,7 @@ fn dropping_the_lease_revokes_the_staged_obligation() {
     drop(lease);
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("post-drop lookup is a decision, not a firewall error");
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
 }
@@ -454,7 +512,7 @@ fn explicit_revoke_does_not_double_revoke_or_panic_on_drop() {
     lease.revoke();
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("post-revoke lookup is a decision, not a firewall error");
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
 }
@@ -487,7 +545,7 @@ fn lease_dropped_during_unwind_still_revokes() {
     );
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("post-unwind lookup is a decision, not a firewall error");
     assert_eq!(decision, SandboxCredentialDecision::NoGrant);
 }
@@ -515,7 +573,7 @@ fn ttl_is_clamped_to_max_grant_ttl_backstop() {
     let after_staging = Instant::now();
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
     let obligations = match decision {
         SandboxCredentialDecision::Grant(obligations) => obligations,
@@ -542,7 +600,7 @@ fn assert_grant_contains(
     expected: &[SecretHandle],
 ) {
     let decision = firewall
-        .authorize(Some((tenant_id, user_id)), far_future_deadline())
+        .authorize(Some(identity(tenant_id, user_id)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
     match decision {
         SandboxCredentialDecision::Grant(obligations) => {
@@ -649,7 +707,7 @@ fn dropping_four_concurrent_leases_in_shuffled_order_only_revokes_each_ones_own_
         "the key's set must be gone once its last entry drops"
     );
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
     assert_eq!(
         decision,
@@ -730,7 +788,7 @@ fn user_b_cannot_retrieve_any_of_user_a_multiple_staged_obligations() {
     );
 
     let decision_for_b = firewall
-        .authorize(Some((&tenant_a, &user_b)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_b)), far_future_deadline())
         .expect("an unstaged (tenant, user) is a decision, not a firewall error");
     assert_eq!(decision_for_b, SandboxCredentialDecision::NoGrant);
 
@@ -781,7 +839,7 @@ fn non_empty_target_policies_survive_stage_and_authorize_unchanged() {
     );
 
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
 
     match decision {
@@ -824,7 +882,7 @@ fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
                 ),
             );
             // Concurrent reads while siblings are still staging/revoking.
-            let _ = firewall.authorize(Some((&tenant_a, &user_a)), far_future_deadline());
+            let _ = firewall.authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline());
             lease.revoke();
         }));
     }
@@ -835,7 +893,7 @@ fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
 
     // Every entry revoked its own lease; none should be left staged.
     let decision = firewall
-        .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+        .authorize(Some(identity(&tenant_a, &user_a)), far_future_deadline())
         .expect("attributed lookup within deadline must not error");
     assert_eq!(
         decision,

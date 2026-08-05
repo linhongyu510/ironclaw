@@ -442,8 +442,6 @@ registerPack("de", {
   "settings.field.quietHoursEndDesc": "Stunde (0–23) für Unterdrückungsende",
   "settings.field.heartbeatTimezone": "Zeitzone",
   "settings.field.heartbeatTimezoneDesc": "IANA‑Zeitzone für Quiet Hours",
-  "settings.field.sandboxEnabled": "Sandbox aktivieren",
-  "settings.field.sandboxEnabledDesc": "Docker‑basierte Tool‑Ausführung",
   "settings.field.sandboxPolicy": "Richtlinie",
   "settings.field.sandboxPolicyDesc": "Container‑FS‑Zugriffslevel",
   "settings.field.sandboxTimeout": "Timeout",

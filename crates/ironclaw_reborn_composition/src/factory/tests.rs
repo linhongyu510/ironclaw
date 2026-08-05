@@ -56,6 +56,112 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     ));
 }
 
+#[test]
+fn sandbox_bootstrap_capabilities_are_declared_only_for_the_sandbox_profile() {
+    let placeholder =
+        CapabilityId::new(ironclaw_product::SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID)
+            .expect("placeholder capability id");
+
+    let ordinary = production_builtin_extension_registry(ProcessBackendKind::None, false, None)
+        .expect("ordinary registry");
+    assert!(ordinary.get_capability(&placeholder).is_none());
+
+    let external_user_sandbox =
+        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, false, None)
+            .expect("external user-sandbox registry");
+    assert!(external_user_sandbox.get_capability(&placeholder).is_none());
+
+    let sandbox =
+        production_builtin_extension_registry(ProcessBackendKind::UserSandbox, true, None)
+            .expect("sandbox registry");
+    assert!(sandbox.get_capability(&placeholder).is_some());
+}
+
+#[derive(Debug)]
+struct ProfileMatrixSandboxTransport;
+
+#[async_trait::async_trait]
+impl ironclaw_host_runtime::SandboxCommandTransport for ProfileMatrixSandboxTransport {
+    async fn run_command(
+        &self,
+        _request: ironclaw_host_runtime::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_runtime::CommandExecutionOutput,
+        ironclaw_host_runtime::RuntimeProcessError,
+    > {
+        unimplemented!("profile matrix validation never executes a command")
+    }
+}
+
+#[test]
+fn sandbox_runtime_bundle_is_accepted_only_for_the_sandbox_deployment_profile() {
+    for profile in [
+        RebornCompositionProfile::Disabled,
+        RebornCompositionProfile::Standalone,
+        RebornCompositionProfile::StandaloneUnrestricted,
+        RebornCompositionProfile::HostedSingleTenant,
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        RebornCompositionProfile::Production,
+        RebornCompositionProfile::MigrationDryRun,
+    ] {
+        let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
+            Arc::new(ProfileMatrixSandboxTransport),
+        ));
+        let input = RebornHostBindings::disabled("profile-matrix-owner")
+            .with_deployment(crate::deployment::DeploymentConfig::for_profile(
+                profile, false,
+            ))
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(process_port));
+        assert!(
+            matches!(
+                validate_sandbox_profile_bundle(&input),
+                Err(RebornBuildError::InvalidConfig { reason })
+                    if reason.contains("hosted-single-tenant-volume-sandboxed")
+            ),
+            "profile {profile} must reject sandbox runtime components"
+        );
+    }
+
+    let sandbox = RebornHostBindings::disabled("profile-matrix-owner").with_deployment(
+        crate::deployment::DeploymentConfig::for_profile(
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            false,
+        ),
+    );
+    assert!(matches!(
+        validate_sandbox_profile_bundle(&sandbox),
+        Err(RebornBuildError::InvalidConfig { reason })
+            if reason.contains("user-sandbox process binding")
+    ));
+}
+
+#[test]
+fn sandbox_runtime_bundle_rejects_a_mismatched_process_port() {
+    let deployment = crate::deployment::DeploymentConfig::for_profile(
+        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+        false,
+    );
+    let config =
+        ironclaw_host_runtime::RailwayPreviewSandboxConfig::new("project-id", "environment-id")
+            .expect("Railway preview config");
+    let external_binding = crate::UserSandboxFactory::railway_preview(config);
+    let external = RebornHostBindings::disabled("profile-matrix-owner")
+        .with_deployment(deployment.clone())
+        .with_user_sandbox_binding(external_binding);
+    assert!(validate_sandbox_profile_bundle(&external).is_ok());
+
+    let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
+        Arc::new(ProfileMatrixSandboxTransport),
+    ));
+    let mismatched = external
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(process_port));
+    assert!(matches!(
+        validate_sandbox_profile_bundle(&mismatched),
+        Err(RebornBuildError::InvalidConfig { reason })
+            if reason.contains("same user sandbox port")
+    ));
+}
+
 #[tokio::test]
 async fn local_dev_libsql_trigger_repository_uses_the_filesystem_writer_lane() {
     let root = tempfile::tempdir().expect("local-dev root");

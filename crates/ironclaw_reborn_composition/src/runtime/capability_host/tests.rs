@@ -5131,7 +5131,7 @@ mod tests {
         // covered elsewhere; the thing under test is per-invocation
         // `/workspace` mount resolution.
         policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
-        let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+        let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
             Arc::new(PanicsIfCalledSandboxTransport),
         ));
         let services = crate::factory::build_runtime_substrate(
@@ -5141,10 +5141,10 @@ mod tests {
                 dir.path().to_path_buf(),
             )
             .with_runtime_policy(policy)
-            .with_runtime_process_binding(crate::RebornRuntimeProcessBinding::tenant_sandbox(
+            .with_runtime_process_binding(crate::RebornRuntimeProcessBinding::user_sandbox(
                 process_port,
             ))
-            .with_sandbox_workspaces_root(dir.path().to_path_buf()),
+            .with_sandbox_runtime_support_for_test(dir.path().to_path_buf()),
         )
         .await
         .expect("sandboxed profile services build"); // safety: test-only assertion in #[cfg(test)] module.

@@ -66,10 +66,6 @@ mod scoped_fs;
 mod steering;
 mod workflow;
 
-pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
-pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
-pub use project_service::RebornProjectService;
-
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use approval_interaction::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
@@ -127,6 +123,9 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
+pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
+pub use project_service::RebornProjectService;
 // `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
 // moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
@@ -407,22 +406,23 @@ pub use reborn_services::{
     RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
-    SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY,
-    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SUBMIT_TURN_COMMAND, SettingsToolPermissionState,
-    SkillsProductService, StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    TriggerRunThreadScope, UnavailableRebornViewProvider, UnsupportedAutomationProductService,
-    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductService,
-    list_outbound_delivery_targets_for_model, outbound_delivery_synthetic_provider,
-    outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    SUBMIT_TURN_COMMAND, SettingsToolPermissionState, SkillsProductService,
+    StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA,
+    THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope, UnavailableRebornViewProvider,
+    UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
+    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
+    UnsupportedOutboundPreferencesProductService, list_outbound_delivery_targets_for_model,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model,
 };
 
 pub use ironclaw_product_contracts::inbound_requests::{

@@ -151,6 +151,5 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         trigger_repository: None,
         reborn_services: None,
         trigger_active_run_lookup_requested: false,
-        sandbox_workspaces_root: None,
     })
 }

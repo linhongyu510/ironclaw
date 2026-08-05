@@ -288,11 +288,50 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertTrue(plan["run_sandbox_docker"])
 
+    def test_composition_sandbox_module_change_selects_docker_lane(self) -> None:
+        repository = metadata()
+        repository["workspace_members"].append("composition")
+        repository["packages"].append(
+            {
+                "id": "composition",
+                "name": "ironclaw_reborn_composition",
+                "manifest_path": str(
+                    ROOT / "crates/ironclaw_reborn_composition/Cargo.toml"
+                ),
+            }
+        )
+        repository["resolve"]["nodes"].append(
+            {"id": "composition", "deps": []}
+        )
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=[
+                "crates/ironclaw_reborn_composition/src/sandbox/factory.rs"
+            ],
+            metadata=repository,
+            canonical_packages=["ironclaw_reborn_composition"],
+        )
+        self.assertTrue(plan["run_sandbox_docker"])
+
     def test_process_sandbox_dockerfile_selects_only_docker_specific_lane(self) -> None:
         plan = self.plan("pull_request", ["Dockerfile.process-sandbox"])
         self.assertEqual(plan["mode"], "selected")
         self.assertTrue(plan["run_sandbox_docker"])
         self.assertEqual(plan["crate_buckets"], [])
+
+    def test_sandbox_shell_integration_paths_select_docker_lane(self) -> None:
+        paths = (
+            "tests/integration/reborn_sandbox_shell_turn.rs",
+            "tests/integration/support/docker_gate.rs",
+            "tests/integration/support/harness/profiles/sandbox_shell.rs",
+            "tests/integration/support/sandbox_shell_identity.rs",
+        )
+
+        for path in paths:
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_sandbox_docker"])
 
     def test_unrelated_package_does_not_select_sandbox_docker_lane(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
@@ -638,6 +677,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
+        self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',
             workflow,

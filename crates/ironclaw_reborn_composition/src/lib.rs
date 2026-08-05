@@ -58,11 +58,7 @@ mod runtime;
 mod runtime_input;
 mod runtime_mounts;
 mod runtime_profile_approval_policy;
-mod sandbox_boot;
-mod sandbox_composition;
-mod sandbox_egress_proxy_task;
-mod sandbox_quota;
-mod sandbox_reaper_task;
+mod sandbox;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
@@ -119,6 +115,11 @@ pub use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, VendorId},
 };
+/// Host-runtime-owned Railway preview configuration re-exported through the
+/// composition facade so the shipping CLI does not depend on lower runtime
+/// crates directly. The downstream boundary is pinned by the CLI's valid
+/// Railway profile test and composition's sandbox-bundle ownership tests.
+pub use ironclaw_host_runtime::RailwayPreviewSandboxConfig;
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
@@ -152,7 +153,7 @@ pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
     create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
-pub use sandbox_boot::{TenantSandboxBinding, tenant_sandbox_process_binding};
+pub use sandbox::{UserSandboxFactory, UserSandboxRuntimeBundle};
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
@@ -428,6 +429,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/turns",
     "/resources",
     "/engine",
+    "/product",
     "/skills",
     "/workspace",
 ];
@@ -635,12 +637,12 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
-    #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
-    MissingTenantSandboxProcessPort,
+    #[error("production user-sandbox process backend requires a user sandbox process binding")]
+    MissingUserSandboxProcessPort,
     #[error(
-        "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+        "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,

@@ -30,7 +30,7 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = SHELL_TIMEOUT_DEFAULT_SECS * 1_000;
 // The manifest's hard ceiling mirrors the model-adjustable `timeout`/
 // `output_limit` ceilings enforced by the process ports (HostProcessPort,
-// TenantSandboxProcessPort) — see `sandbox_process::shell_limits`. A
+// UserSandboxProcessPort) — see `sandbox_process::shell_limits`. A
 // caller-requested value above these is clamped there, never rejected here.
 const MAX_SHELL_WALL_CLOCK_MS: u64 = SHELL_TIMEOUT_MAX_SECS * 1_000;
 const DEFAULT_SHELL_OUTPUT_BYTES: u64 = SHELL_OUTPUT_LIMIT_DEFAULT_BYTES;
@@ -82,7 +82,7 @@ pub(super) async fn dispatch(
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
     // `timeout_secs`/`output_limit_bytes` are forwarded as the model
     // requested them; the process port (HostProcessPort or
-    // TenantSandboxProcessPort) clamps each to its operator ceiling — see
+    // UserSandboxProcessPort) clamps each to its operator ceiling — see
     // `sandbox_process::shell_limits`. Values above the ceiling are clamped
     // there, never rejected here.
     let output = request

@@ -85,6 +85,7 @@ async fn invoke_workspace_tool_as(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"), // safety: test-only assertion in #[cfg(test)] module.
         ),
         workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
+        sandbox_workspaces_root: services.sandbox_workspaces_root.clone(),
         memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
         system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts_for_test()

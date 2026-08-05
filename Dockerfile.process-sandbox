@@ -1,65 +1,28 @@
-# Docker process compatibility image for IronClaw Reborn process execution.
+# Python-only worker image for IronClaw Reborn user-sandbox execution.
 #
 # Build:
 #   docker build -f Dockerfile.process-sandbox -t ironclaw-process-sandbox:dev .
 #
-# The host starts ephemeral containers from this image and mounts only scoped
-# workspace/tool/cache directories. Secrets are not passed as environment
-# values; credentialed runs point HTTP(S)_PROXY at the host broker and install a
-# per-run broker CA.
+# The host starts a persistent container per user and mounts only that user's
+# workspace. PR1 runs with `--network none` and passes no caller environment or
+# credentials into the worker.
 
-FROM debian:bookworm-slim
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
-       curl \
-       git \
-       jq \
-       openssh-client \
-       build-essential \
-       pkg-config \
-       libssl-dev \
-       python3 python3-pip python3-venv \
-       nodejs npm \
-       iptables \
-       libcap2-bin \
        tini \
-       tmux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# GitHub CLI (gh)
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY docker/process-sandbox-entrypoint.sh /usr/local/bin/process-sandbox-entrypoint
 RUN chmod +x /usr/local/bin/process-sandbox-entrypoint \
     && useradd -m -u 1000 -s /bin/bash sandbox \
-    && mkdir -p /workspace/.home /ironclaw/state/tools /ironclaw/state/cache /ironclaw/broker \
-    && chown -R sandbox:sandbox /workspace /ironclaw
+    && mkdir -p /workspace/.home \
+    && chown -R sandbox:sandbox /workspace
 
-# Rust toolchain, installed as the sandbox user under the image's default
-# HOME (/home/sandbox) at build time, since the workspace-relative HOME
-# doesn't exist yet at build time. At runtime the container launch env sets
-# ONLY HOME=/workspace/.home (see exec_transport::user_container_launch_config)
-# — it does NOT set CARGO_HOME/RUSTUP_HOME. Cargo/rustup resolve their config
-# and cache dirs relative to $HOME by default, so they transparently follow
-# HOME to the workspace-relative path; the entrypoint script seeds a
-# first-run copy of /home/sandbox/.cargo and .rustup into /workspace/.home so
-# the toolchain is available there too, and the result persists across
-# container-rm/recreate via the bind-mounted workspace (matches the design's
-# "HOME=/workspace/.home so caches/dotfiles persist" decision). npm, by
-# contrast, does NOT default its global prefix to $HOME, so it is redirected
-# explicitly via NPM_CONFIG_PREFIX in the same launch env.
 USER sandbox
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-ENV PATH="/home/sandbox/.cargo/bin:${PATH}"
-
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/process-sandbox-entrypoint"]
-CMD ["bash", "-lc", "echo missing command >&2; exit 64"]
+CMD ["sh", "-c", "echo missing command >&2; exit 64"]

@@ -648,6 +648,32 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["key", "capability_id", "state", "tenant_id", "user_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/sandbox_credential_placeholder.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "provider_id": { "type": "string", "maxLength": 128 }
+            },
+            "required": ["provider_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/sandbox_credential_placeholder.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "provider_id": { "type": "string", "maxLength": 128 },
+                "placeholder": {
+                    "type": "string",
+                    "pattern": "^icsbx_[A-Za-z0-9]{32}$"
+                },
+                "authorization_schemes": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["basic", "bearer"] },
+                    "minItems": 2,
+                    "maxItems": 2
+                }
+            },
+            "required": ["provider_id", "placeholder", "authorization_schemes"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -1054,6 +1080,14 @@ mod tests {
         assert_eq!(
             tool_output["required"],
             serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
+        );
+        let sandbox_placeholder = resolve_builtin_input_schema_ref(
+            "schemas/builtin/sandbox_credential_placeholder.output.v1.json",
+        )
+        .expect("sandbox placeholder output schema is registered");
+        assert_eq!(
+            sandbox_placeholder["properties"]["placeholder"]["pattern"],
+            "^icsbx_[A-Za-z0-9]{32}$"
         );
     }
 

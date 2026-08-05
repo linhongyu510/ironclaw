@@ -555,6 +555,13 @@ impl DeploymentConfig {
         self.profile
     }
 
+    /// Whether this deployment installs the user-sandbox runtime lane.
+    /// Deployment owns the profile-to-behavior projection so production
+    /// assembly never branches on a profile label.
+    pub(crate) fn sandbox_enabled(&self) -> bool {
+        self.profile == RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+    }
+
     pub fn substrate(&self) -> RuntimeSubstrate {
         self.substrate
     }
@@ -786,7 +793,7 @@ pub fn hosted_single_tenant_volume_runtime_policy() -> Result<EffectiveRuntimePo
         })
 }
 
-/// Resolved tenant-sandbox policy for the sandboxed hosted volume profile.
+/// Resolved user-sandbox policy for the sandboxed hosted volume profile.
 pub fn hosted_single_tenant_volume_sandboxed_runtime_policy()
 -> Result<EffectiveRuntimePolicy, ResolveError> {
     DeploymentConfig::hosted_single_tenant_volume_sandboxed()

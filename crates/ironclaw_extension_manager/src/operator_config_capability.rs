@@ -23,24 +23,33 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, SandboxCredentialRuntime,
 };
 use ironclaw_product::{
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
+    SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID,
 };
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+use ironclaw_secrets::{CredentialAccountStatus, CredentialAccountStore};
 
 pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
+    include_sandbox: bool,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.push(manifest()?);
     package
         .manifest
         .capabilities
         .push(tool_permission_manifest()?);
+    if include_sandbox {
+        package
+            .manifest
+            .capabilities
+            .push(sandbox_placeholder_manifest()?);
+    }
     let root = package
         .materialized_root()
         .map_err(|error| ExtensionError::InvalidManifest {
@@ -48,6 +57,21 @@ pub fn extend_builtin_first_party_package(
         })?
         .clone();
     ExtensionPackage::from_manifest(package.manifest, root)
+}
+
+pub fn insert_sandbox_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+    credential_runtime: SandboxCredentialRuntime,
+    credential_accounts: Arc<dyn CredentialAccountStore>,
+) -> Result<(), HostApiError> {
+    registry.insert_handler(
+        CapabilityId::new(SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID)?,
+        Arc::new(SandboxCredentialPlaceholderHandler {
+            credential_runtime,
+            credential_accounts,
+        }),
+    );
+    Ok(())
 }
 
 pub fn insert_handler(
@@ -129,6 +153,38 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
     })
 }
 
+fn sandbox_placeholder_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    Ok(CapabilityManifest {
+        id: CapabilityId::new(SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID)?,
+        description:
+            "Return an inert sandbox placeholder for an eligible configured credential provider."
+                .to_string(),
+        effects: Vec::new(),
+        default_permission: PermissionMode::Allow,
+        visibility: CapabilityVisibility::Model,
+        input_schema_ref: CapabilityProfileSchemaRef::new(
+            "schemas/builtin/sandbox_credential_placeholder.input.v1.json",
+        )?,
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(
+            "schemas/builtin/sandbox_credential_placeholder.output.v1.json",
+        )?),
+        prompt_doc_ref: None,
+        required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
+        resource_profile: Some(ResourceProfile {
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(500)
+                .set_output_bytes(1024),
+            hard_ceiling: None,
+        }),
+        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(
+            SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID,
+        )),
+    })
+}
+
 struct SetAutoApproveHandler {
     auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
 }
@@ -172,6 +228,68 @@ struct SetToolPermissionHandler {
     overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
+}
+
+struct SandboxCredentialPlaceholderHandler {
+    credential_runtime: SandboxCredentialRuntime,
+    credential_accounts: Arc<dyn CredentialAccountStore>,
+}
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for SandboxCredentialPlaceholderHandler {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let started = Instant::now();
+        ensure_sandbox_placeholder_declared(&request, started)?;
+        authenticated_actor(&request, started)?;
+        let provider = parse_provider_id(request.input, started)?;
+        let accounts = self
+            .credential_accounts
+            .accounts_for_scope(&request.scope)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "sandbox credential account lookup failed");
+                dispatch_error(RuntimeDispatchErrorKind::Backend, started)
+            })?;
+        let mut eligible = accounts.into_iter().filter(|account| {
+            account.provider_or_extension_id == provider
+                && account.status == CredentialAccountStatus::Active
+                && account.secret_handles.len() == 1
+                && !account.allowed_targets.is_empty()
+                && same_credential_owner(&account.scope, &request.scope)
+        });
+        if eligible.next().is_none() {
+            return Err(safe_dispatch_error(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "no eligible sandbox credential is configured for this provider",
+                started,
+            ));
+        }
+        if eligible.next().is_some() {
+            return Err(safe_dispatch_error(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "multiple eligible sandbox credentials match this provider",
+                started,
+            ));
+        }
+        let placeholder = self
+            .credential_runtime
+            .placeholder_for(&request.scope, &provider)
+            .map_err(|error| {
+                tracing::warn!(%error, "sandbox credential placeholder allocation failed");
+                dispatch_error(RuntimeDispatchErrorKind::Backend, started)
+            })?;
+        Ok(dispatch_result(
+            serde_json::json!({
+                "provider_id": provider.as_str(),
+                "placeholder": placeholder.as_str(),
+                "authorization_schemes": ["basic", "bearer"],
+            }),
+            started,
+        ))
+    }
 }
 
 #[async_trait]
@@ -248,6 +366,20 @@ fn ensure_tool_permission_declared(
     }
 }
 
+fn ensure_sandbox_placeholder_declared(
+    request: &FirstPartyCapabilityRequest,
+    started: Instant,
+) -> Result<(), FirstPartyCapabilityError> {
+    if request.capability_id.as_str() == SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID {
+        Ok(())
+    } else {
+        Err(dispatch_error(
+            RuntimeDispatchErrorKind::UndeclaredCapability,
+            started,
+        ))
+    }
+}
+
 fn authenticated_actor(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
@@ -280,6 +412,31 @@ fn parse_enabled(
             started,
         ))
     }
+}
+
+fn parse_provider_id(
+    input: serde_json::Value,
+    started: Instant,
+) -> Result<ironclaw_host_api::ids::ExtensionId, FirstPartyCapabilityError> {
+    let object = input
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or_else(|| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))?;
+    object
+        .get("provider_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))
+        .and_then(|provider| {
+            ironclaw_host_api::ids::ExtensionId::new(provider)
+                .map_err(|_| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))
+        })
+}
+
+fn same_credential_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+    left.tenant_id == right.tenant_id
+        && left.user_id == right.user_id
+        && left.agent_id == right.agent_id
+        && left.project_id == right.project_id
 }
 
 struct ToolPermissionInput {
@@ -511,6 +668,14 @@ fn dispatch_error(kind: RuntimeDispatchErrorKind, started: Instant) -> FirstPart
     FirstPartyCapabilityError::new(kind).with_usage(resource_usage(started))
 }
 
+fn safe_dispatch_error(
+    kind: RuntimeDispatchErrorKind,
+    summary: &'static str,
+    started: Instant,
+) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::with_safe_summary(kind, summary).with_usage(resource_usage(started))
+}
+
 fn dispatch_result(output: serde_json::Value, started: Instant) -> FirstPartyCapabilityResult {
     FirstPartyCapabilityResult::new(output, resource_usage(started))
 }
@@ -522,13 +687,19 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use ironclaw_approvals::{
         AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        ids::{AgentId, ExtensionId, InvocationId, TenantId},
+        action::NetworkMethod,
+        ids::{AgentId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId},
         resource::ResourceScope,
+    };
+    use ironclaw_secrets::{
+        CredentialAccount, CredentialAccountId, CredentialPathPolicy, CredentialTargetPolicy,
+        InMemoryCredentialBroker, RedactedJson,
     };
 
     use super::*;
@@ -572,6 +743,122 @@ mod tests {
             authenticated_actor(&request, Instant::now()).expect("actor"),
             operator
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_placeholder_requires_exactly_one_eligible_credential() {
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let mut registry = FirstPartyCapabilityRegistry::new();
+        insert_sandbox_handlers(
+            &mut registry,
+            SandboxCredentialRuntime::new(),
+            broker.clone(),
+        )
+        .expect("insert sandbox handlers");
+
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant").expect("tenant"),
+            user_id: UserId::new("alice").expect("user"),
+            agent_id: Some(AgentId::new("agent").expect("agent")),
+            project_id: Some(ProjectId::new("project").expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let placeholder_handler = registry
+            .get(&CapabilityId::new(SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID).expect("id"))
+            .expect("placeholder handler");
+
+        broker
+            .put_account(eligible_account(
+                scope.clone(),
+                "github-main",
+                "github-token",
+            ))
+            .expect("put account");
+
+        let first = placeholder_handler
+            .dispatch(sandbox_request(
+                SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID,
+                scope.clone(),
+                serde_json::json!({"provider_id": "github"}),
+            ))
+            .await
+            .expect("first placeholder");
+        let second = placeholder_handler
+            .dispatch(sandbox_request(
+                SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID,
+                scope.clone(),
+                serde_json::json!({"provider_id": "github"}),
+            ))
+            .await
+            .expect("second placeholder");
+        assert_eq!(first.output["placeholder"], second.output["placeholder"]);
+        assert!(
+            first.output["placeholder"]
+                .as_str()
+                .is_some_and(|token| token.starts_with("icsbx_") && token.len() == 38)
+        );
+        assert_eq!(
+            first.output["authorization_schemes"],
+            serde_json::json!(["basic", "bearer"])
+        );
+
+        broker
+            .put_account(eligible_account(
+                scope.clone(),
+                "github-secondary",
+                "github-token-2",
+            ))
+            .expect("put second account");
+        let ambiguous = placeholder_handler
+            .dispatch(sandbox_request(
+                SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID,
+                scope,
+                serde_json::json!({"provider_id": "github"}),
+            ))
+            .await
+            .expect_err("ambiguous accounts must fail");
+        assert_eq!(
+            ambiguous.safe_summary(),
+            Some("multiple eligible sandbox credentials match this provider")
+        );
+    }
+
+    fn sandbox_request(
+        capability_id: &str,
+        scope: ResourceScope,
+        input: serde_json::Value,
+    ) -> FirstPartyCapabilityRequest {
+        let actor = scope.user_id.clone();
+        let mut request = FirstPartyCapabilityRequest::request_for_test(
+            CapabilityId::new(capability_id).expect("capability id"),
+            scope,
+            input,
+            None,
+        );
+        request.authenticated_actor_user_id = Some(actor);
+        request
+    }
+
+    fn eligible_account(scope: ResourceScope, id: &str, handle: &str) -> CredentialAccount {
+        CredentialAccount {
+            scope,
+            id: CredentialAccountId::new(id).expect("account"),
+            provider_or_extension_id: ExtensionId::new("github").expect("provider"),
+            label: "GitHub".to_string(),
+            status: CredentialAccountStatus::Active,
+            secret_handles: vec![SecretHandle::new(handle).expect("handle")],
+            allowed_targets: vec![CredentialTargetPolicy {
+                scheme: "https".to_string(),
+                host: "api.github.com".to_string(),
+                port: Some(443),
+                path: CredentialPathPolicy::Prefix("/".to_string()),
+                methods: vec![NetworkMethod::Get],
+            }],
+            redacted_metadata: RedactedJson::new(serde_json::json!({})),
+            updated_at: Utc::now(),
+        }
     }
 
     /// The approvals stores plus the tool-permission handler, wired over one

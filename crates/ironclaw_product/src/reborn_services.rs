@@ -291,6 +291,8 @@ pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID: &str =
     "builtin.operator_config_set_tool_permission";
 pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID);
+pub const SANDBOX_CREDENTIAL_PLACEHOLDER_CAPABILITY_ID: &str =
+    "builtin.sandbox_credential_placeholder";
 pub const OPERATOR_SETUP_RUN_CAPABILITY_ID: &str = "builtin.operator_setup_run";
 pub const OPERATOR_SETUP_RUN_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_SETUP_RUN_CAPABILITY_ID);

@@ -801,11 +801,14 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
             action: LeakAction::Block,
         },
         // Sandbox credential placeholder (icsbx_<identifier>). The credential
-        // firewall injects these inert placeholders into the sandbox in place
-        // of real secrets; the egress proxy swaps them for the real credential
-        // at request time. A placeholder must never cross the trust boundary
-        // into model output, logs, or transcripts, so it is treated like any
-        // other secret.
+        // firewall injects these inert, tenant/user-scoped values into sandbox
+        // CLI configuration and swaps them only during a live host-authorized
+        // window. Provider tool arguments must be allowed to carry them or an
+        // agent cannot initialize/use a dynamic CLI. Keep them registered for
+        // redaction everywhere; provider validation owns the one narrow
+        // exception that lets an exact inert placeholder pass in model tool
+        // arguments. Output, logs, and generic outbound scans must still mask
+        // it.
         //
         // Deliberately NO `\b` word boundaries here: `_` is a word character,
         // so a boundary assertion does not fire next to it, meaning a single
@@ -828,8 +831,8 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
         LeakPattern {
             name: "sandbox_credential_placeholder".to_string(),
             regex: Regex::new(r"icsbx_[A-Za-z0-9]{16,}").unwrap(), // safety: hardcoded literal
-            severity: LeakSeverity::Critical,
-            action: LeakAction::Block,
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
         },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
@@ -1829,7 +1832,14 @@ mod tests {
         let detector = LeakDetector::new();
         let content = "found in ~/.git-credentials: icsbx_7f3a9b2c1d4e5f60";
         let result = detector.scan(content);
-        assert!(result.should_block, "sandbox placeholder not detected");
+        assert!(
+            !result.should_block,
+            "inert sandbox placeholders must remain usable in provider tool arguments"
+        );
+        assert!(
+            result.redacted_content.is_some(),
+            "placeholder detection must redact outside the provider tool-argument exception"
+        );
         assert!(
             result
                 .matches
@@ -1918,12 +1928,15 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_and_clean_blocks_sandbox_credential_placeholder() {
+    fn test_scan_and_clean_redacts_sandbox_credential_placeholder() {
         let detector = LeakDetector::new();
         let content = "icsbx_7f3a9b2c1d4e5f60";
-        assert!(
-            detector.scan_and_clean(content).is_err(),
-            "scan_and_clean should block sandbox credential placeholder"
+        let cleaned = detector
+            .scan_and_clean(content)
+            .expect("inert sandbox credential placeholders should redact rather than block");
+        assert_eq!(
+            cleaned, "[REDACTED]",
+            "normal scan-and-clean consumers must not expose sandbox placeholders"
         );
     }
 

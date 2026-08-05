@@ -77,6 +77,19 @@ async fn shared_extension_registry_returns_same_instance() {
     assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
 }
 
+#[test]
+fn sandbox_credential_runtime_builder_preserves_the_proxy_owned_instance() {
+    let runtime = crate::SandboxCredentialRuntime::new();
+    let proxy_owned_store = runtime.secret_injection_store();
+    let services = test_services().with_sandbox_credential_runtime(runtime.clone());
+
+    assert!(services.uses_sandbox_credential_runtime(&runtime));
+    assert!(Arc::ptr_eq(
+        &services.secret_injection_store,
+        &proxy_owned_store
+    ));
+}
+
 #[tokio::test]
 async fn production_wiring_reports_missing_persistent_approval_policies() {
     let report = test_services()
@@ -485,6 +498,56 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
         Some(&(
             "authorization".to_string(),
             "Bearer staged-secret".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn sandbox_runtime_store_is_the_store_captured_by_later_host_http_egress() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("sandbox-api-token").unwrap();
+    let runtime = crate::SandboxCredentialRuntime::new();
+    let sandbox_store = runtime.secret_injection_store();
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+
+    // Production composition must install the sandbox runtime first, then
+    // construct host HTTP egress. Reversing these calls makes host egress
+    // capture the builder's old staging store and silently breaks credential
+    // handoff from the sandbox proxy.
+    let services = test_services()
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
+        .with_sandbox_credential_runtime(runtime)
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should capture the sandbox runtime store");
+    services
+        .network_policy_store
+        .insert(&scope, &capability_id, staged_policy());
+    sandbox_store
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("sandbox-staged-secret"),
+        )
+        .expect("sandbox credential should be staged host-side");
+
+    configured_egress(&services)
+        .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
+        .expect("canonical host egress should consume sandbox-staged credential");
+
+    let requests = recorded_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sandbox-staged-secret".to_string()
         ))
     );
 }

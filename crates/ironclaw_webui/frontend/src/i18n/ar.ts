@@ -442,8 +442,6 @@ registerPack("ar", {
   "settings.field.quietHoursEndDesc": "الساعة (0–23) لإنهاء الكتم",
   "settings.field.heartbeatTimezone": "المنطقة الزمنية",
   "settings.field.heartbeatTimezoneDesc": "منطقة IANA لساعات الهدوء",
-  "settings.field.sandboxEnabled": "تمكين الصندوق الرملي",
-  "settings.field.sandboxEnabledDesc": "تنفيذ الأدوات عبر Docker",
   "settings.field.sandboxPolicy": "السياسة",
   "settings.field.sandboxPolicyDesc": "مستوى وصول نظام الملفات للحاوية",
   "settings.field.sandboxTimeout": "المهلة",

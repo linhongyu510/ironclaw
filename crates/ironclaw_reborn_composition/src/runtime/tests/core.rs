@@ -632,7 +632,6 @@ use ironclaw_turns::{
 };
 use rust_decimal_macros::dec;
 
-use crate::RebornRuntimeProcessBinding;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -2735,17 +2734,12 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::None,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
-        })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
-        ))),
+        }),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-production-hooks-tenant".to_string(),
@@ -2797,17 +2791,12 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::None,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
-        })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
-        ))),
+        }),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-production-cutover-tenant".to_string(),
@@ -2870,17 +2859,12 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::None,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
-        })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
-        ))),
+        }),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-observer-reject-tenant".to_string(),
@@ -2940,28 +2924,6 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
         output.to_string().contains("hello from tool"),
         "observer should receive the staged capability output, got {output}"
     );
-}
-
-#[derive(Debug)]
-struct RecordingSandboxTransport;
-
-#[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
-    async fn run_command(
-        &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
-    ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
-    > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
-            output: String::new(),
-            saved_output: None,
-            exit_code: 0,
-            sandboxed: true,
-            duration: Duration::ZERO,
-        })
-    }
 }
 
 #[tokio::test]

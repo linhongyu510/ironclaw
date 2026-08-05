@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ironclaw_host_runtime::{
     RebornSandboxConfig, RebornScopedSandboxCommandTransport, RuntimeProcessError,
-    TenantSandboxProcessPort,
+    UserSandboxProcessPort,
 };
 
 /// Connects a real, no-broker sandbox transport for Docker-real tests, with
@@ -12,7 +12,7 @@ use ironclaw_host_runtime::{
 pub(crate) async fn connect_for_test(
     workspace_dir: &Path,
     image: &str,
-) -> Result<TenantSandboxProcessPort, RuntimeProcessError> {
+) -> Result<UserSandboxProcessPort, RuntimeProcessError> {
     let config =
         RebornSandboxConfig::new(workspace_dir.to_path_buf()).with_image(image.to_string());
     let transport = RebornScopedSandboxCommandTransport::connect(config).await?;

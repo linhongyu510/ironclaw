@@ -76,7 +76,7 @@ use crate::{
     HostRuntimeError, HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest,
     InvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
     RuntimeBackendHealth, RuntimeProcessPort, RuntimeSecretMaterialStager, RuntimeSecretStageError,
-    TenantSandboxProcessPort, ToolCallHttpEgress,
+    ToolCallHttpEgress, UserSandboxProcessPort,
 };
 use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
@@ -154,7 +154,8 @@ where
     tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
-    tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    user_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    sandbox_credential_runtime: Option<crate::SandboxCredentialRuntime>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -460,7 +461,8 @@ where
             tool_call_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
-            tenant_sandbox_process_port: None,
+            user_sandbox_process_port: None,
+            sandbox_credential_runtime: None,
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -500,7 +502,7 @@ where
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
-                tenant_sandbox_process_port: None,
+                user_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -608,9 +610,9 @@ where
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
         }
-        if let Some(process_port) = &self.tenant_sandbox_process_port {
+        if let Some(process_port) = &self.user_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
-                .with_tenant_sandbox_process_port(Arc::clone(process_port));
+                .with_user_sandbox_process_port(Arc::clone(process_port));
         }
         if let Some(post_edit_check) = &self.post_edit_check {
             invocation_services_resolver =
@@ -813,11 +815,45 @@ where
         if let Some(resolver) = &self.runtime_credential_account_resolver {
             handler = handler.with_credential_account_resolver_dyn(Arc::clone(resolver));
         }
+        if let Some(runtime) = &self.sandbox_credential_runtime {
+            handler = handler.with_sandbox_static_credentials(
+                runtime.clone(),
+                Arc::clone(&self.credential_account_store),
+            );
+        }
         if let Some(ceiling) = &self.sandbox_per_user_ceiling {
             handler = handler.with_sandbox_per_user_ceiling(Arc::clone(ceiling));
         }
 
         handler
+    }
+
+    /// Installs the opaque presentation runtime already used by the sandbox
+    /// egress proxy. This does not grant credentials or expose its stores;
+    /// later obligation handling may stage only host-authorized bindings into
+    /// this exact runtime.
+    pub fn with_sandbox_credential_runtime(
+        mut self,
+        runtime: crate::SandboxCredentialRuntime,
+    ) -> Self {
+        let secret_injection_store = runtime.secret_injection_store();
+        let governor: Arc<dyn ResourceGovernor> = self.governor.clone();
+        let process_lifecycle_store = Arc::new(
+            ProcessObligationLifecycleStore::from_dyn(
+                self.process_services.process_runtime(),
+                Arc::clone(&self.network_policy_store),
+                Arc::clone(&secret_injection_store),
+                governor,
+            )
+            .with_sandbox_credential_runtime(runtime.clone()),
+        );
+        if let Some(event_sink) = &self.event_sink {
+            process_lifecycle_store.set_event_sink(Arc::clone(event_sink));
+        }
+        self.secret_injection_store = secret_injection_store;
+        self.process_lifecycle_store = process_lifecycle_store;
+        self.sandbox_credential_runtime = Some(runtime);
+        self
     }
 
     /// Builds an approval resolver over the same approval and lease stores used
@@ -1014,6 +1050,26 @@ fn runtime_sort_key(kind: RuntimeKind) -> u8 {
         RuntimeKind::Sandbox => 3,
         RuntimeKind::FirstParty => 4,
         RuntimeKind::System => 5,
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    impl<F, G> HostRuntimeServices<F, G>
+    where
+        F: RootFilesystem + 'static,
+        G: ResourceGovernor + 'static,
+    {
+        pub(super) fn uses_sandbox_credential_runtime(
+            &self,
+            runtime: &crate::SandboxCredentialRuntime,
+        ) -> bool {
+            self.sandbox_credential_runtime
+                .as_ref()
+                .is_some_and(|configured| configured.is_same_instance(runtime))
+        }
     }
 }
 

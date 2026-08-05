@@ -442,8 +442,6 @@ registerPack("pt-BR", {
   "settings.field.quietHoursEndDesc": "Hora (0–23) para encerrar a supressão",
   "settings.field.heartbeatTimezone": "Fuso horário",
   "settings.field.heartbeatTimezoneDesc": "Fuso horário IANA para horário silencioso",
-  "settings.field.sandboxEnabled": "Ativar sandbox",
-  "settings.field.sandboxEnabledDesc": "Execução de ferramentas via Docker",
   "settings.field.sandboxPolicy": "Política",
   "settings.field.sandboxPolicyDesc": "Nível de acesso ao FS do container",
   "settings.field.sandboxTimeout": "Tempo limite",

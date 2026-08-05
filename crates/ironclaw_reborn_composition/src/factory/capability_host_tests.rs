@@ -231,9 +231,7 @@ fn filesystem_root() -> std::path::PathBuf {
     path
 }
 
-/// Stub `SandboxCommandTransport` so `is_sandboxed_profile` (gated on
-/// `runtime_process_binding` being `TenantSandbox`, not on the deployment
-/// profile alone) actually flips true for these tests — mirrors
+/// Stub `SandboxCommandTransport` for sandbox-profile filesystem tests — mirrors
 /// `approval_gates::RecordingSandboxTransport`, never invoked here since
 /// these tests exercise the filesystem mount, not shell execution.
 #[derive(Debug, Default)]
@@ -252,11 +250,11 @@ impl ironclaw_host_runtime::SandboxCommandTransport for NoopSandboxTransport {
     }
 }
 
-fn tenant_sandbox_process_binding_for_test() -> RebornRuntimeProcessBinding {
-    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+fn user_sandbox_process_binding_for_test() -> RebornRuntimeProcessBinding {
+    let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
         Arc::new(NoopSandboxTransport),
     ));
-    RebornRuntimeProcessBinding::tenant_sandbox(process_port)
+    RebornRuntimeProcessBinding::user_sandbox(process_port)
 }
 
 #[tokio::test]
@@ -274,13 +272,13 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
             crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
                 .expect("sandboxed policy resolves"),
         )
-        .with_runtime_process_binding(tenant_sandbox_process_binding_for_test())
+        .with_runtime_process_binding(user_sandbox_process_binding_for_test())
         // This test deliberately shares one root for both the plain LocalDev
         // storage and the sandbox-workspaces root (unlike the CLI, which
         // uses `<root>/sandbox-workspaces` for the latter — see
         // `sandboxed_profile_workspace_mount_resolves_the_container_bind_root_not_the_plain_storage_root`
         // below for the CLI-realistic divergent-roots case).
-        .with_sandbox_workspaces_root(storage_root.clone()),
+        .with_sandbox_runtime_support_for_test(storage_root.clone()),
     )
     .await
     .expect("hosted-single-tenant-volume-sandboxed services build");
@@ -288,8 +286,15 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
         .local_runtime_for_test()
         .expect("local-dev runtime substrate");
 
-    let workspace_grant = local_runtime
+    let owner_scope_for_grant = default_runtime_owner_scope(
+        ironclaw_host_api::ids::UserId::new("sandbox-owner").expect("owner id"),
+    )
+    .expect("owner scope resolves");
+    let workspace_grants = local_runtime
         .workspace_mounts
+        .capability_grant_view(&owner_scope_for_grant)
+        .expect("sandbox workspace grant resolves for owner");
+    let workspace_grant = workspace_grants
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/workspace")
@@ -302,10 +307,6 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
     // even though they share one underlying disk mount. The digest-write
     // and digest-read round trip below is exactly what depends on this
     // narrowing actually happening.
-    let owner_scope_for_grant = default_runtime_owner_scope(
-        ironclaw_host_api::ids::UserId::new("sandbox-owner").expect("owner id"),
-    )
-    .expect("owner scope resolves");
     let workspace_digest =
         ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope_for_grant)
             .workspace_path(std::path::Path::new(""))
@@ -385,7 +386,7 @@ async fn sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_hos
 /// catch: `sandboxed_profile_workspace_mount_is_per_user_and_shares_bytes_with_host_dir`
 /// above builds the abstract-FS mount AND derives the "host workspace dir"
 /// it compares against from the SAME `storage_root` parameter, so it can
-/// never observe a real CLI where the `TenantSandbox` container bind is
+/// never observe a real CLI where the `UserSandbox` container bind is
 /// rooted at a *different* directory
 /// (`<local runtime root>/sandbox-workspaces`,
 /// `ironclaw_reborn_cli::runtime::build_sandboxed_local_runtime_services_input`)
@@ -414,8 +415,8 @@ async fn sandboxed_profile_workspace_mount_resolves_the_container_bind_root_not_
             crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
                 .expect("sandboxed policy resolves"),
         )
-        .with_runtime_process_binding(tenant_sandbox_process_binding_for_test())
-        .with_sandbox_workspaces_root(sandbox_workspaces_root.clone()),
+        .with_runtime_process_binding(user_sandbox_process_binding_for_test())
+        .with_sandbox_runtime_support_for_test(sandbox_workspaces_root.clone()),
     )
     .await
     .expect("hosted-single-tenant-volume-sandboxed services build");
@@ -461,7 +462,7 @@ async fn sandboxed_profile_workspace_mount_resolves_the_container_bind_root_not_
         .expect("write through composite /workspace mount");
 
     // Must land under the sandbox-workspaces root — the same host tree the
-    // `TenantSandbox` container bind is rooted at
+    // `UserSandbox` container bind is rooted at
     // (`RebornSandboxConfig::new(sandbox_workspaces_root)`) — not under
     // `<storage_root>/users`, which is what re-deriving from the plain
     // LocalDev storage root gave before this fix.

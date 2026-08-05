@@ -693,8 +693,13 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             google_oauth_backend_for_test,
             workspace_scoped_per_caller,
+            sandboxed_shell,
         } = options;
-        let root = Arc::new(tempfile::tempdir()?);
+        let root = Arc::new(if sandboxed_shell {
+            super::sandbox_shell_identity::home_rooted_tempdir("sandbox-shell-harness")?
+        } else {
+            tempfile::tempdir()?
+        });
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
@@ -727,6 +732,28 @@ impl HostRuntimeCapabilityHarness {
                 },
             )?
             .with_local_runtime_confirmed_host_home_root(host_home_root)
+        } else if sandboxed_shell {
+            // W6 phase 2: mirrors `ironclaw_reborn_cli::runtime::
+            // build_sandboxed_local_runtime_services_input` — the production
+            // recipe for the `hosted-single-tenant-volume-sandboxed` profile.
+            // `core_builtin_tools()` (the OTHER shell-capable profile) hand-
+            // assembles a `HostRuntime` and never calls `build_runtime`, so it
+            // can never reach this path; this branch is what actually lets
+            // `builtin.shell` dispatch into a real user sandbox container.
+            let sandbox_workspaces_root = storage_root.join("sandbox-workspaces");
+            let user_sandbox = ironclaw_reborn_composition::UserSandboxFactory::local_docker(
+                sandbox_workspaces_root.clone(),
+            )
+            .await
+            .map_err(|error| {
+                format!("user-sandbox process backend requires a reachable Docker daemon: {error}")
+            })?;
+            ironclaw_reborn_composition::local_filesystem_build_input_with_profile(
+                ironclaw_reborn_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+                service_label,
+                storage_root,
+            )
+            .with_user_sandbox_binding(user_sandbox)
         } else {
             ironclaw_reborn_composition::local_filesystem_build_input(service_label, storage_root)
         };

@@ -1,16 +1,15 @@
-//! Composition-owned spawn of `ironclaw_host_runtime::SandboxReaper` (D4-1).
+//! Composition-owned spawn of `ironclaw_host_runtime::SandboxReaper`.
 //!
 //! The reaper core (`ironclaw_host_runtime::sandbox_process::reaper`) is
 //! deliberately unopinionated about scheduling — composition is the one
 //! place that connects to Docker, constructs the reaper, spawns it as a
 //! background task, and owns its cancellation. This module is that one
-//! place; `sandbox_composition::SandboxRuntimeBindings::build` calls
+//! place; `sandbox::lifecycle::SandboxRuntimeBindings::build` calls
 //! [`spawn_sandbox_reaper`] with a single line rather than growing its own
 //! Docker-connect-and-spawn logic.
 //!
-//! **Fail-closed, matching the egress proxy in the same call site
-//! (`sandbox_composition::SandboxRuntimeBindings::build`):** the sandboxed
-//! profile's boot path (`sandbox_boot::tenant_sandbox_process_binding`)
+//! **Fail-closed:** the sandboxed
+//! profile's boot path (`sandbox::factory::user_sandbox_process_binding`)
 //! already made Docker a precondition for the whole build, failing closed if
 //! the daemon is unreachable — so by the time this is called the daemon was
 //! reachable a moment ago, and a fresh connect failure here is not a
@@ -23,9 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_runtime::{
-    ConnectionAttributionResolver, SandboxActivityRegistry, SandboxReaper, SandboxReaperConfig,
-};
+use ironclaw_host_runtime::{SandboxActivityRegistry, SandboxReaper, SandboxReaperConfig};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -44,24 +41,6 @@ pub(crate) const SANDBOX_REAPER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs
 pub(crate) struct SandboxReaperRuntimeHandle {
     shutdown_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
-    /// Test-only handle onto the SAME `Arc<SandboxReaper>` the spawned task
-    /// owns, so a composition-tier test can call
-    /// `SandboxReaper::attribution_for_test` against a PRODUCTION-spawned
-    /// reaper (see `sandbox_composition::tests` /
-    /// `sandbox_attribution_reaches_both_production_consumers`). `None` only
-    /// for this module's own `shutdown_stops_a_running_task_before_the_timeout`
-    /// test, which never spawns via `spawn_sandbox_reaper` and has no
-    /// reaper to hand back. Ships zero bytes in production binaries.
-    ///
-    /// `#[allow(dead_code)]`: read only from this crate's own `#[cfg(test)]`
-    /// `mod tests` (`sandbox_composition.rs`), which the `--all-features`
-    /// lib-only compilation (`feature = "test-support"` without
-    /// `cfg(test)`) never includes — so that build sees the field
-    /// constructed but never read. No `tests/` integration crate consumes
-    /// it (yet); if one does, this allow can come off.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
-    pub(crate) reaper: Option<Arc<SandboxReaper>>,
 }
 
 impl SandboxReaperRuntimeHandle {
@@ -99,14 +78,6 @@ impl SandboxReaperRuntimeHandle {
 /// see the module doc — rather than degrading to a silently absent reaper.
 pub(crate) async fn spawn_sandbox_reaper(
     activity: Arc<SandboxActivityRegistry>,
-    // W17/W6: the SAME attribution resolver `tenant_sandbox_process_binding`
-    // wired into the exec transport (threaded here via
-    // `SandboxProfileBindingInputs::attribution` /
-    // `RebornHostBindings::with_sandbox_attribution_resolver`), so the
-    // reaper's teardown paths invalidate the identical cache the transport
-    // reads from. `None` for non-sandboxed profiles and any caller that
-    // never wired one.
-    attribution: Option<Arc<ConnectionAttributionResolver>>,
 ) -> Result<SandboxReaperRuntimeHandle, RebornBuildError> {
     let docker = ironclaw_host_runtime::connect_docker_with_retry()
         .await
@@ -114,13 +85,11 @@ pub(crate) async fn spawn_sandbox_reaper(
             reason: format!("sandbox reaper Docker connect failed: {error}"),
         })?;
 
-    let mut reaper = SandboxReaper::new(docker, activity, SandboxReaperConfig::default());
-    if let Some(resolver) = attribution {
-        reaper = reaper.with_attribution_resolver(resolver);
-    }
-    let reaper = Arc::new(reaper);
-    #[cfg(any(test, feature = "test-support"))]
-    let reaper_for_test = Arc::clone(&reaper);
+    let reaper = Arc::new(SandboxReaper::new(
+        docker,
+        activity,
+        SandboxReaperConfig::default(),
+    ));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = tokio::spawn(async move {
         reaper.run(shutdown_rx).await;
@@ -129,8 +98,6 @@ pub(crate) async fn spawn_sandbox_reaper(
     Ok(SandboxReaperRuntimeHandle {
         shutdown_tx,
         handle,
-        #[cfg(any(test, feature = "test-support"))]
-        reaper: Some(reaper_for_test),
     })
 }
 
@@ -165,7 +132,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("build current-thread runtime for test")
-            .block_on(spawn_sandbox_reaper(activity, None));
+            .block_on(spawn_sandbox_reaper(activity));
 
         ironclaw_common::env_helpers::remove_runtime_env("IRONCLAW_REBORN_DOCKER_HOST");
 
@@ -197,10 +164,6 @@ mod tests {
         let handle = SandboxReaperRuntimeHandle {
             shutdown_tx,
             handle,
-            // This test never spawns via `spawn_sandbox_reaper` and has no
-            // reaper to hand back — see the field doc.
-            #[cfg(any(test, feature = "test-support"))]
-            reaper: None,
         };
 
         handle.shutdown(SANDBOX_REAPER_SHUTDOWN_TIMEOUT).await;

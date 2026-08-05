@@ -4,43 +4,51 @@
 //! Enforces [`sandbox_network_policy`](super::network_allowlist::sandbox_network_policy)
 //! for real: a sandboxed container's `http_proxy`/`https_proxy` env is
 //! pointed at a bound instance of this proxy (see
-//! `crates/ironclaw_reborn_composition/src/sandbox_boot.rs`), and every
+//! `crates/ironclaw_reborn_composition/src/sandbox/factory.rs`), and every
 //! outbound `CONNECT` (HTTPS tunnel) or plain absolute-URI HTTP request the
 //! container makes is checked against the policy's `allowed_targets` before
 //! any bytes reach the origin.
 //!
-//! This module is deliberately Docker-agnostic and scheduling-agnostic: it
-//! only knows how to bind a `TcpListener` and serve connections against it.
-//! Composition (`ironclaw_reborn_composition::sandbox_egress_proxy_task`)
-//! connects this core to a real bind address, spawns it, and owns its
-//! cancellation — mirroring the `SandboxReaper` core/spawn split.
+//! The proxy core remains scheduling-agnostic. This module also owns the one
+//! narrowly scoped Docker adapter required for VM-backed local engines: a
+//! hardened, secret-free worker-image TCP relay. Composition chooses direct
+//! or relay binding, spawns the accept loop, and owns cancellation.
 //!
 //! Never logs request/response bodies or full URIs (only the host being
 //! allowed/denied, at `debug` level) — secret material in query strings or
 //! headers must never reach the logs.
 
-use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::action::NetworkPolicy;
+use base64::Engine as _;
+use bollard::Docker;
+use bollard::container::{
+    Config, CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions,
+    StartContainerOptions,
+};
+use bollard::errors::Error as DockerError;
+use bollard::models::HostConfig;
+use ironclaw_host_api::{action::NetworkPolicy, ids::InvocationId};
 use ironclaw_network::{
     host_matches_host_pattern, network_denies_any_resolved_ip, network_denies_resolved_ip,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
+use super::attribution;
 use super::ca::{SandboxCertificateAuthority, normalize_host};
-use super::credential_firewall::SandboxCredentialFirewall;
-use super::credential_swap::SandboxCredentialSwap;
+use super::credential_firewall::SandboxCredentialConnectionIdentity;
+use super::credential_swap::SandboxCredentialRuntime;
 use super::tls_intercept::{self, TlsInterceptConfig, VerifiedOriginConnector};
-use crate::obligations::RuntimeSecretInjectionStore;
 
 /// Hard ceiling on concurrent client connections the proxy will service at
-/// once. The proxy binds `0.0.0.0` on the internal egress network and is
-/// reachable from *inside* the sandboxed container — treat that container as
+/// once. The proxy is reachable from *inside* the sandboxed container —
+/// treat that container as
 /// potentially adversarial (prompt injection or hostile code running there
 /// is in-scope for this design) and never let it force unbounded task/socket
 /// growth on the host by opening connections faster than they drain.
@@ -48,21 +56,36 @@ use crate::obligations::RuntimeSecretInjectionStore;
 /// `curl`s, package installs, etc.) while still being a real ceiling.
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
 
+const PROXY_V2_SIGNATURE: [u8; 12] = *b"\r\n\r\n\0\r\nQUIT\n";
+const PROXY_V2_FIXED_HEADER_BYTES: usize = 16;
+const PROXY_V2_IPV4_ADDRESS_BYTES: usize = 12;
+const PROXY_V2_IPV6_ADDRESS_BYTES: usize = 36;
+const PROXY_V2_MAX_ADDRESS_BYTES: usize = PROXY_V2_IPV6_ADDRESS_BYTES;
+const PROXY_V2_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+const VM_RELAY_CONTAINER_NAME: &str = "ironclaw-sandbox-egress-relay";
+const VM_RELAY_LABEL_KEY: &str = "ironclaw.sandbox-egress-relay";
+const VM_RELAY_LABEL_VALUE: &str = "true";
+const VM_RELAY_OWNER_LABEL_KEY: &str = "ironclaw.sandbox-egress-relay.owner";
+const VM_RELAY_TARGET_HOST: &str = "host.docker.internal";
+const VM_RELAY_MEMORY_BYTES: i64 = 64 * 1024 * 1024;
+const VM_RELAY_PIDS_LIMIT: i64 = 64;
+
 /// Hard ceiling on a single request-line/header line's byte length. Real
 /// HTTP headers are a few hundred bytes at most; this only exists to stop an
 /// adversarial or buggy client inside the sandbox from making
 /// [`read_request_head`] buffer an unbounded line.
-const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+pub(super) const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
 
 /// Hard ceiling on the sum of header bytes (request line plus every header
 /// line) for one request — bounds total allocation even across many lines
 /// that each individually stay under [`MAX_HEADER_LINE_BYTES`].
-const MAX_TOTAL_HEADER_BYTES: usize = 32 * 1024;
+pub(super) const MAX_TOTAL_HEADER_BYTES: usize = 32 * 1024;
 
 /// Hard ceiling on header line COUNT — bounds allocation (one `String` per
 /// line, in [`RequestHead::header_lines`]) from many small lines that would
 /// each individually pass both byte caps above.
-const MAX_HEADER_LINES: usize = 200;
+pub(super) const MAX_HEADER_LINES: usize = 200;
 
 /// Resolver seam for the dial-time private-IP guard (E2 hardening 1): the
 /// production impl below does real DNS; tests inject a fixed-address
@@ -113,6 +136,10 @@ enum DenyReason {
     /// A plain-HTTP request-target that doesn't parse as an absolute URI at
     /// all — nothing to allowlist-check against.
     MalformedRequestTarget,
+    /// A credential placeholder appeared in plaintext request metadata. The
+    /// static credential lane is HTTPS-only; never disclose even inert
+    /// placeholder bytes to a plaintext origin.
+    PlainHttpCredentialPlaceholder,
     /// The resolved dial address is private, loopback, link-local, CGNAT, or
     /// otherwise reserved (E2 hardening 1 / SSRF guard). Collapses every
     /// matched range to one reason — see [`denied_ip_reason`]'s doc for why.
@@ -131,6 +158,7 @@ impl DenyReason {
             Self::ConnectPortNotPermitted => "connect_port_not_443",
             Self::PlainHttpPortNotPermitted => "plain_http_port_not_80",
             Self::MalformedRequestTarget => "malformed_request_target",
+            Self::PlainHttpCredentialPlaceholder => "credential_placeholder_requires_https",
             Self::PrivateAddress => "private_or_reserved_ip",
             Self::NoAddressesResolved => "no_addresses_resolved",
         }
@@ -145,6 +173,9 @@ impl DenyReason {
             Self::ConnectPortNotPermitted => "port not permitted: CONNECT is restricted to 443",
             Self::PlainHttpPortNotPermitted => "port not permitted: plain HTTP is restricted to 80",
             Self::MalformedRequestTarget => "malformed request target",
+            Self::PlainHttpCredentialPlaceholder => {
+                "credential placeholders require mediated HTTPS"
+            }
             Self::PrivateAddress => "resolved address is private",
             Self::NoAddressesResolved => "host did not resolve to any address",
         }
@@ -219,6 +250,240 @@ pub enum EgressProxyError {
     BindFailed { reason: String },
     #[error("failed to set up TLS interception for the egress proxy: {reason}")]
     TlsInterceptSetupFailed { reason: String },
+    #[error("failed to start the VM-backed sandbox egress relay: {reason}")]
+    RelayStartFailed { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerSourceMode {
+    /// Trust only the kernel-reported TCP peer. This is the native Linux
+    /// bridge-gateway topology and never consumes client-authored metadata.
+    Direct,
+    /// Consume one bounded PROXY v2 address preface from a loopback peer.
+    /// This mode exists only on the dedicated host-loopback listener used by
+    /// the VM relay; it is never enabled on the direct bridge listener.
+    TrustedProxyV2FromLoopback,
+}
+
+struct VmEgressRelay {
+    docker: Docker,
+    container_id: String,
+    owner_token: String,
+}
+
+impl VmEgressRelay {
+    async fn start(port: u16) -> Result<Self, EgressProxyError> {
+        let docker = super::connect_docker_with_retry().await.map_err(|error| {
+            EgressProxyError::RelayStartFailed {
+                reason: format!("Docker is unavailable: {error}"),
+            }
+        })?;
+        ensure_vm_relay_name_available(&docker).await?;
+        let owner_token = uuid::Uuid::new_v4().to_string();
+
+        let image = std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
+            .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
+            .unwrap_or_else(|_| super::DEFAULT_IMAGE.to_string());
+        let labels = HashMap::from([
+            (
+                VM_RELAY_LABEL_KEY.to_string(),
+                VM_RELAY_LABEL_VALUE.to_string(),
+            ),
+            (VM_RELAY_OWNER_LABEL_KEY.to_string(), owner_token.clone()),
+        ]);
+        let port = port.to_string();
+        let host_config = HostConfig {
+            auto_remove: Some(false),
+            network_mode: Some("host".to_string()),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            readonly_rootfs: Some(true),
+            pids_limit: Some(VM_RELAY_PIDS_LIMIT),
+            memory: Some(VM_RELAY_MEMORY_BYTES),
+            memory_swap: Some(VM_RELAY_MEMORY_BYTES),
+            ..Default::default()
+        };
+        let config = Config {
+            image: Some(image),
+            entrypoint: Some(vec![
+                "python3".to_string(),
+                "/usr/local/bin/sandbox-egress-relay".to_string(),
+            ]),
+            cmd: Some(vec![
+                "--listen-host".to_string(),
+                super::broker::SANDBOX_EGRESS_NETWORK_GATEWAY.to_string(),
+                "--listen-port".to_string(),
+                port.clone(),
+                "--target-host".to_string(),
+                VM_RELAY_TARGET_HOST.to_string(),
+                "--target-port".to_string(),
+                port,
+            ]),
+            env: Some(vec!["PYTHONDONTWRITEBYTECODE=1".to_string()]),
+            labels: Some(labels),
+            host_config: Some(host_config),
+            user: Some("1000:1000".to_string()),
+            attach_stdout: Some(false),
+            attach_stderr: Some(false),
+            ..Default::default()
+        };
+
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: VM_RELAY_CONTAINER_NAME.to_string(),
+                    platform: None,
+                }),
+                config,
+            )
+            .await
+            .map_err(|error| EgressProxyError::RelayStartFailed {
+                reason: format!("relay container creation failed: {error}"),
+            })?;
+
+        if let Err(error) = docker
+            .start_container(&created.id, None::<StartContainerOptions<String>>)
+            .await
+        {
+            let _ = remove_owned_vm_relay_container(&docker, &created.id, &owner_token).await;
+            return Err(EgressProxyError::RelayStartFailed {
+                reason: format!("relay container start failed: {error}"),
+            });
+        }
+
+        // The relay exits immediately if it cannot bind the VM bridge
+        // gateway. Give that failure a bounded window to surface before
+        // declaring the topology ready.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let inspected = docker
+            .inspect_container(&created.id, None::<InspectContainerOptions>)
+            .await;
+        let running = inspected
+            .as_ref()
+            .ok()
+            .and_then(|container| container.state.as_ref())
+            .and_then(|state| state.running)
+            .unwrap_or(false);
+        if !running {
+            let reason = inspected.err().map_or_else(
+                || "relay process exited during startup".to_string(),
+                |error| format!("relay readiness inspection failed: {error}"),
+            );
+            let _ = remove_owned_vm_relay_container(&docker, &created.id, &owner_token).await;
+            return Err(EgressProxyError::RelayStartFailed { reason });
+        }
+
+        Ok(Self {
+            docker,
+            container_id: created.id,
+            owner_token,
+        })
+    }
+
+    async fn shutdown(self) -> Result<(), EgressProxyError> {
+        remove_owned_vm_relay_container(&self.docker, &self.container_id, &self.owner_token).await
+    }
+}
+
+async fn remove_owned_vm_relay_container(
+    docker: &Docker,
+    container: &str,
+    owner_token: &str,
+) -> Result<(), EgressProxyError> {
+    let existing = match docker
+        .inspect_container(container, None::<InspectContainerOptions>)
+        .await
+    {
+        Ok(existing) => existing,
+        Err(DockerError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Ok(()),
+        Err(error) => {
+            return Err(EgressProxyError::RelayStartFailed {
+                reason: format!("relay ownership inspection failed: {error}"),
+            });
+        }
+    };
+    let owner_matches = existing
+        .config
+        .and_then(|config| config.labels)
+        .and_then(|labels| labels.get(VM_RELAY_OWNER_LABEL_KEY).cloned())
+        .as_deref()
+        == Some(owner_token);
+    if !owner_matches {
+        return Err(EgressProxyError::RelayStartFailed {
+            reason: "relay ownership changed before cleanup".to_string(),
+        });
+    }
+    docker
+        .remove_container(
+            container,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .or_else(ignore_missing_container)
+        .map_err(|error| EgressProxyError::RelayStartFailed {
+            reason: format!("relay container cleanup failed: {error}"),
+        })
+}
+
+fn ignore_missing_container(error: DockerError) -> Result<(), DockerError> {
+    match error {
+        DockerError::DockerResponseServerError {
+            status_code: 404, ..
+        } => Ok(()),
+        error => Err(error),
+    }
+}
+
+async fn ensure_vm_relay_name_available(docker: &Docker) -> Result<(), EgressProxyError> {
+    let existing = match docker
+        .inspect_container(VM_RELAY_CONTAINER_NAME, None::<InspectContainerOptions>)
+        .await
+    {
+        Ok(existing) => existing,
+        Err(DockerError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Ok(()),
+        Err(error) => {
+            return Err(EgressProxyError::RelayStartFailed {
+                reason: format!("stale relay inspection failed: {error}"),
+            });
+        }
+    };
+    let labels = existing
+        .config
+        .and_then(|config| config.labels)
+        .unwrap_or_default();
+    let owned = labels.get(VM_RELAY_LABEL_KEY).map(String::as_str) == Some(VM_RELAY_LABEL_VALUE);
+    if !owned {
+        return Err(EgressProxyError::RelayStartFailed {
+            reason: format!(
+                "container name {VM_RELAY_CONTAINER_NAME:?} is occupied without the IronClaw relay label"
+            ),
+        });
+    }
+    let Some(owner_token) = labels.get(VM_RELAY_OWNER_LABEL_KEY) else {
+        return Err(EgressProxyError::RelayStartFailed {
+            reason: format!(
+                "container name {VM_RELAY_CONTAINER_NAME:?} is occupied without an instance owner label"
+            ),
+        });
+    };
+    let running = existing
+        .state
+        .as_ref()
+        .and_then(|state| state.running)
+        .unwrap_or(false);
+    if running {
+        return Err(EgressProxyError::RelayStartFailed {
+            reason: "another IronClaw sandbox egress relay is already active".to_string(),
+        });
+    }
+    remove_owned_vm_relay_container(docker, VM_RELAY_CONTAINER_NAME, owner_token).await
 }
 
 /// The forward/CONNECT proxy, not yet bound to a socket.
@@ -250,6 +515,22 @@ pub struct EgressAllowlistProxy {
     /// with intercept configured) is proven independently of whether this
     /// field is populated at all.
     tls_intercept: Option<Arc<TlsInterceptConfig>>,
+    /// The connection-attribution resolver (`attribution` module) this proxy
+    /// consults to name the `{tenant, user}` behind a peer address before
+    /// handing it to the credential firewall — see [`with_attribution_resolver`]
+    /// (Self::with_attribution_resolver). `None` reproduces the
+    /// pre-attribution posture (every intercepted connection's identity is
+    /// `None`, so the credential firewall's `authorize` fails closed with
+    /// `AttributionFailed` for any request that actually carries a
+    /// placeholder): the one production door to `Some` is
+    /// [`bind_sandbox_egress_proxy_with_tls_intercept`], mirroring
+    /// `tls_intercept` immediately above. Held as `Arc<dyn
+    /// attribution::ResolveAttribution>` rather than the concrete
+    /// `Arc<ConnectionAttributionResolver>` composition wires, so this
+    /// module's own tests can inject a fake `NetworkContainerLookup`-backed
+    /// resolver without a Docker daemon — see `attribution::ResolveAttribution`'s
+    /// doc for why this seam exists.
+    attribution: Option<Arc<dyn attribution::ResolveAttribution>>,
 }
 
 impl EgressAllowlistProxy {
@@ -260,6 +541,7 @@ impl EgressAllowlistProxy {
             deny_private_ips: true,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         }
     }
 
@@ -274,6 +556,21 @@ impl EgressAllowlistProxy {
         self
     }
 
+    /// Wires the connection-attribution resolver this proxy consults on
+    /// every intercepted (bound-host) CONNECT. `pub(crate)`: the only
+    /// caller is [`bind_sandbox_egress_proxy_with_tls_intercept`] below,
+    /// which is handed the SAME `Arc<ConnectionAttributionResolver>`
+    /// composition already shares with the exec transport and the reaper
+    /// (`ironclaw_reborn_composition::user_sandbox_process_binding`)
+    /// — never a second, independently constructed resolver.
+    pub(crate) fn with_attribution_resolver(
+        mut self,
+        attribution: Arc<dyn attribution::ResolveAttribution>,
+    ) -> Self {
+        self.attribution = Some(attribution);
+        self
+    }
+
     /// Binds `bind_addr` (e.g. `"127.0.0.1:0"` for tests, `"0.0.0.0:0"` in
     /// production — see composition's spawn task for why) and returns the
     /// bound proxy plus its resolved local address, so the caller can read
@@ -282,6 +579,15 @@ impl EgressAllowlistProxy {
     pub async fn bind(
         self,
         bind_addr: &str,
+    ) -> Result<BoundEgressAllowlistProxy, EgressProxyError> {
+        self.bind_with_peer_source(bind_addr, PeerSourceMode::Direct)
+            .await
+    }
+
+    async fn bind_with_peer_source(
+        self,
+        bind_addr: &str,
+        peer_source_mode: PeerSourceMode,
     ) -> Result<BoundEgressAllowlistProxy, EgressProxyError> {
         let listener =
             TcpListener::bind(bind_addr)
@@ -296,6 +602,8 @@ impl EgressAllowlistProxy {
             deny_private_ips: self.deny_private_ips,
             max_connections: self.max_connections,
             tls_intercept: self.tls_intercept,
+            attribution: self.attribution,
+            peer_source_mode,
         })
     }
 }
@@ -362,25 +670,50 @@ fn interception_bound_hosts(policy: &NetworkPolicy) -> HashSet<String> {
 /// (`ironclaw_reborn_composition::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy`)
 /// to bind a proxy without an intercept config.
 ///
-/// The credential swap's registry/firewall/injection-store are freshly
-/// constructed here, scoped to this one proxy instance — all three
-/// constructors are dependency-free (`::new()`), matching how
-/// `services.rs` builds its own standalone `RuntimeSecretInjectionStore`.
-/// Nothing yet stages a live grant into the returned proxy's
-/// `SandboxCredentialFirewall` or mints a placeholder into its
-/// `CredentialPlaceholderRegistry` — that is a separate, not-yet-built
-/// feature (capability-dispatch obligation staging that hands a container
-/// an `icsbx_` placeholder ahead of a shell invocation; nothing in this
-/// workspace calls `CredentialPlaceholderRegistry::get_or_create` or
-/// `SandboxCredentialFirewall::stage` outside tests today). Until that
-/// lands, every `icsbx_`-shaped token this proxy's intercepted connections
-/// see resolves to GRANT-DENIAL and is stripped (D5) — this wiring is
-/// strictly additive to the prior plain-tunnel posture: it activates the
-/// interception + swap MACHINERY and fails safe (strip, never forward)
-/// rather than ever leaking a secret through an ungranted connection.
+/// `credential_runtime` is constructed once by composition and shared with
+/// `HostRuntimeServices`. The proxy, obligation lifecycle, and host HTTP
+/// egress adapter therefore use the exact same placeholder/firewall/injection
+/// bundle; this factory never constructs a disconnected credential store.
+/// Production Basic/Bearer grants are staged by the obligation lifecycle and
+/// resolved here from attributed placeholder-bearing requests. Secret
+/// material remains host-side and the resulting origin request is dispatched
+/// through the attached [`crate::RuntimeHttpEgress`] service. Unknown,
+/// expired, cross-user, or otherwise unauthorized placeholders still fail
+/// closed before any credential can be presented to an origin.
+///
+/// `attribution` is the SAME `ConnectionAttributionResolver` instance
+/// composition already shares with the exec transport and the reaper
+/// (`ironclaw_reborn_composition::user_sandbox_process_binding`)
+/// — `None` only in the rare shape where a caller genuinely has no
+/// attribution resolver to wire (today: none in production; every real
+/// caller has Docker connectivity by the time it reaches this factory,
+/// since the same connectivity already backs the user sandbox transport).
+/// A `None` here means every intercepted connection's identity resolves to
+/// `None`, which the credential firewall fails closed on
+/// (`AttributionFailed`) the moment a request actually carries a
+/// placeholder — never a forward-without-attribution.
 pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
     bind_addr: &str,
     policy: NetworkPolicy,
+    attribution: Option<Arc<attribution::ConnectionAttributionResolver>>,
+    credential_runtime: SandboxCredentialRuntime,
+) -> Result<SandboxEgressProxyBinding, EgressProxyError> {
+    bind_sandbox_egress_proxy(
+        bind_addr,
+        policy,
+        attribution,
+        credential_runtime,
+        PeerSourceMode::Direct,
+    )
+    .await
+}
+
+async fn bind_sandbox_egress_proxy(
+    bind_addr: &str,
+    policy: NetworkPolicy,
+    attribution: Option<Arc<attribution::ConnectionAttributionResolver>>,
+    credential_runtime: SandboxCredentialRuntime,
+    peer_source_mode: PeerSourceMode,
 ) -> Result<SandboxEgressProxyBinding, EgressProxyError> {
     let bound_hosts = interception_bound_hosts(&policy);
     let ca = SandboxCertificateAuthority::generate().map_err(|error| {
@@ -404,22 +737,22 @@ pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
             reason: error.to_string(),
         }
     })?;
-    let credential_swap = SandboxCredentialSwap::new(
-        Arc::new(ironclaw_secrets::CredentialPlaceholderRegistry::new()),
-        Arc::new(SandboxCredentialFirewall::new()),
-        RuntimeSecretInjectionStore::new(),
-    );
+    let credential_swap = credential_runtime.credential_swap();
     let tls_intercept_config = Arc::new(
         TlsInterceptConfig::new(ca, bound_hosts, origin_connector)
             .with_credential_swap(credential_swap),
     );
-    let proxy = EgressAllowlistProxy::new(policy)
-        .with_tls_intercept(tls_intercept_config)
-        .bind(bind_addr)
+    let mut builder = EgressAllowlistProxy::new(policy).with_tls_intercept(tls_intercept_config);
+    if let Some(attribution) = attribution {
+        builder = builder.with_attribution_resolver(attribution);
+    }
+    let proxy = builder
+        .bind_with_peer_source(bind_addr, peer_source_mode)
         .await?;
     Ok(SandboxEgressProxyBinding {
         proxy,
         ca_bundle_pem,
+        vm_relay: None,
     })
 }
 
@@ -429,7 +762,7 @@ pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
 /// (`SandboxCertificateAuthority::build_container_trust_bundle_pem` — system
 /// roots plus this CA's own public root certificate, no private key
 /// material). Composition
-/// (`ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`)
+/// (`ironclaw_reborn_composition::user_sandbox_process_binding`)
 /// threads `ca_bundle_pem` into
 /// [`super::RebornSandboxConfig::with_ca_bundle_pem`] so every sandbox
 /// container this proxy instance serves trusts the exact CA that mints its
@@ -438,6 +771,66 @@ pub async fn bind_sandbox_egress_proxy_with_tls_intercept(
 pub struct SandboxEgressProxyBinding {
     pub proxy: BoundEgressAllowlistProxy,
     pub ca_bundle_pem: String,
+    vm_relay: Option<VmEgressRelay>,
+}
+
+impl SandboxEgressProxyBinding {
+    /// Bind the host proxy to loopback and place the secret-free worker-image
+    /// relay in the Docker VM's host network. The listener accepts PROXY v2
+    /// source metadata only in this topology; the native factory above stays
+    /// in direct mode and cannot be tricked into consuming it.
+    pub async fn bind_vm_backed_relay(
+        bind_addr: &str,
+        policy: NetworkPolicy,
+        attribution: Option<Arc<attribution::ConnectionAttributionResolver>>,
+        credential_runtime: SandboxCredentialRuntime,
+    ) -> Result<Self, EgressProxyError> {
+        let mut binding = bind_sandbox_egress_proxy(
+            bind_addr,
+            policy,
+            attribution,
+            credential_runtime,
+            PeerSourceMode::TrustedProxyV2FromLoopback,
+        )
+        .await?;
+        let relay = VmEgressRelay::start(binding.proxy.local_addr().port()).await?;
+        binding.vm_relay = Some(relay);
+        Ok(binding)
+    }
+
+    /// Serve the existing allowlist/TLS/credential pipeline and clean up the
+    /// optional transport-only VM relay when the accept loop stops.
+    pub async fn serve(self, shutdown: watch::Receiver<bool>) {
+        let Self {
+            proxy,
+            ca_bundle_pem: _,
+            vm_relay,
+        } = self;
+        proxy.serve(shutdown).await;
+        if let Some(relay) = vm_relay
+            && let Err(error) = relay.shutdown().await
+        {
+            tracing::debug!(?error, "sandbox egress relay cleanup failed");
+        }
+    }
+
+    /// Opaque per-boot ownership token used only for deterministic forced
+    /// cleanup. It is a Docker label value, never relay process input.
+    pub fn vm_relay_owner_token(&self) -> Option<&str> {
+        self.vm_relay
+            .as_ref()
+            .map(|relay| relay.owner_token.as_str())
+    }
+
+    /// Idempotent forced-shutdown cleanup for this exact relay instance.
+    pub async fn cleanup_vm_backed_relay(owner_token: &str) -> Result<(), EgressProxyError> {
+        let docker = super::connect_docker_with_retry().await.map_err(|error| {
+            EgressProxyError::RelayStartFailed {
+                reason: format!("Docker is unavailable during relay cleanup: {error}"),
+            }
+        })?;
+        remove_owned_vm_relay_container(&docker, VM_RELAY_CONTAINER_NAME, owner_token).await
+    }
 }
 
 /// A proxy bound to a real local address, ready to `serve`.
@@ -448,6 +841,8 @@ pub struct BoundEgressAllowlistProxy {
     deny_private_ips: bool,
     max_connections: usize,
     tls_intercept: Option<Arc<TlsInterceptConfig>>,
+    attribution: Option<Arc<dyn attribution::ResolveAttribution>>,
+    peer_source_mode: PeerSourceMode,
 }
 
 impl BoundEgressAllowlistProxy {
@@ -460,19 +855,6 @@ impl BoundEgressAllowlistProxy {
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
     }
 
-    /// Test-support only: whether this bound proxy has TLS interception (and
-    /// therefore W6 phase 2's credential swap) wired in. Mirrors the
-    /// production call site —
-    /// `ironclaw_reborn_composition::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy`
-    /// reads this right after `bind` and threads it onto
-    /// `SandboxEgressProxyRuntimeHandle` — so an integration test can assert
-    /// the production factory actually wired the interception seam, not
-    /// merely that construction returned `Ok`.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn tls_intercept_is_active(&self) -> bool {
-        self.tls_intercept.is_some()
-    }
-
     /// Accept loop; spawns one task per connection, capped at
     /// [`Self::max_connections`] concurrently in flight — a connection
     /// accepted beyond the cap is closed immediately rather than queued or
@@ -481,6 +863,7 @@ impl BoundEgressAllowlistProxy {
     /// finish on their own, no new ones are accepted after that point.
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) {
         let connection_slots = Arc::new(Semaphore::new(self.max_connections));
+        let peer_source_mode = self.peer_source_mode;
         loop {
             tokio::select! {
                 biased;
@@ -493,7 +876,7 @@ impl BoundEgressAllowlistProxy {
                 }
                 accepted = self.listener.accept() => {
                     match accepted {
-                        Ok((stream, _peer_addr)) => {
+                        Ok((mut stream, kernel_peer_addr)) => {
                             let Ok(permit) = Arc::clone(&connection_slots).try_acquire_owned()
                             else {
                                 tracing::debug!(
@@ -508,14 +891,33 @@ impl BoundEgressAllowlistProxy {
                             let resolver = Arc::clone(&self.resolver);
                             let deny_private_ips = self.deny_private_ips;
                             let tls_intercept = self.tls_intercept.clone();
+                            let attribution = self.attribution.clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
+                                let peer_addr = match resolve_peer_addr(
+                                    &mut stream,
+                                    kernel_peer_addr,
+                                    peer_source_mode,
+                                )
+                                .await
+                                {
+                                    Ok(peer_addr) => peer_addr,
+                                    Err(error) => {
+                                        tracing::debug!(
+                                            ?error,
+                                            "egress proxy rejected source metadata"
+                                        );
+                                        return;
+                                    }
+                                };
                                 if let Err(error) = handle_connection(
                                     stream,
+                                    peer_addr,
                                     policy,
                                     resolver,
                                     deny_private_ips,
                                     tls_intercept,
+                                    attribution,
                                 )
                                 .await
                                 {
@@ -530,6 +932,100 @@ impl BoundEgressAllowlistProxy {
                 }
             }
         }
+    }
+}
+
+async fn resolve_peer_addr(
+    stream: &mut TcpStream,
+    kernel_peer_addr: SocketAddr,
+    mode: PeerSourceMode,
+) -> std::io::Result<SocketAddr> {
+    match mode {
+        PeerSourceMode::Direct => Ok(kernel_peer_addr),
+        PeerSourceMode::TrustedProxyV2FromLoopback => {
+            if !kernel_peer_addr.ip().is_loopback() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "egress proxy: relay metadata arrived from a non-loopback peer",
+                ));
+            }
+            tokio::time::timeout(PROXY_V2_READ_TIMEOUT, read_proxy_v2_source(stream))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "egress proxy: relay metadata timed out",
+                    )
+                })?
+        }
+    }
+}
+
+async fn read_proxy_v2_source(stream: &mut TcpStream) -> std::io::Result<SocketAddr> {
+    let mut fixed = [0u8; PROXY_V2_FIXED_HEADER_BYTES];
+    stream.read_exact(&mut fixed).await?;
+    if fixed[..PROXY_V2_SIGNATURE.len()] != PROXY_V2_SIGNATURE {
+        return Err(invalid_proxy_v2("invalid signature"));
+    }
+    if fixed[12] != 0x21 {
+        return Err(invalid_proxy_v2("unsupported version or command"));
+    }
+    let payload_len = usize::from(u16::from_be_bytes([fixed[14], fixed[15]]));
+    if payload_len > PROXY_V2_MAX_ADDRESS_BYTES {
+        return Err(invalid_proxy_v2("address payload exceeds the bound"));
+    }
+    let expected_len = match fixed[13] {
+        0x11 => PROXY_V2_IPV4_ADDRESS_BYTES,
+        0x21 => PROXY_V2_IPV6_ADDRESS_BYTES,
+        _ => return Err(invalid_proxy_v2("unsupported address family or protocol")),
+    };
+    if payload_len != expected_len {
+        return Err(invalid_proxy_v2("unexpected address payload length"));
+    }
+
+    let mut payload = [0u8; PROXY_V2_MAX_ADDRESS_BYTES];
+    stream.read_exact(&mut payload[..payload_len]).await?;
+    let (source_ip, source_port_offset) = match fixed[13] {
+        0x11 => (
+            IpAddr::V4(Ipv4Addr::new(
+                payload[0], payload[1], payload[2], payload[3],
+            )),
+            8,
+        ),
+        0x21 => {
+            let mut source = [0u8; 16];
+            source.copy_from_slice(&payload[..16]);
+            (IpAddr::V6(Ipv6Addr::from(source)), 32)
+        }
+        _ => return Err(invalid_proxy_v2("unsupported address family or protocol")),
+    };
+    let source_port =
+        u16::from_be_bytes([payload[source_port_offset], payload[source_port_offset + 1]]);
+    if source_port == 0 {
+        return Err(invalid_proxy_v2("source port must be non-zero"));
+    }
+    Ok(SocketAddr::new(source_ip, source_port))
+}
+
+fn invalid_proxy_v2(reason: &'static str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("egress proxy: malformed relay metadata: {reason}"),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl BoundEgressAllowlistProxy {
+    /// Test-support only: assert the production factory wired TLS
+    /// interception before the binding moves into its serve task.
+    pub fn tls_intercept_is_active(&self) -> bool {
+        self.tls_intercept.is_some()
+    }
+
+    pub fn uses_sandbox_credential_runtime(&self, runtime: &SandboxCredentialRuntime) -> bool {
+        self.tls_intercept
+            .as_ref()
+            .is_some_and(|config| config.uses_sandbox_credential_runtime(runtime))
     }
 }
 
@@ -563,6 +1059,47 @@ struct RequestHead {
     /// Raw header lines exactly as read (each still ending in `\r\n`),
     /// forwarded verbatim on the allow path.
     header_lines: Vec<String>,
+}
+
+/// Extracts the host-generated invocation identity from standard HTTP proxy
+/// authentication. The sandbox command receives this opaque value as the
+/// username in its proxy URL, so ordinary clients place it in
+/// `Proxy-Authorization: Basic ...` on CONNECT. It is not a provider secret;
+/// it only narrows a live host-side credential window to one invocation.
+///
+/// Missing, duplicated, malformed, or password-bearing values deliberately
+/// collapse to `None`. Uncredentialed traffic can still use the allowlisted
+/// proxy, but a placeholder-bearing request then fails closed at the
+/// credential firewall.
+fn proxy_invocation_identity(head: &RequestHead) -> Option<InvocationId> {
+    let mut encoded = None;
+    for line in &head.header_lines {
+        let Some((name, raw_value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("proxy-authorization") {
+            continue;
+        }
+        if encoded.is_some() {
+            return None;
+        }
+        let value = raw_value.trim_matches([' ', '\t']);
+        let (scheme, value) = value.split_once(' ')?;
+        if !scheme.eq_ignore_ascii_case("basic") || value.is_empty() {
+            return None;
+        }
+        encoded = Some(value);
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded?)
+        .ok()?;
+    let decoded = std::str::from_utf8(&decoded).ok()?;
+    let invocation = decoded.strip_suffix(':')?;
+    if invocation.contains(':') {
+        return None;
+    }
+    InvocationId::parse(invocation).ok()
 }
 
 /// `read_line`-alike that never buffers more than `max_bytes` for a single
@@ -687,10 +1224,12 @@ where
 
 async fn handle_connection(
     stream: TcpStream,
+    peer_addr: SocketAddr,
     policy: Arc<NetworkPolicy>,
     resolver: Arc<dyn HostResolver>,
     deny_private_ips: bool,
     tls_intercept: Option<Arc<TlsInterceptConfig>>,
+    attribution: Option<Arc<dyn attribution::ResolveAttribution>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let head = match read_request_head(&mut reader).await {
@@ -719,7 +1258,12 @@ async fn handle_connection(
             &policy,
             resolver.as_ref(),
             deny_private_ips,
-            tls_intercept.as_deref(),
+            InterceptionContext {
+                tls_intercept: tls_intercept.as_deref(),
+                peer_addr,
+                attribution: attribution.as_deref(),
+                invocation_id: proxy_invocation_identity(&head),
+            },
         )
         .await
     } else {
@@ -738,18 +1282,38 @@ async fn handle_connection(
 /// **W6 phase 1:** once a target passes those checks, an allowed host is
 /// further split into BOUND (terminate TLS via `tls_intercept`, see D1 in
 /// that module's doc) or UNBOUND (unchanged opaque `copy_bidirectional`
-/// tunnel below). `tls_intercept` is `None` in every production path today
-/// (see [`EgressAllowlistProxy::new`]), so this split is a no-op in
-/// production until something wires a [`TlsInterceptConfig`] in — every host
-/// takes the unbound branch, exactly as before this phase.
+/// tunnel below). The production sandbox factory always supplies
+/// `tls_intercept`: exact allowlist hosts take the bound path while
+/// wildcard-only hosts remain opaque tunnels as documented by
+/// [`interception_bound_hosts`].
+/// W6's per-connection interception inputs, bundled to keep
+/// [`handle_connect`] under clippy's argument-count ceiling now that
+/// connection attribution added a third input (`peer_addr`) alongside
+/// `tls_intercept`: these three only ever matter together — `tls_intercept`
+/// gates whether interception happens at all, and `peer_addr`/`attribution`
+/// only get consulted once a host is actually bound (see the identity
+/// resolution inside [`handle_connect`]).
+struct InterceptionContext<'a> {
+    tls_intercept: Option<&'a TlsInterceptConfig>,
+    peer_addr: SocketAddr,
+    attribution: Option<&'a dyn attribution::ResolveAttribution>,
+    invocation_id: Option<InvocationId>,
+}
+
 async fn handle_connect(
     mut client: BufReader<TcpStream>,
     target: &str,
     policy: &NetworkPolicy,
     resolver: &dyn HostResolver,
     deny_private_ips: bool,
-    tls_intercept: Option<&TlsInterceptConfig>,
+    interception: InterceptionContext<'_>,
 ) -> std::io::Result<()> {
+    let InterceptionContext {
+        tls_intercept,
+        peer_addr,
+        attribution,
+        invocation_id,
+    } = interception;
     // Single normalization point: DNS hostnames are case-insensitive, and
     // every downstream use of `host` in this function treats it that way
     // (`host_allowed` and `TlsInterceptConfig::is_bound`/`bind` canonicalize
@@ -877,14 +1441,40 @@ async fn handle_connect(
         // just be dropped.
         let leftover = client.buffer().to_vec();
         let raw_client = client.into_inner();
-        // Attribution (`ConnectionAttributionResolver`) is not consulted by
-        // this crate's proxy dispatch yet, so this proxy cannot name the peer's
-        // `{tenant, user}` — `identity: None`. That is deliberately fail-closed
-        // rather than convenient: with a credential swap configured, an
-        // unattributed connection presenting a placeholder is a
-        // CONNECTION-DENIAL, so no credential can be injected before
-        // attribution is actually wired into this dispatch path.
-        let connection = tls_intercept::InterceptedConnection::default();
+        // Resolve the peer's `{tenant, user}` from the kernel-verified
+        // `peer_addr` this connection was accepted on — never from anything
+        // container-authored, which could be forged. `attribution` is
+        // `None` when this proxy wasn't wired with a resolver (every
+        // non-production/no-Docker test path); a wired resolver that can't
+        // attribute this peer (unknown IP, more than one container
+        // reporting it, malformed labels, a Docker query error) returns
+        // `Unattributed`. Either way `owned_identity` ends up `None`, which
+        // `SandboxCredentialFirewall::authorize` (via
+        // `SandboxCredentialSwap::rewrite_request_head`) turns into
+        // `Err(AttributionFailed)` — a CONNECTION-DENIAL, not a forward —
+        // the instant a request on this connection actually carries a
+        // placeholder. See `attribution`'s module doc for why source IP is
+        // sound here and why a duplicate/ambiguous peer address must not
+        // guess.
+        let owned_identity = match attribution {
+            Some(resolver) => match resolver.resolve_peer(peer_addr.ip()).await {
+                attribution::ConnectionAttribution::Attributed { tenant_id, user_id } => {
+                    Some((tenant_id, user_id))
+                }
+                attribution::ConnectionAttribution::Unattributed => None,
+            },
+            None => None,
+        };
+        let connection = tls_intercept::InterceptedConnection {
+            identity: owned_identity.as_ref().and_then(|(tenant_id, user_id)| {
+                invocation_id.map(|invocation_id| SandboxCredentialConnectionIdentity {
+                    tenant_id,
+                    user_id,
+                    invocation_id,
+                })
+            }),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
         if let Err(error) = tls_intercept::terminate_and_forward(
             raw_client, leftover, bound_host, dial_addr, config, connection,
         )
@@ -954,6 +1544,21 @@ async fn handle_plain_http(
     resolver: &dyn HostResolver,
     deny_private_ips: bool,
 ) -> std::io::Result<()> {
+    let mut untrusted_head = format!("{} {} HTTP/1.1\r\n", head.method, head.target);
+    for header_line in &head.header_lines {
+        untrusted_head.push_str(header_line);
+    }
+    if !super::credential_swap::placeholder_candidates(untrusted_head.as_bytes()).is_empty() {
+        let reason = DenyReason::PlainHttpCredentialPlaceholder;
+        tracing::debug!(
+            action = "deny",
+            rule = reason.audit_rule(),
+            "egress proxy: plain HTTP denied"
+        );
+        write_denied_response(&mut client, None, reason).await?;
+        return Ok(());
+    }
+
     let parsed = url::Url::parse(&head.target).ok();
     let host_only = parsed.as_ref().and_then(|url| url.host_str());
     let Some(host_only) = host_only else {
@@ -1034,11 +1639,7 @@ async fn handle_plain_http(
     };
 
     tracing::debug!(host = %host_only, action = "allow", rule = "allowlist_match", "egress proxy: plain HTTP allowed");
-    let mut request_head = format!("{} {} HTTP/1.1\r\n", head.method, head.target);
-    for header_line in &head.header_lines {
-        request_head.push_str(header_line);
-    }
-    request_head.push_str("\r\n");
+    let request_head = forwarded_plain_http_head(head);
     origin.write_all(request_head.as_bytes()).await?;
 
     // As in `handle_connect`: a request body sent in the same TCP segment
@@ -1055,10 +1656,38 @@ async fn handle_plain_http(
     Ok(())
 }
 
+fn forwarded_plain_http_head(head: &RequestHead) -> String {
+    let mut request_head = format!("{} {} HTTP/1.1\r\n", head.method, head.target);
+    for header_line in &head.header_lines {
+        if header_line
+            .split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+        {
+            continue;
+        }
+        request_head.push_str(header_line);
+    }
+    request_head.push_str("\r\n");
+    request_head
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::registry;
     use super::*;
-    use ironclaw_host_api::action::NetworkTargetPattern;
+    use crate::sandbox_process::credential_swap::{
+        SandboxCredentialRuntime, SandboxStaticCredentialGrant,
+    };
+    use ironclaw_host_api::{
+        action::{NetworkMethod, NetworkTargetPattern},
+        http::{
+            RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+            RuntimeHttpEgressResponse,
+        },
+        ids::{CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
+        resource::ResourceScope,
+    };
+    use ironclaw_secrets::{CredentialPathPolicy, CredentialTargetPolicy, SecretMaterial};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
@@ -1074,6 +1703,26 @@ mod tests {
     impl HostResolver for FixedAddrResolver {
         async fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<SocketAddr>> {
             Ok(vec![self.0])
+        }
+    }
+
+    struct AttributionHostEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for AttributionHostEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                body: b"origin saw the request\n".to_vec(),
+                saved_body: None,
+                request_bytes: 1,
+                response_bytes: 23,
+                redaction_applied: true,
+            })
         }
     }
 
@@ -1103,6 +1752,348 @@ mod tests {
             deny_private_ip_ranges: true,
             max_egress_bytes: None,
         }
+    }
+
+    fn connect_head_with_proxy_authorization(value: &str) -> RequestHead {
+        RequestHead {
+            method: "CONNECT".to_string(),
+            target: "api.github.com:443".to_string(),
+            header_lines: vec![format!("Proxy-Authorization: {value}\r\n")],
+        }
+    }
+
+    #[test]
+    fn proxy_basic_username_recovers_exact_invocation_identity() {
+        let invocation_id = InvocationId::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{invocation_id}:"));
+        let head = connect_head_with_proxy_authorization(&format!("Basic {encoded}"));
+        assert_eq!(proxy_invocation_identity(&head), Some(invocation_id));
+    }
+
+    #[test]
+    fn proxy_identity_rejects_missing_password_delimiter_and_duplicates() {
+        let invocation_id = InvocationId::new();
+        let missing_delimiter =
+            base64::engine::general_purpose::STANDARD.encode(invocation_id.to_string());
+        assert_eq!(
+            proxy_invocation_identity(&connect_head_with_proxy_authorization(&format!(
+                "Basic {missing_delimiter}"
+            ))),
+            None
+        );
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{invocation_id}:"));
+        let mut duplicate = connect_head_with_proxy_authorization(&format!("Basic {encoded}"));
+        duplicate
+            .header_lines
+            .push(format!("proxy-authorization: Basic {encoded}\r\n"));
+        assert_eq!(proxy_invocation_identity(&duplicate), None);
+    }
+
+    fn proxy_v2_ipv4_header(source: SocketAddr, destination: SocketAddr) -> Vec<u8> {
+        let (IpAddr::V4(source_ip), IpAddr::V4(destination_ip)) = (source.ip(), destination.ip())
+        else {
+            panic!("test helper requires IPv4 addresses");
+        };
+        let mut header = PROXY_V2_SIGNATURE.to_vec();
+        header.extend_from_slice(&[0x21, 0x11]);
+        header.extend_from_slice(&(PROXY_V2_IPV4_ADDRESS_BYTES as u16).to_be_bytes());
+        header.extend_from_slice(&source_ip.octets());
+        header.extend_from_slice(&destination_ip.octets());
+        header.extend_from_slice(&source.port().to_be_bytes());
+        header.extend_from_slice(&destination.port().to_be_bytes());
+        header
+    }
+
+    async fn loopback_tcp_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(listener_addr).await.unwrap();
+        let (server, kernel_peer) = listener.accept().await.unwrap();
+        (client, server, kernel_peer)
+    }
+
+    #[tokio::test]
+    async fn relay_mode_consumes_bounded_proxy_v2_source_metadata() {
+        let (mut client, mut server, kernel_peer) = loopback_tcp_pair().await;
+        let claimed_source: SocketAddr = "10.200.0.42:43123".parse().unwrap();
+        let destination: SocketAddr = "10.200.0.1:18443".parse().unwrap();
+        let mut bytes = proxy_v2_ipv4_header(claimed_source, destination);
+        bytes.extend_from_slice(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+        client.write_all(&bytes).await.unwrap();
+
+        let resolved = resolve_peer_addr(
+            &mut server,
+            kernel_peer,
+            PeerSourceMode::TrustedProxyV2FromLoopback,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, claimed_source);
+
+        let mut request = [0u8; 7];
+        server.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"CONNECT");
+    }
+
+    #[tokio::test]
+    async fn direct_mode_does_not_consume_spoofed_proxy_metadata() {
+        let (mut client, mut server, kernel_peer) = loopback_tcp_pair().await;
+        let claimed_source: SocketAddr = "10.200.0.99:41234".parse().unwrap();
+        let destination: SocketAddr = "10.200.0.1:18443".parse().unwrap();
+        client
+            .write_all(&proxy_v2_ipv4_header(claimed_source, destination))
+            .await
+            .unwrap();
+
+        let resolved = resolve_peer_addr(&mut server, kernel_peer, PeerSourceMode::Direct)
+            .await
+            .unwrap();
+        assert_eq!(resolved, kernel_peer);
+
+        let mut signature = [0u8; PROXY_V2_SIGNATURE.len()];
+        server.read_exact(&mut signature).await.unwrap();
+        assert_eq!(signature, PROXY_V2_SIGNATURE);
+    }
+
+    #[tokio::test]
+    async fn relay_mode_rejects_non_loopback_metadata_sources() {
+        let (_client, mut server, _kernel_peer) = loopback_tcp_pair().await;
+        let untrusted_peer: SocketAddr = "192.0.2.10:40000".parse().unwrap();
+
+        let error = resolve_peer_addr(
+            &mut server,
+            untrusted_peer,
+            PeerSourceMode::TrustedProxyV2FromLoopback,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn relay_mode_rejects_oversized_proxy_v2_metadata() {
+        let (mut client, mut server, kernel_peer) = loopback_tcp_pair().await;
+        let mut header = PROXY_V2_SIGNATURE.to_vec();
+        header.extend_from_slice(&[0x21, 0x11]);
+        header.extend_from_slice(&((PROXY_V2_MAX_ADDRESS_BYTES + 1) as u16).to_be_bytes());
+        client.write_all(&header).await.unwrap();
+
+        let error = resolve_peer_addr(
+            &mut server,
+            kernel_peer,
+            PeerSourceMode::TrustedProxyV2FromLoopback,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn relay_mode_times_out_an_incomplete_proxy_v2_preface() {
+        let (mut client, mut server, kernel_peer) = loopback_tcp_pair().await;
+        client.write_all(&PROXY_V2_SIGNATURE).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let error = resolve_peer_addr(
+            &mut server,
+            kernel_peer,
+            PeerSourceMode::TrustedProxyV2FromLoopback,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "incomplete relay metadata must fail within the production timeout"
+        );
+    }
+
+    /// Real Colima/Docker proof for the VM topology. Run explicitly after
+    /// building `ironclaw-worker:latest` from `Dockerfile.process-sandbox`.
+    #[tokio::test]
+    #[ignore = "requires a real Docker/Colima engine and the local worker image"]
+    async fn vm_relay_connects_internal_worker_and_preserves_source_ip() {
+        let docker = super::super::connect_docker_with_retry()
+            .await
+            .expect("Docker must be reachable");
+        super::super::exec_transport::ensure_default_egress_network(&docker)
+            .await
+            .expect("sandbox egress network must be ready");
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("host-loopback listener binds");
+        let port = listener.local_addr().expect("listener address").port();
+        let relay = VmEgressRelay::start(port)
+            .await
+            .expect("VM relay starts from the worker image");
+        let relay_owner = relay.owner_token.clone();
+
+        let second = VmEgressRelay::start(port).await;
+        let active_owner_was_preserved = second.is_err();
+        if let Ok(unexpected) = second {
+            let _ = unexpected.shutdown().await;
+        }
+
+        let worker_name = format!("ironclaw-egress-relay-probe-{}", uuid::Uuid::new_v4());
+        let gateway = super::super::broker::SANDBOX_EGRESS_NETWORK_GATEWAY;
+        let script = r#"import socket, sys, time
+address = (sys.argv[1], int(sys.argv[2]))
+for attempt in range(30):
+    try:
+        connection = socket.create_connection(address, timeout=1)
+        break
+    except OSError:
+        if attempt == 29:
+            raise
+        time.sleep(0.1)
+connection.sendall(b'ping')
+reply = connection.recv(2)
+connection.close()
+sys.exit(0 if reply == b'ok' else 1)
+"#;
+        let accepted = tokio::spawn(async move {
+            let (mut stream, kernel_peer) = listener.accept().await?;
+            let source = resolve_peer_addr(
+                &mut stream,
+                kernel_peer,
+                PeerSourceMode::TrustedProxyV2FromLoopback,
+            )
+            .await?;
+            let mut payload = [0u8; 4];
+            stream.read_exact(&mut payload).await?;
+            stream.write_all(b"ok").await?;
+            Ok::<_, std::io::Error>((source, payload, kernel_peer))
+        });
+
+        let mut worker_id = None;
+        let outcome = async {
+            let created = docker
+                .create_container(
+                    Some(CreateContainerOptions {
+                        name: worker_name,
+                        platform: None,
+                    }),
+                    Config {
+                        image: Some(super::super::DEFAULT_IMAGE.to_string()),
+                        entrypoint: Some(vec!["python3".to_string(), "-c".to_string()]),
+                        cmd: Some(vec![
+                            script.to_string(),
+                            gateway.to_string(),
+                            port.to_string(),
+                        ]),
+                        user: Some("1000:1000".to_string()),
+                        host_config: Some(HostConfig {
+                            network_mode: Some(
+                                super::super::broker::SANDBOX_EGRESS_NETWORK_NAME.to_string(),
+                            ),
+                            readonly_rootfs: Some(true),
+                            cap_drop: Some(vec!["ALL".to_string()]),
+                            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            worker_id = Some(created.id.clone());
+            docker
+                .start_container(&created.id, None::<StartContainerOptions<String>>)
+                .await
+                .map_err(|error| error.to_string())?;
+
+            let worker = docker
+                .inspect_container(&created.id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|error| error.to_string())?;
+            let worker_ip = worker
+                .network_settings
+                .and_then(|settings| settings.networks)
+                .and_then(|networks| {
+                    networks
+                        .get(super::super::broker::SANDBOX_EGRESS_NETWORK_NAME)
+                        .cloned()
+                })
+                .and_then(|endpoint| endpoint.ip_address)
+                .filter(|address| !address.is_empty())
+                .ok_or_else(|| "worker had no internal-network IP".to_string())?;
+            let worker_ip: IpAddr = worker_ip
+                .parse()
+                .map_err(|error| format!("worker IP was invalid: {error}"))?;
+
+            let (source, payload, kernel_peer) =
+                tokio::time::timeout(Duration::from_secs(10), accepted)
+                    .await
+                    .map_err(|_| "host listener timed out".to_string())?
+                    .map_err(|error| format!("host listener task failed: {error}"))?
+                    .map_err(|error| format!("host listener I/O failed: {error}"))?;
+
+            let relay_inspect = docker
+                .inspect_container(VM_RELAY_CONTAINER_NAME, None::<InspectContainerOptions>)
+                .await
+                .map_err(|error| error.to_string())?;
+            let relay_config = relay_inspect
+                .config
+                .ok_or_else(|| "relay inspect omitted Config".to_string())?;
+            let relay_host_config = relay_inspect
+                .host_config
+                .ok_or_else(|| "relay inspect omitted HostConfig".to_string())?;
+            let relay_labels = relay_config.labels.unwrap_or_default();
+            let relay_env = relay_config.env.unwrap_or_default();
+            let relay_mounts = relay_inspect.mounts.unwrap_or_default();
+
+            Ok::<_, String>((
+                source,
+                payload,
+                kernel_peer,
+                worker_ip,
+                relay_labels,
+                relay_env,
+                relay_mounts,
+                relay_host_config,
+            ))
+        }
+        .await;
+
+        if let Some(worker_id) = worker_id {
+            let _ = docker
+                .remove_container(
+                    &worker_id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
+        relay
+            .shutdown()
+            .await
+            .expect("owned relay cleanup succeeds");
+
+        let (source, payload, kernel_peer, worker_ip, labels, env, mounts, host_config) =
+            outcome.expect("real relay topology succeeds");
+        assert!(active_owner_was_preserved);
+        assert!(kernel_peer.ip().is_loopback());
+        assert_eq!(source.ip(), worker_ip);
+        assert_eq!(payload, *b"ping");
+        assert_eq!(labels.get(VM_RELAY_OWNER_LABEL_KEY), Some(&relay_owner));
+        assert!(mounts.is_empty(), "relay must have no mounts: {mounts:?}");
+        assert!(env.iter().any(|entry| entry == "PYTHONDONTWRITEBYTECODE=1"));
+        assert!(
+            env.iter().all(|entry| {
+                entry.starts_with("PATH=") || entry == "PYTHONDONTWRITEBYTECODE=1"
+            }),
+            "relay environment must contain no credential-bearing values: {env:?}"
+        );
+        assert_eq!(host_config.network_mode.as_deref(), Some("host"));
+        assert_eq!(host_config.readonly_rootfs, Some(true));
+        assert_eq!(host_config.cap_drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(host_config.pids_limit, Some(VM_RELAY_PIDS_LIMIT));
+        assert_eq!(host_config.memory, Some(VM_RELAY_MEMORY_BYTES));
+        assert!(host_config.binds.unwrap_or_default().is_empty());
     }
 
     /// `interception_bound_hosts` is the exact-match filter feeding
@@ -1156,9 +2147,12 @@ mod tests {
     #[tokio::test]
     async fn bind_sandbox_egress_proxy_with_tls_intercept_wires_interception_and_a_key_free_bundle()
     {
+        let credential_runtime = SandboxCredentialRuntime::new();
         let binding = bind_sandbox_egress_proxy_with_tls_intercept(
             "127.0.0.1:0",
             policy_allowing(&["pypi.org"]),
+            None,
+            credential_runtime.clone(),
         )
         .await
         .expect("binding an ephemeral port and building the CA/trust bundle should succeed");
@@ -1166,6 +2160,13 @@ mod tests {
         assert!(
             binding.proxy.tls_intercept_is_active(),
             "the production factory must always wire TLS interception"
+        );
+        assert!(
+            binding
+                .proxy
+                .uses_sandbox_credential_runtime(&credential_runtime),
+            "the production proxy must consume the caller-owned credential runtime rather than \
+             constructing disconnected stores"
         );
         assert!(
             !binding.ca_bundle_pem.is_empty(),
@@ -1230,6 +2231,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1355,6 +2357,7 @@ mod tests {
             deny_private_ips: true,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1609,6 +2612,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1645,6 +2649,75 @@ mod tests {
             "the denied host's origin must never be dialed on the plain-HTTP forward path \
              either — the allowlist check must run strictly before any connection attempt"
         );
+    }
+
+    #[tokio::test]
+    async fn plain_http_placeholder_is_denied_before_origin_dial() {
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener binds");
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let origin_saw_a_connection = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(300), origin_listener.accept()).await
+        });
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["example.com"]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: None,
+            attribution: None,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects");
+        client
+            .write_all(
+                b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer icsbx_0123456789abcdef0123456789abcdef\r\n\r\n",
+            )
+            .await
+            .expect("request writes");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response reads");
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 403"));
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+        assert!(
+            origin_saw_a_connection
+                .await
+                .expect("origin probe task did not panic")
+                .is_err(),
+            "plaintext placeholder must be rejected before origin dial"
+        );
+    }
+
+    #[test]
+    fn plain_http_forwarding_strips_proxy_authorization() {
+        let head = RequestHead {
+            method: "GET".to_string(),
+            target: "http://example.com/".to_string(),
+            header_lines: vec![
+                "Host: example.com\r\n".to_string(),
+                "Proxy-Authorization: Basic opaque-proxy-value\r\n".to_string(),
+                "X-Keep: yes\r\n".to_string(),
+            ],
+        };
+        let forwarded = forwarded_plain_http_head(&head);
+        assert!(
+            !forwarded
+                .to_ascii_lowercase()
+                .contains("proxy-authorization")
+        );
+        assert!(forwarded.contains("X-Keep: yes\r\n"));
     }
 
     /// A CONNECT target with no `:port` suffix at all (e.g. a client that
@@ -1701,6 +2774,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -1945,6 +3019,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2013,6 +3088,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2195,6 +3271,7 @@ mod tests {
             deny_private_ips: true,
             max_connections,
             tls_intercept: None,
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2299,6 +3376,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: Some(tls_intercept),
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2394,6 +3472,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: Some(Arc::clone(&tls_intercept)),
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2495,6 +3574,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: Some(Arc::clone(&tls_intercept)),
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2585,6 +3665,7 @@ mod tests {
             deny_private_ips: false,
             max_connections: MAX_CONCURRENT_CONNECTIONS,
             tls_intercept: Some(Arc::clone(&tls_intercept)),
+            attribution: None,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -2628,6 +3709,409 @@ mod tests {
             1,
             "two different-cased CONNECTs for the same effective host must share ONE \
              cached leaf, not mint/cache a separate one per casing"
+        );
+    }
+
+    // --- W8 step 1: connection attribution reaches the credential firewall ---
+    //
+    // The tests below drive the FULL accept -> resolve -> authorize path
+    // (never call the attribution resolver or the firewall directly) so they
+    // actually prove the proxy's dispatch is wired, not merely that the
+    // resolver/firewall work in isolation — a resolver-only test would pass
+    // even if the proxy never called it, which is the exact defect this pins.
+    //
+    // Both tests connect from the loopback client the proxy bind already
+    // uses (`peer_addr.ip()` is always `127.0.0.1` here — binding a second
+    // loopback alias address is not available in every sandboxed test
+    // environment), so the fake `NetworkContainerLookup` distinguishes
+    // "attributed" from "unattributed" by what it reports at that one IP,
+    // not by using a different IP per case.
+
+    /// A [`attribution::NetworkContainerLookup`] double that returns a fixed,
+    /// pre-programmed container list — lets these tests drive
+    /// [`attribution::ConnectionAttributionResolver`] without a Docker
+    /// daemon. Mirrors `attribution`'s own private `FakeLookup` test double
+    /// (not reusable across modules: it is declared inside that module's
+    /// `#[cfg(test)]` block).
+    struct FakeNetworkLookup {
+        containers: Vec<bollard::models::ContainerSummary>,
+    }
+
+    #[async_trait]
+    impl attribution::NetworkContainerLookup for FakeNetworkLookup {
+        async fn containers_on_network(
+            &self,
+            _network: &str,
+        ) -> Result<Vec<bollard::models::ContainerSummary>, crate::RuntimeProcessError> {
+            Ok(self.containers.clone())
+        }
+    }
+
+    const ATTRIBUTION_TEST_NETWORK: &str = "ironclaw-test-egress-attribution";
+    const ATTRIBUTION_TEST_LABEL_PREFIX: &str = "ironclaw";
+
+    fn container_with_ip_and_labels(
+        ip: &str,
+        tenant: &str,
+        user: &str,
+    ) -> bollard::models::ContainerSummary {
+        use bollard::models::{ContainerSummaryNetworkSettings, EndpointSettings};
+        let networks = std::collections::HashMap::from([(
+            ATTRIBUTION_TEST_NETWORK.to_string(),
+            EndpointSettings {
+                ip_address: Some(ip.to_string()),
+                ..Default::default()
+            },
+        )]);
+        let labels = std::collections::HashMap::from([
+            (
+                registry::label_tenant(ATTRIBUTION_TEST_LABEL_PREFIX),
+                tenant.to_string(),
+            ),
+            (
+                registry::label_user(ATTRIBUTION_TEST_LABEL_PREFIX),
+                user.to_string(),
+            ),
+        ]);
+        bollard::models::ContainerSummary {
+            id: Some("fake-container".to_string()),
+            labels: Some(labels),
+            network_settings: Some(ContainerSummaryNetworkSettings {
+                networks: Some(networks),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Shared harness for the two tests below: a bound host, a fake origin
+    /// echo server, and a proxy wired with TLS interception AND W6 phase 2's
+    /// credential swap (a registry + firewall + empty injection store — no
+    /// grant is ever staged, so both tests only exercise attribution, never
+    /// GRANT-DENIAL vs. GRANT). Returns the running proxy plus the minted
+    /// placeholder token so the caller can build the request head.
+    async fn attribution_test_harness(
+        attribution: Option<Arc<dyn attribution::ResolveAttribution>>,
+    ) -> (
+        SocketAddr,
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+        String,
+        &'static str,
+        InvocationId,
+    ) {
+        use super::super::ca::SandboxCertificateAuthority;
+        use super::super::tls_intercept::{TlsInterceptConfig, VerifiedOriginConnector};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let host = "attribution.bound.example.com";
+
+        let origin_ca = SandboxCertificateAuthority::generate().unwrap();
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        drop(origin_listener);
+
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let mut origin_trust = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut origin_ca.root_certificate_pem().as_bytes()) {
+            origin_trust.add(cert.unwrap()).unwrap();
+        }
+        let origin_connector =
+            VerifiedOriginConnector::for_test(tokio_rustls::TlsConnector::from(Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(origin_trust)
+                    .with_no_client_auth(),
+            )));
+
+        let tenant = TenantId::new("attribution-tenant").unwrap();
+        let user = UserId::new("attribution-user").unwrap();
+        let provider = ExtensionId::new("attribution-provider").unwrap();
+        let capability_id = CapabilityId::new("sandbox.shell").unwrap();
+        let secret_handle = SecretHandle::new("attribution-token").unwrap();
+        let scope = ResourceScope {
+            tenant_id: tenant,
+            user_id: user,
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let credential_runtime = SandboxCredentialRuntime::new();
+        let token = credential_runtime
+            .placeholder_for(&scope, &provider)
+            .expect("placeholder mints");
+        credential_runtime
+            .secret_injection_store()
+            .insert(
+                &scope,
+                &capability_id,
+                &secret_handle,
+                SecretMaterial::from("host-side-attribution-secret"),
+            )
+            .expect("secret material stages");
+        credential_runtime.open_static_window(
+            &scope,
+            &capability_id,
+            vec![SandboxStaticCredentialGrant {
+                provider_or_extension_id: provider,
+                secret_handle,
+                allowed_targets: vec![CredentialTargetPolicy {
+                    scheme: "https".to_string(),
+                    host: host.to_string(),
+                    port: None,
+                    path: CredentialPathPolicy::Prefix("/".to_string()),
+                    methods: vec![NetworkMethod::Get],
+                }],
+            }],
+            Duration::from_secs(60),
+        );
+        credential_runtime
+            .attach_http_egress(Arc::new(AttributionHostEgress))
+            .map_err(|_| "host egress was already attached")
+            .expect("host egress attaches");
+        let credential_swap = credential_runtime.credential_swap();
+        let tls_intercept = Arc::new(
+            TlsInterceptConfig::new(
+                ca,
+                std::collections::HashSet::from([host.to_string()]),
+                origin_connector,
+            )
+            .with_credential_swap(credential_swap),
+        );
+
+        let mut proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&[host]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+            tls_intercept: Some(tls_intercept),
+            attribution: None,
+        };
+        if let Some(attribution) = attribution {
+            proxy = proxy.with_attribution_resolver(attribution);
+        }
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        (
+            proxy_addr,
+            shutdown_tx,
+            serve_handle,
+            token.as_str().to_string(),
+            host,
+            scope.invocation_id,
+        )
+    }
+
+    /// CONNECTs to the bound host through the real proxy, over TLS, and
+    /// returns whatever bytes the origin echoed back within a short window —
+    /// empty if the connection was closed before (or without) reaching the
+    /// origin. `token` is embedded in an `Authorization` header so the
+    /// credential swap's `resolvable_candidates` actually finds a
+    /// registry-resolvable placeholder and calls `SandboxCredentialFirewall::
+    /// authorize` — a request with no placeholder never consults attribution
+    /// at all (see `rewrite_request_head`'s doc), so it would prove nothing
+    /// here.
+    async fn drive_placeholder_request(
+        proxy_addr: SocketAddr,
+        host: &str,
+        token: &str,
+        invocation_id: InvocationId,
+    ) -> Vec<u8> {
+        use rustls::pki_types::ServerName;
+        use tokio_rustls::TlsConnector;
+
+        let mut raw_client = TcpStream::connect(proxy_addr).await.unwrap();
+        let proxy_identity =
+            base64::engine::general_purpose::STANDARD.encode(format!("{invocation_id}:"));
+        raw_client
+            .write_all(
+                format!(
+                    "CONNECT {host}:443 HTTP/1.1\r\nProxy-Authorization: Basic {proxy_identity}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = [0u8; 128];
+        let n = raw_client.read(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"));
+
+        // Trust nothing real — this test only cares whether bytes flow, not
+        // whether the client validates the leaf, so skip cert verification
+        // entirely via a permissive `ServerCertVerifier` rather than pulling
+        // in the proxy's minted CA root.
+        let client_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify))
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let server_name = ServerName::try_from(host.to_string()).unwrap();
+        let mut client_tls = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, raw_client),
+        )
+        .await
+        .expect("client tls handshake must not hang")
+        .expect("client tls handshake succeeds against the proxy's minted leaf");
+
+        let request =
+            format!("GET / HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\r\n");
+        client_tls.write_all(request.as_bytes()).await.unwrap();
+
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            client_tls.read_to_end(&mut received),
+        )
+        .await;
+        received
+    }
+
+    /// Permissive `rustls` server-cert verifier for
+    /// `drive_placeholder_request` — these tests assert on whether the
+    /// request reached the origin, not on leaf-certificate trust (already
+    /// covered by the other tests in this module).
+    #[derive(Debug)]
+    struct NoVerify;
+
+    impl rustls::client::danger::ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    /// THE FIX'S PROOF, positive case: a connecting peer that a real
+    /// `ConnectionAttributionResolver` (backed here by a fake
+    /// `NetworkContainerLookup`, no Docker needed) can attribute to a known
+    /// `{tenant, user}` reaches `SandboxCredentialFirewall::authorize` with
+    /// the matching invocation identity — proven by the granted request
+    /// reaching canonical host HTTP egress and returning its sanitized
+    /// response. The direct-origin socket remains closed. Before the
+    /// accept-loop peer-address wiring, this
+    /// proxy could never construct anything but `identity: None`, so this
+    /// assertion is exactly the one a pre-fix build fails — see this
+    /// function's `PLANTED-RED` sibling assertion in the module's manual
+    /// verification, not a separate test (planting is done by hand against
+    /// this same test, per the task's proof requirement).
+    #[tokio::test]
+    async fn attributed_peer_reaches_the_credential_firewall_and_is_forwarded() {
+        let fake_lookup = FakeNetworkLookup {
+            containers: vec![container_with_ip_and_labels(
+                "127.0.0.1",
+                "attribution-tenant",
+                "attribution-user",
+            )],
+        };
+        let resolver: Arc<dyn attribution::ResolveAttribution> =
+            Arc::new(attribution::ConnectionAttributionResolver::with_lookup(
+                fake_lookup,
+                ATTRIBUTION_TEST_NETWORK,
+                ATTRIBUTION_TEST_LABEL_PREFIX,
+            ));
+
+        let (proxy_addr, shutdown_tx, serve_handle, token, host, invocation_id) =
+            attribution_test_harness(Some(resolver)).await;
+
+        let received = drive_placeholder_request(proxy_addr, host, &token, invocation_id).await;
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        assert!(
+            received.ends_with(b"origin saw the request\n"),
+            "an attributed peer's granted placeholder request must reach host HTTP egress; \
+             an empty response means the complete tenant/user/invocation identity never \
+             reached the firewall; response={received:?}"
+        );
+    }
+
+    /// THE FIX'S PROOF, negative case: a connecting peer the resolver cannot
+    /// attribute (no container reports this IP on the egress network) must
+    /// be a CONNECTION-DENIAL — the connection closes before the origin is
+    /// ever dialed, never a forward without credentials and never a guess.
+    /// Uses the SAME harness and the SAME placeholder-bearing request as the
+    /// positive case above; only the fake lookup's contents differ (empty —
+    /// no container anywhere claims this peer's IP).
+    #[tokio::test]
+    async fn unattributable_peer_is_denied_not_forwarded() {
+        let fake_lookup = FakeNetworkLookup { containers: vec![] };
+        let resolver: Arc<dyn attribution::ResolveAttribution> =
+            Arc::new(attribution::ConnectionAttributionResolver::with_lookup(
+                fake_lookup,
+                ATTRIBUTION_TEST_NETWORK,
+                ATTRIBUTION_TEST_LABEL_PREFIX,
+            ));
+
+        let (proxy_addr, shutdown_tx, serve_handle, token, host, invocation_id) =
+            attribution_test_harness(Some(resolver)).await;
+
+        let received = drive_placeholder_request(proxy_addr, host, &token, invocation_id).await;
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        assert!(
+            received.is_empty(),
+            "an unattributable peer's placeholder-bearing request must never reach the \
+             origin — got {received:?}, which means the connection was forwarded instead \
+             of denied"
+        );
+    }
+
+    /// Same negative outcome as `unattributable_peer_is_denied_not_forwarded`,
+    /// but for the OTHER shape of "no resolver wired into the proxy" (an
+    /// explicit `None`, e.g. today's non-Docker test/dev proxies) rather
+    /// than a resolver that looked and found nothing — pins that both
+    /// collapse to the same fail-closed `identity: None` path, never a
+    /// silent fallback to "forward anyway."
+    #[tokio::test]
+    async fn no_attribution_resolver_wired_is_also_denied_not_forwarded() {
+        let (proxy_addr, shutdown_tx, serve_handle, token, host, invocation_id) =
+            attribution_test_harness(None).await;
+
+        let received = drive_placeholder_request(proxy_addr, host, &token, invocation_id).await;
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+
+        assert!(
+            received.is_empty(),
+            "a proxy with no attribution resolver wired must deny a placeholder-bearing \
+             request, not forward it — got {received:?}"
         );
     }
 }

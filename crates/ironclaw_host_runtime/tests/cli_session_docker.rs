@@ -186,7 +186,7 @@ fn execution_context_for_scope(scope: &ResourceScope, capability: &str) -> Execu
 /// Builds a `HostRuntime` bound to a *real* per-scope sandbox container: one
 /// fresh workspace root, one `RebornSandboxConfig`, one
 /// `RebornScopedSandboxCommandTransport::connect` (Phase A's persistent-mode
-/// transport), turned into a `TenantSandboxProcessPort` via
+/// transport), turned into a `UserSandboxProcessPort` via
 /// `.into_process_port()` — the same connect/`into_process_port` pair
 /// `sandbox_cross_tenant_escape.rs` already uses for its real-Docker tests.
 /// Everything else mirrors `first_party_builtin_tools.rs`'s own
@@ -225,28 +225,28 @@ async fn runtime_for_scope(_scope: &ResourceScope) -> impl HostRuntime {
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    // The runtime policy below declares `process_backend: TenantSandbox`, so
+    // The runtime policy below declares `process_backend: UserSandbox`, so
     // `InvocationServices` resolves the process port from the dedicated
-    // tenant-sandbox slot (`with_tenant_sandbox_process_port`), not the
+    // user-sandbox slot (`with_user_sandbox_process_port`), not the
     // generic/local-host slot `with_runtime_process_port` populates — using
-    // the latter left the resolver's `tenant_sandbox_process` unset and every
-    // dispatch failed `Backend("process backend TenantSandbox is not
+    // the latter left the resolver's `user_sandbox_process` unset and every
+    // dispatch failed `Backend("process backend UserSandbox is not
     // supported by this invocation services resolver")`.
-    .with_tenant_sandbox_process_port(process_port)
+    .with_user_sandbox_process_port(process_port)
     .with_runtime_http_egress(Arc::new(UnusedRuntimeHttpEgress))
     .with_runtime_policy(EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
         requested_profile: RuntimeProfile::SecureDefault,
         resolved_profile: RuntimeProfile::SecureDefault,
         filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         // `LocalInvocationServicesResolver::validate_network_plan` only
         // accepts `DirectLogged`/`Direct` under `DeploymentMode::LocalSingleUser`
         // — under `HostedMultiTenant` (this test) it requires `Brokered` or
         // `Allowlist`, matching the `HostedSafe`/`HostedDev` production
-        // profile→backend mapping for `ProcessBackendKind::TenantSandbox`
+        // profile→backend mapping for `ProcessBackendKind::UserSandbox`
         // (`ironclaw_runtime_policy::resolver::backends_for`). `Brokered`
-        // pairs with `TenantSandbox` under `HostedSafe`, the tightest match
+        // pairs with `UserSandbox` under `HostedSafe`, the tightest match
         // for this test's `SecureDefault`-flavored policy.
         network_mode: NetworkMode::Brokered,
         secret_mode: SecretMode::BrokeredHandles,

@@ -13,10 +13,10 @@ use super::{
     RebornEventStoreError, RebornEventStores, RebornProfile, ResourceGovernor, RootFilesystem,
     RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
-    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunWakeNotifier, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
-    production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
+    SecurityAuditSink, SharedSecretStore, TrustPolicy, TurnRunWakeNotifier, UserSandboxProcessPort,
+    WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials,
+    WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores, production_wiring_report,
+    set_runtime_http_egress, set_tool_call_http_egress,
 };
 use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -60,7 +60,8 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
+            sandbox_credential_runtime,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -105,7 +106,8 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
+            sandbox_credential_runtime,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -169,7 +171,8 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
+            sandbox_credential_runtime,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -216,7 +219,8 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
+            sandbox_credential_runtime,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -637,27 +641,27 @@ where
         self
     }
 
-    pub fn with_tenant_sandbox_process_port(
+    pub fn with_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::UnverifiedProductionImplementation,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 
-    pub fn with_production_tenant_sandbox_process_port(
+    pub fn with_production_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::ProductionCandidate,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 

@@ -418,7 +418,7 @@ fn sanitize_preview_bytes(bytes: &[u8]) -> String {
 /// unless a caller already has a cheaper preview available.
 ///
 /// Widened from private to `pub(crate)` so both host-process capture
-/// (`capture_command_output` above) and the tenant-sandbox exec path
+/// (`capture_command_output` above) and the user-sandbox exec path
 /// (`sandbox_process.rs`'s `RebornScopedSandboxCommandTransport::run_command`)
 /// share the identical redaction chokepoint on their command output — the
 /// sandbox path previously returned Docker stdout/stderr straight to the

@@ -20,14 +20,19 @@ use std::collections::HashMap;
 
 use bollard::{
     Docker,
-    container::{InspectContainerOptions, ListContainersOptions, RemoveContainerOptions},
+    container::{
+        Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
+        RemoveContainerOptions, StartContainerOptions,
+    },
+    models::HostConfig,
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{
-    CommandExecutionRequest, RebornSandboxUserKey, RuntimeProcessError, RuntimeProcessPort,
+    CommandExecutionRequest, RebornSandboxConfig, RebornSandboxUserKey,
+    RebornScopedSandboxCommandTransport, RuntimeProcessError, RuntimeProcessPort,
 };
 
 // Docker label keys the production launch config attaches (see
@@ -36,6 +41,8 @@ use ironclaw_host_runtime::{
 // `pub(crate)` and unreachable from an integration test.
 const LABEL_TENANT: &str = "ironclaw.tenant";
 const LABEL_USER: &str = "ironclaw.user";
+const LABEL_SECURITY_POSTURE: &str = "ironclaw.security_posture";
+const EXPECTED_SANDBOX_PIDS_LIMIT: i64 = 1024;
 
 fn scope(tenant: &str, user: &str) -> ResourceScope {
     ResourceScope {
@@ -101,6 +108,20 @@ async fn best_effort_remove(docker: &Docker, container_id: &str) {
         .await;
 }
 
+async fn assert_container_stopped(docker: &Docker, container_id: &str) {
+    let running = docker
+        .inspect_container(container_id, None::<InspectContainerOptions>)
+        .await
+        .expect("container inspect succeeds")
+        .state
+        .and_then(|state| state.running);
+    assert_eq!(
+        running,
+        Some(false),
+        "foreground-only sandbox must be stopped between commands"
+    );
+}
+
 macro_rules! skip_unless_docker_ready {
     ($test_name:literal) => {{
         if !docker_gate::docker_available() {
@@ -120,6 +141,209 @@ macro_rules! skip_unless_docker_ready {
         }
         image
     }};
+}
+
+/// A sandbox process port selected by the deployment profile reaches the real
+/// Docker transport without a second, user-controlled enablement gate.
+#[tokio::test]
+async fn sandbox_profile_process_port_runs_in_container() {
+    let image = skip_unless_docker_ready!("sandbox_profile_process_port_runs_in_container");
+
+    const TENANT: &str = "enablement-gate-tenant";
+    const USER: &str = "enablement-gate-user";
+    let docker = Docker::connect_with_local_defaults().expect("docker connects");
+    if let Some(stale_id) = find_labeled_container(&docker, TENANT, USER).await {
+        best_effort_remove(&docker, &stale_id).await;
+    }
+
+    let temp = tempfile::tempdir().expect("sandbox workspace root");
+    let config = RebornSandboxConfig::new(temp.path().to_path_buf()).with_image(image);
+    let transport = RebornScopedSandboxCommandTransport::connect(config)
+        .await
+        .expect("sandbox transport connects");
+    let port = transport.into_process_port();
+    let user_scope = scope(TENANT, USER);
+
+    let output = port
+        .run_command(request(user_scope, "echo sandbox-enabled"))
+        .await
+        .expect("sandbox profile reaches the real sandbox transport");
+    assert!(output.sandboxed);
+    assert!(output.output.contains("sandbox-enabled"));
+
+    let container_id = find_labeled_container(&docker, TENANT, USER)
+        .await
+        .expect("sandbox-profile command creates a labeled sandbox container");
+    best_effort_remove(&docker, &container_id).await;
+}
+
+/// Real-container proof of the complete PR1 containment posture. This checks
+/// guest-visible behavior and the daemon's authoritative HostConfig so a
+/// future image or launch-config change cannot silently weaken isolation.
+#[tokio::test]
+async fn python_worker_is_networkless_readonly_non_root_and_credential_free() {
+    let image = skip_unless_docker_ready!(
+        "python_worker_is_networkless_readonly_non_root_and_credential_free"
+    );
+
+    const TENANT: &str = "containment-tenant";
+    const USER: &str = "containment-user";
+    let docker = Docker::connect_with_local_defaults().expect("docker connects");
+    if let Some(stale_id) = find_labeled_container(&docker, TENANT, USER).await {
+        best_effort_remove(&docker, &stale_id).await;
+    }
+
+    let temp = tempfile::tempdir().expect("sandbox workspace root");
+    let config = RebornSandboxConfig::new(temp.path().to_path_buf()).with_image(image);
+    let port = RebornScopedSandboxCommandTransport::connect(config)
+        .await
+        .expect("sandbox transport connects")
+        .into_process_port();
+    let probe = port
+        .run_command(request(
+            scope(TENANT, USER),
+            "python3 - <<'PY'\n\
+             import os\n\
+             from pathlib import Path\n\
+             assert os.getuid() == 1000\n\
+             assert Path.cwd() == Path('/workspace')\n\
+             assert not Path('/host').exists()\n\
+             assert not Path('/var/run/docker.sock').exists()\n\
+             routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
+             assert not any(route[1] == '00000000' for route in routes)\n\
+             root_mount = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
+             assert 'ro' in root_mount[3].split(',')\n\
+             Path('/workspace/persistence-probe.txt').write_text('ok')\n\
+             forbidden = ['RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'NEARAI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY']\n\
+             assert not any(name in os.environ for name in forbidden)\n\
+             print('IRONCLAW_DOCKER_SANDBOX_CONTAINMENT_OK')\n\
+             PY",
+        ))
+        .await
+        .expect("containment probe executes");
+    assert_eq!(
+        probe.exit_code, 0,
+        "containment probe failed: {}",
+        probe.output
+    );
+    assert!(
+        probe
+            .output
+            .contains("IRONCLAW_DOCKER_SANDBOX_CONTAINMENT_OK")
+    );
+
+    let container_id = find_labeled_container(&docker, TENANT, USER)
+        .await
+        .expect("containment probe creates a labeled container");
+    let inspected = docker
+        .inspect_container(&container_id, None::<InspectContainerOptions>)
+        .await
+        .expect("container inspect succeeds");
+    let host = inspected.host_config.expect("container has HostConfig");
+    assert_eq!(host.network_mode.as_deref(), Some("none"));
+    assert_eq!(host.readonly_rootfs, Some(true));
+    assert_eq!(host.cap_drop, Some(vec!["ALL".to_string()]));
+    assert!(
+        host.security_opt
+            .unwrap_or_default()
+            .iter()
+            .any(|option| option.contains("no-new-privileges"))
+    );
+    assert_eq!(
+        inspected.config.and_then(|config| config.user),
+        Some("1000:1000".to_string())
+    );
+
+    best_effort_remove(&docker, &container_id).await;
+}
+
+/// Drives the public process port against a real pre-limit container. The
+/// missing PID limit must make its stamped posture stale, causing the caller
+/// to destroy it and launch a replacement whose live Docker HostConfig has
+/// the finite limit.
+#[tokio::test]
+async fn missing_pid_limit_recycles_container_and_replacement_has_finite_limit() {
+    let image = skip_unless_docker_ready!(
+        "missing_pid_limit_recycles_container_and_replacement_has_finite_limit"
+    );
+
+    const TENANT: &str = "pids-limit-tenant";
+    const USER: &str = "pids-limit-user";
+    let docker = Docker::connect_with_local_defaults().expect("docker connects");
+    if let Some(stale_id) = find_labeled_container(&docker, TENANT, USER).await {
+        best_effort_remove(&docker, &stale_id).await;
+    }
+
+    let stale = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: format!("ironclaw-test-no-pids-limit-{}", uuid::Uuid::new_v4()),
+                platform: None,
+            }),
+            Config {
+                image: Some(image.clone()),
+                cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+                labels: Some(HashMap::from([
+                    (LABEL_TENANT.to_string(), TENANT.to_string()),
+                    (LABEL_USER.to_string(), USER.to_string()),
+                    (
+                        LABEL_SECURITY_POSTURE.to_string(),
+                        "pre-pids-limit-posture".to_string(),
+                    ),
+                ])),
+                host_config: Some(HostConfig {
+                    pids_limit: None,
+                    auto_remove: Some(false),
+                    network_mode: Some("none".to_string()),
+                    ..Default::default()
+                }),
+                user: Some("1000:1000".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("legacy no-limit container creates");
+    docker
+        .start_container(&stale.id, None::<StartContainerOptions<String>>)
+        .await
+        .expect("legacy no-limit container starts");
+
+    let temp = tempfile::tempdir().expect("sandbox workspace root");
+    let config = RebornSandboxConfig::new(temp.path().to_path_buf()).with_image(image);
+    let transport = RebornScopedSandboxCommandTransport::connect(config)
+        .await
+        .expect("sandbox transport connects");
+    let port = transport.into_process_port();
+    let output = port
+        .run_command(request(scope(TENANT, USER), "echo finite-pids"))
+        .await
+        .expect("command recycles the stale container and runs in its replacement");
+    assert!(output.output.contains("finite-pids"));
+
+    assert!(
+        docker
+            .inspect_container(&stale.id, None::<InspectContainerOptions>)
+            .await
+            .is_err(),
+        "the no-limit container must be destroyed on posture mismatch"
+    );
+    let replacement_id = find_labeled_container(&docker, TENANT, USER)
+        .await
+        .expect("replacement container exists");
+    assert_ne!(replacement_id, stale.id);
+    let replacement = docker
+        .inspect_container(&replacement_id, None::<InspectContainerOptions>)
+        .await
+        .expect("replacement container inspects");
+    assert_eq!(
+        replacement
+            .host_config
+            .and_then(|host_config| host_config.pids_limit),
+        Some(EXPECTED_SANDBOX_PIDS_LIMIT),
+        "the replacement must apply the finite cgroup PID limit"
+    );
+
+    best_effort_remove(&docker, &replacement_id).await;
 }
 
 #[tokio::test]
@@ -155,11 +379,14 @@ async fn exec_reuses_container_across_commands_file_persists_env_does_not() {
 
     let mut with_env = request(user_scope.clone(), "echo $PROBE_VAR");
     with_env.extra_env = HashMap::from([("PROBE_VAR".to_string(), "set".to_string())]);
-    let with_env_output = port
+    let with_env_error = port
         .run_command(with_env)
         .await
-        .expect("env-setting command succeeds");
-    assert!(with_env_output.output.contains("set"));
+        .expect_err("caller-provided environment must be rejected before Docker exec");
+    assert!(
+        format!("{with_env_error}")
+            .contains("does not accept caller-provided environment variables")
+    );
 
     let without_env = port
         .run_command(request(user_scope.clone(), "echo [$PROBE_VAR]"))
@@ -196,10 +423,7 @@ async fn stopped_container_restarts_transparently_on_next_exec() {
     let container_id = find_labeled_container(&docker, "restart-tenant", "restart-user")
         .await
         .expect("container exists after first command");
-    docker
-        .stop_container(&container_id, None)
-        .await
-        .expect("stop out of band");
+    assert_container_stopped(&docker, &container_id).await;
 
     let output = port
         .run_command(request(user_scope, "echo alive"))
@@ -252,45 +476,13 @@ async fn timeout_kills_process_group_but_container_survives() {
     }
 }
 
-/// Renders every process line `docker top` reports for `container_id` as one
-/// space-joined string per row — used to search for a distinctive argv
-/// (e.g. a `sleep <unique-seconds>` marker) anywhere in the container's live
-/// process tree, regardless of which pgid/wrapper layer it actually landed
-/// under.
-async fn container_process_listing(docker: &Docker, container_id: &str) -> String {
-    let top = docker
-        .top_processes::<String>(container_id, None)
-        .await
-        .expect("docker top succeeds");
-    top.processes
-        .unwrap_or_default()
-        .into_iter()
-        .map(|row| row.join(" "))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Proves the timeout-kill path actually terminates the timed-out job inside
-/// the container, not just that the exec call *reports* a timeout. The
-/// production kill (`kill_exec_process_group` in `exec_transport.rs`) issues
-/// `kill -KILL -<exec_pid>` against the pid Docker reports for the exec, but
-/// that pid is `setsid --wait`'s own pid — a session leader with NO live
-/// children in its own process group, since `setsid` internally forks a
-/// child to make the `setsid()` syscall and that child (not the waiting
-/// parent) ends up owning the real job's pgid. The kill therefore currently
-/// hits "No such process" and the job runs to completion regardless of the
-/// reported timeout.
-///
-/// Also pins the two collateral-damage invariants any real fix must
-/// preserve: an unrelated background job in the SAME container must survive
-/// a foreground timeout kill (containers are reused across commands, and
-/// background jobs are deliberately detached from the timed-out exec), and
-/// the container itself must remain usable for a subsequent command.
+/// Proves the timeout path leaves no process running: PR1 stops the entire
+/// user container after every foreground result, including timeout errors,
+/// then transparently restarts the same retained container on the next call.
 #[tokio::test]
-async fn timed_out_process_is_actually_killed_but_background_and_container_survive() {
-    let image = skip_unless_docker_ready!(
-        "timed_out_process_is_actually_killed_but_background_and_container_survive"
-    );
+async fn timed_out_process_is_actually_killed_and_container_survives() {
+    let image =
+        skip_unless_docker_ready!("timed_out_process_is_actually_killed_and_container_survives");
 
     let docker = Docker::connect_with_local_defaults().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -300,20 +492,6 @@ async fn timed_out_process_is_actually_killed_but_background_and_container_survi
     let port = sandbox_transport::connect_for_test(&workspace, &image)
         .await
         .expect("sandbox transport connects");
-
-    // Distinct sleep durations act as unique argv markers in `docker top`,
-    // letting us tell the timed-out job apart from the survivor without
-    // depending on pid/pgid values this test doesn't control.
-    let background_launch = port
-        .run_command(background_request(user_scope.clone(), "sleep 8172"))
-        .await
-        .expect("background launch succeeds");
-    assert!(
-        background_launch
-            .output
-            .starts_with("Started in background: pid "),
-        "expected the background-launch acknowledgement: {background_launch:?}"
-    );
 
     let mut timeout_request = request(user_scope.clone(), "sleep 8171");
     timeout_request.timeout_secs = Some(1);
@@ -326,40 +504,15 @@ async fn timed_out_process_is_actually_killed_but_background_and_container_survi
     let container_id = find_labeled_container(&docker, "timeout-kill-tenant", "timeout-kill-user")
         .await
         .expect("container exists after the timed-out command");
+    assert_container_stopped(&docker, &container_id).await;
 
-    // Poll rather than check once — the kill (once it actually works) is a
-    // best-effort exec issued after the timeout fires, so it races this
-    // check by a small, non-deterministic amount.
-    let mut listing = String::new();
-    let mut target_still_present = true;
-    for _ in 0..20 {
-        listing = container_process_listing(&docker, &container_id).await;
-        if !listing.contains("8171") {
-            target_still_present = false;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    assert!(
-        !target_still_present,
-        "the timed-out `sleep 8171` process must actually be killed, but it is still \
-         present in `docker top` after waiting: {listing}"
-    );
-
-    // Collateral-damage check #1: the unrelated background job must survive
-    // the foreground timeout's kill.
-    assert!(
-        listing.contains("8172"),
-        "an unrelated background job in the same container must NOT be killed by a \
-         different foreground exec's timeout: {listing}"
-    );
-
-    // Collateral-damage check #2: the container itself must still be usable.
+    // The container itself must still be usable.
     let still_alive = port
         .run_command(request(user_scope, "echo alive"))
         .await
         .expect("the container itself must survive a timeout kill of the exec'd process group");
     assert!(still_alive.output.contains("alive"));
+    assert_container_stopped(&docker, &container_id).await;
 
     best_effort_remove(&docker, &container_id).await;
 }
@@ -375,25 +528,20 @@ async fn cross_user_containers_and_workspaces_are_isolated() {
     let scope_b = scope("isolation-tenant", "isolation-user-b");
     let workspace_a = RebornSandboxUserKey::from_scope(&scope_a).workspace_path(temp.path());
     let workspace_b = RebornSandboxUserKey::from_scope(&scope_b).workspace_path(temp.path());
-    std::fs::create_dir_all(&workspace_a).unwrap();
-    std::fs::create_dir_all(&workspace_b).unwrap();
-
-    let port_a = sandbox_transport::connect_for_test(&workspace_a, &image)
+    let config = RebornSandboxConfig::new(temp.path().to_path_buf()).with_image(image);
+    let port = RebornScopedSandboxCommandTransport::connect(config)
         .await
-        .expect("sandbox transport A connects");
-    let port_b = sandbox_transport::connect_for_test(&workspace_b, &image)
-        .await
-        .expect("sandbox transport B connects");
+        .expect("shared-root sandbox transport connects")
+        .into_process_port();
 
-    port_a
-        .run_command(request(
-            scope_a,
-            "echo user-a-secret > /workspace/user-a-only.txt",
-        ))
-        .await
-        .unwrap();
+    port.run_command(request(
+        scope_a,
+        "echo user-a-secret > /workspace/user-a-only.txt",
+    ))
+    .await
+    .unwrap();
 
-    let leak_check = port_b
+    let leak_check = port
         .run_command(request(
             scope_b,
             "cat /workspace/user-a-only.txt 2>&1 || echo NOT_FOUND",
@@ -446,10 +594,9 @@ async fn cross_user_containers_and_workspaces_are_isolated() {
 }
 
 #[tokio::test]
-async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
-    let image = skip_unless_docker_ready!(
-        "fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home"
-    );
+async fn worker_image_provides_python_under_non_root_workspace_home() {
+    let image =
+        skip_unless_docker_ready!("worker_image_provides_python_under_non_root_workspace_home");
 
     let docker = Docker::connect_with_local_defaults().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -460,13 +607,9 @@ async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
         .await
         .expect("sandbox transport connects");
 
-    // The image's `/bin/sh` is dash, whose `command -v` builtin (unlike
-    // bash's) only checks its FIRST operand and silently ignores the rest —
-    // `command -v git node python3 ...` therefore only ever probed `git`.
-    // Loop over each binary individually so every one is actually checked.
     let mut probe_request = request(
         user_scope,
-        "for b in git node python3 cargo gh tmux npm; do command -v \"$b\"; done && whoami && echo $HOME",
+        "command -v python3 && python3 -c 'print(\"python-ok\")' && whoami && echo $HOME",
     );
     probe_request.timeout_secs = Some(20);
     let probe = port
@@ -474,14 +617,14 @@ async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
         .await
         .expect("probe command succeeds");
 
-    for binary in [
-        "/git", "/node", "/python3", "/cargo", "/gh", "/tmux", "/npm",
-    ] {
-        assert!(
-            probe.output.contains(binary),
-            "expected {binary} on PATH: {probe:?}"
-        );
-    }
+    assert!(
+        probe.output.contains("/python3"),
+        "expected Python on PATH: {probe:?}"
+    );
+    assert!(
+        probe.output.contains("python-ok"),
+        "Python must execute: {probe:?}"
+    );
     assert!(
         probe.output.contains("sandbox"),
         "must run as the non-root sandbox user: {probe:?}"
@@ -510,7 +653,7 @@ async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
 /// `capsh --drop=all --user=sandbox` before handing off; see
 /// `user_container_launch_config`). This asserts the exec identity directly
 /// via `id -u`/`id -g`, independent of the broader
-/// `fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home`
+/// `worker_image_provides_python_under_non_root_workspace_home`
 /// probe above.
 #[tokio::test]
 async fn dispatched_command_runs_as_the_non_root_sandbox_user() {
@@ -549,20 +692,13 @@ async fn dispatched_command_runs_as_the_non_root_sandbox_user() {
     }
 }
 
-/// End-to-end round trip for `background: true` against a real container:
-/// starts a detached command, then proves the pid-agreement invariant that
-/// only the script-shape unit test (`background_launch_script_puts_the_
-/// dollar_dollar_log_redirect_inside_the_inner_shell` in `exec_transport.rs`)
-/// otherwise pins — that the log file the launched job actually writes to
-/// lives at the exact `log_path` reported back to the caller. If the `$$`
-/// used to build the log filename ever disagreed with the `$!` pid reported
-/// to Rust again, this test would fail by finding no file (or the wrong
-/// content) at the reported path, where the unit test alone cannot catch it
-/// (it only asserts the script string's shape, never runs it).
+/// PR1 exposes foreground execution only. Pin that local Docker matches the
+/// Railway provider and rejects background requests before provisioning a
+/// user container.
 #[tokio::test]
-async fn background_command_writes_its_output_to_the_reported_log_path() {
+async fn background_command_is_rejected_before_container_creation() {
     let image =
-        skip_unless_docker_ready!("background_command_writes_its_output_to_the_reported_log_path");
+        skip_unless_docker_ready!("background_command_is_rejected_before_container_creation");
 
     let docker = Docker::connect_with_local_defaults().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -573,53 +709,67 @@ async fn background_command_writes_its_output_to_the_reported_log_path() {
         .await
         .expect("sandbox transport connects");
 
-    let marker = "background-e2e-marker-9f3c1a";
-    let launch = port
-        .run_command(background_request(
+    let result = port
+        .run_command(background_request(user_scope, "echo must-not-run"))
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeProcessError::ExecutionFailed(ref reason))
+                if reason.contains("does not support background commands")
+        ),
+        "background request must fail closed: {result:?}"
+    );
+    assert!(
+        find_labeled_container(&docker, "background-tenant", "background-user")
+            .await
+            .is_none(),
+        "rejected background request must not provision a container"
+    );
+}
+
+/// A foreground command can detach internally without setting the API's
+/// `background` bit. Stopping the whole container after the result is the
+/// provider-independent boundary that prevents such a process from surviving.
+#[tokio::test]
+async fn internally_detached_process_cannot_survive_foreground_completion() {
+    let image = skip_unless_docker_ready!(
+        "internally_detached_process_cannot_survive_foreground_completion"
+    );
+
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let user_scope = scope("detached-tenant", "detached-user");
+    let workspace = RebornSandboxUserKey::from_scope(&user_scope).workspace_path(temp.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let port = sandbox_transport::connect_for_test(&workspace, &image)
+        .await
+        .expect("sandbox transport connects");
+
+    let detached = port
+        .run_command(request(
             user_scope.clone(),
-            &format!("echo {marker}"),
+            "python -c 'import subprocess; subprocess.Popen([\"python\", \"-c\", \"import time; time.sleep(300)\"], start_new_session=True); print(\"detached\")'",
         ))
         .await
-        .expect("background launch succeeds");
-    assert!(
-        launch.output.starts_with("Started in background: pid "),
-        "expected the background-launch acknowledgement, got: {launch:?}"
-    );
-    let log_path = launch
-        .output
-        .split_once(", log ")
-        .map(|(_, log_path)| log_path.trim().to_string())
-        .expect("background launch output names a log path");
-    assert!(
-        log_path.starts_with("/workspace/.ironclaw/bg-") && log_path.ends_with(".log"),
-        "unexpected log path shape: {log_path}"
-    );
+        .expect("foreground launcher completes");
+    assert!(detached.output.contains("detached"));
 
-    // The background job races the `cat` below; poll briefly rather than
-    // assuming it has already flushed its output by the time we check.
-    let mut log_contents = String::new();
-    for _ in 0..20 {
-        let read = port
-            .run_command(request(
-                user_scope.clone(),
-                &format!("cat {log_path} 2>&1 || echo NOT_YET"),
-            ))
-            .await
-            .expect("log read command succeeds");
-        if read.output.contains(marker) {
-            log_contents = read.output;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    assert!(
-        log_contents.contains(marker),
-        "expected the background job's output at its reported log_path {log_path}, got: {log_contents:?}"
-    );
+    let container_id = find_labeled_container(&docker, "detached-tenant", "detached-user")
+        .await
+        .expect("retained user container exists");
+    assert_container_stopped(&docker, &container_id).await;
 
-    if let Some(container_id) =
-        find_labeled_container(&docker, "background-tenant", "background-user").await
-    {
-        best_effort_remove(&docker, &container_id).await;
-    }
+    let restarted = port
+        .run_command(request(user_scope, "python -c 'print(\"restarted\")'"))
+        .await
+        .expect("same retained container restarts for the next foreground call");
+    assert!(restarted.output.contains("restarted"));
+    let reused_id = find_labeled_container(&docker, "detached-tenant", "detached-user")
+        .await
+        .expect("retained user container still exists");
+    assert_eq!(reused_id, container_id);
+    assert_container_stopped(&docker, &container_id).await;
+
+    best_effort_remove(&docker, &container_id).await;
 }

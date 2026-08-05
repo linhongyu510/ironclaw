@@ -4,6 +4,8 @@ use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    validate_sandbox_profile_bundle(&input)?;
+    let sandbox_enabled = input.deployment.sandbox_enabled();
     let RebornHostBindings {
         deployment,
         storage,
@@ -12,10 +14,7 @@ pub(super) async fn build_production_shaped(
         // Compatibility input; the build mints one shared scheduler channel.
         turn_run_wake_notifier: _,
         runtime_process_binding,
-        sandbox_activity,
-        sandbox_egress_proxy,
-        sandbox_attribution,
-        sandbox_workspaces_root,
+        sandbox,
         product_auth_ports,
         native_extension_factories,
         channel_extension_bindings,
@@ -71,14 +70,12 @@ pub(super) async fn build_production_shaped(
     let workspace_scoped_per_caller = deployment.workspace_scoped_per_caller();
     let build_context = |production_wiring, scheduler_wake_wiring| RebornProductionBuildContext {
         profile,
+        sandbox_enabled,
         workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port: None,
-        sandbox_activity,
-        sandbox_egress_proxy,
-        sandbox_attribution,
-        sandbox_workspaces_root,
+        sandbox,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -273,32 +270,42 @@ async fn build_local_storage_production_shaped(
         })?;
     let default_system_prompt_path = bootstrap_standalone_host(root, &owner_user_id).await?;
 
-    let is_sandboxed_profile = matches!(
-        &context.production_wiring.runtime_process_binding,
-        RebornRuntimeProcessBinding::TenantSandbox { .. }
-    );
-    let sandbox_users_root = if is_sandboxed_profile {
-        let configured_root = context.sandbox_workspaces_root.as_ref().ok_or_else(|| {
-            RebornBuildError::InvalidConfig {
-                reason: "sandboxed profile requires a sandbox workspaces root".to_string(),
+    let sandbox_users_root = if context.sandbox_enabled {
+        let bundle = context
+            .sandbox
+            .as_mut()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "sandboxed profile requires a complete sandbox runtime bundle".to_string(),
+            })?;
+        match bundle.host_workspace_root() {
+            Some(configured_root) => {
+                std::fs::create_dir_all(configured_root).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "sandbox workspaces root could not be initialized: {error}"
+                        ),
+                    }
+                })?;
+                let canonical_root = std::fs::canonicalize(configured_root).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("sandbox workspaces root could not be resolved: {error}"),
+                    }
+                })?;
+                let users_root = canonical_root.join("users");
+                std::fs::create_dir_all(&users_root).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "sandbox user workspace root could not be initialized: {error}"
+                        ),
+                    }
+                })?;
+                bundle.replace_workspace_root(canonical_root);
+                Some(users_root)
             }
-        })?;
-        std::fs::create_dir_all(configured_root).map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("sandbox workspaces root could not be initialized: {error}"),
-            }
-        })?;
-        let canonical_root = std::fs::canonicalize(configured_root).map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("sandbox workspaces root could not be resolved: {error}"),
-            }
-        })?;
-        let users_root = canonical_root.join("users");
-        std::fs::create_dir_all(&users_root).map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("sandbox user workspace root could not be initialized: {error}"),
-        })?;
-        context.sandbox_workspaces_root = Some(canonical_root);
-        Some(users_root)
+            // Transport-managed workspaces live with the remote Docker
+            // daemon. Do not create a misleading host mirror.
+            None => None,
+        }
     } else {
         None
     };
@@ -378,6 +385,7 @@ pub(super) struct RebornProductionWiring {
 
 pub(super) struct RebornProductionBuildContext {
     pub(super) profile: RebornCompositionProfile,
+    pub(super) sandbox_enabled: bool,
     /// The deployment's resolved workspace scoping decision. Carried, not
     /// re-derived from `profile`: the assembling host may raise it (SSO on a
     /// standalone-composed deployment), and a second derivation here would
@@ -386,12 +394,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     pub(super) production_wiring: RebornProductionWiring,
     pub(super) local_process_port: Option<HostProcessPort>,
-    pub(super) sandbox_activity: Option<Arc<ironclaw_host_runtime::SandboxActivityRegistry>>,
-    pub(super) sandbox_egress_proxy:
-        Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
-    pub(super) sandbox_attribution:
-        Option<Arc<ironclaw_host_runtime::ConnectionAttributionResolver>>,
-    pub(super) sandbox_workspaces_root: Option<PathBuf>,
+    pub(super) sandbox: Option<crate::sandbox::UserSandboxRuntimeBundle>,
     pub(super) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(super) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(super) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
@@ -508,6 +511,45 @@ fn validate_production_process_binding(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })
+}
+
+pub(super) fn validate_sandbox_profile_bundle(
+    input: &RebornHostBindings,
+) -> Result<(), RebornBuildError> {
+    let sandbox_profile = input.deployment.sandbox_enabled();
+    let has_process_binding = matches!(
+        input.runtime_process_binding,
+        RebornRuntimeProcessBinding::UserSandbox { .. }
+    );
+    let has_sandbox_bundle = input.sandbox.is_some();
+
+    if !sandbox_profile {
+        if has_process_binding || has_sandbox_bundle {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "user-sandbox process bindings and runtime components require profile=hosted-single-tenant-volume-sandboxed"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    if !has_process_binding {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "sandbox profile requires its user-sandbox process binding".to_string(),
+        });
+    }
+    let Some(bundle) = input.sandbox.as_ref() else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "sandbox profile requires one complete sandbox runtime bundle".to_string(),
+        });
+    };
+    if !bundle.process_binding_matches(&input.runtime_process_binding) {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "sandbox runtime bundle and process binding must reference the same user sandbox port"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn planned_run_profile_resolver()

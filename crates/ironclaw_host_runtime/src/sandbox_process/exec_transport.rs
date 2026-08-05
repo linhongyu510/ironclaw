@@ -18,7 +18,7 @@ use bollard::{
     Docker,
     container::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, LogOutput,
-        RemoveContainerOptions, StartContainerOptions,
+        RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
     },
     errors::Error as DockerError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
@@ -44,6 +44,9 @@ use super::{
     shell_single_quote,
 };
 
+#[cfg(test)]
+use super::worker_spec::DOCKER_WORKER_PIDS_LIMIT as SANDBOX_PIDS_LIMIT;
+
 /// Finds the one container already labeled for `{tenant_id, user_id}` and
 /// makes sure it is running (creating or restarting it as needed), or
 /// creates a fresh one if none exists yet. Returns the container ID a
@@ -55,17 +58,29 @@ use super::{
 /// only value any current production caller passes, since nothing
 /// constructs a resolver yet (W6 is its consumer) — makes this a no-op,
 /// same as before this parameter existed.
-#[allow(clippy::too_many_arguments)]
+pub(super) struct EnsureContainerRequest<'a> {
+    pub config: &'a RebornSandboxConfig,
+    pub key: &'a RebornSandboxUserKey,
+    pub tenant_id: &'a TenantId,
+    pub user_id: &'a UserId,
+    pub workspace: &'a Path,
+    pub network_ready: &'a tokio::sync::OnceCell<()>,
+    pub attribution: Option<&'a ConnectionAttributionResolver>,
+}
+
 pub(super) async fn ensure_container(
     docker: &Docker,
-    config: &RebornSandboxConfig,
-    key: &RebornSandboxUserKey,
-    tenant_id: &TenantId,
-    user_id: &UserId,
-    workspace: &Path,
-    network_ready: &tokio::sync::OnceCell<()>,
-    attribution: Option<&ConnectionAttributionResolver>,
+    request: EnsureContainerRequest<'_>,
 ) -> Result<String, RuntimeProcessError> {
+    let EnsureContainerRequest {
+        config,
+        key,
+        tenant_id,
+        user_id,
+        workspace,
+        network_ready,
+        attribution,
+    } = request;
     ensure_egress_network_once(docker, config, network_ready).await?;
     let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
     let found = docker
@@ -262,6 +277,17 @@ async fn ensure_egress_network(
     if config.container_network_mode().as_deref() != Some(SANDBOX_EGRESS_NETWORK_NAME) {
         return Ok(());
     }
+    ensure_default_egress_network(docker).await
+}
+
+/// Creates or verifies the production sandbox egress network without
+/// launching a user container. Composition calls this before binding the
+/// host-side proxy to the network gateway, so an unsupported Docker topology
+/// fails during sandbox-profile boot instead of after the first user's shell
+/// command has already started a container.
+pub(super) async fn ensure_default_egress_network(
+    docker: &Docker,
+) -> Result<(), RuntimeProcessError> {
     match docker
         .create_network(sandbox_egress_network_create_options())
         .await
@@ -320,21 +346,48 @@ async fn verify_existing_egress_network_posture(
         .as_ref()
         .and_then(|options| options.get(SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY))
         .cloned();
+    let expected_ipam = expected
+        .ipam
+        .config
+        .as_ref()
+        .and_then(|configs| configs.first());
+    let actual_ipam = network
+        .ipam
+        .as_ref()
+        .and_then(|ipam| ipam.config.as_ref())
+        .and_then(|configs| configs.first());
+    let expected_subnet = expected_ipam.and_then(|config| config.subnet.as_deref());
+    let expected_gateway = expected_ipam.and_then(|config| config.gateway.as_deref());
+    let actual_subnet = actual_ipam.and_then(|config| config.subnet.as_deref());
+    let actual_gateway = actual_ipam.and_then(|config| config.gateway.as_deref());
+    let actual_driver = network.driver.as_deref();
 
-    if actual_internal == Some(expected.internal) && actual_icc == expected_icc {
+    if actual_internal == Some(expected.internal)
+        && actual_icc == expected_icc
+        && actual_driver == Some(expected.driver.as_str())
+        && actual_subnet == expected_subnet
+        && actual_gateway == expected_gateway
+    {
         return Ok(());
     }
 
     Err(RuntimeProcessError::ExecutionFailed(format!(
         "sandbox egress network {SANDBOX_EGRESS_NETWORK_NAME:?} already exists but its isolation \
-         posture does not match what this deployment requires — expected internal={:?} and \
-         {}={:?}, found internal={:?} and {}={:?}. Refusing to proceed silently: a mismatched \
-         network would leave container-to-container lateral movement open and undermine \
-         source-IP attribution for the egress proxy. Recreate {SANDBOX_EGRESS_NETWORK_NAME:?} \
+         posture does not match what this deployment requires — expected driver={:?}, \
+         subnet={:?}, gateway={:?}, internal={:?}, and {}={:?}; found driver={:?}, subnet={:?}, \
+         gateway={:?}, internal={:?}, and {}={:?}. Refusing to proceed silently: a mismatched \
+         network would break the proxy route, leave container-to-container lateral movement \
+         open, or undermine source-IP attribution. Recreate {SANDBOX_EGRESS_NETWORK_NAME:?} \
          manually with the required options (no containers may currently be attached).",
+        expected.driver,
+        expected_subnet,
+        expected_gateway,
         expected.internal,
         SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY,
         expected_icc,
+        actual_driver,
+        actual_subnet,
+        actual_gateway,
         actual_internal,
         SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY,
         actual_icc,
@@ -470,10 +523,9 @@ async fn create_and_start_user_container(
 /// the stamp can never silently drift from what a freshly created
 /// container actually gets.
 ///
-/// `pids_limit` is carried even though nothing currently sets it (always
-/// `None` today): a future per-process-count hardening change only needs to
-/// populate this one field to also get automatic recycling of containers
-/// created under the old limit.
+/// `pids_limit` is part of the stamped posture so containers created before
+/// the finite task limit was introduced, or under a different limit, are
+/// recycled before they can be reused.
 ///
 /// `ca_bundle_hash` closes RUN-001: the sandbox CA root is regenerated
 /// fresh in memory on every host-process start (see `ca.rs`'s module doc),
@@ -503,16 +555,17 @@ struct SecurityPostureFields {
 /// preparation, purely to compare against an existing container's stamped
 /// label.
 fn security_posture_fields(config: &RebornSandboxConfig) -> SecurityPostureFields {
+    let worker = super::worker_spec::DockerWorkerSecuritySpec::new(config.container_network_mode());
     SecurityPostureFields {
         // See `user_container_launch_config`'s doc comment: PID 1 is pinned
         // directly to uid 1000 at create time (W1), not via an in-container
         // privilege drop.
-        user: Some(format!("{SANDBOX_EXEC_UID}:{SANDBOX_EXEC_GID}")),
+        user: Some(worker.user()),
         cap_add: None,
-        cap_drop: Some(vec!["ALL".to_string()]),
-        readonly_rootfs: Some(true),
-        network_mode: config.container_network_mode(),
-        pids_limit: None,
+        cap_drop: Some(worker.cap_drop()),
+        readonly_rootfs: Some(worker.readonly_rootfs()),
+        network_mode: worker.network_mode(),
+        pids_limit: Some(worker.pids_limit()),
         // Same helper `materialize_ca_bundle`'s caller already threads
         // through key_codec.rs's usage — reused here rather than adding a
         // second hashing utility to this crate.
@@ -563,22 +616,11 @@ pub(super) async fn user_container_launch_config(
     let labels = build_user_container_labels(LABEL_PREFIX, tenant_id, user_id, &posture_stamp);
     let mut env = config.command_env(std::collections::HashMap::new())?;
     env.push("HOME=/workspace/.home".to_string());
-    // npm's global install prefix defaults to `/usr` on this Debian-apt
-    // install (Dockerfile.process-sandbox), which is NOT `$HOME`-relative —
-    // unlike cargo/rustup, `HOME=/workspace/.home` alone does not rescue it.
-    // Under `readonly_rootfs: Some(true)` a bare `npm install -g` then fails
-    // with EROFS. Redirect npm's prefix into the writable, persistent
-    // workspace HOME instead.
-    env.push("NPM_CONFIG_PREFIX=/workspace/.home/.npm-global".to_string());
-    // Setting `Config.env`'s PATH here REPLACES the image-baked `ENV PATH`
-    // for the whole container (and therefore every subsequent `docker exec`)
-    // rather than extending it, so every directory a sandboxed command needs
-    // must be restated explicitly: the new npm global bin dir, `pip
-    // --user`'s console-script directory (installed but otherwise not on
-    // PATH — those CLIs would be present but not invokable), the image's
-    // baked cargo bin dir, and the standard system dirs.
+    // Setting `Config.env`'s PATH replaces the image value. Keep Python's
+    // user-install bin directory plus standard system paths; PR1 deliberately
+    // ships no Node, Rust, provider-specific CLI, or tmux toolchain.
     env.push(
-        "PATH=/workspace/.home/.npm-global/bin:/workspace/.home/.local/bin:/home/sandbox/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        "PATH=/workspace/.home/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             .to_string(),
     );
     // Historically `config.container_identity.container_user()` (default
@@ -640,7 +682,10 @@ pub(super) async fn user_container_launch_config(
         // never has a PID 1 that runs as root with privilege-manipulating
         // capabilities.
         cap_add: posture.cap_add.clone(),
-        security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+        security_opt: Some(
+            super::worker_spec::DockerWorkerSecuritySpec::new(posture.network_mode.clone())
+                .security_options(),
+        ),
         readonly_rootfs: posture.readonly_rootfs,
         pids_limit: posture.pids_limit,
         tmpfs: Some(
@@ -663,36 +708,10 @@ pub(super) async fn user_container_launch_config(
     })
 }
 
-/// `setsid` creates a new session AND process group for `command`, isolating
-/// it (and anything it forks) from the launching exec's own process. Used
-/// only by [`background_launch_script`] today — the persistent container's
-/// only `background: true` path — where it is also what detaches the
-/// launched job from the (short-lived) launching exec's session so it keeps
-/// running after that exec returns.
-///
-/// `--wait` is load-bearing and easy to miss: without it, (util-linux)
-/// `setsid` forks the target command and returns IMMEDIATELY, exit code 0,
-/// without waiting for it — since this whole line is reached via `exec`
-/// (replacing the exec'd process in place), that immediate return becomes
-/// the WHOLE wrapped command's reported completion. Docker's own `exec`
-/// tracking (`inspect_exec`'s `Pid`/`ExitCode`) then reflects `setsid`'s own
-/// always-0 launch status, not `command`'s real exit code — verified
-/// empirically: `docker exec ... setsid sh -c 'false'` reports **0**.
-/// `--wait` makes `setsid` block until `command` finishes and exit with
-/// `command`'s own status.
-///
-/// This wrapper is NOT used for the foreground [`exec_in_container`] path —
-/// see [`wrap_foreground_command_reporting_pgid`]'s doc comment for why a
-/// `setsid`-based wrapper is both unnecessary and actively wrong there.
-fn wrap_command_for_pgid_isolation(command: &str) -> String {
-    format!("exec setsid --wait sh -c {}", shell_single_quote(command))
-}
-
 /// Builds the wrapped command line [`exec_in_container`] actually launches,
 /// and the counterpart [`kill_exec_process_group`] reads back from to issue
-/// a timeout kill that actually works — replacing a `setsid`-based wrapper
-/// (still used for background launches, see [`wrap_command_for_pgid_isolation`])
-/// whose `kill -KILL -<inspect_exec_pid>` was silently non-functional.
+/// a timeout kill that actually works. The prior `setsid`-based wrapper's
+/// `kill -KILL -<inspect_exec_pid>` was silently non-functional.
 /// Empirically-confirmed root causes, in order of what made the OLD wrapper
 /// unfixable without a bigger structural change here:
 ///
@@ -738,20 +757,19 @@ fn wrap_command_for_pgid_isolation(command: &str) -> String {
 fn wrap_foreground_command_reporting_pgid(command: &str, pgid_marker: &str) -> String {
     let marker_path = foreground_pgid_marker_path(pgid_marker);
     format!(
-        "mkdir -p {BACKGROUND_LOG_DIR} && echo $$ >{marker_path} && sh -c {}; \
+        "mkdir -p {PROCESS_STATE_DIR} && echo $$ >{marker_path} && sh -c {}; \
          status=$?; rm -f {marker_path}; exit $status",
         shell_single_quote(command),
     )
 }
 
+const PROCESS_STATE_DIR: &str = "/workspace/.ironclaw";
+
 /// Path (inside the container) [`wrap_foreground_command_reporting_pgid`]
 /// writes its self-reported pgid to and [`kill_exec_process_group`] reads it
-/// back from. Shares [`BACKGROUND_LOG_DIR`] with background job logs — both
-/// are per-exec scratch files under the one already-writable, already-
-/// `mkdir -p`'d scratch directory inside the persistent workspace; no new
-/// mount or directory is needed for this.
+/// back from. Markers are per-exec scratch files under the writable workspace.
 fn foreground_pgid_marker_path(pgid_marker: &str) -> String {
-    format!("{BACKGROUND_LOG_DIR}/{pgid_marker}.pgid")
+    format!("{PROCESS_STATE_DIR}/{pgid_marker}.pgid")
 }
 
 /// The unprivileged user (baked into the image by
@@ -857,149 +875,42 @@ pub(super) async fn exec_in_container(
     })
 }
 
-/// Result of launching a detached (`background: true`) command inside the
-/// container: the pid the launch script reported (which is also its
-/// `setsid`-created pgid, per [`wrap_command_for_pgid_isolation`]) and the
-/// container-local log path its stdout/stderr were redirected to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BackgroundLaunch {
-    pub(super) pid: u32,
-    pub(super) log_path: String,
-}
-
-/// Directory (inside the container) background job logs are written under.
-const BACKGROUND_LOG_DIR: &str = "/workspace/.ironclaw";
-
-/// Builds the launch script for a detached (`background: true`) command,
-/// pure so the pid-agreement invariant below is unit-testable without a
-/// Docker daemon.
+/// Stops the persistent user container after one foreground command.
 ///
-/// The log filename must be derived from the exact same pid `$!` reports
-/// back to the launching (outer) shell — but in POSIX sh, `$$` evaluated
-/// *inside* a backgrounded compound command still expands to the INVOKING
-/// shell's pid, not the forked job's; only `$!`, read by the shell that did
-/// the forking, names the actual child. Redirecting via `>>bg-$$.log`
-/// *outside* the wrapped command (as this used to) therefore wrote to a
-/// different file than the one `$!` names, so the reported `log_path` never
-/// matched the file the job actually wrote.
-///
-/// Fix: fold the redirect INSIDE the `setsid`-wrapped inner `sh -c` instead.
-/// That inner shell is reached only through a chain of `exec`s (never a bare
-/// fork) starting from the process `$!` names, and `exec` never changes a
-/// process's pid — so by the time this inner shell starts up fresh and reads
-/// its own `$$`, that value is the real pid of the process `$!` already
-/// reported, and the two agree.
-fn background_launch_script(command: &str) -> String {
-    let logging_command = format!("exec >>{BACKGROUND_LOG_DIR}/bg-$$.log 2>&1; {command}");
-    format!(
-        "mkdir -p {BACKGROUND_LOG_DIR} && {} & echo $!",
-        wrap_command_for_pgid_isolation(&logging_command),
-    )
-}
-
-/// Launches `command` detached inside the container (`setsid ... &`),
-/// redirecting its output to a per-pid log under `/workspace/.ironclaw/`,
-/// and returns immediately with the launched pid instead of waiting for
-/// completion.
-pub(super) async fn exec_background_in_container(
+/// PR1 deliberately has no background-process lifecycle. Stopping the
+/// container after every command is the fail-closed boundary: even a command
+/// that detaches into a new session cannot leave a daemon running after the
+/// foreground result returns. Docker retains the stopped container's writable
+/// layer and the host-mounted `/workspace`, and [`ensure_container`] restarts
+/// the same container for the user's next command.
+pub(super) async fn stop_container_after_command(
     docker: &Docker,
     container_id: &str,
-    workdir: ContainerWorkdir,
-    env: Vec<String>,
-    command: String,
-) -> Result<BackgroundLaunch, RuntimeProcessError> {
-    let launch_script = background_launch_script(&command);
-    let exec = docker
-        .create_exec(
-            container_id,
-            CreateExecOptions {
-                cmd: Some(vec!["sh".to_string(), "-c".to_string(), launch_script]),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                working_dir: Some(workdir.into_string()),
-                env: Some(env),
-                user: Some(SANDBOX_EXEC_USER.to_string()),
-                ..Default::default()
-            },
-        )
+) -> Result<(), RuntimeProcessError> {
+    match docker
+        .stop_container(container_id, Some(StopContainerOptions { t: 0 }))
         .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox background launch failed: {error}"
-            ))
-        })?;
-    let launch_timeout = Duration::from_secs(10);
-    let pid_output = tokio::time::timeout(launch_timeout, async {
-        match docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: false,
-                    tty: false,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox background launch start failed: {error}"
-                ))
-            })? {
-            StartExecResults::Attached { output, .. } => collect_exec_output(output, 256).await,
-            StartExecResults::Detached => Ok(String::new()),
+    {
+        Ok(()) => Ok(()),
+        Err(stop_error) => {
+            // A command may have stopped its own container. Treat that as the
+            // required postcondition only when Docker independently confirms
+            // the container is no longer running; uncertainty fails closed.
+            let stopped = docker
+                .inspect_container(container_id, None::<InspectContainerOptions>)
+                .await
+                .ok()
+                .and_then(|container| container.state)
+                .and_then(|state| state.running)
+                .is_some_and(|running| !running);
+            if stopped {
+                Ok(())
+            } else {
+                Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox container could not be stopped after foreground command: {stop_error}"
+                )))
+            }
         }
-    })
-    .await
-    .map_err(|_| RuntimeProcessError::Timeout(launch_timeout))??;
-    let pid: u32 = pid_output.trim().parse().map_err(|_| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox background launch did not report a pid: {pid_output:?}"
-        ))
-    })?;
-    Ok(BackgroundLaunch {
-        pid,
-        log_path: format!("{BACKGROUND_LOG_DIR}/bg-{pid}.log"),
-    })
-}
-
-/// Renders the "still-live background processes" footer appended to every
-/// foreground shell result. Empty when there are no tracked survivors.
-pub(super) fn render_background_footer(jobs: &[registry::BackgroundJob]) -> String {
-    if jobs.is_empty() {
-        return String::new();
-    }
-    let mut footer = String::from("\n\nLive background processes:");
-    for job in jobs {
-        footer.push_str(&format!("\n  pid {} ({})", job.pid, job.command_preview));
-    }
-    footer
-}
-
-#[cfg(test)]
-mod footer_tests {
-    use super::*;
-
-    #[test]
-    fn empty_job_list_renders_no_footer() {
-        assert_eq!(render_background_footer(&[]), "");
-    }
-
-    #[test]
-    fn footer_lists_every_survivor_with_pid_and_command_preview() {
-        let jobs = vec![
-            registry::BackgroundJob {
-                pid: 101,
-                command_preview: "npm run dev".to_string(),
-            },
-            registry::BackgroundJob {
-                pid: 202,
-                command_preview: "python -m http.server".to_string(),
-            },
-        ];
-        assert_eq!(
-            render_background_footer(&jobs),
-            "\n\nLive background processes:\n  pid 101 (npm run dev)\n  pid 202 (python -m http.server)",
-        );
     }
 }
 
@@ -1099,18 +1010,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrapped_command_runs_under_setsid_for_process_group_isolation() {
-        let wrapped = wrap_command_for_pgid_isolation("echo hi && sleep 1");
-        // `--wait` is load-bearing, not cosmetic: without it `setsid`
-        // returns immediately (exit 0) without waiting for `command`, so
-        // Docker's own exec exit code — what `CommandExecutionOutput::
-        // exit_code` is built from — would always report 0 regardless of
-        // whether `command` actually succeeded. See this function's doc
-        // comment for the full empirical case.
-        assert_eq!(wrapped, "exec setsid --wait sh -c 'echo hi && sleep 1'");
-    }
-
-    #[test]
     fn foreground_wrapper_reports_its_own_pid_before_running_and_cleans_up_after() {
         let wrapped = wrap_foreground_command_reporting_pgid("echo hi && sleep 1", "marker-abc");
         assert_eq!(
@@ -1131,41 +1030,6 @@ mod tests {
         assert!(
             !wrapped.contains("exec "),
             "the foreground wrapper must not `exec` over itself: {wrapped}"
-        );
-    }
-
-    /// Pins the pid-agreement invariant `background_launch_script` exists
-    /// for: the `bg-$$.log` redirect must live strictly inside the
-    /// single-quoted, freshly-`exec`'d inner `sh -c` — not in the outer,
-    /// unquoted portion of the script — because only there does `$$` share
-    /// its value with the `$!` the outer shell reports back to Rust. Before
-    /// the fix, the redirect sat outside the wrap (`{wrapped} >>bg-$$.log`),
-    /// so `$$` resolved to the wrong (invoking) shell's pid.
-    #[test]
-    fn background_launch_script_puts_the_dollar_dollar_log_redirect_inside_the_inner_shell() {
-        let script = background_launch_script("echo hi");
-        assert_eq!(
-            script,
-            "mkdir -p /workspace/.ironclaw && exec setsid --wait sh -c 'exec >>/workspace/.ironclaw/bg-$$.log 2>&1; echo hi' & echo $!"
-        );
-
-        let inner_quote_start = script.find("sh -c '").unwrap() + "sh -c '".len();
-        let redirect_pos = script
-            .find("bg-$$.log")
-            .expect("script must still redirect via a $$-derived filename");
-        assert!(
-            redirect_pos > inner_quote_start,
-            "the bg-$$.log redirect must be inside the inner sh -c's quoted body, \
-             where $$ agrees with the $! the outer shell reports: {script}"
-        );
-
-        // The final `echo $!` — read by Rust to build `BackgroundLaunch.pid`
-        // and therefore `log_path` — must stay in the OUTER, unquoted part
-        // of the script (it reports the outer shell's view of the forked
-        // job, which is what the inner shell's own pid actually equals).
-        assert!(
-            script.ends_with("& echo $!"),
-            "the outer shell must still report the launched job's pid via $!: {script}"
         );
     }
 
@@ -1191,22 +1055,11 @@ mod tests {
         assert_eq!(labels.get("ironclaw.user").unwrap(), "user-a");
         let env = launch.env.unwrap();
         assert!(env.iter().any(|e| e == "HOME=/workspace/.home"));
-        assert!(
-            env.iter()
-                .any(|e| e == "NPM_CONFIG_PREFIX=/workspace/.home/.npm-global"),
-            "npm's global prefix is not $HOME-relative, so it must be redirected explicitly \
-             to a writable path under readonly_rootfs: {env:?}"
-        );
         let path_entry = env
             .iter()
             .find(|e| e.starts_with("PATH="))
             .unwrap_or_else(|| panic!("launch env must set an explicit PATH: {env:?}"));
-        for expected in [
-            "/workspace/.home/.npm-global/bin",
-            "/workspace/.home/.local/bin",
-            "/home/sandbox/.cargo/bin",
-            "/usr/bin",
-        ] {
+        for expected in ["/workspace/.home/.local/bin", "/usr/local/bin", "/usr/bin"] {
             assert!(
                 path_entry.contains(expected),
                 "PATH must include {expected} (setting Config.env PATH replaces the \
@@ -1215,6 +1068,11 @@ mod tests {
         }
         let host_config = launch.host_config.unwrap();
         assert_eq!(host_config.auto_remove, Some(false));
+        assert_eq!(
+            host_config.pids_limit,
+            Some(SANDBOX_PIDS_LIMIT),
+            "every newly launched sandbox container must have a finite cgroup PID limit"
+        );
 
         // The launch config's own labels must carry the same stamp
         // `security_posture_stamp` would compute for this config — the
@@ -1360,7 +1218,8 @@ mod tests {
         use ironclaw_secrets::SecretMaterial;
 
         use super::super::credential_firewall::{
-            SandboxCredentialDecision, SandboxCredentialFirewall, StagedCredentialObligation,
+            SandboxCredentialConnectionIdentity, SandboxCredentialDecision,
+            SandboxCredentialFirewall, StagedCredentialObligation,
             StagedCredentialObligationSource,
         };
         use crate::obligations::RuntimeSecretInjectionStore;
@@ -1425,7 +1284,11 @@ mod tests {
         );
         let decision = firewall
             .authorize(
-                Some((&tenant, &user)),
+                Some(SandboxCredentialConnectionIdentity {
+                    tenant_id: &tenant,
+                    user_id: &user,
+                    invocation_id: scope.invocation_id,
+                }),
                 Instant::now() + Duration::from_secs(5),
             )
             .expect("attributed lookup within deadline must not error");
@@ -1571,6 +1434,32 @@ mod tests {
             security_posture_stamp(&security_posture_fields(&no_net_config)),
             security_posture_stamp(&security_posture_fields(&egress_config)),
             "a different container_network_mode must change the stamp"
+        );
+    }
+
+    #[test]
+    fn security_posture_stamp_changes_when_pids_limit_is_missing_or_different() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        let baseline = security_posture_fields(&config);
+        let baseline_stamp = security_posture_stamp(&baseline);
+
+        assert_eq!(baseline.pids_limit, Some(SANDBOX_PIDS_LIMIT));
+
+        let mut missing_limit = security_posture_fields(&config);
+        missing_limit.pids_limit = None;
+        assert_ne!(
+            baseline_stamp,
+            security_posture_stamp(&missing_limit),
+            "a container without the finite PID limit must have a stale posture stamp"
+        );
+
+        let mut different_limit = security_posture_fields(&config);
+        different_limit.pids_limit = Some(SANDBOX_PIDS_LIMIT + 1);
+        assert_ne!(
+            baseline_stamp,
+            security_posture_stamp(&different_limit),
+            "a container with a different PID limit must have a stale posture stamp"
         );
     }
 
@@ -1744,7 +1633,8 @@ pub(crate) mod docker_gate;
 /// `#[ignore]` vanish.
 #[cfg(test)]
 mod docker_tests {
-    use super::super::set_sandbox_writable_permissions;
+    #[cfg(unix)]
+    use super::super::prepare_workspace_unix;
     use super::*;
     use std::collections::HashMap;
 
@@ -1769,13 +1659,16 @@ mod docker_tests {
     /// window since W1) can't write into it and `mkdir -p /workspace/.ironclaw`
     /// fails with `Permission denied` before the test's real assertions run.
     async fn create_writable_workspace(config: &RebornSandboxConfig, workspace: &Path) {
-        std::fs::create_dir_all(workspace).unwrap();
-        set_sandbox_writable_permissions(
-            workspace.to_path_buf(),
+        #[cfg(unix)]
+        prepare_workspace_unix(
+            &config.workspace_root,
+            workspace,
             config.container_identity.workspace_mode(),
         )
-        .await
-        .expect("chowning/chmoding the test workspace should succeed");
+        .expect("preparing the test workspace should succeed");
+
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(workspace).unwrap();
     }
 
     async fn best_effort_remove(docker: &Docker, container_id: &str) {
@@ -2166,6 +2059,44 @@ mod docker_tests {
         );
 
         best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
+
+        // A network can carry the isolation flags while still pointing at a
+        // different gateway. That must also be rejected because the proxy URL
+        // and host listener both rely on the pinned 10.200.0.1 address.
+        docker
+            .create_network(CreateNetworkOptions {
+                name: SANDBOX_EGRESS_NETWORK_NAME.to_string(),
+                check_duplicate: true,
+                driver: "bridge".to_string(),
+                internal: true,
+                ipam: Ipam {
+                    config: Some(vec![IpamConfig {
+                        subnet: Some("10.201.0.0/24".to_string()),
+                        gateway: Some("10.201.0.1".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+                options: [(
+                    SANDBOX_EGRESS_NETWORK_ICC_OPTION_KEY.to_string(),
+                    "false".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .await
+            .expect("gateway-mismatched network create succeeds");
+
+        let error = ensure_egress_network(&docker, &egress_config)
+            .await
+            .expect_err("an existing network with the wrong gateway must be rejected");
+        assert!(
+            error.to_string().contains("gateway"),
+            "the fail-closed error must name the gateway mismatch: {error}"
+        );
+
+        best_effort_remove_network(&docker, SANDBOX_EGRESS_NETWORK_NAME).await;
     }
 
     /// Guards against the applied container's `HostConfig` diverging from
@@ -2208,13 +2139,15 @@ mod docker_tests {
         let network_ready = tokio::sync::OnceCell::new();
         let container_id = ensure_container(
             &docker,
-            &config,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds");
@@ -2236,6 +2169,11 @@ mod docker_tests {
             host_config.cpu_shares,
             Some(config.cpu_shares as i64),
             "applied cpu_shares must match config: {host_config:?}"
+        );
+        assert_eq!(
+            host_config.pids_limit,
+            Some(SANDBOX_PIDS_LIMIT),
+            "applied container must have the finite cgroup PID limit: {host_config:?}"
         );
         assert_eq!(
             host_config.readonly_rootfs,
@@ -2410,7 +2348,7 @@ mod docker_tests {
     /// disposable, so `ensure_container` must recycle-and-recreate on a
     /// stale stamp rather than fail closed. Covers both halves of
     /// `ensure_container`'s label-driven branch in one flow: a container
-    /// manually created with a stale (bogus) `security_posture` label is
+    /// manually created with the old no-PID-limit `security_posture` is
     /// destroyed and replaced by a freshly stamped one (asserting the
     /// container ID changes, the stale container is actually gone, and the
     /// new one carries today's stamp); a second `ensure_container` call
@@ -2448,19 +2386,26 @@ mod docker_tests {
         create_writable_workspace(&config, &workspace).await;
 
         // Manually build and start a container carrying the right
-        // tenant/user labels but a deliberately WRONG security-posture
-        // stamp — standing in for a container created under an older,
-        // less-hardened posture (e.g. pre-W1, root PID 1). Docker has no
+        // tenant/user labels and a self-consistent pre-limit posture: both
+        // HostConfig.pids_limit and its stamped posture omit the finite
+        // limit. Docker has no
         // "update labels on an existing container" API, so a stale
         // container can only be simulated by creating one directly like
         // this, not by mutating a real one after the fact.
         let mut stale_launch = user_container_launch_config(&config, &tenant, &user, &workspace)
             .await
             .expect("launch config builds");
+        stale_launch
+            .host_config
+            .as_mut()
+            .expect("launch config has host config")
+            .pids_limit = None;
+        let mut stale_posture = security_posture_fields(&config);
+        stale_posture.pids_limit = None;
         let mut stale_labels = stale_launch.labels.take().unwrap_or_default();
         stale_labels.insert(
             registry::label_security_posture(LABEL_PREFIX),
-            "stale-posture-stamp".to_string(),
+            security_posture_stamp(&stale_posture),
         );
         stale_launch.labels = Some(stale_labels);
         let stale_created = docker
@@ -2484,13 +2429,15 @@ mod docker_tests {
         let network_ready = tokio::sync::OnceCell::new();
         let recreated_id = ensure_container(
             &docker,
-            &config,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds despite the stale stamp");
@@ -2525,18 +2472,28 @@ mod docker_tests {
             security_posture_stamp(&security_posture_fields(&config)),
             "the recreated container must carry today's expected posture stamp"
         );
+        assert_eq!(
+            recreated_inspect
+                .host_config
+                .as_ref()
+                .and_then(|host_config| host_config.pids_limit),
+            Some(SANDBOX_PIDS_LIMIT),
+            "the container replacing the no-limit posture must apply the finite PID limit"
+        );
 
         // Second call: the recreated container's stamp now matches, so it
         // must be reused untouched — no recycle, same container ID.
         let reused_id = ensure_container(
             &docker,
-            &config,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds on the matching-stamp path");
@@ -2593,13 +2550,15 @@ mod docker_tests {
         let network_ready = tokio::sync::OnceCell::new();
         let container_under_ca_a = ensure_container(
             &docker,
-            &config_ca_a,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config_ca_a,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds under CA-A");
@@ -2608,13 +2567,15 @@ mod docker_tests {
         // steady-state case — no proxy restart) must reuse the container.
         let reused_under_ca_a = ensure_container(
             &docker,
-            &config_ca_a,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config_ca_a,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds on the repeat CA-A call");
@@ -2630,13 +2591,15 @@ mod docker_tests {
         );
         let container_under_ca_b = ensure_container(
             &docker,
-            &config_ca_b,
-            &key,
-            &tenant,
-            &user,
-            &workspace,
-            &network_ready,
-            None,
+            EnsureContainerRequest {
+                config: &config_ca_b,
+                key: &key,
+                tenant_id: &tenant,
+                user_id: &user,
+                workspace: &workspace,
+                network_ready: &network_ready,
+                attribution: None,
+            },
         )
         .await
         .expect("ensure_container succeeds under CA-B");

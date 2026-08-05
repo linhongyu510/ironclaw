@@ -11,7 +11,7 @@
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -105,6 +105,53 @@ impl UserContainerCandidate {
 #[derive(Debug, Default)]
 pub struct SandboxActivityRegistry {
     last_activity: Mutex<HashMap<RebornSandboxUserKey, Instant>>,
+    active_invocations: Mutex<HashMap<RebornSandboxUserKey, usize>>,
+    lifecycle_gates: Mutex<HashMap<RebornSandboxUserKey, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+/// RAII marker for one in-flight sandbox command.
+///
+/// The lease begins before any per-user container lifecycle or exec work and
+/// decrements the active count on every return path, including cancellation.
+pub(crate) struct SandboxInvocationLease<'a> {
+    registry: &'a SandboxActivityRegistry,
+    key: RebornSandboxUserKey,
+}
+
+impl Drop for SandboxInvocationLease<'_> {
+    fn drop(&mut self) {
+        self.registry.finish_invocation(&self.key);
+    }
+}
+
+/// Exclusive access to one user's container lifecycle.
+///
+/// Gates are keyed by user, so Docker I/O for one user never blocks another.
+/// The weak-map entry is removed when the last holder or waiter releases its
+/// gate, bounding registry growth without a global cleanup sweep.
+pub(crate) struct SandboxLifecycleGuard<'a> {
+    registry: &'a SandboxActivityRegistry,
+    key: RebornSandboxUserKey,
+    gate: Arc<tokio::sync::Mutex<()>>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for SandboxLifecycleGuard<'_> {
+    fn drop(&mut self) {
+        self.guard.take();
+        if Arc::strong_count(&self.gate) != 1 {
+            return;
+        }
+
+        let mut gates = self.registry.lock_lifecycle_gates();
+        let remove = gates
+            .get(&self.key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|registered| Arc::ptr_eq(&registered, &self.gate));
+        if remove && Arc::strong_count(&self.gate) == 1 {
+            gates.remove(&self.key);
+        }
+    }
 }
 
 impl SandboxActivityRegistry {
@@ -121,7 +168,97 @@ impl SandboxActivityRegistry {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    pub(crate) fn touch(&self, key: &RebornSandboxUserKey) {
+    fn lock_active(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, usize>> {
+        self.active_invocations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn lock_lifecycle_gates(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Weak<tokio::sync::Mutex<()>>>>
+    {
+        self.lifecycle_gates
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Takes exclusive lifecycle ownership for `key`. The process-wide map
+    /// mutex is held only while cloning or inserting the keyed gate; callers
+    /// wait on and hold only that user's asynchronous mutex across Docker I/O.
+    pub(crate) async fn lock_user_lifecycle(
+        &self,
+        key: &RebornSandboxUserKey,
+    ) -> SandboxLifecycleGuard<'_> {
+        let gate = {
+            let mut gates = self.lock_lifecycle_gates();
+            if let Some(gate) = gates.get(key).and_then(Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(key.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let guard = Arc::clone(&gate).lock_owned().await;
+        SandboxLifecycleGuard {
+            registry: self,
+            key: key.clone(),
+            gate,
+            guard: Some(guard),
+        }
+    }
+
+    /// Marks one command active. Call this while holding the user's lifecycle
+    /// gate so a reaper teardown and a new invocation cannot pass each other.
+    pub(crate) fn begin_invocation(
+        &self,
+        key: &RebornSandboxUserKey,
+    ) -> SandboxInvocationLease<'_> {
+        let mut active = self.lock_active();
+        let count = active.entry(key.clone()).or_default();
+        *count = count.saturating_add(1);
+        SandboxInvocationLease {
+            registry: self,
+            key: key.clone(),
+        }
+    }
+
+    fn finish_invocation(&self, key: &RebornSandboxUserKey) {
+        let mut active = self.lock_active();
+        let Some(count) = active.get_mut(key) else {
+            return;
+        };
+        if *count <= 1 {
+            active.remove(key);
+        } else {
+            *count -= 1;
+        }
+    }
+
+    pub(crate) fn has_active_invocations(&self, key: &RebornSandboxUserKey) -> bool {
+        self.lock_active().get(key).copied().unwrap_or_default() > 0
+    }
+
+    /// Acquires exclusive lifecycle ownership only when no invocation is
+    /// active. A new invocation cannot become active until the returned guard
+    /// is dropped because invocation startup takes this same gate first.
+    pub(crate) async fn lock_user_for_reap(
+        &self,
+        key: &RebornSandboxUserKey,
+    ) -> Option<SandboxLifecycleGuard<'_>> {
+        let guard = self.lock_user_lifecycle(key).await;
+        if self.has_active_invocations(key) {
+            None
+        } else {
+            Some(guard)
+        }
+    }
+
+    /// Records successful command activity for a persistent user container.
+    /// Runtime owners that share this registry with a reaper use this as the
+    /// push-side of the idle-lifecycle contract.
+    pub fn touch(&self, key: &RebornSandboxUserKey) {
         self.lock().insert(key.clone(), Instant::now());
     }
 
@@ -139,62 +276,17 @@ impl SandboxActivityRegistry {
     }
 }
 
-/// A single tracked background (`background: true`) shell launch, kept
-/// per-user so the foreground command path can render a "still-live
-/// background processes" footer. A named struct rather than a `(u32,
-/// String)` tuple — `jobs_for` return values flow into formatting code
-/// where a bare tuple's field order is not self-documenting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BackgroundJob {
-    pub(crate) pid: u32,
-    pub(crate) command_preview: String,
-}
-
-/// Push-based in-memory map of per-user background job launches, keyed on
-/// [`RebornSandboxUserKey`] the same way [`SandboxActivityRegistry`] is.
-/// Kept as a sibling registry (single responsibility) rather than folded
-/// into the activity map.
-#[derive(Debug, Default)]
-pub(crate) struct BackgroundJobRegistry {
-    jobs: Mutex<HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>>,
-}
-
-impl BackgroundJobRegistry {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>> {
-        self.jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    pub(crate) fn record(&self, key: &RebornSandboxUserKey, pid: u32, command_preview: String) {
-        self.lock()
-            .entry(key.clone())
-            .or_default()
-            .push(BackgroundJob {
-                pid,
-                command_preview,
-            });
-    }
-
-    pub(crate) fn jobs_for(&self, key: &RebornSandboxUserKey) -> Vec<BackgroundJob> {
-        self.lock().get(key).cloned().unwrap_or_default()
-    }
-
-    pub(crate) fn drop_dead(&self, key: &RebornSandboxUserKey, alive_pids: &[u32]) {
-        if let Some(jobs) = self.lock().get_mut(key) {
-            jobs.retain(|job| alive_pids.contains(&job.pid));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::{TenantId, UserId};
+
+    fn user_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
+        RebornSandboxUserKey::from_tenant_user(
+            &TenantId::new(tenant).expect("valid tenant"),
+            &UserId::new(user).expect("valid user"),
+        )
+    }
 
     #[test]
     fn label_filter_targets_tenant_and_user_labels_only() {
@@ -276,5 +368,70 @@ mod tests {
         registry.forget(&key);
 
         assert!(registry.last_activity(&key).is_none());
+    }
+
+    #[tokio::test]
+    async fn same_user_container_lifecycle_is_serialized() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let key = user_key("tenant", "user");
+        let first_create = registry.lock_user_lifecycle(&key).await;
+        let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let second_registry = Arc::clone(&registry);
+        let second_key = key.clone();
+        let second_create = tokio::spawn(async move {
+            let _ = attempted_tx.send(());
+            let _guard = second_registry.lock_user_lifecycle(&second_key).await;
+            let _ = acquired_tx.send(());
+            let _ = release_rx.await;
+        });
+
+        attempted_rx.await.expect("second create must start");
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            acquired_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        drop(first_create);
+        acquired_rx.await.expect("second create must acquire next");
+        let _ = release_tx.send(());
+        second_create.await.expect("second create task must finish");
+    }
+
+    #[tokio::test]
+    async fn different_users_have_independent_lifecycle_gates() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let first_key = user_key("tenant", "user-a");
+        let second_key = user_key("tenant", "user-b");
+        let first_guard = registry.lock_user_lifecycle(&first_key).await;
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+
+        let second_registry = Arc::clone(&registry);
+        let second_user = tokio::spawn(async move {
+            let _guard = second_registry.lock_user_lifecycle(&second_key).await;
+            let _ = acquired_tx.send(());
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), acquired_rx)
+            .await
+            .expect("user-b must not wait for user-a")
+            .expect("user-b acquisition signal must arrive");
+        drop(first_guard);
+        second_user.await.expect("user-b task must finish");
+    }
+
+    #[test]
+    fn invocation_lease_releases_active_count_on_drop() {
+        let registry = SandboxActivityRegistry::new();
+        let key = user_key("tenant", "user");
+
+        let lease = registry.begin_invocation(&key);
+        assert!(registry.has_active_invocations(&key));
+
+        drop(lease);
+        assert!(!registry.has_active_invocations(&key));
     }
 }

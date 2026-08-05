@@ -1150,6 +1150,7 @@ pub(crate) fn shared_workspace_view(
     match policy {
         crate::runtime_mounts::WorkspaceMountPolicy::Shared(view) => Some(view),
         crate::runtime_mounts::WorkspaceMountPolicy::PerCaller
-        | crate::runtime_mounts::WorkspaceMountPolicy::SandboxPerCaller => None,
+        | crate::runtime_mounts::WorkspaceMountPolicy::SandboxPerCaller
+        | crate::runtime_mounts::WorkspaceMountPolicy::Unavailable => None,
     }
 }

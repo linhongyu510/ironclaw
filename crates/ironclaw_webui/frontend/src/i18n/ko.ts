@@ -442,8 +442,6 @@ registerPack("ko", {
   "settings.field.quietHoursEndDesc": "억제 종료 시각 (0–23)",
   "settings.field.heartbeatTimezone": "시간대",
   "settings.field.heartbeatTimezoneDesc": "조용한 시간의 IANA 시간대",
-  "settings.field.sandboxEnabled": "샌드박스 활성화",
-  "settings.field.sandboxEnabledDesc": "Docker 기반 도구 실행",
   "settings.field.sandboxPolicy": "정책",
   "settings.field.sandboxPolicyDesc": "컨테이너 파일 시스템 접근 수준",
   "settings.field.sandboxTimeout": "시간 제한",

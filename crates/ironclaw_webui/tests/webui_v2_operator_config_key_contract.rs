@@ -142,6 +142,7 @@ async fn operator_config_key_routes_dispatch_path_and_body() {
 
     let set_value = json!({"model": "gpt-4", "temperature": 0.2});
     let set_response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)

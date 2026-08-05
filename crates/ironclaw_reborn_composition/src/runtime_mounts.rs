@@ -240,6 +240,10 @@ pub(crate) enum WorkspaceMountPolicy {
     /// The sandbox profile keys `/workspace` by the same hashed
     /// `{tenant_id,user_id}` leaf used by the process backend.
     SandboxPerCaller,
+    /// The selected sandbox provider owns a remote workspace that the host
+    /// filesystem cannot address. File capabilities remain fail-closed until
+    /// a provider workspace adapter is installed.
+    Unavailable,
 }
 
 impl WorkspaceMountPolicy {
@@ -283,6 +287,7 @@ impl WorkspaceMountPolicy {
             Self::SandboxPerCaller => {
                 sandbox_user_workspace_mount_view(scope, MountPermissions::read_write())
             }
+            Self::Unavailable => MountView::new(Vec::new()),
         }
     }
 }
@@ -311,6 +316,7 @@ pub(crate) fn read_write_workspace_filesystem(
             Arc::clone(extension_filesystem),
             move |scope| sandbox_user_workspace_mount_view(scope, permissions.clone()),
         ))),
+        WorkspaceMountPolicy::Unavailable => None,
         WorkspaceMountPolicy::Shared(_) => Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(extension_filesystem),
             // silent-ok: the alias-free workspace mount view is built from
@@ -431,6 +437,16 @@ mod tests {
             ),
         )
         .expect("shared handle builds");
+        assert!(
+            read_write_workspace_filesystem(&backend, &WorkspaceMountPolicy::Unavailable).is_none()
+        );
+        assert!(
+            WorkspaceMountPolicy::Unavailable
+                .capability_grant_view(&scope)
+                .expect("unavailable view is a valid empty grant")
+                .mounts
+                .is_empty()
+        );
 
         assert_eq!(
             per_caller

@@ -46,16 +46,6 @@ export const AGENT_FIELDS = [
     ],
   },
   {
-    groupKey: "settings.group.sandbox",
-    fields: [
-      { key: "sandbox.enabled", labelKey: "settings.field.sandboxEnabled", descKey: "settings.field.sandboxEnabledDesc", type: "boolean" },
-      { key: "sandbox.policy", labelKey: "settings.field.sandboxPolicy", descKey: "settings.field.sandboxPolicyDesc", type: "select", options: ["readonly", "workspace_write", "full_access"] },
-      { key: "sandbox.timeout_secs", labelKey: "settings.field.sandboxTimeout", descKey: "settings.field.sandboxTimeoutDesc", type: "number", min: 0 },
-      { key: "sandbox.memory_limit_mb", labelKey: "settings.field.sandboxMemoryLimit", descKey: "settings.field.sandboxMemoryLimitDesc", type: "number", min: 0 },
-      { key: "sandbox.image", labelKey: "settings.field.sandboxImage", descKey: "settings.field.sandboxImageDesc", type: "text" },
-    ],
-  },
-  {
     groupKey: "settings.group.routines",
     fields: [
       { key: "routines.max_concurrent", labelKey: "settings.field.routinesMaxConcurrent", descKey: "settings.field.routinesMaxConcurrentDesc", type: "number", min: 0 },

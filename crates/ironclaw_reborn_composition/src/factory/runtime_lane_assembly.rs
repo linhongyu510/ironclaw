@@ -98,11 +98,11 @@ where
 {
     match binding {
         RebornRuntimeProcessBinding::None => services,
-        RebornRuntimeProcessBinding::TenantSandbox { process_port } => services
-            .with_production_tenant_sandbox_process_port(process_port)
+        RebornRuntimeProcessBinding::UserSandbox { process_port } => services
+            .with_production_user_sandbox_process_port(process_port)
             .with_sandbox_per_user_ceiling(Arc::new(
                 ironclaw_host_runtime::SandboxPerUserCeiling::new(
-                    crate::sandbox_quota::SANDBOX_PER_USER_MAX_CONCURRENT,
+                    crate::sandbox::SANDBOX_PER_USER_MAX_CONCURRENT,
                 ),
             )),
     }

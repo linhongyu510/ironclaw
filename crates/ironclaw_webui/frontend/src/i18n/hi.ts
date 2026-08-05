@@ -442,8 +442,6 @@ registerPack("hi", {
   "settings.field.quietHoursEndDesc": "Suppression खत्म करने का hour (0–23)",
   "settings.field.heartbeatTimezone": "समयक्षेत्र",
   "settings.field.heartbeatTimezoneDesc": "Quiet hours के लिए IANA timezone",
-  "settings.field.sandboxEnabled": "सैंडबॉक्स सक्षम करें",
-  "settings.field.sandboxEnabledDesc": "डॉकर-आधारित टूल निष्पादन",
   "settings.field.sandboxPolicy": "नीति",
   "settings.field.sandboxPolicyDesc": "कंटेनर फ़ाइल सिस्टम पहुंच स्तर",
   "settings.field.sandboxTimeout": "टाइमआउट",

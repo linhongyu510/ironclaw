@@ -35,10 +35,10 @@ use ironclaw_host_runtime::{
     RebornScopedSandboxCommandTransport, SandboxCommandTransport,
 };
 
-fn tenant_scope(tenant: &str, user: &str) -> ResourceScope {
+fn tenant_scope(tenant: &str, user: &str, unique: &str) -> ResourceScope {
     ResourceScope {
-        tenant_id: TenantId::new(tenant).unwrap(),
-        user_id: UserId::new(user).unwrap(),
+        tenant_id: TenantId::new(format!("{tenant}-{unique}")).unwrap(),
+        user_id: UserId::new(format!("{user}-{unique}")).unwrap(),
         agent_id: Some(AgentId::new("agent").unwrap()),
         project_id: Some(ProjectId::new("project").unwrap()),
         mission_id: None,
@@ -67,7 +67,7 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
     let config = RebornSandboxConfig::new(workspace_root.path());
 
     // One shared transport instance, exactly as composition wires it in
-    // production (a single `Arc<TenantSandboxProcessPort>` binding serves
+    // production (a single `Arc<UserSandboxProcessPort>` binding serves
     // every tenant) — the test must prove per-request scope isolation holds
     // from a single shared connection, not merely across separately
     // connected transports.
@@ -75,8 +75,13 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
         .await
         .expect("real docker connect should succeed when the daemon is reachable");
 
-    let scope_a = tenant_scope("tenant-a", "user-a");
-    let scope_b = tenant_scope("tenant-b", "user-b");
+    // Container names are deterministic from (tenant, user) so persistence
+    // survives transport restarts. A fresh scope per test run prevents a
+    // retained container from an earlier run from keeping that run's now-dead
+    // TempDir bind source.
+    let unique = InvocationId::new().to_string();
+    let scope_a = tenant_scope("tenant-a", "user-a", &unique);
+    let scope_b = tenant_scope("tenant-b", "user-b", &unique);
 
     // Host-side leaf directory `ironclaw-worker`'s container for tenant A
     // gets bind-mounted at (`<root>/scopes/<digest-a>`). Only its basename is

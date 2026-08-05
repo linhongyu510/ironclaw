@@ -25,6 +25,15 @@ pub(crate) enum HarnessCapabilityRecorder {
 }
 
 impl HarnessCapabilityRecorder {
+    pub(crate) fn reborn_runtime_for_test(
+        &self,
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.reborn_services_for_test(),
+        }
+    }
+
     pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         match self {
             Self::Recording(port) => port.invocations(),

@@ -32,18 +32,6 @@
 //! disappear, so that sweep has no trigger yet — it is a named follow-up
 //! for a future multi-user profile.
 //!
-//! **Idle-stop veto (live background jobs).** The activity registry only
-//! records *foreground* exec activity, so a `background:true` dev server
-//! started once and then left running never touches it again — a naive
-//! idle-stop would hard-kill a live server out from under the user. Before
-//! [`SandboxReaper::scan_and_reap`] acts on an idle-stop verdict it runs a
-//! live `ps` probe against the container (see
-//! [`SandboxReaper::probe_live_background`]); a surviving non-PID-1 process
-//! vetoes the stop for this scan. The probe never gates forced recycle,
-//! which stays unconditional — nothing runs past `forced_recycle_after`
-//! regardless of what is live inside it. A probe failure counts as "live"
-//! (never reap on uncertainty).
-//!
 //! **Remove debounce.** `docker rm` is destructive and irreversible, so
 //! [`ReapAction::Remove`] only executes once the *same* container id has
 //! produced a `Remove` verdict on two consecutive scans (see
@@ -69,11 +57,9 @@ use ironclaw_host_api::ids::{TenantId, UserId};
 
 use crate::RuntimeProcessError;
 
-use super::ContainerWorkdir;
 use super::LABEL_PREFIX;
 use super::attribution::{self, ConnectionAttributionResolver};
 use super::broker::SANDBOX_EGRESS_NETWORK_NAME;
-use super::exec_transport;
 use super::registry::{self, SandboxActivityRegistry, UserContainerCandidate};
 use super::user_key::RebornSandboxUserKey;
 
@@ -159,11 +145,7 @@ impl Default for SandboxReaperConfig {
     }
 }
 
-/// Pure helper shared by [`decide_reap_action`] and
-/// [`SandboxReaper::scan_and_reap`] (the latter needs it to decide whether a
-/// container is even a candidate for the idle-stop live probe) so the two
-/// never compute "how old is this container" in two places that could
-/// drift apart.
+/// Computes container age without allowing a future timestamp to underflow.
 fn age_since(now: DateTime<Utc>, created_at: DateTime<Utc>) -> Duration {
     (now - created_at).to_std().unwrap_or(Duration::ZERO)
 }
@@ -191,45 +173,27 @@ pub(crate) enum ReapAction {
 /// unparseable/absent `finished_at` is left alone, not force-removed,
 /// because "unknown" must never be reinterpreted as "eligible" just because
 /// another signal (age) happens to be known.
-///
-/// `idle_stop_veto` is the caller's live-probe result (module doc's
-/// "Idle-stop veto" section): when `true`, an idle-stop that would
-/// otherwise fire is suppressed for this scan (`Stop` becomes `None`). The
-/// veto applies only to the idle-stop branch — it never suppresses forced
-/// recycle, which stays unconditional regardless of what is live inside
-/// the container.
 pub(crate) fn decide_reap_action(
     now: DateTime<Utc>,
     created_at: DateTime<Utc>,
     running: bool,
     finished_at: Option<DateTime<Utc>>,
     idle: Option<Duration>,
-    idle_stop_veto: bool,
     config: &SandboxReaperConfig,
 ) -> ReapAction {
     let age = age_since(now, created_at);
     let past_forced_recycle_age = age >= config.forced_recycle_after;
 
     if running {
-        // Forced recycle overrides the idle window (and the veto) outright:
+        // Forced recycle overrides the idle window outright:
         // a running container's age is always known (it is the container's
         // own `created_at` label), so there is no uncertainty to defer to
-        // here, and nothing — including a live background job — runs past
-        // this backstop.
+        // here.
         if past_forced_recycle_age {
             return ReapAction::Stop;
         }
         return match idle {
-            Some(idle) if idle >= config.idle_stop_after => {
-                if idle_stop_veto {
-                    // A live-probe found a surviving background process:
-                    // suppress the stop for this scan rather than kill a
-                    // running dev server out from under the user.
-                    ReapAction::None
-                } else {
-                    ReapAction::Stop
-                }
-            }
+            Some(idle) if idle >= config.idle_stop_after => ReapAction::Stop,
             _ => ReapAction::None, // no activity record: never reap on uncertainty
         };
     }
@@ -354,20 +318,6 @@ impl SandboxReaper {
         self
     }
 
-    /// Test-only introspection: whether — and which — attribution resolver
-    /// this reaper was wired with. Mirrors the production call site
-    /// `ironclaw_reborn_composition::sandbox_reaper_task::spawn_sandbox_reaper`
-    /// (`with_attribution_resolver` above), so a composition-tier test can
-    /// assert against a PRODUCTION-constructed reaper that this is `Some`,
-    /// and (via `Arc::ptr_eq` against
-    /// `RebornScopedSandboxCommandTransport::attribution_for_test`) that it
-    /// shares the SAME instance the exec transport was wired with. Ships
-    /// zero bytes in production binaries.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn attribution_for_test(&self) -> Option<Arc<ConnectionAttributionResolver>> {
-        self.attribution.clone()
-    }
-
     /// Runs the scan loop until `shutdown` reports `true`. Composition owns
     /// spawning this as a task and driving `shutdown` — this method itself
     /// has no opinion on how it is scheduled.
@@ -428,20 +378,8 @@ impl SandboxReaper {
                 self.finished_at(&candidate.container_id).await
             };
 
-            // Only spend a live probe when the pure decision would *idle*-stop
-            // this container — forced recycle is unconditional and must never
-            // be gated behind a probe, and a container that isn't headed for
-            // idle-stop has nothing for the veto to suppress.
             let age = age_since(now, candidate.created_at);
             let past_forced_recycle_age = age >= self.config.forced_recycle_after;
-            let would_idle_stop = running
-                && !past_forced_recycle_age
-                && idle.is_some_and(|idle| idle >= self.config.idle_stop_after);
-            let idle_stop_veto = if would_idle_stop {
-                self.probe_live_background(&candidate.container_id).await
-            } else {
-                false
-            };
 
             let action = decide_reap_action(
                 now,
@@ -449,7 +387,6 @@ impl SandboxReaper {
                 running,
                 finished_at,
                 idle,
-                idle_stop_veto,
                 &self.config,
             );
 
@@ -459,6 +396,27 @@ impl SandboxReaper {
                 }
                 ReapAction::Stop => {
                     self.remove_debounce.observe(&candidate.container_id, false);
+                    // Invocation startup takes this same per-user gate before
+                    // incrementing its active lease. Holding it from this
+                    // final active-count check through Docker teardown closes
+                    // the scan/stop TOCTOU without blocking other users.
+                    let Some(_lifecycle_guard) = self.activity.lock_user_for_reap(&key).await
+                    else {
+                        continue;
+                    };
+
+                    // An invocation may have completed while this scan was
+                    // probing. Its completion touch makes an ordinary
+                    // idle-stop decision stale; forced recycle still proceeds
+                    // once no invocation is active.
+                    if !past_forced_recycle_age
+                        && self
+                            .activity
+                            .idle_for(&key, std::time::Instant::now())
+                            .is_none_or(|idle| idle < self.config.idle_stop_after)
+                    {
+                        continue;
+                    }
                     // Read before stopping: a stopped container drops off
                     // the running-containers list `attribution` queries, so
                     // its IP is free for Docker to reassign — that IP is
@@ -467,23 +425,45 @@ impl SandboxReaper {
                         container,
                         SANDBOX_EGRESS_NETWORK_NAME,
                     );
-                    self.stop_container(&candidate.container_id, released_ip)
-                        .await;
-                    summary.reaped += 1;
+                    if self
+                        .stop_container(&candidate.container_id, released_ip)
+                        .await
+                    {
+                        summary.reaped += 1;
+                    }
                 }
                 ReapAction::Remove => {
                     // Debounced: only act once the same container id has
                     // produced a `Remove` verdict on two consecutive sweeps
                     // (see the module doc's "Remove debounce" section).
                     if self.remove_debounce.observe(&candidate.container_id, true) {
+                        let Some(_lifecycle_guard) = self.activity.lock_user_for_reap(&key).await
+                        else {
+                            // Require two fresh consecutive remove verdicts
+                            // after the active invocation finishes.
+                            self.remove_debounce.observe(&candidate.container_id, false);
+                            continue;
+                        };
+                        // The list result may have said "stopped" before an
+                        // invocation waited on the lifecycle gate, restarted
+                        // this container, and completed. Re-inspect under the
+                        // gate so force-removal cannot kill that newly running
+                        // container. Inspection uncertainty also vetoes.
+                        if !self.container_is_stopped(&candidate.container_id).await {
+                            self.remove_debounce.observe(&candidate.container_id, false);
+                            continue;
+                        }
                         let released_ip = attribution::container_ip_on_network(
                             container,
                             SANDBOX_EGRESS_NETWORK_NAME,
                         );
-                        self.remove_container(&candidate.container_id, released_ip)
-                            .await;
-                        self.activity.forget(&key);
-                        summary.reaped += 1;
+                        if self
+                            .remove_container(&candidate.container_id, released_ip)
+                            .await
+                        {
+                            self.activity.forget(&key);
+                            summary.reaped += 1;
+                        }
                     }
                 }
             }
@@ -542,45 +522,19 @@ impl SandboxReaper {
         Some(parsed.with_timezone(&Utc))
     }
 
-    /// Live-probes `container_id` for a surviving background job to decide
-    /// whether an idle-stop should be vetoed (module doc's "Idle-stop veto"
-    /// section). Only called when the pure decision would otherwise
-    /// idle-stop this container.
-    ///
-    /// The persistent container's PID 1 is always `sleep infinity` (see
-    /// `exec_transport::user_container_launch_config`), and by scan time
-    /// every *foreground* shell invocation's own `setsid`-wrapped exec
-    /// session has exited (`exec_in_container` waits for it, and this probe
-    /// only runs between commands — see
-    /// `RebornScopedSandboxCommandTransport::reconcile_background_jobs` for
-    /// the sibling in-band sweep that trims dead pids from the footer). So
-    /// any pid other than PID 1 that this `ps` snapshot observes is
-    /// necessarily a detached, model-launched background process (e.g. a
-    /// `background:true` dev server) — the same shape
-    /// `reconcile_background_jobs` sweeps, just probed here without a
-    /// tracked-pid list to check against.
-    ///
-    /// Probe failure (exec error, container race, timeout) returns `true`
-    /// (veto/"live") — never reap on uncertainty.
-    async fn probe_live_background(&self, container_id: &str) -> bool {
-        let probed = exec_transport::exec_in_container(
-            &self.docker,
-            container_id,
-            ContainerWorkdir::workspace_root(),
-            Vec::new(),
-            "ps -o pid= --no-headers".to_string(),
-            Duration::from_secs(5),
-            4096,
-        )
-        .await;
-        let Ok(probed) = probed else {
-            return true;
-        };
-        probed
-            .output
-            .split_whitespace()
-            .filter_map(|token| token.trim().parse::<u32>().ok())
-            .any(|pid| pid != 1)
+    /// Revalidates a removal candidate while its per-user lifecycle gate is
+    /// held. Any inspection failure or incomplete state fails closed.
+    async fn container_is_stopped(&self, container_id: &str) -> bool {
+        self.docker
+            .inspect_container(
+                container_id,
+                None::<bollard::container::InspectContainerOptions>,
+            )
+            .await
+            .ok()
+            .and_then(|container| container.state)
+            .and_then(|state| state.running)
+            .is_some_and(|running| !running)
     }
 
     /// Best-effort stop: never fail the scan over a single container's
@@ -588,7 +542,7 @@ impl SandboxReaper {
     /// tasks must not write to the REPL surface). On success, invalidates
     /// `released_ip` against the wired attribution resolver (if any) — see
     /// [`Self::attribution`]'s doc and `attribution`'s module doc ("W17").
-    async fn stop_container(&self, container_id: &str, released_ip: Option<IpAddr>) {
+    async fn stop_container(&self, container_id: &str, released_ip: Option<IpAddr>) -> bool {
         match self
             .docker
             .stop_container(container_id, Some(StopContainerOptions { t: 0 }))
@@ -598,6 +552,7 @@ impl SandboxReaper {
                 if let (Some(attribution), Some(ip)) = (self.attribution.as_deref(), released_ip) {
                     attribution.invalidate(ip);
                 }
+                true
             }
             Err(error) => {
                 tracing::debug!(
@@ -605,13 +560,14 @@ impl SandboxReaper {
                     container_id,
                     "sandbox reaper best-effort stop failed"
                 );
+                false
             }
         }
     }
 
     /// Best-effort forced removal, mirroring [`Self::stop_container`]'s
     /// error handling and attribution-invalidation behavior.
-    async fn remove_container(&self, container_id: &str, released_ip: Option<IpAddr>) {
+    async fn remove_container(&self, container_id: &str, released_ip: Option<IpAddr>) -> bool {
         match self
             .docker
             .remove_container(
@@ -627,6 +583,7 @@ impl SandboxReaper {
                 if let (Some(attribution), Some(ip)) = (self.attribution.as_deref(), released_ip) {
                     attribution.invalidate(ip);
                 }
+                true
             }
             Err(error) => {
                 tracing::debug!(
@@ -634,6 +591,7 @@ impl SandboxReaper {
                     container_id,
                     "sandbox reaper best-effort removal failed"
                 );
+                false
             }
         }
     }
@@ -656,6 +614,18 @@ fn parse_tenant_user_labels(
         .get(&registry::label_user(label_prefix))
         .and_then(|value| UserId::new(value).ok())?;
     Some((tenant_id, user_id))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_support {
+    use super::*;
+
+    impl SandboxReaper {
+        /// Test-only introspection for the production attribution wiring.
+        pub fn attribution_for_test(&self) -> Option<Arc<ConnectionAttributionResolver>> {
+            self.attribution.clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -682,7 +652,6 @@ mod decision_tests {
             true,
             None,
             Some(Duration::from_secs(60)),
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -697,28 +666,9 @@ mod decision_tests {
             true,
             None,
             Some(Duration::from_secs(1_000)),
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Stop);
-    }
-
-    #[test]
-    fn running_container_past_idle_threshold_with_live_background_veto_is_left_alone() {
-        // A `background:true` dev server only touches the activity registry
-        // once at launch, so idle crosses the threshold while it is still
-        // running. A live `ps` probe finding it suppresses the idle-stop.
-        let now = Utc::now();
-        let action = decide_reap_action(
-            now,
-            now,
-            true,
-            None,
-            Some(Duration::from_secs(1_000)),
-            true,
-            &config(),
-        );
-        assert_eq!(action, ReapAction::None);
     }
 
     #[test]
@@ -728,7 +678,7 @@ mod decision_tests {
         // every composition restart. Mirrors the old reaper's "never
         // reap on uncertainty" rule.
         let now = Utc::now();
-        let action = decide_reap_action(now, now, true, None, None, false, &config());
+        let action = decide_reap_action(now, now, true, None, None, &config());
         assert_eq!(action, ReapAction::None);
     }
 
@@ -742,7 +692,6 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -758,7 +707,6 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Remove);
@@ -773,7 +721,6 @@ mod decision_tests {
             false,
             None,
             None,
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -788,16 +735,13 @@ mod decision_tests {
             true,
             None,
             Some(Duration::ZERO),
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Stop);
     }
 
     #[test]
-    fn running_container_past_forced_recycle_age_is_stopped_even_with_veto() {
-        // Forced recycle is unconditional: a live background job never
-        // outlives the 7-day backstop, unlike an ordinary idle-stop.
+    fn running_container_past_forced_recycle_age_is_stopped_even_when_not_idle() {
         let now = Utc::now();
         let action = decide_reap_action(
             now,
@@ -805,7 +749,6 @@ mod decision_tests {
             true,
             None,
             Some(Duration::ZERO),
-            true,
             &config(),
         );
         assert_eq!(action, ReapAction::Stop);
@@ -821,7 +764,6 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
-            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Remove);
@@ -831,6 +773,13 @@ mod decision_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_key() -> RebornSandboxUserKey {
+        RebornSandboxUserKey::from_tenant_user(
+            &TenantId::new("tenant").expect("valid tenant"),
+            &UserId::new("user").expect("valid user"),
+        )
+    }
 
     #[test]
     fn default_config_matches_plan_thresholds() {
@@ -847,6 +796,45 @@ mod tests {
             Duration::from_secs(7 * 24 * 3600)
         );
         assert_eq!(config.label_prefix, "ironclaw");
+    }
+
+    #[tokio::test]
+    async fn active_invocation_vetoes_reaper_lifecycle_ownership() {
+        let activity = SandboxActivityRegistry::new();
+        let key = user_key();
+        let invocation_start = activity.lock_user_lifecycle(&key).await;
+        let invocation = activity.begin_invocation(&key);
+        drop(invocation_start);
+
+        assert!(activity.lock_user_for_reap(&key).await.is_none());
+
+        drop(invocation);
+        let reap_guard = activity.lock_user_for_reap(&key).await;
+        assert!(reap_guard.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_invocation_releases_reaper_veto() {
+        let activity = Arc::new(SandboxActivityRegistry::new());
+        let key = user_key();
+        let task_activity = Arc::clone(&activity);
+        let task_key = key.clone();
+        let (active_tx, active_rx) = tokio::sync::oneshot::channel();
+
+        let invocation = tokio::spawn(async move {
+            let lifecycle = task_activity.lock_user_lifecycle(&task_key).await;
+            let _lease = task_activity.begin_invocation(&task_key);
+            drop(lifecycle);
+            let _ = active_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        active_rx.await.expect("invocation must become active");
+        assert!(activity.lock_user_for_reap(&key).await.is_none());
+
+        invocation.abort();
+        let _ = invocation.await;
+        let reap_guard = activity.lock_user_for_reap(&key).await;
+        assert!(reap_guard.is_some());
     }
 
     #[test]

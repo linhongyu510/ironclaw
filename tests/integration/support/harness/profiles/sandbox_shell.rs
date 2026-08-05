@@ -1,13 +1,13 @@
 //! `sandbox_shell` domain tools profile (`sandbox_shell_tools`) — W6 phase 2.
 //!
 //! Unlike `core_builtin`'s `core_builtin_tools()` (which hand-assembles a
-//! `HostRuntime` via `local_dev_host_runtime_with_http_egress` and never calls
+//! `HostRuntime` via the local-development helper and never calls
 //! `build_runtime`), this profile flows through
 //! `HostRuntimeCapabilityHarness::new_with_options` / `ToolsProfile::build()`
 //! with `HostRuntimeHarnessOptions::with_sandboxed_shell()` set — the ONLY
 //! harness path that reaches the real `HostedSingleTenantVolumeSandboxed`
-//! composition profile and, through it, a real `TenantSandbox` Docker
-//! process-port binding (`tenant_sandbox_process_binding`, wired in
+//! composition profile and, through it, a real `UserSandbox` Docker
+//! process-port binding (`user_sandbox_process_binding`, wired in
 //! `harness/mod.rs::new_with_options`). See
 //! `tests/integration/reborn_sandbox_shell_turn.rs` for the driving test.
 //!
@@ -16,13 +16,14 @@
 //! `sandbox_shell_tools` — this profile does not skip on a missing daemon; it
 //! fails the Docker connect (surfaced as a build error).
 
-use ironclaw_host_api::{AgentId, CapabilityId, EffectKind, MountPermissions, TenantId, UserId};
-use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
-
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
-use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, wildcard_test_policy, workspace_mounts,
+use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{AgentId, CapabilityId, TenantId, UserId},
+    mount::MountPermissions,
 };
+use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 
 /// Fixed literal: unlike `tenant_id`/`user_id` (which the caller mints fresh
 /// per test via `sandbox_shell_identity` so containers/workspaces never
@@ -43,10 +44,11 @@ pub(crate) fn sandbox_shell_tools_profile(
         Some(runtime_policy),
     )
     .with_local_runtime_identity(tenant_id, AgentId::new(SANDBOX_SHELL_AGENT_ID)?)
-    .with_sandboxed_shell();
+    .with_sandboxed_shell()
+    .with_durable_capability_io();
     Ok(ToolsProfile {
         // `builtin.shell` on the surface so a scripted shell call routes
-        // through the real `TenantSandbox` process port — mirrors
+        // through the real `UserSandbox` process port — mirrors
         // `core_builtin_tools_capability_ids`'s shell entry, but this is the
         // ONLY capability this profile grants (a minimal, sandbox-only
         // surface, not the whole core-builtin set).
@@ -55,22 +57,9 @@ pub(crate) fn sandbox_shell_tools_profile(
             EffectKind::DispatchCapability,
             EffectKind::ExecuteCode,
             EffectKind::SpawnProcess,
-            EffectKind::Network,
         ],
         options,
-        // Granting `EffectKind::Network` above puts a network-obligation
-        // check on the dispatch path (`validate_network_policy_metadata`,
-        // `crates/ironclaw_host_runtime/src/obligations.rs`), which fails
-        // closed with `CapabilityObligationFailureKind::Network` unless the
-        // capability's authorized `NetworkPolicy.allowed_targets` is
-        // non-empty. `builtin.shell` makes no direct HTTP calls of its own
-        // (the sandbox's OWN egress allowlist, wired via
-        // `tenant_sandbox_process_binding`'s egress proxy, is what actually
-        // mediates the container's network access) — this is just satisfying
-        // that unrelated ceiling-metadata check, so a wildcard policy is
-        // correct here (unlike `core_builtin_tools`'s `http_test_policy()`,
-        // which narrows `builtin.http`'s OWN outbound targets).
-        network_policy_override: Some(wildcard_test_policy()),
+        auto_approve_default: Some(true),
         ..ToolsProfile::new("reborn-e2e-sandbox-shell-tools", user_id.as_str())?
     })
 }

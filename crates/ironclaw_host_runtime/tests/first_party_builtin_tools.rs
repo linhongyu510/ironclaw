@@ -47,10 +47,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
-    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
-    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    CLI_SESSION_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
+    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
+    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -62,8 +62,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
-    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
+    TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
@@ -417,20 +417,55 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
 #[tokio::test]
 async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     let package =
-        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
+    let sandbox_shell = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("the user sandbox keeps foreground shell");
+    assert!(
+        !sandbox_shell.effects.contains(&EffectKind::Network),
+        "a network-none user sandbox must not request a host network obligation"
+    );
+    let sandbox_shell_manifest = package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("the user sandbox manifest keeps foreground shell");
+    assert!(
+        !sandbox_shell_manifest
+            .effects
+            .contains(&EffectKind::Network),
+        "manifest and projected descriptor effects must stay aligned"
+    );
     assert!(
         package
             .capabilities
             .iter()
-            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+            .all(|descriptor| descriptor.id.as_str() != CLI_SESSION_CAPABILITY_ID),
+        "the PR1 user sandbox must disclose foreground shell only"
     );
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(!handlers.contains_handler(&capability_id(CLI_SESSION_CAPABILITY_ID)));
+
+    let local_package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::LocalHost).unwrap();
+    let local_shell = local_package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("local host keeps shell");
+    assert!(
+        local_shell.effects.contains(&EffectKind::Network),
+        "sandbox narrowing must not change existing host-shell authority"
+    );
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -3691,14 +3726,14 @@ async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail()
 }
 
 #[tokio::test]
-async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
+async fn builtin_shell_uses_configured_user_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
 
     let output = invoke_with_context(
@@ -3717,14 +3752,14 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
-async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+async fn builtin_shell_user_sandbox_process_uses_callers_scope_for_two_user_isolation() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
-    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let sandbox_process = Arc::new(UserSandboxProcessPort::new(sandbox_transport.clone()));
     let runtime = runtime_with_local_and_sandbox_process_ports(
         Arc::clone(&local_process),
         Arc::clone(&sandbox_process),
-        tenant_sandbox_process_policy(),
+        user_sandbox_process_policy(),
     );
     let user_a = UserId::new("user-a").unwrap();
     let user_b = UserId::new("user-b").unwrap();
@@ -9449,7 +9484,7 @@ where
 
 fn runtime_with_local_and_sandbox_process_ports<L>(
     local_process: Arc<L>,
-    sandbox_process: Arc<TenantSandboxProcessPort>,
+    sandbox_process: Arc<UserSandboxProcessPort>,
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
 where
@@ -9467,7 +9502,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_process_port(local_process)
-    .with_tenant_sandbox_process_port(sandbox_process)
+    .with_user_sandbox_process_port(sandbox_process)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
@@ -9505,9 +9540,9 @@ fn local_host_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
+fn user_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         ..local_host_policy()
     }
 }
@@ -9518,7 +9553,7 @@ fn hosted_dev_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,

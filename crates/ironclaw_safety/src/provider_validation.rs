@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use crate::LeakDetector;
+use crate::{LeakAction, LeakDetector, LeakMatch};
 
 pub const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
 /// Max serialized size of a single provider tool call's JSON arguments.
@@ -234,12 +234,41 @@ fn validate_provider_argument_text(
 fn reject_provider_secret_leaks(value: &str, label: &str) -> Result<(), ProviderValidationError> {
     static DETECTOR: OnceLock<LeakDetector> = OnceLock::new();
     let result = DETECTOR.get_or_init(LeakDetector::new).scan(value);
-    if result.should_block || result.redacted_content.is_some() {
+    let contains_secret_like_token = result.matches.iter().any(|leak_match| {
+        matches!(leak_match.action, LeakAction::Block | LeakAction::Redact)
+            && !is_inert_sandbox_placeholder_match(value, leak_match)
+    });
+    if contains_secret_like_token {
         return Err(ProviderValidationError::new(format!(
             "{label} must not contain secret-like tokens"
         )));
     }
     Ok(())
+}
+
+fn is_inert_sandbox_placeholder_match(value: &str, leak_match: &LeakMatch) -> bool {
+    if leak_match.pattern_name == "sandbox_credential_placeholder" {
+        return value
+            .get(leak_match.location.clone())
+            .is_some_and(is_sandbox_credential_placeholder);
+    }
+    if !matches!(
+        leak_match.pattern_name.as_str(),
+        "bearer_token" | "auth_header"
+    ) {
+        return false;
+    }
+
+    value
+        .get(leak_match.location.clone())
+        .and_then(|matched| matched.split_ascii_whitespace().next_back())
+        .is_some_and(is_sandbox_credential_placeholder)
+}
+
+fn is_sandbox_credential_placeholder(value: &str) -> bool {
+    value.strip_prefix("icsbx_").is_some_and(|identifier| {
+        identifier.len() >= 16 && identifier.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 #[cfg(test)]
@@ -252,6 +281,24 @@ mod tests {
             "content": "---\r\nname: pasted-skill\n---\n\nUse multiline Markdown.\n\t- with tabs\n"
         }))
         .expect("multiline provider argument text is valid");
+    }
+
+    #[test]
+    fn provider_arguments_allow_inert_sandbox_credential_placeholders() {
+        validate_provider_arguments(&serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer icsbx_0123456789abcdef0123456789abcdef' https://api.github.com/user"
+        }))
+        .expect("sandbox placeholders carry no credential authority by themselves");
+    }
+
+    #[test]
+    fn provider_arguments_still_reject_real_credentials_beside_placeholders() {
+        let error = validate_provider_arguments(&serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer icsbx_0123456789abcdef0123456789abcdef' -H 'X-Key: sk-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG' https://api.github.com/user"
+        }))
+        .expect_err("a placeholder must not suppress detection of a real credential");
+
+        assert!(error.to_string().contains("secret-like tokens"));
     }
 
     #[test]

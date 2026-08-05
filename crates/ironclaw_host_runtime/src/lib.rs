@@ -134,20 +134,21 @@ pub use post_edit_check::{
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
-    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+    RuntimeProcessPort, SandboxCommandTransport, UserSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
     BoundEgressAllowlistProxy, ConnectionAttributionResolver, DEFAULT_SANDBOX_ALLOWED_DOMAINS,
-    DEFAULT_SANDBOX_MAX_EGRESS_BYTES, EgressAllowlistProxy, EgressProxyError, ReapSummary,
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
-    RebornSandboxScopeKey, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
-    SandboxEgressProxyBinding, SandboxReaper, SandboxReaperConfig,
-    bind_sandbox_egress_proxy_with_tls_intercept, connect_docker_with_retry,
-    sandbox_allowed_domains, sandbox_docker_readiness, sandbox_extra_allowed_domains,
-    sandbox_max_egress_bytes, sandbox_network_policy,
+    DEFAULT_SANDBOX_MAX_EGRESS_BYTES, EgressAllowlistProxy, EgressProxyError,
+    RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport, ReapSummary, RebornSandboxConfig,
+    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
+    RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry,
+    SandboxCredentialRuntime, SandboxDockerReadiness, SandboxEgressProxyBinding, SandboxReaper,
+    SandboxReaperConfig, bind_sandbox_egress_proxy_with_tls_intercept, connect_docker_with_retry,
+    prepare_sandbox_egress_network, sandbox_allowed_domains, sandbox_docker_readiness,
+    sandbox_egress_proxy_bind_addr, sandbox_extra_allowed_domains, sandbox_max_egress_bytes,
+    sandbox_network_policy,
 };
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain

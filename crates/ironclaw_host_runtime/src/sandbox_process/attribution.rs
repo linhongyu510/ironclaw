@@ -42,12 +42,15 @@
 //! **W6 is the consumer.** [`ConnectionAttributionResolver`] is a
 //! standalone, independently testable unit; composition constructs the one
 //! production instance via [`ConnectionAttributionResolver::for_sandbox_egress`]
-//! and shares it (both the exec transport and the reaper hold the SAME
-//! `Arc`) so cache invalidation actually reaches both consumers — see
-//! `ironclaw_reborn_composition::sandbox_boot::tenant_sandbox_process_binding`.
-//! The proxy's TCP-accept loop still discards the peer address it would need
-//! to pass in (see `egress_proxy`'s accept loop) — wiring that hand-off,
-//! plus TLS termination and credential injection, remains W6 phase 2's job.
+//! and shares the SAME `Arc` across three consumers — the exec transport,
+//! the reaper, and (via [`ResolveAttribution`], object-erased so the proxy's
+//! own types need not become generic over `L`) the egress proxy's
+//! accept-loop dispatch (`egress_proxy::handle_connect`) — so cache
+//! invalidation reaches all three; see
+//! `ironclaw_reborn_composition::user_sandbox_process_binding`.
+//! Credential-grant staging (handing a container a live `icsbx_` placeholder
+//! ahead of a shell invocation) is separate, not-yet-built work — see
+//! `credential_swap`'s module doc.
 //!
 //! **W17: every container-teardown path invalidates ahead of W6.** A cache
 //! hit never re-verifies the container, so a torn-down container's IP that
@@ -90,7 +93,6 @@ use super::registry::{label_tenant, label_user};
 /// module doc's "Fail closed" section for exactly which conditions collapse
 /// to `Unattributed` — there is no partial/best-guess variant by design.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by W6 (proxy TLS termination + credential injection); not wired yet
 pub(crate) enum ConnectionAttribution {
     Attributed {
         tenant_id: TenantId,
@@ -229,7 +231,6 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
 
     /// Resolves `peer_ip` to its owning `{tenant, user}`, consulting the
     /// cache first. See the type doc for the cache's staleness guarantee.
-    #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) async fn resolve(&self, peer_ip: IpAddr) -> ConnectionAttribution {
         if let Some(cached) = self.cached(peer_ip) {
             return cached;
@@ -296,6 +297,31 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
             Some((tenant_id, user_id)) => ConnectionAttribution::Attributed { tenant_id, user_id },
             None => ConnectionAttribution::Unattributed,
         }
+    }
+}
+
+/// Object-safe seam over [`ConnectionAttributionResolver::resolve`] so a
+/// holder outside this module (the egress proxy) can carry either the
+/// production `Docker`-backed resolver or, in tests, one built over a fake
+/// [`NetworkContainerLookup`] — without the holder's own types becoming
+/// generic over `L`. Blanket-implemented for every
+/// `ConnectionAttributionResolver<L>` below.
+///
+/// This module's own doc ("Trait collapsed") retired a prior
+/// `AttributionInvalidator` trait as speculative indirection with "bring
+/// the trait back only if W6 genuinely needs to wire a non-`Docker` lookup
+/// through a holder" — this is exactly that case: the egress proxy
+/// (`super::egress_proxy`) is the W6 consumer, and its own tests need a
+/// fake-backed resolver without a Docker daemon.
+#[async_trait]
+pub(crate) trait ResolveAttribution: Send + Sync {
+    async fn resolve_peer(&self, peer_ip: IpAddr) -> ConnectionAttribution;
+}
+
+#[async_trait]
+impl<L: NetworkContainerLookup> ResolveAttribution for ConnectionAttributionResolver<L> {
+    async fn resolve_peer(&self, peer_ip: IpAddr) -> ConnectionAttribution {
+        self.resolve(peer_ip).await
     }
 }
 
