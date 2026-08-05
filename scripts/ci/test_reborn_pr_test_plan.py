@@ -812,7 +812,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["crate_buckets"], [], path)
 
     def test_container_and_hook_inputs_are_owned_by_static_gates(self) -> None:
-        """`Dockerfile`, `.dockerignore` and `.githooks/**` select no Rust lane.
+        """Container inputs and `.githooks/**` select no Rust lane.
 
         Regression for the #7087 gap, the same class #7064 fixed for
         `.claude/`: the planner had no rule for the container build inputs or
@@ -830,6 +830,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "Dockerfile",
             ".dockerignore",
+            "docker/reborn/entrypoint.sh",
             ".githooks/pre-commit",
             ".githooks/commit-msg",
         ):

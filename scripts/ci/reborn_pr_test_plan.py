@@ -178,13 +178,16 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
-    # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
-    # off exactly this pair and owns the image build; Code Style additionally
+    # Container build/startup inputs. `platform-and-compat.yml` keys
+    # `has_docker_risk` off the Dockerfile pair and owns the image build;
+    # `docker/reborn/entrypoint.sh` is additionally exercised by the shipping
+    # CLI smoke contract and Railway preview. Code Style additionally
     # proves every `include_str!` target is inside each build context
     # (`scripts/ci/check-include-str-paths.sh`, the #5603 outage class). A
     # Reborn Rust lane never builds an image.
     "Dockerfile",
     ".dockerignore",
+    "docker/reborn/entrypoint.sh",
     # `.gitignore` is decided the same way, and belongs here rather than with
     # the repo-root prose above precisely because something *does* read it:
     # Code Style's `Reject tracked files that match .gitignore` guard
