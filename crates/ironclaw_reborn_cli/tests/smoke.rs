@@ -77,7 +77,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
-        "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
+        "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'workspace=%s\\n' \"$IRONCLAW_REBORN_WORKSPACE_ROOT\"\nprintf 'args=%s\\n' \"$*\"\n",
     )
     .expect("write fake reborn bin");
     let mut permissions = std::fs::metadata(&bin)
@@ -480,11 +480,30 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "the cargo-dist publisher must extract and smoke every exact native archive before it can enter the artifact upload set"
     );
     assert!(
-        code_style_workflow.contains("scripts/ci/smoke-release-binary\\.py$")
-            && code_style_workflow.contains("tests/test_smoke_release_binary\\.py$")
+        code_style_workflow
+            .contains("scripts/ci/(smoke-release-binary|release-upgrade-canary)\\.py$")
             && code_style_workflow
-                .contains("python3 -m unittest tests/test_smoke_release_binary.py"),
-        "release-smoke script changes must select and run their sabotage self-tests on pull requests"
+                .contains("tests/test_(smoke_release_binary|release_upgrade_canary)\\.py$")
+            && code_style_workflow.contains(
+                "tests/test_smoke_release_binary.py\n          tests/test_release_upgrade_canary.py"
+            ),
+        "release artifact-gate changes must select and run their sabotage self-tests on pull requests"
+    );
+    let release_upgrade_position = release_workflow
+        .find("  release-upgrade-canary:\n")
+        .expect("release upgrade canary job");
+    let release_host_position = release_workflow
+        .find("  host:\n")
+        .expect("release host job");
+    assert!(
+        release_upgrade_position < release_host_position
+            && release_workflow.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_workflow.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
+            && release_workflow.contains("scripts/ci/release-upgrade-canary.py")
+            && release_workflow.contains("--previous-checksum")
+            && release_workflow.contains("--candidate-checksum")
+            && release_workflow.contains("needs.release-upgrade-canary.result == 'success'"),
+        "the exact release-pair upgrade canary must gate the privileged publishing job"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
@@ -690,6 +709,13 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("args=--help"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "workspace={}",
+            reborn_home.join("workspace").display()
+        )),
+        "stdout: {stdout}"
+    );
 }
 
 #[cfg(unix)]
@@ -779,6 +805,69 @@ fn docker_reborn_entrypoint_rejects_standalone_home_outside_railway_volume() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("to be under RAILWAY_VOLUME_MOUNT_PATH"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_rejects_workspace_outside_railway_volume() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let volume = temp.path().join("railway-volume");
+    let reborn_home = volume.join("ironclaw-reborn");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
+        .env("IRONCLAW_REBORN_WORKSPACE_ROOT", "/workspace")
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WORKSPACE_ROOT=/workspace")
+            && stderr.contains("to be under RAILWAY_VOLUME_MOUNT_PATH"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_rejects_ephemeral_legacy_snapshot_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let volume = temp.path().join("railway-volume");
+    let reborn_home = volume.join("ironclaw-reborn");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
+        .env("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT", "/workspace")
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT must be under"),
         "stderr: {stderr}"
     );
 }
@@ -7034,9 +7123,24 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
         "global packaging must not receive elevated repository permissions or a GitHub token"
     );
 
+    let release_upgrade_job = release_job("release-upgrade-canary");
+    assert!(
+        release_upgrade_job.contains("permissions:\n      contents: read")
+            && release_upgrade_job.contains("- build-local-artifacts")
+            && release_upgrade_job.contains("- build-global-artifacts")
+            && release_upgrade_job.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_upgrade_job.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
+            && release_upgrade_job.contains("scripts/ci/release-upgrade-canary.py")
+            && release_upgrade_job.contains("release-upgrade-canary-evidence")
+            && release_upgrade_job.contains("scripts/live-canary/scrub-artifacts.sh"),
+        "release publishing must run the checksummed artifact upgrade and retain scrubbed evidence"
+    );
+
     let host_job = release_job("host");
     assert!(
         host_job.contains("needs.plan.outputs.publishing == 'true'")
+            && host_job.contains("- release-upgrade-canary")
+            && host_job.contains("needs.release-upgrade-canary.result == 'success'")
             && host_job.contains("permissions:\n      \"contents\": \"write\"")
             && host_job.contains("GH_TOKEN:")
             && host_job.contains("--steps=upload --steps=release")

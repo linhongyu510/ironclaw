@@ -28,6 +28,10 @@ use crate::resolved::{PackageRootBinding, ResolvedExtensionManifest};
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 use crate::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 
+mod rc1_snapshot;
+
+pub use rc1_snapshot::Rc1SnapshotMigrationReport;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ManifestHash(String);
@@ -614,10 +618,30 @@ impl TryFrom<InstallationOwnerWire> for InstallationOwner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActivationState {
+    Installed,
+    Disabled,
+    Enabled,
+}
+
+impl ExtensionActivationState {
+    fn is_enabled(value: &Self) -> bool {
+        *value == Self::Enabled
+    }
+}
+
+fn default_enabled_activation_state() -> ExtensionActivationState {
+    ExtensionActivationState::Enabled
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
+    #[serde(skip_serializing_if = "ExtensionActivationState::is_enabled")]
+    activation_state: ExtensionActivationState,
     manifest_ref: ExtensionManifestRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
@@ -636,6 +660,7 @@ pub struct ExtensionInstallation {
 pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
+    pub activation_state: ExtensionActivationState,
     pub manifest_ref: ExtensionManifestRef,
     pub incarnation_id: Option<InstallationIncarnationId>,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
@@ -655,6 +680,7 @@ impl ExtensionInstallation {
         Self::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id,
             extension_id,
+            activation_state: ExtensionActivationState::Enabled,
             manifest_ref,
             incarnation_id: Some(InstallationIncarnationId::fresh()),
             credential_bindings,
@@ -681,6 +707,7 @@ impl ExtensionInstallation {
         Ok(Self {
             installation_id: parts.installation_id,
             extension_id: parts.extension_id,
+            activation_state: parts.activation_state,
             manifest_ref: parts.manifest_ref,
             incarnation_id: parts.incarnation_id,
             credential_bindings: parts.credential_bindings,
@@ -695,6 +722,10 @@ impl ExtensionInstallation {
 
     pub fn extension_id(&self) -> &ExtensionId {
         &self.extension_id
+    }
+
+    pub fn persisted_activation_state(&self) -> ExtensionActivationState {
+        self.activation_state
     }
 
     pub fn manifest_ref(&self) -> &ExtensionManifestRef {
@@ -724,6 +755,15 @@ impl ExtensionInstallation {
         self.updated_at = Utc::now();
         self
     }
+
+    /// Same installation with an explicit lifecycle state. Kept on the
+    /// durable installation authority so disabled/installed rc1 extensions
+    /// cannot become active merely because the process restarted.
+    pub fn with_activation_state(mut self, state: ExtensionActivationState) -> Self {
+        self.activation_state = state;
+        self.updated_at = Utc::now();
+        self
+    }
 }
 
 impl<'de> Deserialize<'de> for ExtensionInstallation {
@@ -736,6 +776,11 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         struct Wire {
             installation_id: ExtensionInstallationId,
             extension_id: ExtensionId,
+            // 1.0.0-rc.1 persisted this field. Rows written by early 1.1
+            // builds omitted it while implicitly treating installations as
+            // enabled, so absence retains that behavior.
+            #[serde(default = "default_enabled_activation_state")]
+            activation_state: ExtensionActivationState,
             manifest_ref: ExtensionManifestRef,
             #[serde(default)]
             incarnation_id: Option<InstallationIncarnationId>,
@@ -767,6 +812,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         Ok(Self {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
+            activation_state: wire.activation_state,
             manifest_ref: wire.manifest_ref,
             incarnation_id: wire.incarnation_id,
             credential_bindings: wire.credential_bindings,
@@ -856,6 +902,24 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError>;
+
+    /// Persist the lifecycle state without changing membership or credential
+    /// children. Durable stores should override this with a core-row update;
+    /// the aggregate fallback keeps lightweight test ports source-compatible.
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        let installation = self
+            .get_installation(installation_id)
+            .await?
+            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })?;
+        self.upsert_installation(installation.with_activation_state(state))
+            .await
+    }
 
     /// Conditionally refresh only the manifest embedded in a live installation.
     /// The current installation row is read and retained by the CAS transform,
@@ -1028,6 +1092,16 @@ where
         (**self).upsert_installation(installation).await
     }
 
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .set_persisted_activation_state(installation_id, state)
+            .await
+    }
+
     async fn upsert_manifest_only(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -1188,6 +1262,8 @@ struct V2InstallationRecord {
     schema_version: String,
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
+    #[serde(default = "default_enabled_activation_state")]
+    activation_state: ExtensionActivationState,
     manifest: WireManifestRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
@@ -1284,6 +1360,7 @@ pub struct ExtensionInstallationStore {
     host_ports: HostPortCatalog,
     contracts: HostApiContractRegistry,
     cas_retries: usize,
+    rc1_snapshot_report: Rc1SnapshotMigrationReport,
 }
 
 impl fmt::Debug for ExtensionInstallationStore {
@@ -1319,15 +1396,71 @@ impl ExtensionInstallationStore {
             host_ports,
             contracts,
             cas_retries: FILESYSTEM_CAS_RETRIES,
+            rc1_snapshot_report: Rc1SnapshotMigrationReport::default(),
         };
         store.ensure_indexes().await?;
-        store.migrate_legacy_manifest_rows().await?;
         store.ensure_v2_indexes().await?;
+        let mut store = store;
+        // An interrupted import can leave an otherwise-live v2 record leased.
+        // Repair it before snapshot conflict checks, which intentionally treat
+        // invisible records as divergent.
+        store.repair_interrupted_v2_leases().await?;
+        store.rc1_snapshot_report = store.bootstrap_from_rc1_snapshot().await?;
+        store.migrate_legacy_manifest_rows().await?;
         store.bootstrap_v2_from_compatibility_rows().await?;
         store.repair_interrupted_v2_leases().await?;
         store.repair_removed_v2_children().await?;
         store.repair_compatibility_views().await?;
         Ok(store)
+    }
+
+    /// Persist only the lifecycle state on the authoritative v2 core row.
+    ///
+    /// Removal may already hold a membership lease when it disables an
+    /// installation. That lease makes aggregate reads intentionally
+    /// invisible, so routing this update through `get_installation` plus a
+    /// full aggregate rewrite would incorrectly report the row as absent and
+    /// would risk disturbing membership or credential children. The core CAS
+    /// preserves every other field, including an in-flight lease.
+    pub async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if record.is_removed() {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    }
+                    record.activation_state = state;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
     pub fn default_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
@@ -2206,6 +2339,7 @@ impl ExtensionInstallationStore {
                         schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                         installation_id: installation.installation_id().clone(),
                         extension_id: installation.extension_id().clone(),
+                        activation_state: installation.persisted_activation_state(),
                         manifest: wire,
                         incarnation_id: installation.incarnation_id().cloned(),
                         legacy_tenant_owner: installation.owner().is_tenant(),
@@ -2940,6 +3074,7 @@ impl ExtensionInstallationStore {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
+            activation_state: core.activation_state,
             manifest_ref: core.manifest_ref(),
             incarnation_id: core.incarnation_id.clone(),
             credential_bindings,
@@ -3451,6 +3586,10 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                         schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                         installation_id,
                         extension_id,
+                        activation_state: current
+                            .as_ref()
+                            .map(|record| record.activation_state)
+                            .unwrap_or(ExtensionActivationState::Enabled),
                         manifest: wire,
                         incarnation_id: current
                             .as_ref()
@@ -3556,6 +3695,15 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             .put_installation(&installation, CasExpectation::Any)
             .await;
         Ok(())
+    }
+
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        ExtensionInstallationStore::set_persisted_activation_state(self, installation_id, state)
+            .await
     }
 
     async fn upsert_manifest_only(
@@ -5530,6 +5678,65 @@ mod tests {
             )
             .await
             .expect("retry checkpoint");
+    }
+
+    #[tokio::test]
+    async fn reopen_repairs_orphaned_v2_lease_before_importing_unmarked_rc1_snapshot() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root =
+            VirtualPath::new("/system/extensions/.installations/rc1-lease-recovery").expect("root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("store");
+        let installed = installation("fixture", Some("hash-one"));
+        let installation_id = installed.installation_id().clone();
+        let manifest = manifest_record("fixture", Some("hash-one"));
+        store
+            .upsert_manifest_and_installation(manifest.clone(), installed.clone())
+            .await
+            .expect("seed normalized and compatibility state");
+        store
+            .take_v2_update_lease(&installation_id)
+            .await
+            .expect("simulate a crash after taking the v2 lease");
+
+        let snapshot_path = child_path(&root, "state.json").expect("snapshot path");
+        let snapshot = serde_json::json!({
+            "manifests": [WireManifestRecord::from(&manifest)],
+            "installations": [installed],
+        });
+        backend
+            .put(
+                &snapshot_path,
+                Entry::bytes(serde_json::to_vec(&snapshot).expect("snapshot bytes")),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("write unmarked rc1 snapshot");
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("startup must repair the lease before snapshot conflict checks");
+        assert_eq!(
+            reopened
+                .get_installation(&installation_id)
+                .await
+                .expect("read recovered installation"),
+            Some(installed),
+            "the interrupted migration must not hide or lose the rc1 installation"
+        );
+        assert_eq!(reopened.rc1_snapshot_migration_report().sources_migrated, 1);
     }
 
     #[tokio::test]

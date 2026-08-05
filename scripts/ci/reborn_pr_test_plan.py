@@ -28,6 +28,7 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
 IGNORED_GUIDANCE_PATHS = {
+    "crates/AGENTS.md",
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
 }
@@ -61,15 +62,16 @@ PR_STATIC_CONTROL_PATHS = {
     #     its own scope detector (`Detect Reborn E2E scope`). This planner
     #     selects lanes for `Tests (Reborn)` only, and that workflow does not
     #     invoke the script.
-    #   * `tests/test_smoke_release_binary.py` is run by Code Style
-    #     (`python3 -m unittest tests/test_smoke_release_binary.py`), whose
+    #   * release artifact harness self-tests are run by Code Style, whose
     #     changed-path filter already names it. It exercises a CI script with
     #     `unittest`, not Reborn behavior with cargo, so no lane here reads it.
     #     Its subject, `scripts/ci/smoke-release-binary.py`, is already covered
     #     by the `scripts/ci/` prefix below.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    "docker/reborn/entrypoint.sh",
     "tests/test_smoke_release_binary.py",
+    "tests/test_release_upgrade_canary.py",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
