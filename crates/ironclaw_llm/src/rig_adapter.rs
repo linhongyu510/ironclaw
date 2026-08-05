@@ -343,6 +343,11 @@ impl<M: CompletionModel> RigAdapter<M> {
 
     /// Enable rig-core streaming for a provider whose live request path has
     /// been validated against its upstream API.
+    ///
+    /// This is test-only today: no production Rig-backed provider exposes an
+    /// authoritative terminal event, so production factories keep the buffered
+    /// fallback. The first factory validated against that contract owns removing
+    /// this gate when it enables native streaming.
     #[cfg(test)]
     pub(crate) fn with_native_streaming(mut self) -> Self {
         self.native_streaming = true;

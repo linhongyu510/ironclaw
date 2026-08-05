@@ -45,7 +45,9 @@ impl OpenAiCodexProvider {
     /// Create a new provider.
     ///
     /// Extracts the `chatgpt_account_id` from the JWT token.
-    /// `request_timeout_secs` controls the HTTP client timeout (falls back to 300s).
+    /// `request_timeout_secs` bounds the wait for streaming response headers and
+    /// the idle gap between SSE events. The client has no overall request timeout,
+    /// so an active stream can run longer than this interval.
     pub fn new(
         model: &str,
         api_base_url: &str,
