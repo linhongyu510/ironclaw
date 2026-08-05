@@ -24,7 +24,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ToolDefinition, strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use ironclaw_common::llm_costs as costs;
 
@@ -368,6 +368,8 @@ impl AnthropicOAuthProvider {
                     provider: "anthropic_oauth".to_string(),
                 });
             }
+            // silent-ok: the bounded provider error body is diagnostic only;
+            // status-based classification remains authoritative if reading it fails.
             let response_body = tokio::time::timeout(
                 Duration::from_secs(5),
                 crate::error::read_bounded_provider_error_body(response),
@@ -547,35 +549,8 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
-        let tools: Vec<AnthropicTool> = req
-            .tools
-            .into_iter()
-            .map(|t| AnthropicTool {
-                name: t.name,
-                description: t.description,
-                input_schema: t.parameters,
-            })
-            .collect();
-
-        // Map tool_choice from OpenAI format to Anthropic format
-        let tool_choice = req.tool_choice.map(|tc| match tc.as_str() {
-            "auto" => AnthropicToolChoice {
-                choice_type: "auto".to_string(),
-                name: None,
-            },
-            "required" => AnthropicToolChoice {
-                choice_type: "any".to_string(),
-                name: None,
-            },
-            "none" => AnthropicToolChoice {
-                choice_type: "none".to_string(),
-                name: None,
-            },
-            specific => AnthropicToolChoice {
-                choice_type: "tool".to_string(),
-                name: Some(specific.to_string()),
-            },
-        });
+        let tools = convert_anthropic_tools(req.tools);
+        let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         // Suppress thinking for tool-capable requests to avoid signature round-trip issues.
@@ -640,33 +615,8 @@ impl LlmProvider for AnthropicOAuthProvider {
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
-        let tools = req
-            .tools
-            .into_iter()
-            .map(|tool| AnthropicTool {
-                name: tool.name,
-                description: tool.description,
-                input_schema: tool.parameters,
-            })
-            .collect::<Vec<_>>();
-        let tool_choice = req.tool_choice.map(|choice| match choice.as_str() {
-            "auto" => AnthropicToolChoice {
-                choice_type: "auto".to_string(),
-                name: None,
-            },
-            "required" => AnthropicToolChoice {
-                choice_type: "any".to_string(),
-                name: None,
-            },
-            "none" => AnthropicToolChoice {
-                choice_type: "none".to_string(),
-                name: None,
-            },
-            specific => AnthropicToolChoice {
-                choice_type: "tool".to_string(),
-                name: Some(specific.to_string()),
-            },
-        });
+        let tools = convert_anthropic_tools(req.tools);
+        let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let has_tools = !tools.is_empty();
         let request = AnthropicRequest {
@@ -1091,6 +1041,38 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::Text { .. } => None,
         })
         .collect()
+}
+
+fn convert_anthropic_tools(tools: Vec<ToolDefinition>) -> Vec<AnthropicTool> {
+    tools
+        .into_iter()
+        .map(|tool| AnthropicTool {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters,
+        })
+        .collect()
+}
+
+fn convert_anthropic_tool_choice(choice: Option<String>) -> Option<AnthropicToolChoice> {
+    choice.map(|choice| match choice.as_str() {
+        "auto" => AnthropicToolChoice {
+            choice_type: "auto".to_string(),
+            name: None,
+        },
+        "required" => AnthropicToolChoice {
+            choice_type: "any".to_string(),
+            name: None,
+        },
+        "none" => AnthropicToolChoice {
+            choice_type: "none".to_string(),
+            name: None,
+        },
+        specific => AnthropicToolChoice {
+            choice_type: "tool".to_string(),
+            name: Some(specific.to_string()),
+        },
+    })
 }
 
 /// Convert ChatMessage list to Anthropic format.

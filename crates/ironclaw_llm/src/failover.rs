@@ -672,6 +672,34 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             panic!("tool path is not used by this test")
         }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(delta) = self.delta {
+                sink.text_delta(delta.to_string()).await;
+            }
+            match self.result {
+                Ok(content) => Ok(ToolCompletionResponse {
+                    content: Some(content.to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    reasoning: None,
+                    reasoning_details: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                Err(reason) => Err(LlmError::StreamInterrupted {
+                    provider: "streaming-outcome".to_string(),
+                    reason: reason.to_string(),
+                }),
+            }
+        }
     }
 
     #[derive(Default)]
@@ -730,6 +758,57 @@ mod tests {
             .expect("fallback streaming response");
 
         assert_eq!(response.content, "fallback");
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["fallback"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_failover_never_replaces_visible_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("partial"),
+            result: Err("disconnected"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("replacement"),
+            result: Ok("replacement"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let result = provider
+            .complete_with_tools_streaming(make_tool_request(), sink.clone())
+            .await;
+
+        assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
+        assert_eq!(sink.0.lock().unwrap().as_slice(), ["partial"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_streaming_failover_advances_before_visible_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: None,
+            result: Err("unavailable"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("fallback"),
+            result: Ok("fallback"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+        let sink = Arc::new(DeltaSink::default());
+
+        let response = provider
+            .complete_with_tools_streaming(make_tool_request(), sink.clone())
+            .await
+            .expect("fallback tool streaming response");
+
+        assert_eq!(response.content.as_deref(), Some("fallback"));
         assert_eq!(sink.0.lock().unwrap().as_slice(), ["fallback"]);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);

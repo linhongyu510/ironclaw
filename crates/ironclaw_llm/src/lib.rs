@@ -1948,7 +1948,10 @@ mod tests {
                 .await
                 .expect_err("loopback server rejects the request");
             assert!(matches!(error, LlmError::InvalidRequest { .. }));
-            let body = server.await.expect("loopback server task");
+            let body = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+                .await
+                .expect("loopback server must observe a request")
+                .expect("loopback server task");
             let body: serde_json::Value =
                 serde_json::from_str(&body).expect("request body is valid JSON");
             assert_ne!(

@@ -2300,6 +2300,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_cascade_keeps_confident_cheap_output() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "Deployed successfully to production mainnet.",
+            vec!["Deployed successfully to production mainnet."],
+        ));
+        let router = SmartRoutingProvider::new(primary.clone(), cheap.clone(), default_config());
+        let sink = Arc::new(ReplacingStreamSink::default());
+
+        let response = router
+            .complete_streaming(make_request("Deploy this to production"), sink.clone())
+            .await
+            .expect("confident cheap stream should succeed");
+
+        assert!(response.content.contains("Deployed successfully"));
+        assert_eq!(primary.calls(), 0);
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(sink.replacements.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.finishes.load(Ordering::Relaxed), 0);
+        assert_eq!(router.stats().cascade_escalations, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_moderate_without_cascade_routes_to_cheap() {
+        let primary = Arc::new(StreamingStubLlm::new(
+            "primary",
+            "primary response",
+            vec!["primary response"],
+        ));
+        let cheap = Arc::new(StreamingStubLlm::new(
+            "cheap",
+            "I'm not sure.",
+            vec!["I'm not sure."],
+        ));
+        let router = SmartRoutingProvider::new(
+            primary.clone(),
+            cheap.clone(),
+            SmartRoutingConfig {
+                cascade_enabled: false,
+                ..default_config()
+            },
+        );
+        let sink = Arc::new(ReplacingStreamSink::default());
+
+        let response = router
+            .complete_streaming(make_request("Deploy this to production"), sink.clone())
+            .await
+            .expect("cheap stream should succeed");
+
+        assert_eq!(response.content, "I'm not sure.");
+        assert_eq!(primary.calls(), 0);
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(sink.replacements.load(Ordering::Relaxed), 0);
+        let stats = router.stats();
+        assert_eq!(stats.cheap_requests, 1);
+        assert_eq!(stats.cascade_escalations, 0);
+    }
+
+    #[tokio::test]
     async fn streaming_cascade_does_not_finalize_failed_primary_replacement() {
         let primary = Arc::new(
             StreamingStubLlm::new("primary", "unused", vec!["partial primary"])

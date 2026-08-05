@@ -168,22 +168,6 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal is `LlmError::StreamInterrupted` even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics. Completed malformed or empty responses use `InvalidResponse` / `EmptyResponse`; those are invalid model output, not provider availability.
 
-**Streaming rollout:** Native streaming is enabled only on provider paths that
-expose an authoritative terminal event to IronClaw: NEAR AI, Anthropic OAuth,
-and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key
-providers retain the buffered trait fallback because rig-core 0.33 synthesizes
-its final response after EOF, so IronClaw cannot distinguish a complete stream
-from a truncated one. Other unvalidated providers also retain the buffered
-fallback, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub
-Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
-Text deltas are advisory UI progress;
-the returned response remains authoritative for text, tool calls, finish reason,
-reasoning artifacts, and usage. Provider decorators must forward both streaming
-methods. Retry or failover must not append a replacement response after visible
-partial text unless the sink advertises atomic text-replacement support. The
-response cache deliberately bypasses cache lookup for streaming calls because a
-stored response cannot reproduce provider deltas honestly.
-
 **Shared client timeout hygiene:** Every production reqwest client in this crate starts from the shared hardened builders in `config.rs`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). One-shot requests additionally use `hardened_client_builder(request_timeout_secs)` for a total timeout; streaming responses use `hardened_streaming_client_builder()` and apply header/idle bounds while consuming the stream. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
 
 ## Circuit Breaker
@@ -363,7 +347,9 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 
 ## Streaming Support
 
-`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Providers that do not override these methods inherit the blocking `complete()` / `complete_with_tools()` fallback, so callers must treat streaming as opportunistic. The NEAR AI chat provider currently implements OpenAI-compatible SSE streaming for live assistant text; the final response remains authoritative for finish reason, tool calls, and usage accounting.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, Anthropic OAuth, and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key providers retain the buffered trait fallback because rig-core 0.33 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
+
+Text deltas are advisory UI progress; the returned response remains authoritative for text, tool calls, finish reason, reasoning artifacts, and usage. Provider decorators must forward both streaming methods. Retry or failover must not append a replacement after visible partial text unless the sink advertises atomic text-replacement support. The response cache bypasses lookup for streaming calls because a stored response cannot reproduce provider deltas honestly.
 
 ## Trace Recording
 
