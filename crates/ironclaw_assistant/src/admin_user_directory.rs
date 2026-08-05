@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
-use ironclaw_product_contracts::admin_users::{
-    AdminApiTokenMinter, AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord,
-    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
-};
 use ironclaw_identity::{
     RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole,
     RebornUserStatus,
+};
+use ironclaw_product_contracts::admin_users::{
+    AdminApiTokenMinter, AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord,
+    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_secrets::{SecretMaterial, SecretMetadata, SecretStoreError};
 use secrecy::SecretString;

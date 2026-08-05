@@ -1474,14 +1474,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_config/src/config_file.rs", "google"),
     // The retired-section gravestones: the only place this crate still
     // names a vendor, and only as the TOML table name an operator typed.
-    (
-        "crates/ironclaw_config/src/retired_sections.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_config/src/retired_sections.rs",
-        "telegram",
-    ),
+    ("crates/ironclaw_config/src/retired_sections.rs", "slack"),
+    ("crates/ironclaw_config/src/retired_sections.rs", "telegram"),
     ("crates/ironclaw_config/src/lib.rs", "google"),
     // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
     // for the production-shaped channel-host E2E suite; the scanner sees the
@@ -1661,8 +1655,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// incoming batch measured **122**; neither is evidence for the union, so the
 /// constant was set to `0` and the true length read out of the ratchet's own
 /// panic on the merged tree. Never by eye and never with `grep` — both also
-/// match the entry comments and this prose.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 0; // RECOUNT-PENDING
+/// match the entry comments and this prose. The ratchet answered **122**: the
+/// batch's three vendor-pair removals (the `adapter_registry` pair repointed
+/// onto `extension_registry::host_api::product_adapter`, and the
+/// `config_file.rs` slack/telegram pair moved to `retired_sections.rs`) are the
+/// only entries either side removed, and this branch's renames repoint entries
+/// in place without adding any. So the union is the batch's number, not ours —
+/// which is exactly why it is measured rather than reasoned.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

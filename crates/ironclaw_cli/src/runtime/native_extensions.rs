@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
+use ironclaw_composition::ChannelExtensionBinding;
 use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
     NativeExtensionFactory,
 };
 use ironclaw_host_api::ids::ExtensionId;
-use ironclaw_composition::ChannelExtensionBinding;
 use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
 
 /// Every native factory the binary assembles (`first_party`-runtime

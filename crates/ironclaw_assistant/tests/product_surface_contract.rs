@@ -9,25 +9,6 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_conversations::{
-    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
-};
-use ironclaw_extension_contracts::external::{
-    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
-};
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
-    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
-};
-use ironclaw_host_api::{
-    attachment::InboundAttachment,
-    ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
-    mount::{MountGrant, MountPermissions, MountView},
-    path::{MountAlias, VirtualPath},
-    resource::ResourceScope,
-};
 use ironclaw_assistant::{
     ActionDispatchKind, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionScope,
@@ -54,6 +35,25 @@ use ironclaw_assistant::{
     ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
     TrustedInboundContext, UserMessagePayload,
+};
+use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_conversations::{
+    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
+use ironclaw_host_api::{
+    attachment::InboundAttachment,
+    ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product_contracts::action::{
     ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,

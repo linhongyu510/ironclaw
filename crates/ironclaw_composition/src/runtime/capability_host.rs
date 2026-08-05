@@ -8,6 +8,7 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
+use ironclaw_assistant::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_host_api::{
     capability::EffectKind,
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
@@ -27,7 +28,6 @@ use ironclaw_loop_host::{
     HostManagedModelGateway, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ThreadScopeResolver, loop_driver_execution_extension_id,
 };
-use ironclaw_assistant::{OutboundPreferencesProductService, ProjectService};
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -50,7 +50,9 @@ use crate::factory::RebornRuntimeStores;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
 use ironclaw_approvals::ApprovalSettingsProvider;
-use ironclaw_assistant::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
+use ironclaw_assistant::projection::{
+    CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore,
+};
 
 mod outbound_delivery;
 mod refreshing_capability_port;
@@ -63,6 +65,8 @@ mod workspace_scoping_tests;
 pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
@@ -70,8 +74,6 @@ use ironclaw_extension_host::capability_surface::{
 pub(crate) use ironclaw_first_party_extension_ports::SKILL_ACTIVATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
 pub(crate) use ironclaw_loop_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };

@@ -479,9 +479,7 @@ mod tests {
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
             Ok(ironclaw_operator::LlmKeyStore::new(
-                ironclaw_composition::RuntimeOperatorSecretValueStore::shared(
-                    self.store.clone(),
-                ),
+                ironclaw_composition::RuntimeOperatorSecretValueStore::shared(self.store.clone()),
             ))
         }
 

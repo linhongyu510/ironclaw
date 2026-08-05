@@ -6,6 +6,10 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_assistant::{
+    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductConversationRouteKind,
+    ProductInboundAction, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
+};
 use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     error::HostApiError,
@@ -13,10 +17,6 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
-};
-use ironclaw_assistant::{
-    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductConversationRouteKind,
-    ProductInboundAction, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::action::ActionFingerprintKey;
 use ironclaw_product_contracts::binding::ProductBindingResolver;

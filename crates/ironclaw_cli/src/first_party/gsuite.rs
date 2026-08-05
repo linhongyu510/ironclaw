@@ -289,9 +289,9 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, Timestamp,
     };
+    use ironclaw_composition::host_api::{InvocationId, ResourceScope, UserId};
     use ironclaw_extension_support::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
     use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
-    use ironclaw_composition::host_api::{InvocationId, ResourceScope, UserId};
 
     use super::*;
 

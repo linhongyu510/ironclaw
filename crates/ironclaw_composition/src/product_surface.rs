@@ -5,18 +5,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_attachments::ProjectScopedAttachmentLander;
-use ironclaw_auth::ChannelConnectionService;
-#[cfg(test)]
-use ironclaw_extension_registry::SharedExtensionRegistry;
-use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
-use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_assistant::{
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
 };
+use ironclaw_attachments::ProjectScopedAttachmentLander;
+use ironclaw_auth::ChannelConnectionService;
+#[cfg(test)]
+use ironclaw_extension_registry::SharedExtensionRegistry;
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
+use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product_contracts::operator_llm::LlmConfigService;
 use ironclaw_product_contracts::operator_service::OperatorStatusService;
 use ironclaw_product_contracts::product_wire::{
@@ -98,12 +98,13 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {
-        api =
-            api.with_admin_user_service(Arc::new(ironclaw_assistant::RebornAdminUserDirectory::new(
+        api = api.with_admin_user_service(Arc::new(
+            ironclaw_assistant::RebornAdminUserDirectory::new(
                 runtime.reborn_user_directory(),
                 runtime.reborn_admin_secret_provisioner(),
                 minter,
-            )));
+            ),
+        ));
     }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api

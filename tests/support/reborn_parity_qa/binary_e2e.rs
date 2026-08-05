@@ -17,11 +17,18 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_assistant::{
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_assistant::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+};
+use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_event_projections::{
     EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
     ProjectionSnapshot, ReplayEventProjectionService,
 };
-use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
     IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
@@ -43,14 +50,11 @@ use ironclaw_loop_host::{
     JsonSpawnSubagentInputCodec, RejectingInputEnqueue,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_assistant::{
-    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
-    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-};
-use ironclaw_assistant::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_threads::{
+    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
+    ThreadMessageRecord, ThreadScope,
+};
 use ironclaw_turn_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -65,10 +69,6 @@ use ironclaw_turn_runner::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
         RebornRuntimeLoopComposition, build_default_planned_runtime,
     },
-};
-use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -856,7 +856,9 @@ impl RebornBinaryE2EHarness {
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
                 Arc::clone(&await_edge_store)
-                    as Arc<dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                    as Arc<
+                        dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore,
+                    >,
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),

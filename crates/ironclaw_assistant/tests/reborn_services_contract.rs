@@ -21,35 +21,6 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
-use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
-use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
-    CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
-};
-use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
-use ironclaw_extension_contracts::{
-    state::{InstallationState, LifecyclePublicState},
-    surface::CapabilitySurfaceKind,
-};
-use ironclaw_host_api::attachment::InboundAttachment;
-use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
-};
-use ironclaw_host_api::{
-    capability::{EffectKind, PermissionMode},
-    ids::{
-        ActivityId, AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId,
-        ResultRef, SecretHandle, TenantId, ThreadId, UserId,
-    },
-    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
-    resource::ResourceScope,
-    result_meta::{ResultProgress, TerminateHint},
-    safe_summary::SafeSummary,
-    scope::Principal,
-};
-use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -146,6 +117,35 @@ use ironclaw_assistant::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
+use ironclaw_auth::{
+    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
+    CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
+};
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
+use ironclaw_extension_contracts::{
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
+};
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
+};
+use ironclaw_host_api::{
+    capability::{EffectKind, PermissionMode},
+    ids::{
+        ActivityId, AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId,
+        ResultRef, SecretHandle, TenantId, ThreadId, UserId,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    resource::ResourceScope,
+    result_meta::{ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    scope::Principal,
+};
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
@@ -953,7 +953,8 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_assistant::ProductSurfaceFailure> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_assistant::ProductSurfaceFailure>
+    {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })

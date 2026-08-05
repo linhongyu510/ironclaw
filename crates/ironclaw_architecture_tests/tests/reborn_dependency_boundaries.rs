@@ -1474,8 +1474,7 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // module paths. Confirm the run-state assembly is wired there (it would
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
-    let composition_runtime =
-        crate_path(&root, "crates/ironclaw_composition/src/runtime.rs");
+    let composition_runtime = crate_path(&root, "crates/ironclaw_composition/src/runtime.rs");
     let composition_capability_host = crate_path(
         &root,
         "crates/ironclaw_composition/src/runtime/capability_host.rs",
@@ -2300,11 +2299,9 @@ fn slack_import_segment(suffix: &str) -> &str {
 fn reborn_boot_config_file_layout_is_pinned() {
     let root = workspace_root();
 
-    let config_lib = std::fs::read_to_string(crate_path(
-        &root,
-        "crates/ironclaw_config/src/lib.rs",
-    ))
-    .expect("reborn config lib.rs must be readable");
+    let config_lib =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_config/src/lib.rs"))
+            .expect("reborn config lib.rs must be readable");
     for required_export in [
         "pub use config_file::",
         "RebornConfigFile",
@@ -2318,11 +2315,8 @@ fn reborn_boot_config_file_layout_is_pinned() {
         );
     }
 
-    let home_src = std::fs::read_to_string(crate_path(
-        &root,
-        "crates/ironclaw_config/src/home.rs",
-    ))
-    .expect("reborn config home.rs must be readable");
+    let home_src = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_config/src/home.rs"))
+        .expect("reborn config home.rs must be readable");
     for required_method in ["pub fn config_file_path", "pub fn providers_file_path"] {
         assert!(
             home_src.contains(required_method),

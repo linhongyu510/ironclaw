@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extension_registry::{ExtensionPackage, SharedExtensionRegistry, is_hosted_http_mcp_package};
+use ironclaw_extension_registry::{
+    ExtensionPackage, SharedExtensionRegistry, is_hosted_http_mcp_package,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress},

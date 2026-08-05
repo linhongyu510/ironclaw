@@ -2,6 +2,10 @@ mod support;
 
 use std::{sync::Arc, time::Duration};
 
+use ironclaw_composition::{
+    LibSqlProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
+    build_libsql_production_host_runtime_services,
+};
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -10,10 +14,6 @@ use ironclaw_host_api::runtime_policy::{
     RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
-use ironclaw_composition::{
-    LibSqlProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
-    build_libsql_production_host_runtime_services,
-};
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use secrecy::SecretString;
 use support::production_readiness::{

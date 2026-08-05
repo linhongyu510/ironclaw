@@ -359,6 +359,8 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 
 use ironclaw_approvals::ApprovalStoreError;
 use ironclaw_authorization::CapabilityLeaseError;
+use ironclaw_event_store::RebornEventStoreConfig;
+use ironclaw_event_store::RebornEventStoreError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
@@ -369,8 +371,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_event_store::RebornEventStoreConfig;
-use ironclaw_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
 use ironclaw_secrets::SecretError;

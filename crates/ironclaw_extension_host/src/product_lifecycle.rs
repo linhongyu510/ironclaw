@@ -4117,12 +4117,13 @@ output_schema_ref = "schemas/run.output.json"
         .expect("installation store");
         let holding = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let installation_store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort> =
-            Arc::new(PauseOnAdmitStore {
-                inner: inner_store,
-                holding: Arc::clone(&holding),
-                release: Arc::clone(&release),
-            });
+        let installation_store: Arc<
+            dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
+        > = Arc::new(PauseOnAdmitStore {
+            inner: inner_store,
+            holding: Arc::clone(&holding),
+            release: Arc::clone(&release),
+        });
         let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
         let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),

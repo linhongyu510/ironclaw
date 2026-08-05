@@ -54,6 +54,15 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use ironclaw_assistant::ProductTriggerReason;
+use ironclaw_assistant::{
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+    ResolvedBinding,
+};
+use ironclaw_composition::RebornTrajectoryObserver;
+use ironclaw_composition::build_default_budget_accountant;
+use ironclaw_composition::test_support::ChannelConnectionTestBundle;
+use ironclaw_config::BudgetDefaults;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
@@ -70,21 +79,13 @@ use ironclaw_loop_host::{
     ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_assistant::ProductTriggerReason;
-use ironclaw_assistant::{
-    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
-    ResolvedBinding,
-};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
-use ironclaw_composition::RebornTrajectoryObserver;
-use ironclaw_composition::build_default_budget_accountant;
-use ironclaw_composition::test_support::ChannelConnectionTestBundle;
-use ironclaw_config::BudgetDefaults;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,
     ResourceAccount, ResourceGovernor,
 };
+use ironclaw_threads::SessionThreadService;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turn_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_turn_runner::runtime::{
@@ -98,7 +99,6 @@ use ironclaw_turn_runner::subagent::{
     flavors::StaticSubagentDefinitionResolver,
 };
 use ironclaw_turn_runner::turn_scheduler::TurnRunSchedulerHandle;
-use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::loop_exit::LoopExitEvidencePort;
 use ironclaw_turns::{
     AgentTurnProcessRuntime, AgentTurnRuntimePort, InMemoryTurnEventSink, LoopCheckpointStore,
@@ -1180,10 +1180,7 @@ impl RebornIntegrationGroupBuilder {
         // decision helper so an undeclared lifecycle hook is never wired here
         // either — the same gate `build_reborn_runtime` applies.
         let memory_consumers = self.bound_memory.as_ref().map(|(provider, lifecycle)| {
-            ironclaw_composition::memory_lifecycle_consumers(
-                Some(Arc::clone(provider)),
-                lifecycle,
-            )
+            ironclaw_composition::memory_lifecycle_consumers(Some(Arc::clone(provider)), lifecycle)
         });
         // E-PROFILE / E-MEMORY: resolve ONE effective profile source and wire
         // the SAME `Arc` into the runtime parts and `GroupSharedStorage` (so

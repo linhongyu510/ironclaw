@@ -455,13 +455,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     },
     SameLayerEdge {
         crate_name: "ironclaw_conversations",
-        dependency_name: "ironclaw_safety",
-        layer: "substrates",
-        owner: "domains/",
-        decided_in: "WS6",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_conversations",
         dependency_name: "ironclaw_triggers",
         layer: "substrates",
         owner: "domains/",
@@ -649,6 +642,21 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "domains/",
         decided_in: "WS6",
     },
+    // The trusted-trigger prompt scan moved *behind* the seam: it now runs in
+    // `TrustedTriggerSubmitRequest::new`, so "this prompt passed the scan" is
+    // an invariant of the sealed type rather than a step one submitter
+    // performs. `ironclaw_safety` is an I/O-free `substrates` leaf with no
+    // ironclaw dependencies, so this is a peer edge, not a reach upward — and
+    // it is the counterpart of the edge `ironclaw_conversations` *lost* in the
+    // same change, which `reborn_dependency_boundaries.rs` now forbids by name.
+    // (PROPOSAL §6.4.2/§6.4.3.)
+    SameLayerEdge {
+        crate_name: "ironclaw_triggers",
+        dependency_name: "ironclaw_safety",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "WS6",
+    },
 ];
 
 /// The same-layer edge count on `origin/main` @ `676d86ce02` (2026-08-04).
@@ -683,6 +691,23 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// root, at the cost of two edges inside a kernel family that already carries
 /// twelve (`capabilities` and `host_runtime` hold six each). Growth here is a
 /// reviewed decision, not drift — see PROPOSAL §6.5.2/§6.10.1.
+///
+/// ✎ **Still 72 after the WS6 renames (#7152) folded onto this batch — one row
+/// moved, the count did not.** The trusted-trigger prompt scan moved *behind*
+/// the seam: it now runs in `TrustedTriggerSubmitRequest::new`, so
+/// "this prompt passed the scan" is an invariant of the sealed type rather than
+/// a step one submitter performs. That deletes `conversations → safety` (which
+/// `reborn_dependency_boundaries.rs` now forbids by name) and adds
+/// `triggers → safety` in its place — a swap, not growth. `ironclaw_safety` is
+/// an I/O-free `substrates` leaf with no ironclaw dependencies, so either
+/// spelling is a peer edge rather than a reach upward. See PROPOSAL
+/// §6.4.2/§6.4.3.
+///
+/// Both halves were found by the gate rather than by reading the diff: the new
+/// edge tripped the not-inventoried arm and the dead one tripped the stale-row
+/// arm, on a merge that is the first tree where both sides of the swap exist.
+/// The equality is what made the second half loud — under a `<=` ratchet the
+/// stale row would have sat green as one entry of slack.
 ///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a

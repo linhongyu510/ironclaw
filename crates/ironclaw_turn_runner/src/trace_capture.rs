@@ -22,15 +22,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_threads::{
+    ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+};
 use ironclaw_trace_commons::ConversationMessage;
 use ironclaw_trace_commons::capture::{
     CAPTURE_MESSAGE_LIMIT, ObservedTraceScopes, capture_conversation_trace, record_observed_scope,
 };
 use ironclaw_trace_commons::contribution as trace;
-use ironclaw_threads::{
-    ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-};
 use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 
 /// Narrow history-read seam so tests don't have to fake the full

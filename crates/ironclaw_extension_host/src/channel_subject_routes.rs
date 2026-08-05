@@ -347,9 +347,10 @@ supports_threads = false
         .expect("filesystem extension installation store")
     }
 
-    fn product_extension_host_api_contract_registry()
-    -> Result<ironclaw_extension_registry::HostApiContractRegistry, ironclaw_extension_registry::ManifestV2Error>
-    {
+    fn product_extension_host_api_contract_registry() -> Result<
+        ironclaw_extension_registry::HostApiContractRegistry,
+        ironclaw_extension_registry::ManifestV2Error,
+    > {
         let mut registry = ironclaw_extension_registry::default_host_api_contract_registry()?;
         ironclaw_extension_registry::host_api::product_adapter::register_product_adapter_host_api_contract(
             &mut registry,

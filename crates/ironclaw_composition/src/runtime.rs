@@ -32,6 +32,13 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use ironclaw_assistant::{
+    ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
+    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService,
+    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
+};
 use ironclaw_event_log::{DurableAuditLog, DurableEventLog, RuntimeEvent};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
@@ -69,17 +76,14 @@ use ironclaw_processes::{
     ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
     ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
-use ironclaw_assistant::{
-    ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
-    DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunStateApprovalInteractionReadModel,
-};
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::operator_llm::ActiveModelReader;
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::ProductSurface;
+use ironclaw_threads::{
+    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
+    SessionThreadService, ThreadHistoryRequest, ThreadScope,
+};
 use ironclaw_turn_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
@@ -94,24 +98,20 @@ use ironclaw_turn_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
 };
 use ironclaw_turn_runner::subagent::flavors::StaticSubagentDefinitionResolver;
-use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
-    SessionThreadService, ThreadHistoryRequest, ThreadScope,
-};
 use ironclaw_turns::{
     AgentTurnProcessRuntime, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
     GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnRunState, TurnRunWake,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_assistant::RebornOutboundDeliveryTargetId;
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundError;
-#[cfg(any(test, feature = "test-support"))]
-use ironclaw_assistant::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
@@ -139,6 +139,8 @@ use crate::outbound::{
     outbound_delivery_synthetic_provider,
 };
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
+use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
 pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
@@ -149,8 +151,6 @@ use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagement
 use ironclaw_extension_manager::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
-use ironclaw_assistant::projection::{RebornProjectionServices, build_reborn_projection_services};
-use ironclaw_assistant::{current_turn_gate_runs, first_turn_run_for_gate};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
@@ -936,8 +936,10 @@ impl RebornRuntime {
     pub async fn install_extension_for_test(
         &self,
         package_ref: ironclaw_assistant::LifecyclePackageRef,
-    ) -> Result<ironclaw_assistant::LifecycleProductResponse, ironclaw_assistant::ProductSurfaceFailure>
-    {
+    ) -> Result<
+        ironclaw_assistant::LifecycleProductResponse,
+        ironclaw_assistant::ProductSurfaceFailure,
+    > {
         self.extension_management
             .install(package_ref, &self.actor_user_id)
             .await
@@ -953,8 +955,10 @@ impl RebornRuntime {
     pub async fn activate_extension_for_test(
         &self,
         package_ref: ironclaw_assistant::LifecyclePackageRef,
-    ) -> Result<ironclaw_assistant::LifecycleProductResponse, ironclaw_assistant::ProductSurfaceFailure>
-    {
+    ) -> Result<
+        ironclaw_assistant::LifecycleProductResponse,
+        ironclaw_assistant::ProductSurfaceFailure,
+    > {
         self.extension_management
             .activate_with_prechecked_credentials_for_test(package_ref)
             .await
@@ -1330,7 +1334,8 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     fn standalone_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<ironclaw_assistant::ProjectScopedAttachmentReader<CompositeRootFilesystem>>> {
+    ) -> Option<Arc<ironclaw_assistant::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
+    {
         Some(Arc::new(
             ironclaw_assistant::ProjectScopedAttachmentReader::new(
                 self.read_write_workspace_filesystem()?,
@@ -1575,9 +1580,7 @@ impl RebornRuntime {
     /// enumerates exactly the users SSO login persists. Synchronous and fold-free
     /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
     /// directory reads), so `runtime.product_surface` can call it directly.
-    pub(crate) fn reborn_user_directory(
-        &self,
-    ) -> Arc<dyn ironclaw_identity::RebornUserDirectory> {
+    pub(crate) fn reborn_user_directory(&self) -> Arc<dyn ironclaw_identity::RebornUserDirectory> {
         filesystem_reborn_identity_store(
             Arc::clone(&self.scoped_filesystem),
             self.thread_scope.tenant_id.clone(),

@@ -31,13 +31,13 @@ use std::{
 };
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extension_support::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
-    WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
-};
 use ironclaw_extension_registry::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
     default_host_api_contract_registry,
+};
+use ironclaw_extension_support::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
+    WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
 };
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},

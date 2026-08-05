@@ -617,7 +617,8 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
         VirtualPath::new("/system/extensions/.installations/oauth-connect-multiuser")
             .expect("valid installation root"),
         ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_extension_registry::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_extension_registry::default_host_api_contract_registry()
+            .expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");
@@ -657,7 +658,8 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
         VirtualPath::new("/system/extensions/.installations/oauth-connect")
             .expect("valid installation root"),
         ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_extension_registry::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_extension_registry::default_host_api_contract_registry()
+            .expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");

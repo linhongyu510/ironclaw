@@ -22,6 +22,10 @@ use ironclaw_event_log::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
+use ironclaw_event_store::{
+    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
+    RebornEventStores, RebornProfile, build_reborn_event_stores,
+};
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::LibSqlRootFilesystem;
@@ -45,10 +49,6 @@ use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutor, ProcessInvocationStatePort, ProcessManager,
     ProcessServices,
-};
-use ironclaw_event_store::{
-    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
-    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_sandbox::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};

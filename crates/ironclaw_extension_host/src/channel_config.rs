@@ -845,7 +845,8 @@ fields = [
                     .expect("valid test path"),
                 ironclaw_host_api::host_port::default_host_port_catalog()
                     .expect("host port catalog"),
-                ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
+                ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("contracts"),
             )
             .await
             .expect("filesystem extension installation store"),

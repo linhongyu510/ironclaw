@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_assistant::{
+    ApprovalInteractionService, AuthInteractionService, ExtensionAccountSetupRegistry,
+    ProjectFilesystemReader, RunDeliverySettings,
+};
 use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_auth::product_prompt::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
@@ -11,10 +15,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
-use ironclaw_assistant::{
-    ApprovalInteractionService, AuthInteractionService, ExtensionAccountSetupRegistry,
-    ProjectFilesystemReader, RunDeliverySettings,
-};
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,

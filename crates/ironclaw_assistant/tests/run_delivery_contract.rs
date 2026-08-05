@@ -13,6 +13,22 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_assistant::{
+    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
+    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
+    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    VerifiedInbound,
+};
+use ironclaw_assistant::{
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver,
+};
+use ironclaw_assistant::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
@@ -31,22 +47,6 @@ use ironclaw_outbound::{
     DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
     TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
-};
-use ironclaw_assistant::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
-    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
-    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
-    VerifiedInbound,
-};
-use ironclaw_assistant::{
-    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver,
-};
-use ironclaw_assistant::{
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::delivery::{

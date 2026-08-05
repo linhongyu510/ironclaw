@@ -5,6 +5,11 @@ mod support;
 use std::{sync::Arc, time::Duration};
 
 use deadpool_postgres::tokio_postgres;
+use ironclaw_composition::{
+    PostgresProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
+    build_postgres_production_host_runtime_services,
+};
+use ironclaw_event_store::RebornEventStoreConfig;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -13,11 +18,6 @@ use ironclaw_host_api::runtime_policy::{
     RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
-use ironclaw_composition::{
-    PostgresProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
-    build_postgres_production_host_runtime_services,
-};
-use ironclaw_event_store::RebornEventStoreConfig;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
