@@ -366,21 +366,14 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "loop/",
         decided_in: "WS4",
     },
-    // ---- products ----
     SameLayerEdge {
         crate_name: "ironclaw_extension_host",
-        dependency_name: "ironclaw_product",
-        layer: "products",
+        dependency_name: "ironclaw_loop_host",
+        layer: "loops",
         owner: "extensions/",
-        decided_in: "WS2",
+        decided_in: "the WS2 flip (extension_host products -> loops; the loop_host edge predates the flip and becomes same-layer with it)",
     },
-    SameLayerEdge {
-        crate_name: "ironclaw_extension_manager",
-        dependency_name: "ironclaw_extension_host",
-        layer: "products",
-        owner: "extensions/",
-        decided_in: "WS2",
-    },
+    // ---- products ----
     SameLayerEdge {
         crate_name: "ironclaw_extension_manager",
         dependency_name: "ironclaw_product",
@@ -391,13 +384,6 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     SameLayerEdge {
         crate_name: "ironclaw_reborn_openai_compat",
         dependency_name: "ironclaw_product",
-        layer: "products",
-        owner: "product/",
-        decided_in: "WS5",
-    },
-    SameLayerEdge {
-        crate_name: "ironclaw_webui",
-        dependency_name: "ironclaw_extension_host",
         layer: "products",
         owner: "product/",
         decided_in: "WS5",
@@ -712,9 +698,9 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 // migration policy does not inflate the production composition root. The
 // dependency is one-way: composition invokes the coordinator; the coordinator
 // has no composition dependency.
-// Recounted on the merged #7198 + current-main tree: main's 74 entries plus
-// this deliberate release-migration edge yields 75.
-const SAME_LAYER_EDGE_BASELINE: usize = 75;
+// Recounted on the merged #7198 + current-main tree: main's 72 entries plus
+// this deliberate release-migration edge yields 73.
+const SAME_LAYER_EDGE_BASELINE: usize = 73;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -826,6 +812,31 @@ struct DowngradePin {
 }
 
 const DOWNGRADE_PINS: &[DowngradePin] = &[
+    DowngradePin {
+        crate_name: "ironclaw_extension_host",
+        from_layer: "products",
+        to_layer: "loops",
+        demoted_in: "the WS2 flip (D-A factory port + batch-2 union emptied the \
+                     product-reference ledger and trait residue to 0/0, deleting \
+                     the manifest edge per the re-keyed biconditional)",
+        // The flip PROPOSAL §12.1(c) calls "the sharpest edge in the whole
+        // restructure": every port inversion (WS2.1/2.2/2.5/2.6 + D-A) had to
+        // land first, and the port-inversion gate now pins the inverted shape.
+        // Frozen at the four normal-dep consumers that existed at the flip;
+        // each addition is a reviewed decision. `webui -> extension_host` and
+        // `extension_manager -> extension_host` left the same-layer inventory
+        // with this demotion (products -> loops is downward); this pin is what
+        // keeps that widening deliberate.
+        permitted_consumers: &[
+            "ironclaw",
+            "ironclaw_extension_manager",
+            "ironclaw_reborn_composition",
+            // #7198: the bounded release-pair coordinator invokes the
+            // extension-host-owned rc1 channel-state compatibility adapter.
+            "ironclaw_release_migration",
+            "ironclaw_webui",
+        ],
+    },
     DowngradePin {
         crate_name: "ironclaw_skills",
         from_layer: "loops",
