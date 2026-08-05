@@ -454,6 +454,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
             # raising `unmapped test or CI path` until they were classified.
             "scripts/reborn_qa_matrix/audit_surface_inventory.py",
             "scripts/reborn_qa_matrix/test_audit_surface_inventory.py",
+            # 2026-08-05: `scripts/live_canary/` (UNDERSCORE) is a second real
+            # directory beside `scripts/live-canary/` (hyphen) above, and
+            # classifying the hyphen tree never classified this one. It is the
+            # canary's importable Python package; a crate rename reaches it
+            # through a `RUST_LOG` string, and the fail-closed arm rejected the
+            # whole rename PR on that one line.
+            "scripts/live_canary/common.py",
+            "scripts/live_canary/auth_runtime.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -1142,6 +1150,38 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 docs = self.plan("pull_request", ["docs/reborn/README.md"])
                 self.assertEqual(plan["mode"], "none")
                 self.assertEqual(plan, docs)
+
+    def test_generated_wiki_paths_are_prose_and_select_nothing(self) -> None:
+        """`openwiki/**` is generated prose, like `docs/**`.
+
+        Regression fixture for the same class as `.claude/` above: the planner
+        had no rule for the auto-generated wiki, so its fail-closed arm rejected
+        any PR that touched it. A crate rename touches it by construction — the
+        wiki's prose names crate directories — so the whole of WS6 was
+        unplannable while the gap stood.
+
+        Paired against `docs/`: the assertion is that the two are the *same*
+        plan, so a later change that quietly escalates the wiki to a lane fails
+        here too.
+        """
+        for path in (
+            "openwiki/quickstart.md",
+            "openwiki/architecture/crates.md",
+            "openwiki/development/workflows.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan, docs)
+
+        # The decision is per-path, not per-PR: a real change riding along
+        # still selects its lane.
+        paired = self.plan(
+            "pull_request", ["openwiki/quickstart.md", "crates/alpha/src/lib.rs"]
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
 
     def test_crate_tree_prose_outside_any_package_selects_nothing(self) -> None:
         """`crates/AGENTS.md` and friends belong to no package.
