@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner};
+use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner, ManifestSource};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
@@ -23,6 +23,18 @@ use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
 /// including one initiated by the operator, is private to the caller.
 pub fn derive_owner(caller: &UserId, _tenant_operator: &UserId) -> InstallationOwner {
     InstallationOwner::user(caller.clone())
+}
+
+/// User-registered packages are private to their explicit installation
+/// members. Other catalog sources retain the ordinary discover-and-join
+/// lifecycle behavior.
+pub fn package_visible_to_caller(
+    source: ManifestSource,
+    installation: Option<&ExtensionInstallation>,
+    caller: &UserId,
+) -> bool {
+    source != ManifestSource::UserRegistered
+        || installation.is_some_and(|installation| installation.owner().visible_to(caller))
 }
 
 /// Fail-closed visibility check for lifecycle mutations on an existing
@@ -188,6 +200,32 @@ mod tests {
                 "denial must mask the membership: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn user_registered_packages_are_visible_only_to_installation_members() {
+        let held = installation(members(&["alice"]));
+
+        assert!(package_visible_to_caller(
+            ManifestSource::UserRegistered,
+            Some(&held),
+            &user("alice")
+        ));
+        assert!(!package_visible_to_caller(
+            ManifestSource::UserRegistered,
+            Some(&held),
+            &user("bob")
+        ));
+        assert!(!package_visible_to_caller(
+            ManifestSource::UserRegistered,
+            None,
+            &user("alice")
+        ));
+        assert!(package_visible_to_caller(
+            ManifestSource::HostBundled,
+            None,
+            &user("bob")
+        ));
     }
 
     #[test]

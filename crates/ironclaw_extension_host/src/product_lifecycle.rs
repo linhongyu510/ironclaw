@@ -82,7 +82,7 @@ use crate::{
 use crate::ActiveExtensionPublisher;
 use crate::{
     decide_install_on_existing, decide_remove, derive_owner, ensure_caller_may_operate,
-    install_scope_for_owner,
+    install_scope_for_owner, package_visible_to_caller,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,10 +638,12 @@ impl ExtensionLifecycleManager {
         let activation_errors = self.installation_activation_errors().await?;
         let mut summaries = Vec::new();
         for extension in extensions {
-            summaries.push(
-                self.search_summary(&extension, credential_gate, caller, &activation_errors)
-                    .await?,
-            );
+            if let Some(summary) = self
+                .search_summary(&extension, credential_gate, caller, &activation_errors)
+                .await?
+            {
+                summaries.push(summary);
+            }
         }
         let count = summaries.len();
         // The top-level phase of a multi-item search response is neutral; each
@@ -699,15 +701,24 @@ impl ExtensionLifecycleManager {
             .installation_store
             .get_installation(&installation_id)
             .await
-            .map_err(map_extension_installation_error)?
-            // A foreign user-private install projects as not-installed for
-            // this caller — same masking as search/list (#5459 P1).
-            .filter(|installation| installation.owner().visible_to(caller));
+            .map_err(map_extension_installation_error)?;
         let activation_errors = self.installation_activation_errors().await?;
         let available = {
             let catalog = self.catalog.read().await;
             catalog.resolve(&package_ref)?
         };
+        if !package_visible_to_caller(available.source, installation.as_ref(), caller) {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} is not installed",
+                    available.package.id.as_str()
+                ),
+            });
+        }
+        let installation = installation
+            // A foreign user-private install projects as not-installed for
+            // this caller — same masking as search/list (#5459 P1).
+            .filter(|installation| installation.owner().visible_to(caller));
         let has_activatable_surface = package_has_activatable_surface(&available.package);
         // A not-installed package has no installation state; `install_scope`
         // (`None` below) is the not-installed signal, so the neutral `Installed`
@@ -922,29 +933,31 @@ impl ExtensionLifecycleManager {
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
         activation_errors: &std::collections::HashMap<ExtensionId, String>,
-    ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
+    ) -> Result<Option<LifecycleSearchExtensionSummary>, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
-        let installation = self
-            .search_installation(&extension.package.id)
-            .await?
+        let installation = self.search_installation(&extension.package.id).await?;
+        if !package_visible_to_caller(extension.source, installation.as_ref(), caller) {
+            return Ok(None);
+        }
+        let installation = installation
             // A foreign user-private install reads as not-installed for this
             // caller (#5459 P1) — same masking as list/project.
             .filter(|installation| installation.owner().visible_to(caller));
         let Some(installation) = installation else {
-            return Ok(LifecycleSearchExtensionSummary {
+            return Ok(Some(LifecycleSearchExtensionSummary {
                 summary,
                 installation_phase: None,
-            });
+            }));
         };
         let has_last_error = activation_errors.contains_key(installation.extension_id());
         let phase =
             search_installation_phase(extension, &installation, credential_gate, has_last_error)
                 .await?;
-        Ok(LifecycleSearchExtensionSummary {
+        Ok(Some(LifecycleSearchExtensionSummary {
             summary,
             installation_phase: Some(phase),
-        })
+        }))
     }
 
     async fn search_installation(
@@ -1231,6 +1244,14 @@ impl ExtensionLifecycleManager {
             .get_installation(&installation_id)
             .await
             .map_err(map_extension_installation_error)?;
+        if !package_visible_to_caller(available.source, existing.as_ref(), caller) {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} is not installed",
+                    available.package.id.as_str()
+                ),
+            });
+        }
         match existing {
             // The id is already installed: the policy decision authorizes the
             // caller (tenant rows and non-member shapes error here), and the
@@ -3913,20 +3934,22 @@ mod tests {
         );
     }
 
-    /// Wraps a real [`ExtensionInstallationStore`] so `admit_package_definition`
-    /// (the call `HostedMcpPreparationService::register` makes between its two
+    /// Wraps a real [`ExtensionInstallationStore`] so `upsert_manifest_and_installation`
+    /// (the atomic commit `HostedMcpPreparationService::register` makes between its two
     /// lock acquisitions) can be paused mid-flight. Lets the deadlock test below
     /// force the exact interleaving the lock-order fix depends on: register
-    /// signals `holding` once it is inside `admit_package_definition`, then
+    /// signals `holding` once it is inside `upsert_manifest_and_installation`, then
     /// blocks on `release` until the test lets it continue.
-    struct PauseOnAdmitStore {
+    struct PauseOnRegistrationCommitStore {
         inner: ExtensionInstallationStore,
         holding: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait]
-    impl ironclaw_extension_registry::ExtensionInstallationStorePort for PauseOnAdmitStore {
+    impl ironclaw_extension_registry::ExtensionInstallationStorePort
+        for PauseOnRegistrationCommitStore
+    {
         async fn admit_package_definition(
             &self,
             record: ExtensionManifestRecord,
@@ -3964,6 +3987,8 @@ mod tests {
             manifest: ExtensionManifestRecord,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            self.holding.notify_one();
+            self.release.notified().await;
             self.inner
                 .upsert_manifest_and_installation(manifest, installation)
                 .await
@@ -4084,14 +4109,14 @@ output_schema_ref = "schemas/run.output.json"
     /// interleaved (register's own async work completed before import even
     /// reached the catalog lock), so it passed in ~0.07s against the buggy
     /// lock order too — a non-discriminating regression test. This version
-    /// pauses `register` mid-flight (inside `admit_package_definition`, which
+    /// pauses `register` mid-flight (inside `upsert_manifest_and_installation`, which
     /// runs between its two lock acquisitions) via a controllable test double,
     /// forcing `import_bundle` to actually contend for the shared locks before
     /// `register` is allowed to finish:
     ///
     /// 1. `register` grabs its first lock (`catalog` when fixed,
     ///    `operation_lock` when buggy), then blocks inside
-    ///    `admit_package_definition` and signals `holding`.
+    ///    `upsert_manifest_and_installation` and signals `holding`.
     /// 2. The test waits for `holding`, then spawns `import_bundle`, which
     ///    unconditionally takes `catalog` first, then `operation_lock` — and
     ///    waits briefly to let it reach that second lock.
@@ -4119,7 +4144,7 @@ output_schema_ref = "schemas/run.output.json"
         let release = Arc::new(tokio::sync::Notify::new());
         let installation_store: Arc<
             dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
-        > = Arc::new(PauseOnAdmitStore {
+        > = Arc::new(PauseOnRegistrationCommitStore {
             inner: inner_store,
             holding: Arc::clone(&holding),
             release: Arc::clone(&release),

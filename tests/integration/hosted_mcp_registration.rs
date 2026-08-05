@@ -612,7 +612,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(
         registration.phase,
         ironclaw_extension_contracts::state::InstallationState::Installed,
-        "registration persists a catalog definition without implicit installation: {registration:#?}",
+        "registration persists a private inactive installation: {registration:#?}",
     );
     assert!(
         server
@@ -631,10 +631,10 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     let registered_definition = services
         .extension_management
         .installation_store_for_test()
-        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
         .await
-        .expect("registered definition readback")
-        .expect("registration persists the resolved definition");
+        .expect("installed manifest readback")
+        .expect("registration persists the resolved definition with its membership");
     assert!(matches!(
         registered_definition
             .resolved()
@@ -1143,8 +1143,7 @@ async fn legacy_no_auth_manifest_rejected_by_server_resets_to_auth_selection() {
 }
 
 #[tokio::test]
-async fn registered_but_never_installed_definition_survives_restart_and_installs_without_reregistration()
- {
+async fn privately_registered_inactive_mcp_survives_restart_and_activates_without_reregistration() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::NoAuth,
         vec![HostedMcpTool::read_only("search", json!("ok"))],
@@ -1168,13 +1167,11 @@ async fn registered_but_never_installed_definition_survives_restart_and_installs
             },
         )
         .await
-        .expect("registration persists the tenant definition without installing it");
+        .expect("registration persists a private inactive installation");
 
-    // Deliberately never install. Rebuild services over the same durable
-    // backing (simulated restart) and confirm the registered definition is
-    // still discoverable, even though restore only ever walked installation
-    // rows — the durable `registered-definitions/{id}.json` row has no
-    // installation row backing it here.
+    // Deliberately never activate. Rebuild services over the same durable
+    // backing (simulated restart) and confirm the creator's installation
+    // aggregate restores the private definition without publishing tools.
     let restored = rebuild_lifecycle_test_services_with_auth_provider(
         &services,
         "hosted-mcp-registered-only",
@@ -1203,7 +1200,7 @@ async fn registered_but_never_installed_definition_survives_restart_and_installs
         extensions
             .iter()
             .any(|extension| extension.summary.package_ref == fixture_package_ref()),
-        "a registered-but-never-installed hosted MCP definition must survive restart: {extensions:#?}",
+        "a privately registered hosted MCP must survive restart for its creator: {extensions:#?}",
     );
 
     assert!(
@@ -1213,14 +1210,14 @@ async fn registered_but_never_installed_definition_survives_restart_and_installs
             .await
             .expect("active capability projection")
             .is_empty(),
-        "a registered-but-uninstalled definition must not be active or publish tools after restart",
+        "an inactive registered installation must not publish tools after restart",
     );
 
     let installed = install_fixture(&restored, scope).await;
     assert_eq!(
         installed.phase,
         ironclaw_extension_contracts::state::InstallationState::Active,
-        "the restored definition installs without re-registration: {installed:#?}",
+        "the restored private installation activates without re-registration: {installed:#?}",
     );
 }
 
@@ -1283,7 +1280,7 @@ async fn reserved_hosted_mcp_id_is_rejected_without_registration_or_installation
 }
 
 #[tokio::test]
-async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per_user() {
+async fn user_registered_hosted_mcp_is_discoverable_only_by_the_registering_user() {
     let server = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::NoAuth,
         vec![HostedMcpTool::read_only("search", json!("ok"))],
@@ -1299,7 +1296,7 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
     .await;
     let admin_scope = webui_gate_resource_scope_for_owner("tenant-admin");
     let member_scope = webui_gate_resource_scope_for_owner("tenant-member");
-    services
+    let registration = services
         .lifecycle_service
         .execute(
             lifecycle_product_context(admin_scope.clone()),
@@ -1308,25 +1305,51 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
             },
         )
         .await
-        .expect("tenant admin registers the definition");
+        .expect("user A registers the definition");
+    assert!(matches!(
+        registration.payload,
+        Some(LifecycleProductPayload::ExtensionInstall {
+            installed: true,
+            ..
+        })
+    ));
 
-    let admin_before = services
+    let requests_before_foreign_retry = server.requests().len();
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(member_scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect_err("user B cannot claim user A's exact custom MCP registration");
+    assert_eq!(
+        server.requests().len(),
+        requests_before_foreign_retry,
+        "foreign re-registration is rejected from membership before endpoint egress"
+    );
+
+    let admin_search = services
         .lifecycle_service
         .execute(
             lifecycle_product_context(admin_scope.clone()),
-            LifecycleProductAction::ExtensionList,
+            LifecycleProductAction::ExtensionSearch {
+                query: "Fixture MCP".to_string(),
+            },
         )
         .await
-        .expect("admin installation list");
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = admin_before.payload
+        .expect("user A searches their registered definition");
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = admin_search.payload
     else {
-        panic!("list returns installed extension summaries")
+        panic!("search returns extension summaries")
     };
     assert!(
         extensions
             .iter()
-            .all(|extension| extension.summary.package_ref != fixture_package_ref()),
-        "registration must not implicitly install for its creator"
+            .any(|extension| extension.summary.package_ref == fixture_package_ref()),
+        "the registering user must retain visibility of their custom hosted MCP"
     );
 
     let member_search = services
@@ -1338,7 +1361,7 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
             },
         )
         .await
-        .expect("tenant member can discover the tenant definition");
+        .expect("user B searches the shared tenant catalog");
     let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = member_search.payload
     else {
         panic!("search returns extension summaries")
@@ -1346,125 +1369,43 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
     assert!(
         extensions
             .iter()
-            .any(|extension| extension.summary.package_ref == fixture_package_ref()),
-        "tenant definition is shared for discovery"
-    );
-    let member_before = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(member_scope.clone()),
-            LifecycleProductAction::ExtensionList,
-        )
-        .await
-        .expect("member installation list");
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = member_before.payload
-    else {
-        panic!("list returns installed extension summaries")
-    };
-    assert!(
-        extensions
-            .iter()
             .all(|extension| extension.summary.package_ref != fixture_package_ref()),
-        "shared definition is not installed for another user implicitly"
+        "a custom hosted MCP registration must not grant visibility or membership to another user"
     );
 
-    let member_install = services
+    let guessed_install = services
         .lifecycle_service
         .execute(
-            lifecycle_product_context(member_scope.clone()),
+            lifecycle_product_context(member_scope),
             LifecycleProductAction::ExtensionInstall {
                 package_ref: fixture_package_ref(),
             },
         )
-        .await
-        .expect("member joins through the ordinary install lifecycle");
-    assert_eq!(
-        member_install.phase,
-        ironclaw_extension_contracts::state::InstallationState::Active
+        .await;
+    assert!(
+        guessed_install.is_err(),
+        "a user who guesses the package ref must not join another user's custom MCP"
     );
 
-    let admin_install = install_fixture(&services, admin_scope.clone()).await;
-    assert_eq!(
-        admin_install.phase,
-        ironclaw_extension_contracts::state::InstallationState::Active
-    );
-
-    services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(admin_scope.clone()),
-            LifecycleProductAction::ExtensionRemove {
-                package_ref: fixture_package_ref(),
-            },
-        )
-        .await
-        .expect("admin removes only their installation membership");
-    let admin_user_id = ironclaw_host_api::ids::UserId::new("tenant-admin").expect("admin user id");
-    let member_user_id =
-        ironclaw_host_api::ids::UserId::new("tenant-member").expect("member user id");
-    let capabilities_after_admin_removal = services
+    let installation = services
         .extension_management
-        .active_model_visible_capabilities()
+        .installation_store_for_test()
+        .list_installations()
         .await
-        .expect("active capability projection after admin removal");
-    let fixture_capability_after_removal = capabilities_after_admin_removal
-        .iter()
-        .find(|capability| capability.id.as_str().starts_with("mcp-fixture."))
-        .expect(
-            "member's installation keeps the fixture MCP capability published \
-             after the admin's removal",
-        );
-    let owner_members = fixture_capability_after_removal
-        .owner
+        .expect("installation-store readback")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "mcp-fixture")
+        .expect("registration creates the custom MCP installation membership");
+    let members = installation
+        .owner()
         .members()
-        .expect("hosted-MCP installations are member-scoped, not tenant-wide");
-    assert!(
-        !owner_members.contains(&admin_user_id),
-        "removal must revoke the admin's publication membership on the shared \
-         installation's capability, not just their own list view: {fixture_capability_after_removal:#?}"
-    );
-    assert!(
-        owner_members.contains(&member_user_id),
-        "the member's own membership must survive the admin's removal (per-user \
-         scoping): {fixture_capability_after_removal:#?}"
-    );
-    let member_after = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(member_scope.clone()),
-            LifecycleProductAction::ExtensionList,
-        )
-        .await
-        .expect("member installation survives another user's removal");
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = member_after.payload
-    else {
-        panic!("list returns installed extension summaries")
-    };
-    assert!(
-        extensions
-            .iter()
-            .any(|extension| extension.summary.package_ref == fixture_package_ref()),
-        "member keeps their installation"
-    );
-    let admin_search = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(admin_scope),
-            LifecycleProductAction::ExtensionSearch {
-                query: "Fixture MCP".to_string(),
-            },
-        )
-        .await
-        .expect("removed definition remains in the tenant catalog");
-    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = admin_search.payload
-    else {
-        panic!("search returns extension summaries")
-    };
-    assert!(
-        extensions
-            .iter()
-            .any(|extension| extension.summary.package_ref == fixture_package_ref()),
-        "removal retains the tenant definition for later installs"
+        .expect("custom hosted MCP registration is user-scoped");
+    assert_eq!(
+        members,
+        &std::collections::BTreeSet::from([
+            ironclaw_host_api::ids::UserId::new("tenant-admin").expect("registering user id")
+        ]),
+        "only the registering user belongs to the custom MCP installation"
     );
 }
 
@@ -2117,10 +2058,10 @@ async fn explicit_oauth_registration_uses_the_selected_client_profile() {
     let definition = services
         .extension_management
         .installation_store_for_test()
-        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
         .await
-        .expect("registered-definition lookup")
-        .expect("selected OAuth profile persists an admitted definition");
+        .expect("installed-manifest lookup")
+        .expect("selected OAuth profile persists with the creator membership");
     assert!(matches!(
         definition.resolved().mcp.as_ref().map(|mcp| &mcp.registration_auth),
         Some(HostedMcpAuthSelection::OAuth {

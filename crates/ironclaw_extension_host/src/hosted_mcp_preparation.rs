@@ -10,7 +10,8 @@ use std::sync::Arc;
 use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest};
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort,
-    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, ManifestSource,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, InstallationOwner,
+    ManifestSource, PackageDefinitionRetention,
 };
 use ironclaw_host_api::{
     dispatch::CredentialStageError,
@@ -94,70 +95,76 @@ impl HostedMcpPreparationService {
             LifecyclePackageKind::Extension,
             extension_id.as_str(),
         )?;
-        let existing = self
-            .installation_store
-            .get_registered_package_definition(&extension_id)
-            .await
+        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let definition = if let Some(existing) = existing {
-            if !registration_request_matches(&existing, &request, &endpoint) {
-                return Err(crate::hosted_mcp_manifest::name_unavailable());
-            }
-            existing
-        } else {
-            match request.auth_selection.as_ref() {
-                Some(
-                    selection @ (HostedMcpAuthSelection::Auto
-                    | HostedMcpAuthSelection::OAuth { .. }),
-                ) => {
-                    let _preflight_permit = self
-                        .registration_preflight_semaphore
-                        .try_acquire()
-                        .map_err(|_| ProductOperationFailure::Transient {
-                            reason: "hosted MCP registration preflight is temporarily saturated"
-                                .to_string(),
-                        })?;
-                    let seed = crate::hosted_mcp_manifest::pending_manifest(
-                        &extension_id,
-                        &request.desired_name,
-                        &endpoint,
-                        selection,
-                    )?;
-                    let Some(resolved) = self
-                        .resolve_registration_auth(
-                            &extension_id,
-                            &request.desired_name,
-                            &endpoint,
-                            seed,
-                            selection,
-                            scope,
-                        )
-                        .await?
-                    else {
-                        return match selection {
-                            HostedMcpAuthSelection::Auto => auth_selection_required_response(
-                                package_ref,
-                                "Hosted MCP requires authentication but did not expose usable OAuth metadata; choose OAuth or Bearer token to finish registration.",
-                            ),
-                            HostedMcpAuthSelection::OAuth { .. } => {
-                                Err(ProductOperationFailure::InvalidBindingRequest {
-                                    reason: "hosted MCP did not expose usable OAuth metadata"
-                                        .to_string(),
-                                })
-                            }
-                            _ => Err(crate::hosted_mcp_manifest::name_unavailable()),
-                        };
-                    };
-                    resolved
-                }
-                Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
+        let caller = scope.user_id.clone();
+        if let Some(existing) = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(crate::product_lifecycle::map_extension_installation_error)?
+        {
+            return self
+                .existing_registration_response(
+                    existing,
+                    &request,
+                    &endpoint,
+                    &package_ref,
+                    &caller,
+                )
+                .await;
+        }
+        let definition = match request.auth_selection.as_ref() {
+            Some(
+                selection @ (HostedMcpAuthSelection::Auto | HostedMcpAuthSelection::OAuth { .. }),
+            ) => {
+                let _preflight_permit = self
+                    .registration_preflight_semaphore
+                    .try_acquire()
+                    .map_err(|_| ProductOperationFailure::Transient {
+                        reason: "hosted MCP registration preflight is temporarily saturated"
+                            .to_string(),
+                    })?;
+                let seed = crate::hosted_mcp_manifest::pending_manifest(
                     &extension_id,
                     &request.desired_name,
                     &endpoint,
                     selection,
-                )?,
-                None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
+                )?;
+                let Some(resolved) = self
+                    .resolve_registration_auth(
+                        &extension_id,
+                        &request.desired_name,
+                        &endpoint,
+                        seed,
+                        selection,
+                        scope,
+                    )
+                    .await?
+                else {
+                    return match selection {
+                        HostedMcpAuthSelection::Auto => auth_selection_required_response(
+                            package_ref,
+                            "Hosted MCP requires authentication but did not expose usable OAuth metadata; choose OAuth or Bearer token to finish registration.",
+                        ),
+                        HostedMcpAuthSelection::OAuth { .. } => {
+                            Err(ProductOperationFailure::InvalidBindingRequest {
+                                reason: "hosted MCP did not expose usable OAuth metadata"
+                                    .to_string(),
+                            })
+                        }
+                        _ => Err(crate::hosted_mcp_manifest::name_unavailable()),
+                    };
+                };
+                resolved
             }
+            Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
+                &extension_id,
+                &request.desired_name,
+                &endpoint,
+                selection,
+            )?,
+            None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
         };
         // Lock order invariant: catalog write guard BEFORE operation_lock,
         // matching `ExtensionLifecycleManager::import_bundle` /
@@ -166,14 +173,60 @@ impl HostedMcpPreparationService {
         // order prevents an AB-BA deadlock across concurrent callers.
         let mut catalog = self.catalog.write().await;
         let _guard = self.operation_lock.lock().await;
+        if let Some(existing) = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(crate::product_lifecycle::map_extension_installation_error)?
+        {
+            return self
+                .existing_registration_response(
+                    existing,
+                    &request,
+                    &endpoint,
+                    &package_ref,
+                    &caller,
+                )
+                .await;
+        }
+        let definition = definition
+            .with_definition_retention(PackageDefinitionRetention::RemoveWithLastInstallation);
+        let available = crate::hosted_mcp_manifest::available_package(&definition)?;
+        let plan = crate::prepare_install(&available, InstallationOwner::user(caller), None)?;
         self.installation_store
-            .admit_package_definition(definition.clone())
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
             .await
             .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let available = crate::hosted_mcp_manifest::available_package(&definition)?;
         catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
         Ok(crate::hosted_mcp_manifest::registration_response(
             package_ref,
+        ))
+    }
+
+    async fn existing_registration_response(
+        &self,
+        existing: ExtensionInstallation,
+        request: &RegisterHostedMcpRequest,
+        endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
+        package_ref: &LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        if !existing.owner().visible_to(caller) {
+            return Err(crate::hosted_mcp_manifest::name_unavailable());
+        }
+        let definition = self
+            .installation_store
+            .get_manifest(existing.extension_id())
+            .await
+            .map_err(crate::product_lifecycle::map_extension_installation_error)?
+            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        if definition.manifest().source != ManifestSource::UserRegistered
+            || !registration_request_matches(&definition, request, endpoint)
+        {
+            return Err(crate::hosted_mcp_manifest::name_unavailable());
+        }
+        Ok(crate::hosted_mcp_manifest::registration_response(
+            package_ref.clone(),
         ))
     }
 

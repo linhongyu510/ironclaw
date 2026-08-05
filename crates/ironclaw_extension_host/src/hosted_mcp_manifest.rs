@@ -40,9 +40,9 @@ pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> Lifecyc
         blockers: Vec::new(),
         message: Some("Hosted MCP registration accepted.".to_string()),
         payload: Some(LifecycleProductPayload::ExtensionInstall {
-            installed: false,
+            installed: true,
             visible_capability_ids: Vec::new(),
-            next_step: "Install this registered extension through the ordinary lifecycle."
+            next_step: "The extension is installed privately but inactive. Call extension install to attempt activation."
                 .to_string(),
         }),
     }

@@ -3,8 +3,9 @@
 //! Hosted-MCP **registration** is its own pipeline: it validates a
 //! user-supplied endpoint, authenticates to it, discovers its tools, and only
 //! then hands the shared extension lifecycle a *complete* package —
-//! indistinguishable from a bundled one. Everything about "registered but not
-//! yet discovered" belongs inside that pipeline.
+//! indistinguishable from a bundled one — for persistence as an inactive,
+//! creator-owned installation. Everything about "registered but not yet
+//! discovered" belongs inside that pipeline.
 //!
 //! The shared lifecycle (install → configure → activate → execute → remove)
 //! runs for every extension: gmail, slack, github, telegram. It must not learn

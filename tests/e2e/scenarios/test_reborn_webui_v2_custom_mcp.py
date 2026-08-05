@@ -2,8 +2,8 @@
 
 The server-side lifecycle journey is covered by the hosted-MCP integration
 suite. This file deliberately mocks only the browser-facing projection and
-mutation routes so it can prove registration creates an available registry
-entry, while the existing install/setup UI owns installation and credentials.
+mutation routes so it can prove registration creates a private inactive
+installation, while the existing install/setup UI owns activation and credentials.
 """
 
 import json
@@ -37,9 +37,9 @@ def _registered_catalog_entry() -> dict:
         "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
         "display_name": "Custom weather MCP",
         "runtime": "mcp",
-        "description": "A registered custom MCP server available to install.",
+        "description": "A privately registered custom MCP server available to activate.",
         "keywords": ["custom", "mcp"],
-        "installed": False,
+        "installed": True,
         "surfaces": [{"kind": "tool"}],
     }
 
@@ -126,6 +126,7 @@ async def _open_custom_mcp_page(
         if path == "/api/webchat/v2/extensions/register-hosted-mcp" and request.method == "POST":
             body = json.loads(request.post_data or "{}")
             registrations.append(body)
+            installed[:] = [_installed_extension(auth_kind, "installed")]
             await fulfill(
                 route,
                 {
@@ -193,7 +194,7 @@ async def _install_registered_mcp(page) -> None:
     await card.get_by_role("button", name="Install").click()
 
 
-async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
+async def test_custom_mcp_registration_creates_private_inactive_installation(
     reborn_v2_server, reborn_v2_browser
 ):
     context, page, registrations, installations, _ = await _open_custom_mcp_page(
@@ -215,6 +216,8 @@ async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
                 "auth_selection": {"kind": "auto"},
             }
         ]
+        # Registration creates membership directly; it does not call the
+        # separate install endpoint used below to attempt activation.
         assert installations == []
         await expect(page.get_by_role("button", name="Continue setup")).to_have_count(0)
         await page.get_by_role("button", name="Done").click()

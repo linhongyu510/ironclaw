@@ -122,6 +122,11 @@ test("RegistryTab renders only real installed extensions with management actions
   const extensionCards = collectComponentValues(rendered, ExtensionCard);
   assert.equal(extensionCards.length, 1);
   assert.equal(extensionCards[0][2], installedExtension);
+  assert.equal(
+    extensionCards[0][3],
+    onInstall,
+    "installed inactive entries retain the idempotent install/activate action"
+  );
 
   const registryCards = collectComponentValues(rendered, RegistryCard);
   assert.equal(registryCards.length, 2);

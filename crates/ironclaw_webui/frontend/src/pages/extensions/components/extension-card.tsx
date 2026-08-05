@@ -139,12 +139,13 @@ function ChipGrid({ items }) {
 /**
  * @param {{
  *   ext: any;
+ *   onInstall?: InstallFocusHandler | null;
  *   onConfigure: ConfigureFocusHandler<any>;
  *   onRemove: (extension: any) => void;
  *   isBusy: boolean;
  * }} props
  */
-export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
+export function ExtensionCard({ ext, onInstall = null, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
@@ -201,6 +202,13 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       id: "configure",
       label: configureLabel,
       run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
+    });
+  }
+  if (ext.installation_state === "installed" && onInstall) {
+    primaryActions.push({
+      id: "install",
+      label: t("extensions.install"),
+      run: (returnFocusTo) => onInstall(configurePayload, returnFocusTo),
     });
   }
   if (
