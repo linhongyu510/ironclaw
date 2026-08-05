@@ -2353,9 +2353,7 @@ async fn explicit_oauth_registration_uses_the_selected_client_profile() {
     let definition = services
         .extension_management
         .installation_store_for_test()
-        .get_registered_package_definition(
-            &ExtensionId::new("mcp-fixture").expect("extension id"),
-        )
+        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
         .await
         .expect("registered-definition lookup")
         .expect("selected OAuth profile persists on the registered definition");
