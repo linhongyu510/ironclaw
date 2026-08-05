@@ -71,33 +71,28 @@ const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
 /// actually blocks the survivors is their *request/response* vocabulary, which
 /// is what each reason now states. `ProductConversationSubjectRouteResolver`
 /// had no other blocker and was inverted.
-const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[
-    (
-        "AuthChallengeProvider",
-        "signature returns Result<_, ironclaw_auth::AuthProductError> and carries \
-         ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl}; \
-         moving it needs the auth vocabulary narrowed out of the port first",
-    ),
-    (
-        "ChannelConnectionService",
-        "returns ChannelAuthAccountState, whose fields are \
-         ironclaw_auth::{AuthFlowStatus, CredentialAccountStatus}",
-    ),
-    (
-        "ConversationBindingService",
-        "takes ironclaw_product::ResolveBindingRequest and returns \
-         ironclaw_product::ResolvedBinding; both are declared in product beside \
-         the route-kind grammar that derives them. The error no longer blocks it \
-         (WS2.2) — the DTOs do, and they move with the channel_host row",
-    ),
-    (
-        "ProductActorUserResolver",
-        "resolves to ResolvedProductActorUser, which carries \
-         ironclaw_conversations::ExternalActorBindingEpoch. The error no longer \
-         blocks it (WS2.2); the conversations dep is the whole blocker and needs \
-         that epoch narrowed out of the response first",
-    ),
-];
+///
+/// **WS2.5 then cleared every vocabulary-blocked row, 4 -> 1, and the reasons
+/// above were the map that made it mechanical.** Two of the three did not need
+/// their vocabulary narrowed at all: `AuthChallengeProvider` and
+/// `ChannelConnectionService` were declared where their vocabulary already
+/// lives (`ironclaw_auth`), which is what `.claude/rules/type-placement.md`
+/// §2/§3 and `families/contracts.md:46` ask for and costs zero type
+/// weakening — the residue clears when a trait stops being *product*-declared,
+/// whichever legal home it lands in. The third,
+/// `ProductActorUserResolver`, did move to `ironclaw_product_contracts`,
+/// because the one type that blocked it (`ExternalActorBindingEpoch`) belonged
+/// beside `ExternalActorRef` in `ironclaw_extension_contracts::external` all
+/// along. What survives is not vocabulary: `ConversationBindingService`'s DTOs
+/// move with the §12.11 D-A factory port, which is unstarted.
+const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[(
+    "ConversationBindingService",
+    "takes ironclaw_product::ResolveBindingRequest and returns \
+     ironclaw_product::ResolvedBinding; both are declared in product beside \
+     the route-kind grammar that derives them. The error no longer blocks it \
+     (WS2.2) — the DTOs do, and they move with the channel_host row (the \
+     §12.11 D-A factory-port scope, unstarted)",
+)];
 
 /// The ports this row inverted: defined in `ironclaw_product_contracts` and
 /// implemented **below** product, paired with the crate that implements each.
@@ -127,6 +122,11 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     ("DeliveryReplyContextSource", EXTENSION_HOST),
     // WS2.4: the lifecycle product service is the manager's headline surface.
     ("LifecycleProductService", EXTENSION_MANAGER),
+    // WS2.5: inverted once `ExternalActorBindingEpoch` moved to
+    // `ironclaw_extension_contracts::external`, which made
+    // `ResolvedProductActorUser` contracts-legal. Its request and response
+    // types moved with it and the error became `ProductOperationFailure`.
+    ("ProductActorUserResolver", EXTENSION_HOST),
     // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
     // error. Its request type and route key moved with it.
     ("ProductConversationSubjectRouteResolver", EXTENSION_HOST),
@@ -136,8 +136,12 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
 
 /// Ceiling on the residue. Only ever moves down. (WS2.1 froze it at 6; WS2.2
 /// inverted `ProductConversationSubjectRouteResolver`; WS2.4 moved
-/// `ExtensionCredentialSetupService`'s implementation out of the crate.)
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 4;
+/// `ExtensionCredentialSetupService`'s implementation out of the crate; WS2.5
+/// took the three vocabulary-blocked ports 4 -> 1 — `AuthChallengeProvider` and
+/// `ChannelConnectionService` to `ironclaw_auth` beside the vocabulary that
+/// blocked them, `ProductActorUserResolver` to `ironclaw_product_contracts`
+/// once `ExternalActorBindingEpoch` moved to `ironclaw_extension_contracts`.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 1;
 
 /// The manager twin of the host list above. WS2.4 moved
 /// `ExtensionCredentialSetupService`'s implementation out of the host, which
@@ -150,9 +154,73 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
     "ExtensionCredentialSetupService",
     "implemented in webui_extension_credentials.rs; the port stays declared in \
      ironclaw_product because its vocabulary is ironclaw_auth credential-account \
-     projections — it moves to ironclaw_product_contracts when that vocabulary \
-     is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
+     projections. WS2.5 showed the cheaper answer for that class: declare the \
+     port in ironclaw_auth beside the vocabulary, as AuthChallengeProvider and \
+     ChannelConnectionService now are, rather than narrowing the vocabulary out \
+     to reach ironclaw_product_contracts",
 )];
+
+/// **The full `ironclaw_product` reference ledger** — every production file in
+/// `ironclaw_extension_host` whose code names `ironclaw_product` at all, with
+/// the reason it still does. Exact-match in both directions and shrink-only.
+///
+/// Why this exists when the trait residue above already does: the trait list is
+/// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
+/// else. A dependency can also be a free function or an inline construction
+/// of a concrete product type (`ProductConversationBindingService::new`), and
+/// none of those register there — the two examples this paragraph used to
+/// give are both gone: `adapter_registry::PRODUCT_ADAPTER_HOST_API_ID`
+/// retired with the WS5 `adapter_registry` move, and
+/// `auth_prompt_view_for_blocked_auth` moved to
+/// `ironclaw_auth::product_prompt` with the challenge family (WS2.5). The
+/// manifest biconditional below catches the *sum* loudly, but as a
+/// boolean: it cannot say what remains. The `products → loops` re-layer was
+/// sized five times from proxies of this set and was wrong five times
+/// (PROPOSAL §12.11 D-A and its 2026-08-03 amendment; #7092; #7143; #7145) —
+/// this ledger makes the remaining scope a file-list diff instead of an
+/// estimate.
+///
+/// **Update rule:** removing a reference deletes its row in the same change
+/// (the stale direction fails otherwise); a new production file naming product
+/// fails the gate and is not to be allowlisted here — implement against
+/// `ironclaw_product_contracts` instead (§6.1.3). The row's reason names the
+/// blocker class so the flip's remaining work stays enumerable: `port` (the
+/// trait residue above), `adapter-registry` (manifest projection, owned by
+/// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
+/// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
+const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
+    (
+        "channel_host.rs",
+        "port: implements ConversationBindingService (its DTOs are \
+         product-declared) + assembly: inline-constructs product's concrete \
+         stack — the §12.11 D-A factory-port scope. The ProductActorUserResolver \
+         half of this row fell to WS2.5's inversion",
+    ),
+    (
+        "channel_triggered_delivery.rs",
+        "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
+         triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
+         alongside channel_host.rs",
+    ),
+];
+
+/// Ceiling on the reference ledger. Only ever moves down — growing the frozen
+/// list past it needs this constant raised in the same PR, which is the
+/// deliberate two-edit speed bump against re-widening the edge.
+///
+/// **WS2.5 took it 9 -> 5.** Four rows fell together, all by the same move: the
+/// port-facing vocabulary went to the crate that owns it, and product maps at
+/// its boundary. `channel_connection.rs` and `product_lifecycle.rs` speak
+/// `ironclaw_auth::{ChannelConnectionService, ChannelAuthAccountState}` and the
+/// `ExtensionAccountSetupReader` port; `provider_identity.rs` speaks
+/// `ironclaw_product_contracts::actor_identity`; `run_delivery_ports.rs` speaks
+/// `ironclaw_auth::product_prompt` for the challenge family and
+/// `ironclaw_product_contracts::approval_prompt` for the approval projection.
+///
+/// The five survivors are exactly two classes and neither is vocabulary: three
+/// `adapter-registry` rows (CHECKLIST WS5's `product` narrows row) and two
+/// `assembly` rows (§12.11 D-A's factory port, unstarted).
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 2;
 
 /// Workspace package metadata, resolved once per test binary.
 ///
@@ -550,17 +618,10 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
 /// `ironclaw_product_contracts::error::ProductOperationFailure`. A third file
 /// appearing here means the boundary error was bypassed; a stale entry means a
 /// port was inverted without deleting its row.
-const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
-    (
-        "channel_host.rs",
-        "implements ConversationBindingService and ProductActorUserResolver, both \
-         still declared in ironclaw_product",
-    ),
-    (
-        "provider_identity.rs",
-        "implements ProductActorUserResolver, still declared in ironclaw_product",
-    ),
-];
+const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[(
+    "channel_host.rs",
+    "implements ConversationBindingService, still declared in ironclaw_product",
+)];
 
 /// Production files in `crate_name` whose *code* names `type_name`, as paths
 /// relative to the crate's `src/`.
@@ -594,6 +655,48 @@ fn production_files_naming(
         let source = std::fs::read_to_string(&file)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
         if strip_cfg_test_blocks(&strip_comments_and_strings(&source)).contains(type_name) {
+            let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
+                panic!("{} is not under {}: {error}", file.display(), src.display())
+            });
+            named.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    named
+}
+
+/// Production files in `crate_name` whose *code* names `referenced_crate` as a
+/// whole token, as paths relative to the crate's `src/`.
+///
+/// The sibling of [`production_files_naming`] for crate names rather than type
+/// names. The difference is load-bearing, not stylistic: that helper matches by
+/// substring, and `ironclaw_product` is a substring of
+/// `ironclaw_product_contracts` — a raw `contains` here would count every file
+/// that (correctly) imports the contracts crate and the ledger would freeze
+/// files that never touch product. `names_crate` is the same whole-token
+/// matcher the impl scan uses, so the two scans cannot disagree about what
+/// "names the crate" means. Stripping order and the fatal-I/O rule are
+/// identical to the sibling, for the reasons documented there.
+fn production_files_naming_crate(
+    crate_name: &str,
+    referenced_crate: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
+    let src = crate_src(crate_name);
+    let files = production_rust_files(&src);
+    assert!(
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than report an empty, vacuously passing set",
+        files.len()
+    );
+    let mut named = BTreeSet::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        if names_crate(
+            &strip_cfg_test_blocks(&strip_comments_and_strings(&source)),
+            referenced_crate,
+        ) {
             let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
                 panic!("{} is not under {}: {error}", file.display(), src.display())
             });
@@ -655,6 +758,81 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
          {} host + {} manager files: {host_users:?} {manager_users:?}",
         host_users.len(),
         manager_users.len()
+    );
+}
+
+/// The reference ledger's enforcement: `ironclaw_extension_host`'s production
+/// tree names `ironclaw_product` in exactly the frozen files, no more (a new
+/// reference, or a proxy-sized estimate about to be wrong again) and no fewer
+/// (a stale row that must fall with the change that removed the reference).
+///
+/// Vacuity guards, in order: the walk floor inside
+/// [`production_files_naming_crate`] (an empty tree cannot read as success);
+/// the exact two-way diff (an empty found-set fails against a non-empty frozen
+/// list); and the ledger⇄manifest consistency assert at the bottom (the ledger
+/// cannot read empty while the manifest still carries the dependency — the
+/// itemization and the biconditional in
+/// [`the_extension_host_manifest_names_product_only_while_a_residue_needs_it`]
+/// must agree about whether the edge exists).
+#[test]
+fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger() {
+    let found = production_files_naming_crate(EXTENSION_HOST, PRODUCT, 21);
+    let frozen: BTreeSet<String> = EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT
+        .iter()
+        .map(|(file, _)| (*file).to_string())
+        .collect();
+    assert_eq!(
+        frozen.len(),
+        EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT.len(),
+        "the reference ledger lists a file twice — every row must be a distinct file"
+    );
+
+    let mut violations = Vec::new();
+    for file in found.difference(&frozen) {
+        violations.push(format!(
+            "{EXTENSION_HOST}/src/{file} names {PRODUCT} but has no ledger row. Do not add \
+             one: implement against {PRODUCT_CONTRACTS} (PROPOSAL §6.1.3) — the ledger only \
+             shrinks on the way to the products -> loops re-layer (#7145)"
+        ));
+    }
+    for file in frozen.difference(&found) {
+        violations.push(format!(
+            "{file} is in the reference ledger but no longer names {PRODUCT} — delete its \
+             row in the same change so the ledger stays the exact remaining scope"
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "WS2 product-reference ledger violated (the residue itemization, #7145):\n{}",
+        violations.join("\n")
+    );
+    assert!(
+        found.len() <= EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
+        "the product-reference ledger is shrink-only: {} files > baseline {}",
+        found.len(),
+        EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE
+    );
+
+    // The itemization and the manifest biconditional must tell one story: a
+    // ledger that reads empty while the manifest still lists the dependency
+    // means this scan went blind (or a reference hides somewhere no file-level
+    // scan sees), and an occupied ledger without the manifest edge means the
+    // rows are stale. Either way the fix is in this file, loudly.
+    let host = package(EXTENSION_HOST);
+    let has_normal_dep = host["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|dependency| {
+            dependency["name"].as_str() == Some(PRODUCT)
+                && dependency["kind"].as_str().unwrap_or("normal") == "normal"
+        });
+    assert_eq!(
+        !found.is_empty(),
+        has_normal_dep,
+        "ledger occupancy ({} files) disagrees with the manifest edge (present: \
+         {has_normal_dep}) — the itemization has gone vacuous or stale",
+        found.len()
     );
 }
 
