@@ -11,10 +11,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ironclaw_assistant::{
-    ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionSubscriptionRequest,
-};
 use ironclaw_assistant::{RebornTimelineRequest, TIMELINE_VIEW};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
@@ -43,10 +39,18 @@ use ironclaw_openai_compat::{
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
 };
 use ironclaw_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_product_contracts::operator_llm::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
 };
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::projection::{
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
 use ironclaw_product_contracts::surface::{
     BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
     ProductSurfaceStreamRequest,
