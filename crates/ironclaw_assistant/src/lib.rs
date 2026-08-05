@@ -113,11 +113,11 @@ pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
 };
+pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
     RebornChannelWorkflowServices, channel_conversation_services,
 };
-pub use blocked_auth_resume::BlockedAuthResumeFanout;
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
 // workflow factory hands a live binding service back to a caller that sits
@@ -141,11 +141,11 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
-pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 pub use ironclaw_product_contracts::binding::{
     ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
     route_kind_for_inbound_payload,
 };
+pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 // `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
 // moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
