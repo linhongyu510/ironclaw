@@ -40,7 +40,10 @@ use ironclaw_extension_manager::lifecycle_test_support::{
     lifecycle_product_context, rebuild_lifecycle_test_services_with_auth_provider,
     webui_gate_resource_scope_for_owner,
 };
-use ironclaw_extension_registry::{ExtensionInstallationStorePort, ExtensionManifestRecord};
+use ironclaw_extension_registry::{
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ManifestSource, PackageRootBinding,
+    RegisteredPackageDefinition,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -1394,6 +1397,101 @@ async fn reserved_hosted_mcp_id_is_rejected_without_registration_or_installation
             .iter()
             .all(|installation| installation.extension_id() != &rejected_extension),
         "invalid registration must not create an installation"
+    );
+}
+
+#[tokio::test]
+async fn registration_cannot_replace_a_non_user_registered_definition() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-definition-collision",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-definition-collision");
+    let raw = r#"schema_version = "reborn.extension_manifest.v3"
+id = "mcp-fixture"
+name = "Bundled collision fixture"
+version = "0.1.0"
+description = "non-user-registered definition collision"
+trust = "third_party"
+
+[mcp]
+server = "https://bundled.example.test/mcp"
+namespace = "mcp-fixture"
+max_tools = 32
+default_permission = "ask"
+effects = ["network"]
+"#;
+    let parsed = ExtensionManifestRecord::from_toml_with_root_binding(
+        raw,
+        ManifestSource::UserRegistered,
+        &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+        None,
+        &ironclaw_extension_host::product_extension_host_api_contract_registry()
+            .expect("host API contracts"),
+        PackageRootBinding::Virtual,
+    )
+    .expect("collision fixture parses through the reserved user-registration boundary");
+    // Simulate a legacy/corrupt durable definition whose source no longer
+    // agrees with the reserved ID. The registration guard must mask and retain
+    // it even though current manifest admission would reject creating it.
+    let existing = ExtensionManifestRecord::from_resolved(
+        parsed.raw_toml(),
+        ManifestSource::HostBundled,
+        parsed.resolved().clone(),
+        parsed.manifest_hash().cloned(),
+    )
+    .expect("source-mismatched durable fixture remains structurally reconstructable");
+    let installation_store = services.extension_management.installation_store_for_test();
+    installation_store
+        .admit_package_definition(RegisteredPackageDefinition::managed_by(
+            existing,
+            scope.user_id.clone(),
+        ))
+        .await
+        .expect("fixture definition admission succeeds");
+
+    let error = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect_err("registration must not replace a non-user-registered definition");
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert!(
+        server.requests().is_empty(),
+        "a masked definition collision must fail before registration egress"
+    );
+
+    let extension_id = ExtensionId::new("mcp-fixture").expect("fixture extension id");
+    let retained = installation_store
+        .get_registered_package_definition(&extension_id)
+        .await
+        .expect("registered-definition lookup")
+        .expect("existing definition remains admitted");
+    assert_eq!(
+        retained.definition().manifest().source,
+        ManifestSource::HostBundled
+    );
+    assert!(
+        installation_store
+            .list_installations()
+            .await
+            .expect("installation-store readback")
+            .is_empty(),
+        "a definition collision must not create an installation"
     );
 }
 

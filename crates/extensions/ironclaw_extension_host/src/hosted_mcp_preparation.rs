@@ -235,7 +235,7 @@ impl HostedMcpPreparationService {
                 reason: "hosted MCP registration runtime is unavailable".to_string(),
             }
         })?;
-        let package = crate::hosted_mcp_manifest::available_package(&seed)?.package;
+        let package = crate::hosted_mcp_manifest::registered_extension_package(&seed)?;
         let capability_id = package
             .manifest
             .capabilities
@@ -419,8 +419,9 @@ impl HostedMcpPreparationService {
                     reason: "hosted MCP authentication can no longer be changed".to_string(),
                 });
             }
-            let current_package = crate::hosted_mcp_manifest::available_package(&manifest)?;
-            if !package_runtime_credential_auth_requirements(&current_package.package).is_empty() {
+            let current_package =
+                crate::hosted_mcp_manifest::registered_extension_package(&manifest)?;
+            if !package_runtime_credential_auth_requirements(&current_package).is_empty() {
                 return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "hosted MCP authentication is already configured".to_string(),
                 });
@@ -545,7 +546,8 @@ impl HostedMcpPreparationService {
         {
             Ok(discovered) => discovered,
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(challenge))
-                if manifest.resolved().auth.is_empty()
+                if manifest.manifest().source == ManifestSource::UserRegistered
+                    && manifest.resolved().auth.is_empty()
                     && matches!(
                         manifest
                             .resolved()
@@ -613,7 +615,8 @@ impl HostedMcpPreparationService {
                     .await;
             }
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(_))
-                if matches!(
+                if manifest.manifest().source == ManifestSource::UserRegistered
+                    && matches!(
                     manifest
                         .resolved()
                         .mcp
@@ -752,6 +755,12 @@ impl HostedMcpPreparationService {
         installation: &ExtensionInstallation,
         enriched: ExtensionManifestRecord,
     ) -> Result<ExtensionPackage, ProductOperationFailure> {
+        if enriched.manifest().source != ManifestSource::UserRegistered {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP registration checkpoint requires user-registered provenance"
+                    .to_string(),
+            });
+        }
         let incarnation = installation
             .incarnation_id()
             .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
@@ -764,12 +773,9 @@ impl HostedMcpPreparationService {
             )
             .await
             .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let enriched_package = if enriched.manifest().source == ManifestSource::UserRegistered {
-            self.user_registered_available_package(&enriched, installation)
-                .await?
-        } else {
-            crate::hosted_mcp_manifest::available_package(&enriched)?
-        };
+        let enriched_package = self
+            .user_registered_available_package(&enriched, installation)
+            .await?;
         let package = enriched_package.package.clone();
         self.catalog
             .write()

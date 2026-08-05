@@ -6,7 +6,7 @@ use ironclaw_extension_contracts::{
 use ironclaw_extension_registry::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
-    PackageDefinitionAudience, UserMembership,
+    UserMembership,
 };
 use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
 use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
@@ -149,10 +149,6 @@ pub struct AvailableExtensionPackage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogVisibility {
     Tenant,
-    /// A user-registered package projection whose durable definition audience
-    /// has not been applied yet. It must remain invisible rather than falling
-    /// back to tenant-wide discovery.
-    UnscopedUserRegistered,
     Members(UserMembership),
 }
 
@@ -160,7 +156,6 @@ impl CatalogVisibility {
     fn visible_to(&self, caller: &UserId) -> bool {
         match self {
             Self::Tenant => true,
-            Self::UnscopedUserRegistered => false,
             Self::Members(membership) => membership.contains(caller),
         }
     }
@@ -174,19 +169,6 @@ pub struct AdminConfigurationCatalogUse {
 }
 
 impl AvailableExtensionPackage {
-    pub(crate) fn with_definition_audience(
-        mut self,
-        audience: &PackageDefinitionAudience,
-    ) -> Result<Self, ProductOperationFailure> {
-        let membership = audience.membership().ok_or_else(|| {
-            ProductOperationFailure::InvalidBindingRequest {
-                reason: "registered package definition has no managed audience".to_string(),
-            }
-        })?;
-        self.catalog_visibility = CatalogVisibility::Members(membership.clone());
-        Ok(self)
-    }
-
     fn visible_to(&self, caller: &UserId) -> bool {
         self.catalog_visibility.visible_to(caller)
     }
@@ -2444,9 +2426,9 @@ handle = "web_token"
     fn managed_definition_visibility_filters_search_and_direct_resolution() {
         let creator = UserId::new("creator").expect("creator");
         let other = UserId::new("other").expect("other");
-        let package = test_extension_package()
-            .with_definition_audience(&PackageDefinitionAudience::managed_by(creator.clone()))
-            .expect("managed package");
+        let mut package = test_extension_package();
+        package.catalog_visibility =
+            CatalogVisibility::Members(UserMembership::user(creator.clone()));
         let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
@@ -2461,18 +2443,6 @@ handle = "web_token"
             hidden.to_string(),
             "invalid binding request: available extension was not found"
         );
-    }
-
-    #[test]
-    fn ownerless_definition_cannot_be_projected_into_catalog_visibility() {
-        let error = test_extension_package()
-            .with_definition_audience(&PackageDefinitionAudience::LegacyOwnerless)
-            .expect_err("legacy ownerless definitions require an explicit compatibility policy");
-
-        assert!(matches!(
-            error,
-            ProductOperationFailure::InvalidBindingRequest { .. }
-        ));
     }
 
     #[tokio::test]

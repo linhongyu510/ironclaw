@@ -483,7 +483,7 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 mod tests {
     use super::{map_extension_error, map_extension_installation_error};
     use ironclaw_extension_registry::{
-        ExtensionError, ExtensionInstallationError, InstallationOwner,
+        ExtensionError, ExtensionInstallationError, InstallationOwner, PackageDefinitionAudience,
     };
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -574,9 +574,12 @@ effects = ["network", "use_secret"]
     #[test]
     fn install_refuses_a_retained_definition_that_disagrees_with_the_catalog() {
         let record = fixture_record("mcp-restore-fixture", "fixture: restore prepare_install");
-        let available = crate::hosted_mcp_manifest::available_package(&record)
-            .expect("fixture record projects to an available package");
         let owner = ironclaw_host_api::ids::UserId::new("restore-owner").expect("valid user");
+        let available = crate::hosted_mcp_manifest::available_registered_package(
+            &record,
+            &PackageDefinitionAudience::managed_by(owner.clone()),
+        )
+        .expect("fixture record projects to an available package");
 
         let plan = super::prepare_install(&available, InstallationOwner::user(owner.clone()), None)
             .expect("install with no retained definition uses the catalog record");
