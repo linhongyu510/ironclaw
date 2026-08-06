@@ -185,7 +185,15 @@ export function useSSE({
       );
       controller = stream.listen({
         onRequest({ options }) {
-          if (disposed || terminalErrorReceived) return;
+          // EventSourcePlus does not cancel a retry timer that is already
+          // sleeping when its controller is aborted. When that timer wakes it
+          // installs a fresh AbortController before calling onRequest, so a
+          // silent return here would still allow the obsolete request to be
+          // sent. Throwing AbortError makes the package treat the retry as
+          // cancelled and prevents disposed thread streams from resurrecting.
+          if (disposed || terminalErrorReceived) {
+            throw new DOMException("SSE lifecycle ended", "AbortError");
+          }
           markTransportUnavailable();
           const connectionState = nextConnectionState();
           options.query = {

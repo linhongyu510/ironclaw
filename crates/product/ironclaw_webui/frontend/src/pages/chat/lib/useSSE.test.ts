@@ -126,6 +126,7 @@ function createHarness({
       sessionStorage,
     },
     Headers,
+    DOMException,
     JSON,
     Math,
     React: {
@@ -366,6 +367,21 @@ test("useSSE does not start a competing watchdog reconnect after a 429", () => {
     stream.controller.reconnectCalls,
     0,
     "a rejected handshake must not race EventSourcePlus's automatic retry",
+  );
+});
+
+test("useSSE terminates a retry that wakes after its thread was disposed", () => {
+  const { render, streams } = createHarness();
+  const disposedThread = streams[0];
+
+  render("thread-2");
+
+  assert.equal(streams.length, 2);
+  assert.deepEqual(disposedThread.controller.abortCalls, ["component disposed"]);
+  assert.throws(
+    () => disposedThread.request(),
+    (error) => error instanceof DOMException && error.name === "AbortError",
+    "a retry already sleeping inside EventSourcePlus must stop before issuing a request",
   );
 });
 
