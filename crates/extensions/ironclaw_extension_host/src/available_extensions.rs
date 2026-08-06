@@ -15,6 +15,7 @@ use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKi
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, UserId, VendorId},
+    messaging::STANDARD_SCHEMA_REF_PREFIX,
     path::VirtualPath,
 };
 // Imported from the contract that owns it. `ironclaw_assistant` only re-exports
@@ -888,8 +889,10 @@ fn bundled_extension_package(
 
 /// Fail catalog construction before a package can be installed when its
 /// manifest points at a static file the bundle does not carry. Dynamic hosted
-/// MCP schemas are inlined at discovery time and are the only intentional
-/// non-file references.
+/// MCP schemas (inlined at discovery time) and standardized-messaging-framework
+/// `standard_op` bindings (host-resolved from the compiled-in
+/// `ironclaw_host_api::messaging` registry, never a package asset — spec §6/§7.1)
+/// are the only intentional non-file references.
 fn validate_bundled_package_assets(
     label: &str,
     package: &ExtensionPackage,
@@ -903,6 +906,10 @@ fn validate_bundled_package_assets(
             && path
                 .strip_prefix(&dynamic_schema_prefix)
                 .is_some_and(|suffix| !suffix.is_empty())
+    };
+    let is_standard_op_schema_ref = |field: &str, path: &str| {
+        matches!(field, "input_schema_ref" | "output_schema_ref")
+            && path.starts_with(STANDARD_SCHEMA_REF_PREFIX)
     };
     let require_asset = |field: &str, path: &str| {
         if has_asset(path) {
@@ -941,7 +948,7 @@ fn validate_bundled_package_assets(
         ];
         for (field, path) in refs {
             let Some(path) = path else { continue };
-            if is_inline_dynamic_schema_ref(field, path) {
+            if is_inline_dynamic_schema_ref(field, path) || is_standard_op_schema_ref(field, path) {
                 continue;
             }
             require_asset(
@@ -1376,13 +1383,17 @@ mod tests {
             }
 
             // Hosted-MCP inline schemas under this package's exact dynamic
-            // prefix ship no package asset; every other ref remains static.
+            // prefix ship no package asset; standard_op bindings resolve
+            // from the compiled-in `ironclaw_host_api::messaging` registry,
+            // also never a package asset (spec §6/§7.1); every other ref
+            // remains static.
             let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
             let is_dynamic_schema_ref = |schema_ref: &str| {
-                crate::is_hosted_http_mcp_package(&package.package)
+                (crate::is_hosted_http_mcp_package(&package.package)
                     && schema_ref
                         .strip_prefix(&dynamic_schema_prefix)
-                        .is_some_and(|suffix| !suffix.is_empty())
+                        .is_some_and(|suffix| !suffix.is_empty()))
+                    || schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
             };
 
             for capability in &package.package.manifest.capabilities {
@@ -2223,13 +2234,13 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("slack channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Slack exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Slack exposes exactly the model, status, new, stop, and interrupt commands"
         );
     }
 
     #[test]
-    fn bundled_telegram_package_declares_model_and_status_commands() {
+    fn bundled_telegram_package_declares_the_full_command_roster() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
@@ -2242,8 +2253,8 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("telegram channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Telegram exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Telegram exposes exactly the model, status, new, stop, and interrupt commands"
         );
         assert_eq!(
             package

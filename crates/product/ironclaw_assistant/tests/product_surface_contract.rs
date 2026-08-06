@@ -2,6 +2,7 @@
 //! Contract tests for the product workflow service.
 
 use ironclaw_loop_host::RejectingInputEnqueue;
+use ironclaw_product_contracts::binding::ResetBindingRequest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,28 +23,24 @@ use ironclaw_assistant::{
     PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    StaticProductInstallationResolver, approval_gate_ref,
 };
-use ironclaw_assistant::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalEventId, InboundCommandPayload,
-    LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
-    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
-    ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
-    TrustedInboundContext, UserMessagePayload,
-};
+
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::ExternalEventId;
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
     TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -63,7 +60,20 @@ use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload,
+};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+};
 use ironclaw_product_contracts::subject_route::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
     ProductConversationSubjectRouteResolver,
@@ -3977,6 +3987,60 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
 }
 
 #[tokio::test]
+async fn product_binding_reset_rotates_the_route_and_preserves_canonical_scope() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let initial_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-initial"));
+    let initial = binding
+        .resolve_binding(initial_request)
+        .await
+        .expect("initial binding");
+    let reset_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-command"));
+
+    let reset = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: reset_request.clone(),
+            expected_thread_id: initial.thread_id.clone(),
+        })
+        .await
+        .expect("binding reset");
+
+    assert_eq!(reset.previous_thread_id, initial.thread_id);
+    assert_ne!(reset.binding.thread_id, reset.previous_thread_id);
+    assert_eq!(reset.binding.tenant_id, initial.tenant_id);
+    assert_eq!(reset.binding.actor_user_id, initial.actor_user_id);
+    assert_eq!(reset.binding.subject_user_id, initial.subject_user_id);
+    assert_eq!(reset.binding.agent_id, initial.agent_id);
+    assert_eq!(reset.binding.project_id, initial.project_id);
+    let replay = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: reset_request,
+            expected_thread_id: reset.previous_thread_id.clone(),
+        })
+        .await
+        .expect("duplicate reset event replays");
+    assert_eq!(replay, reset);
+}
+
+#[tokio::test]
 async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
@@ -5733,7 +5797,7 @@ async fn concrete_product_surface_bot_mention_uses_shared_route() {
     assert_eq!(submissions.len(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Shared]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared]
     );
 }
 
@@ -5857,7 +5921,7 @@ async fn concrete_product_surface_reuses_prepared_binding_for_content_only_polic
     assert_eq!(binding.resolve_count(), 1);
     assert_eq!(
         binding.route_kinds(),
-        vec![ironclaw_assistant::ProductConversationRouteKind::Direct]
+        vec![ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct]
     );
 }
 
@@ -5899,8 +5963,8 @@ async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger
     assert_eq!(
         binding.route_kinds(),
         vec![
-            ironclaw_assistant::ProductConversationRouteKind::Direct,
-            ironclaw_assistant::ProductConversationRouteKind::Shared,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Direct,
+            ironclaw_product_contracts::binding::ProductConversationRouteKind::Shared,
         ]
     );
 }

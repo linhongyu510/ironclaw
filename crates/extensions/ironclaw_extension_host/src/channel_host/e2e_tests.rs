@@ -39,8 +39,8 @@ use ironclaw_assistant::{
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -78,6 +78,7 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::inbound::{
     AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
@@ -5117,7 +5118,7 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
     let feedback =
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
             payload["text"].as_str().is_some_and(|text| {
-                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+                text == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
             })
         })
         .await;
@@ -5155,7 +5156,8 @@ async fn disabled_dm_slash_commands_are_rejected_without_execution() {
         .slack_messages()
         .into_iter()
         .filter(|payload| {
-            payload["text"] == "Available commands:\n/ironclaw model\n/ironclaw status"
+            payload["text"]
+                == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
         })
         .count();
     assert_eq!(scoped_help, 2, "one scoped rejection per disabled command");
@@ -5313,7 +5315,7 @@ async fn slash_dispatcher_bare_returns_prefixed_help() {
         "prefixed command inventory help",
         |payload| {
             payload["text"].as_str().is_some_and(|text| {
-                text == "Available commands:\n/ironclaw model\n/ironclaw status"
+                text == "Available commands:\n/ironclaw interrupt\n/ironclaw model\n/ironclaw new\n/ironclaw status\n/ironclaw stop"
             })
         },
     )

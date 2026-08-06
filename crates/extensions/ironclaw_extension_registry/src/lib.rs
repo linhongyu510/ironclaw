@@ -202,7 +202,9 @@ pub use definition_admission::{
     PackageDefinitionAdmissionOutcome, PackageDefinitionAudience, PackageDefinitionRetention,
     RegisteredPackageDefinition,
 };
-pub use package::{CapabilityDescriptorSchemaMode, ExtensionPackage};
+pub use package::{
+    CapabilityDescriptorSchemaMode, ExtensionPackage, composed_capability_description,
+};
 
 pub use admin_configuration::{
     AdminConfigurationDescriptorError, AdminConfigurationField, AdminConfigurationGroupId,

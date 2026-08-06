@@ -36,10 +36,6 @@ use ironclaw_product_contracts::operator_tools::{
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
-use crate::{
-    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionSubscriptionRequest,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -48,6 +44,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, ChannelConnectionService, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
     TurnScope, TurnStatus,
@@ -65,6 +62,8 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -90,12 +89,14 @@ use crate::{
     AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
     CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductModelCommand, ProductModelCommandInput, ProductRejectionKind, ProductStatusCommandInput,
-    ProductSurfaceFailure, ProductTriggerReason, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
+    ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
+    ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -103,9 +104,10 @@ use crate::{
         bounded_source_binding_ref,
     },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
-    parse_product_slash_command, product_command_descriptors, required_audience,
-    thread_metadata_is_automation_trigger,
+    product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{ProductRejectionKind, parse_product_slash_command};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
@@ -167,9 +169,9 @@ pub use trace_credits::{
 
 use approval_settings::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
@@ -225,6 +227,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
 };
+// A product-tier port gets exactly one import path (§11.2.4), so this is a
+// private `use` and never a `pub use` — callers name the contracts crate.
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
@@ -253,12 +258,12 @@ pub use project_fs::{
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
 };
 pub use projects::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest,
 };
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
@@ -271,7 +276,8 @@ pub use thread_artifact::{
 pub use types::{
     RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornTimelineResponse, RebornVendorAuthAccounts,
+    RebornListThreadsResponse, RebornProductCommandEffect, RebornTimelineResponse,
+    RebornVendorAuthAccounts,
 };
 pub use views::UnavailableRebornViewProvider;
 
@@ -566,7 +572,7 @@ pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentR
 
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -649,6 +655,28 @@ fn idle_status_command_view() -> CommandResultView {
         title: "Status".to_string(),
         fields: vec![command_result_field("State", "idle")],
         lines: vec!["No assistant activity in this conversation yet.".to_string()],
+    }
+}
+
+fn nothing_to_stop_command_view() -> CommandResultView {
+    CommandResultView {
+        title: "Nothing to stop".to_string(),
+        fields: vec![command_result_field("State", "idle")],
+        lines: vec!["There is no active run in this conversation.".to_string()],
+    }
+}
+
+/// The one `/new` success copy, shared by the channel preflight
+/// (`execute_product_new_command`) and the WebUI execute door so the two
+/// renderings cannot drift.
+fn new_conversation_started_view() -> CommandResultView {
+    CommandResultView {
+        title: "New conversation".to_string(),
+        fields: Vec::new(),
+        lines: vec![
+            "Started a fresh conversation. The previous conversation is still available in history."
+                .to_string(),
+        ],
     }
 }
 
@@ -2347,7 +2375,7 @@ where
 
     pub fn with_operator_approval_config(
         mut self,
-        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
         auto_approve: Arc<dyn AutoApproveSettingStorePort>,
         persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
         tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -2914,35 +2942,12 @@ where
         caller: ProductSurfaceCaller,
         input: ProductStatusCommandInput,
     ) -> Result<CommandResultView, ProductSurfaceError> {
-        let thread_id = parse_thread_id_field("thread_id", input.thread_id)?;
-        let scope = caller.turn_scope(thread_id.clone());
-        let history = match self
-            .resolve_thread_history_for_caller(caller.clone(), &scope)
-            .await
-        {
-            Ok((_thread_scope, history)) => history,
-            Err(error) if error.code == ProductSurfaceErrorCode::NotFound => {
-                return Ok(idle_status_command_view());
-            }
-            Err(error) => return Err(error),
-        };
-        let latest_run = history
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| message.turn_run_id.clone());
-        let Some(run_id) = latest_run else {
+        let Some(state) = self
+            .latest_product_command_run_state(caller, &input.thread_id)
+            .await?
+        else {
             return Ok(idle_status_command_view());
         };
-        let state = self
-            .get_run_state(
-                caller,
-                RebornGetRunStateRequest {
-                    thread_id: thread_id.to_string(),
-                    run_id,
-                },
-            )
-            .await?;
         let (state_label, detail) = describe_turn_status(state.status);
         let mut fields = vec![command_result_field("State", state_label)];
         fields.push(command_result_field("Run", state.run_id.to_string()));
@@ -2958,6 +2963,137 @@ where
             fields,
             lines,
         })
+    }
+
+    async fn execute_webui_new_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        current_thread_id: String,
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", current_thread_id)?;
+        let scope = caller.turn_scope(thread_id);
+        self.resolve_thread_history_for_caller(caller.clone(), &scope)
+            .await?;
+        self.create_thread(
+            caller,
+            ProductCreateThreadRequest {
+                client_action_id: Some(format!("product-new-{}", Uuid::new_v4())),
+                requested_thread_id: None,
+                project_id: None,
+            },
+        )
+        .await
+    }
+
+    async fn execute_product_new_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: ProductNewCommandInput,
+    ) -> Result<ProductNewCommandOutput, ProductSurfaceError> {
+        let active = self
+            .latest_product_command_run_state(caller, &input.thread_id)
+            .await?
+            .is_some_and(|state| !state.status.is_terminal());
+        if active {
+            return Ok(ProductNewCommandOutput {
+                can_reset: false,
+                result: CommandResultView {
+                    title: "Conversation still running".to_string(),
+                    fields: vec![command_result_field("State", "working")],
+                    lines: vec!["Use /stop first, then try /new again.".to_string()],
+                },
+            });
+        }
+        Ok(ProductNewCommandOutput {
+            can_reset: true,
+            result: new_conversation_started_view(),
+        })
+    }
+
+    async fn execute_product_stop_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: ProductStopCommandInput,
+    ) -> Result<CommandResultView, ProductSurfaceError> {
+        let Some(state) = self
+            .latest_product_command_run_state(caller.clone(), &input.thread_id)
+            .await?
+        else {
+            return Ok(nothing_to_stop_command_view());
+        };
+        if state.status.is_terminal() {
+            return Ok(nothing_to_stop_command_view());
+        }
+        let response = self
+            .cancel_run(
+                caller,
+                ProductCancelRunRequest {
+                    client_action_id: Some(format!(
+                        "product-{}-{}",
+                        input.invocation.command_name(),
+                        Uuid::new_v4()
+                    )),
+                    thread_id: Some(input.thread_id),
+                    run_id: Some(state.run_id.to_string()),
+                    reason: Some("user_requested".to_string()),
+                },
+            )
+            .await?;
+        let state_label = match response.status {
+            TurnStatus::Cancelled => "cancelled",
+            TurnStatus::CancelRequested => "cancelling",
+            status if status.is_terminal() => "idle",
+            _ => "working",
+        };
+        Ok(CommandResultView {
+            title: format!(
+                "{} requested",
+                if input.invocation == ProductStopInvocation::Stop {
+                    "Stop"
+                } else {
+                    "Interrupt"
+                }
+            ),
+            fields: vec![
+                command_result_field("State", state_label),
+                command_result_field("Run", response.run_id.to_string()),
+            ],
+            lines: Vec::new(),
+        })
+    }
+
+    async fn latest_product_command_run_state(
+        &self,
+        caller: ProductSurfaceCaller,
+        thread_id: &str,
+    ) -> Result<Option<RebornGetRunStateResponse>, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", thread_id.to_string())?;
+        let scope = caller.turn_scope(thread_id.clone());
+        let history = match self
+            .resolve_thread_history_for_caller(caller.clone(), &scope)
+            .await
+        {
+            Ok((_thread_scope, history)) => history,
+            Err(error) if error.code == ProductSurfaceErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(run_id) = history
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_run_id.clone())
+        else {
+            return Ok(None);
+        };
+        self.get_run_state(
+            caller,
+            RebornGetRunStateRequest {
+                thread_id: thread_id.to_string(),
+                run_id,
+            },
+        )
+        .await
+        .map(Some)
     }
 
     pub async fn list_admin_users(
