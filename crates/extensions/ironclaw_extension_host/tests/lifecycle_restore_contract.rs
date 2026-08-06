@@ -203,11 +203,17 @@ async fn restore_installs_but_does_not_enable_an_undiscovered_hosted_mcp_package
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
                 .expect("valid package ref");
-        assert!(catalog.resolve_visible(&package_ref, &owner).is_ok());
+        assert!(
+            catalog.resolve_visible(&package_ref, &owner).is_ok(),
+            "expected owner-visible restore for extension_id={}",
+            extension_id.as_str()
+        );
         assert!(
             catalog
                 .resolve_visible(&package_ref, &foreign_user)
-                .is_err()
+                .is_err(),
+            "expected foreign-user-hidden restore for extension_id={}",
+            extension_id.as_str()
         );
     }
 

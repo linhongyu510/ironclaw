@@ -11,7 +11,10 @@ use ironclaw_extension_registry::{
     RegisteredPackageDefinition, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
+use ironclaw_host_api::{
+    approval::sha256_digest_token,
+    ids::{ExtensionId, UserId},
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use tokio::sync::Mutex;
@@ -37,14 +40,9 @@ pub async fn restore_extension_lifecycle_state(
         .map_err(map_extension_installation_error)?;
     let registered_by_extension = registered_definitions
         .iter()
-        .map(|registered| {
-            (
-                registered.definition().extension_id().as_str().to_string(),
-                registered,
-            )
-        })
+        .map(|registered| (registered.definition().extension_id().clone(), registered))
         .collect::<BTreeMap<_, _>>();
-    let mut catalog_registered_user_extension_ids: BTreeSet<String> = BTreeSet::new();
+    let mut catalog_registered_user_extension_ids: BTreeSet<ExtensionId> = BTreeSet::new();
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
     {
@@ -55,23 +53,21 @@ pub async fn restore_extension_lifecycle_state(
         if let Some(manifest) = stored_manifest.as_ref()
             && manifest.manifest().source == ManifestSource::UserRegistered
         {
-            let audience = if let Some(registered) =
-                registered_by_extension.get(manifest.extension_id().as_str())
-            {
-                restored_installed_definition_audience(registered.audience(), &installation)?
-            } else {
-                tracing::warn!(
-                    extension_id = manifest.extension_id().as_str(),
-                    "restoring legacy user-registered installation without a separate package \
+            let audience =
+                if let Some(registered) = registered_by_extension.get(manifest.extension_id()) {
+                    restored_installed_definition_audience(registered.audience(), &installation)?
+                } else {
+                    tracing::warn!(
+                        extension_id = manifest.extension_id().as_str(),
+                        "restoring legacy user-registered installation without a separate package \
                      definition; deriving catalog membership from installation membership"
-                );
-                legacy_installed_definition_audience(&installation)?
-            };
+                    );
+                    legacy_installed_definition_audience(&installation)?
+                };
             let available =
                 crate::hosted_mcp_manifest::available_registered_package(manifest, &audience)?;
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
-            catalog_registered_user_extension_ids
-                .insert(installation.extension_id().as_str().to_string());
+            catalog_registered_user_extension_ids.insert(installation.extension_id().clone());
         }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
@@ -196,7 +192,7 @@ pub(crate) fn legacy_installed_definition_audience(
 async fn restore_registered_only_definitions(
     catalog: &mut AvailableExtensionCatalog,
     registered_definitions: &[RegisteredPackageDefinition],
-    already_contributed: &BTreeSet<String>,
+    already_contributed: &BTreeSet<ExtensionId>,
     legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductOperationFailure> {
     for registered in registered_definitions {
@@ -204,7 +200,7 @@ async fn restore_registered_only_definitions(
         if manifest.manifest().source != ManifestSource::UserRegistered {
             continue;
         }
-        if already_contributed.contains(manifest.extension_id().as_str()) {
+        if already_contributed.contains(manifest.extension_id()) {
             continue;
         }
         let audience = restored_definition_audience(registered, legacy_tenant_owner);

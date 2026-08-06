@@ -1,4 +1,4 @@
-//! Hosted MCP package-definition admission and installation preparation.
+//! Hosted MCP installation preparation.
 //!
 //! The generic lifecycle knows nothing about discovery: it calls
 //! [`HostedMcpPreparationService::prepare_if_pending`] and reads readiness off
@@ -7,34 +7,23 @@
 
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest};
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_registry::{
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionInstallationStorePort, ExtensionLifecycleService, ExtensionManifestRecord,
-    ExtensionPackage, ManifestSource, PackageDefinitionAudience, RegisteredPackageDefinition,
+    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, ManifestSource,
+    PackageDefinitionAudience, RegisteredPackageDefinition,
 };
-use ironclaw_host_api::{
-    dispatch::CredentialStageError,
-    ids::{CapabilityId, UserId},
-    resource::ResourceScope,
-};
+use ironclaw_host_api::{dispatch::CredentialStageError, ids::UserId, resource::ResourceScope};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageRef, LifecycleProductResponse,
 };
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     AvailableExtensionCatalog, ExtensionActivationCredentialGate,
     ExtensionActivationCredentialReadiness, package_runtime_credential_auth_requirements,
 };
-use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
-
-/// Per-process ceiling for registration-time network preflight. It bounds
-/// concurrent third-party probes without queueing callers behind a stalled
-/// endpoint; saturation is returned as a retryable product failure.
-const MAX_CONCURRENT_HOSTED_MCP_REGISTRATION_PREFLIGHTS: usize = 8;
-
 pub struct HostedMcpPreparationService {
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
@@ -43,7 +32,6 @@ pub struct HostedMcpPreparationService {
     discovery_runtime_ports: Option<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     catalog_safety: crate::McpCatalogAdmissionPolicy,
     oauth_client_profiles: Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>,
-    registration_preflight_semaphore: Arc<Semaphore>,
 }
 
 pub struct HostedMcpPreparationDependencies {
@@ -68,223 +56,6 @@ impl HostedMcpPreparationService {
             discovery_runtime_ports: dependencies.runtime_ports,
             catalog_safety: dependencies.catalog_safety,
             oauth_client_profiles: dependencies.oauth_client_profiles,
-            registration_preflight_semaphore: Arc::new(Semaphore::new(
-                MAX_CONCURRENT_HOSTED_MCP_REGISTRATION_PREFLIGHTS,
-            )),
-        }
-    }
-
-    pub async fn register(
-        &self,
-        request: RegisterHostedMcpRequest,
-        scope: ResourceScope,
-    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        let endpoint =
-            crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&request.endpoint)
-                .map_err(|error| {
-                    tracing::debug!(?error, "hosted MCP registration rejected: invalid endpoint");
-                    crate::hosted_mcp_manifest::name_unavailable()
-                })?;
-        let extension_id =
-            ironclaw_extension_contracts::hosted_mcp::hosted_mcp_extension_id(&request.desired_id)
-                .map_err(|error| {
-                    tracing::debug!(%error, "hosted MCP registration rejected: invalid desired id");
-                    crate::hosted_mcp_manifest::name_unavailable()
-                })?;
-        let package_ref = ironclaw_product_contracts::package_lifecycle::LifecyclePackageRef::new(
-            LifecyclePackageKind::Extension,
-            extension_id.as_str(),
-        )?;
-        let caller = scope.user_id.clone();
-        if let Some(existing) = self
-            .installation_store
-            .get_registered_package_definition(&extension_id)
-            .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?
-        {
-            return self
-                .existing_registration_response(
-                    existing,
-                    &request,
-                    &endpoint,
-                    &package_ref,
-                    &caller,
-                )
-                .await;
-        }
-        let definition = match request.auth_selection.as_ref() {
-            Some(
-                selection @ (HostedMcpAuthSelection::Auto | HostedMcpAuthSelection::OAuth { .. }),
-            ) => {
-                let _preflight_permit = self
-                    .registration_preflight_semaphore
-                    .try_acquire()
-                    .map_err(|_| ProductOperationFailure::Transient {
-                        reason: "hosted MCP registration preflight is temporarily saturated"
-                            .to_string(),
-                    })?;
-                let seed = crate::hosted_mcp_manifest::pending_manifest(
-                    &extension_id,
-                    &request.desired_name,
-                    &endpoint,
-                    selection,
-                )?;
-                let Some(resolved) = self
-                    .resolve_registration_auth(
-                        &extension_id,
-                        &request.desired_name,
-                        &endpoint,
-                        seed,
-                        selection,
-                        scope,
-                    )
-                    .await?
-                else {
-                    return match selection {
-                        HostedMcpAuthSelection::Auto => auth_selection_required_response(
-                            package_ref,
-                            "Hosted MCP requires authentication but did not expose usable OAuth metadata; choose OAuth or Bearer token to finish registration.",
-                        ),
-                        HostedMcpAuthSelection::OAuth { .. } => {
-                            Err(ProductOperationFailure::InvalidBindingRequest {
-                                reason: "hosted MCP did not expose usable OAuth metadata"
-                                    .to_string(),
-                            })
-                        }
-                        _ => Err(crate::hosted_mcp_manifest::name_unavailable()),
-                    };
-                };
-                resolved
-            }
-            Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
-                &extension_id,
-                &request.desired_name,
-                &endpoint,
-                selection,
-            )?,
-            None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
-        };
-        let registered = RegisteredPackageDefinition::managed_by(definition, caller);
-        let available = crate::hosted_mcp_manifest::available_registered_package(
-            registered.definition(),
-            registered.audience(),
-        )?;
-        match self
-            .installation_store
-            .admit_package_definition(registered)
-            .await
-        {
-            Ok(_) => {}
-            Err(ExtensionInstallationError::PackageDefinitionConflict { .. }) => {
-                return Err(crate::hosted_mcp_manifest::name_unavailable());
-            }
-            Err(error) => {
-                return Err(crate::product_lifecycle::map_extension_installation_error(
-                    error,
-                ));
-            }
-        }
-        let mut catalog = self.catalog.write().await;
-        catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
-        Ok(crate::hosted_mcp_manifest::registration_response(
-            package_ref,
-        ))
-    }
-
-    async fn existing_registration_response(
-        &self,
-        existing: RegisteredPackageDefinition,
-        request: &RegisterHostedMcpRequest,
-        endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
-        package_ref: &LifecyclePackageRef,
-        caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        if !existing.audience().visible_to(caller) {
-            return Err(crate::hosted_mcp_manifest::name_unavailable());
-        }
-        let definition = existing.definition();
-        if definition.manifest().source != ManifestSource::UserRegistered
-            || !registration_request_matches(definition, request, endpoint)
-        {
-            return Err(crate::hosted_mcp_manifest::name_unavailable());
-        }
-        let available = crate::hosted_mcp_manifest::available_registered_package(
-            definition,
-            existing.audience(),
-        )?;
-        self.catalog
-            .write()
-            .await
-            .extend(AvailableExtensionCatalog::from_packages(vec![available]));
-        Ok(crate::hosted_mcp_manifest::registration_response(
-            package_ref.clone(),
-        ))
-    }
-
-    async fn resolve_registration_auth(
-        &self,
-        extension_id: &ironclaw_host_api::ids::ExtensionId,
-        desired_name: &str,
-        endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
-        seed: ExtensionManifestRecord,
-        selection: &HostedMcpAuthSelection,
-        scope: ResourceScope,
-    ) -> Result<Option<ExtensionManifestRecord>, ProductOperationFailure> {
-        let ports = self.discovery_runtime_ports.as_ref().ok_or_else(|| {
-            ProductOperationFailure::Transient {
-                reason: "hosted MCP registration runtime is unavailable".to_string(),
-            }
-        })?;
-        let package = crate::hosted_mcp_manifest::registered_extension_package(&seed)?;
-        let capability_id = package
-            .manifest
-            .capabilities
-            .first()
-            .map(|capability| capability.id.clone())
-            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-        let network_policy = crate::mcp::hosted_mcp_network_policy(&package)
-            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-        let _handoff_guard = ports.staged_handoff_guard(scope.clone(), capability_id.clone());
-        ports.stage_network_policy_once(&scope, &capability_id, network_policy);
-        match crate::mcp_discovery::probe_hosted_mcp_auth(
-            &package,
-            scope.clone(),
-            ports.runtime_http_egress(),
-        )
-        .await
-        {
-            Ok(_) if matches!(selection, HostedMcpAuthSelection::Auto) => {
-                crate::hosted_mcp_manifest::pending_manifest(
-                    extension_id,
-                    desired_name,
-                    endpoint,
-                    &HostedMcpAuthSelection::NoAuth,
-                )
-                .map(Some)
-            }
-            Ok(_) => Err(ProductOperationFailure::InvalidBindingRequest {
-                reason: "hosted MCP accepted unauthenticated access instead of advertising OAuth"
-                    .to_string(),
-            }),
-            Err(crate::HostedMcpDiscoveryError::CredentialsRejected(challenge)) => {
-                self.prepare_oauth_manifest(
-                    seed,
-                    &challenge,
-                    selection.clone(),
-                    &scope,
-                    &capability_id,
-                    ports,
-                )
-                .await
-            }
-            Err(error) => {
-                tracing::debug!(
-                    extension_id = %extension_id,
-                    ?error,
-                    "hosted MCP registration preflight failed"
-                );
-                Err(crate::hosted_mcp_manifest::discovery_error(error))
-            }
         }
     }
 
@@ -567,14 +338,14 @@ impl HostedMcpPreparationService {
                     Some(ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::OAuth {
                         client_profile_id,
                     }) => {
-                        let Some(enriched) = self
-                            .prepare_oauth_manifest(
+                        let Some(enriched) = crate::hosted_mcp_auth_admission::prepare_oauth_manifest(
                                 manifest.clone(),
                                 &challenge,
                                 HostedMcpAuthSelection::OAuth { client_profile_id },
                                 &scope,
                                 &capability_id,
                                 ports,
+                                Arc::clone(&self.oauth_client_profiles),
                             )
                             .await?
                         else {
@@ -591,16 +362,17 @@ impl HostedMcpPreparationService {
                         enriched
                     }
                     Some(ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto) => {
-                        let Some(enriched) = self.prepare_oauth_manifest(
+                        let Some(enriched) = crate::hosted_mcp_auth_admission::prepare_oauth_manifest(
                             manifest.clone(),
                             &challenge,
                             HostedMcpAuthSelection::Auto,
                             &scope,
                             &capability_id,
                             ports,
+                            Arc::clone(&self.oauth_client_profiles),
                         )
                         .await? else {
-                            return auth_selection_required_response(
+                            return crate::hosted_mcp_auth_admission::auth_selection_required_response(
                                 package_ref.clone(),
                                 "Hosted MCP requires authentication but did not expose usable OAuth metadata; choose OAuth, Bearer token, or No authentication in extension setup.",
                             )
@@ -663,6 +435,14 @@ impl HostedMcpPreparationService {
         // capabilities, so it reads as resolved without a stored flag.
         .map(|record| record.with_definition_retention(manifest.definition_retention()))
         .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        let available = if finalized.manifest().source == ManifestSource::UserRegistered {
+            Some(
+                self.user_registered_available_package(&finalized, installation)
+                    .await?,
+            )
+        } else {
+            None
+        };
         if best_effort {
             self.installation_store
                 .upsert_manifest_only(
@@ -688,10 +468,7 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         }
-        if finalized.manifest().source == ManifestSource::UserRegistered {
-            let available = self
-                .user_registered_available_package(&finalized, installation)
-                .await?;
+        if let Some(available) = available {
             self.catalog
                 .write()
                 .await
@@ -746,7 +523,11 @@ impl HostedMcpPreparationService {
         )?;
         self.checkpoint_prepared_manifest(extension_id, installation, unresolved)
             .await?;
-        auth_selection_required_response(package_ref.clone(), message).map(Some)
+        crate::hosted_mcp_auth_admission::auth_selection_required_response(
+            package_ref.clone(),
+            message,
+        )
+        .map(Some)
     }
 
     async fn checkpoint_prepared_manifest(
@@ -764,6 +545,9 @@ impl HostedMcpPreparationService {
         let incarnation = installation
             .incarnation_id()
             .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        let enriched_package = self
+            .user_registered_available_package(&enriched, installation)
+            .await?;
         self.installation_store
             .checkpoint_preparation(
                 installation.installation_id(),
@@ -773,9 +557,6 @@ impl HostedMcpPreparationService {
             )
             .await
             .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let enriched_package = self
-            .user_registered_available_package(&enriched, installation)
-            .await?;
         let package = enriched_package.package.clone();
         self.catalog
             .write()
@@ -827,165 +608,6 @@ impl HostedMcpPreparationService {
         crate::hosted_mcp_manifest::available_registered_package(manifest, &audience)
     }
 
-    async fn prepare_oauth_manifest(
-        &self,
-        seed: ExtensionManifestRecord,
-        challenge: &ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge,
-        selection: HostedMcpAuthSelection,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        ports: &ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
-    ) -> Result<Option<ExtensionManifestRecord>, ProductOperationFailure> {
-        let client_profile_id = match &selection {
-            HostedMcpAuthSelection::OAuth { client_profile_id } => client_profile_id.clone(),
-            HostedMcpAuthSelection::Auto => None,
-            _ => return Err(crate::hosted_mcp_manifest::name_unavailable()),
-        };
-        let endpoint = seed
-            .resolved()
-            .mcp
-            .as_ref()
-            .map(|mcp| mcp.server.as_str())
-            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-        let resource_fetches = ironclaw_auth::OAuthRecipeAdmission::<
-            ironclaw_auth::EmptyOAuthClientProfileRegistry,
-        >::preflight_protected_resource_candidates(
-            endpoint, challenge
-        )
-        .map_err(crate::hosted_mcp_manifest::oauth_admission_error)?;
-        let derived = challenge.www_authenticate_metadata.is_empty()
-            && challenge.protected_resource_metadata.is_empty();
-        for resource_fetch in resource_fetches {
-            let Some(resource_metadata): Option<ironclaw_auth::ProtectedResourceAdmissionMetadata> =
-                self.fetch_optional_oauth_metadata(
-                    ports,
-                    scope,
-                    capability_id,
-                    resource_fetch.metadata_url(),
-                )
-                .await?
-            else {
-                if derived {
-                    continue;
-                }
-                return Err(invalid_oauth_metadata_response());
-            };
-            let authorization_server_fetch = ironclaw_auth::OAuthRecipeAdmission::<
-                ironclaw_auth::EmptyOAuthClientProfileRegistry,
-            >::preflight_authorization_server(
-                resource_fetch, &resource_metadata
-            )
-            .map_err(crate::hosted_mcp_manifest::oauth_admission_error)?;
-            let authorization_server_metadata: ironclaw_auth::AuthorizationServerAdmissionMetadata =
-                self.fetch_oauth_metadata(
-                    ports,
-                    scope,
-                    capability_id,
-                    authorization_server_fetch.metadata_url(),
-                )
-                .await?;
-            if matches!(selection, HostedMcpAuthSelection::Auto)
-                && authorization_server_metadata
-                    .registration_endpoint
-                    .is_none()
-            {
-                tracing::debug!(
-                    authorization_server = authorization_server_fetch.issuer(),
-                    "hosted MCP OAuth metadata does not support automatic client registration"
-                );
-                return Ok(None);
-            }
-            let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
-                &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(endpoint)
-                    .map_err(crate::hosted_mcp_manifest::endpoint_input_error)?,
-            )
-            .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
-            let vendor = crate::hosted_mcp_admission::hosted_mcp_vendor_id(&endpoint)
-                .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
-            let profiles = Arc::clone(&self.oauth_client_profiles);
-            let admitted = ironclaw_auth::OAuthRecipeAdmission::new(SharedOAuthProfiles(profiles))
-                .admit(ironclaw_auth::OAuthRecipeAdmissionRequest {
-                    vendor: vendor.as_str().to_string(),
-                    authorization_server_fetch,
-                    authorization_server_metadata,
-                    scopes: Vec::new(),
-                    client_profile_id,
-                })
-                .await
-                .map_err(crate::hosted_mcp_manifest::oauth_admission_error)?;
-            return crate::hosted_mcp_manifest::manifest_with_admitted_oauth(
-                seed, &endpoint, admitted,
-            )
-            .map(Some);
-        }
-        Ok(None)
-    }
-
-    async fn fetch_oauth_metadata<T: serde::de::DeserializeOwned>(
-        &self,
-        ports: &ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        url: &str,
-    ) -> Result<T, ProductOperationFailure> {
-        self.fetch_optional_oauth_metadata(ports, scope, capability_id, url)
-            .await?
-            .ok_or_else(invalid_oauth_metadata_response)
-    }
-
-    async fn fetch_optional_oauth_metadata<T: serde::de::DeserializeOwned>(
-        &self,
-        ports: &ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        url: &str,
-    ) -> Result<Option<T>, ProductOperationFailure> {
-        const BODY_LIMIT: u64 = 64 * 1024;
-        let policy = crate::hosted_mcp_manifest::metadata_network_policy(url)?;
-        ports.stage_network_policy_once(scope, capability_id, policy.clone());
-        let response = ports
-            .runtime_http_egress()
-            .execute(ironclaw_host_api::http::RuntimeHttpEgressRequest {
-                runtime: ironclaw_host_api::runtime::RuntimeKind::Mcp,
-                scope: scope.clone(),
-                capability_id: capability_id.clone(),
-                method: ironclaw_host_api::action::NetworkMethod::Get,
-                url: url.to_string(),
-                headers: vec![("accept".to_string(), "application/json".to_string())],
-                body: Vec::new(),
-                network_policy: policy,
-                credential_injections: Vec::new(),
-                response_body_limit: Some(BODY_LIMIT),
-                save_body_to: None,
-                timeout_ms: Some(10_000),
-            })
-            .await
-            .map_err(|error| {
-                tracing::debug!(%error, "hosted MCP OAuth metadata fetch failed");
-                ProductOperationFailure::Transient {
-                    reason: "hosted MCP OAuth metadata fetch failed".to_string(),
-                }
-            })?;
-        if response.status == 404 {
-            return Ok(None);
-        }
-        if response.status != 200 || response.body.len() as u64 > BODY_LIMIT {
-            return Err(invalid_oauth_metadata_response());
-        }
-        serde_json::from_slice(&response.body)
-            .map(Some)
-            .map_err(|error| {
-                // Same shape as the fetch arm above: the `reason` crossing the
-                // boundary is fixed text (the document came from a third-party
-                // server and must not be echoed), so the parse error is the only
-                // thing that says *why* it was malformed. Logged, never dropped.
-                tracing::debug!(%error, "hosted MCP OAuth metadata document was malformed");
-                ProductOperationFailure::InvalidBindingRequest {
-                    reason: "hosted MCP OAuth metadata document was malformed".to_string(),
-                }
-            })
-    }
-
     async fn load_installation(
         &self,
         extension_id: &ironclaw_host_api::ids::ExtensionId,
@@ -1028,66 +650,121 @@ impl HostedMcpPreparationService {
     }
 }
 
-fn registration_request_matches(
-    existing: &ExtensionManifestRecord,
-    request: &RegisterHostedMcpRequest,
-    endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
-) -> bool {
-    let resolved = existing.resolved();
-    if resolved.name != request.desired_name.trim() {
-        return false;
-    }
-    let Some(mcp) = resolved.mcp.as_ref() else {
-        return false;
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint};
+    use ironclaw_extension_registry::{
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionInstallationStorePort as _, ExtensionLifecycleService, ExtensionManifestRecord,
+        ExtensionManifestRef, ExtensionRegistry, InstallationOwner, ManifestSource,
+        RegisteredPackageDefinition,
     };
-    if mcp.server != endpoint.as_str() {
-        return false;
-    }
-    match request.auth_selection.as_ref() {
-        None | Some(HostedMcpAuthSelection::Auto) => true,
-        Some(selection) => &mcp.registration_auth == selection,
-    }
-}
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
+    use ironclaw_host_api::{
+        ids::{ExtensionId, UserId},
+        path::VirtualPath,
+    };
+    use tokio::sync::{Mutex, RwLock};
 
-fn invalid_oauth_metadata_response() -> ProductOperationFailure {
-    ProductOperationFailure::InvalidBindingRequest {
-        reason: "hosted MCP OAuth metadata response was invalid".to_string(),
-    }
-}
+    use super::{HostedMcpPreparationDependencies, HostedMcpPreparationService};
+    use crate::AvailableExtensionCatalog;
 
-fn auth_selection_required_response(
-    package_ref: LifecyclePackageRef,
-    message: &str,
-) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-    let mut response = crate::product_lifecycle::activation_credentials_incomplete_response(
-        package_ref,
-        Vec::new(),
-    )?;
-    response.blockers = vec![
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(
-                ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef::new(
-                    ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
-                )?,
-            ),
-        },
-    ];
-    response.message = Some(message.to_string());
-    Ok(response)
-}
+    #[tokio::test]
+    async fn projection_failure_does_not_checkpoint_prepared_manifest() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem,
+                VirtualPath::new("/system/extensions/.installations/projection-failure")
+                    .expect("valid store path"),
+                ironclaw_host_api::host_port::default_host_port_catalog()
+                    .expect("host port catalog"),
+                crate::product_extension_host_api_contract_registry().expect("host API contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let extension_id = ExtensionId::new("projection-failure").expect("valid extension id");
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
+            &HostedMcpEndpoint::new("https://mcp.example.test/rpc").expect("valid endpoint"),
+        )
+        .expect("canonical endpoint");
+        let original = crate::hosted_mcp_manifest::pending_manifest(
+            &extension_id,
+            "Original package",
+            &endpoint,
+            &HostedMcpAuthSelection::NoAuth,
+        )
+        .expect("original pending manifest");
+        let enriched = crate::hosted_mcp_manifest::pending_manifest(
+            &extension_id,
+            "Enriched package",
+            &endpoint,
+            &HostedMcpAuthSelection::NoAuth,
+        )
+        .expect("enriched pending manifest");
+        let conflicting_definition = ExtensionManifestRecord::from_resolved(
+            original.raw_toml(),
+            ManifestSource::HostBundled,
+            original.resolved().clone(),
+            original.manifest_hash().cloned(),
+        )
+        .expect("conflicting definition");
+        store
+            .admit_package_definition(RegisteredPackageDefinition::managed_by(
+                conflicting_definition,
+                UserId::new("projection-owner").expect("valid owner"),
+            ))
+            .await
+            .expect("seed conflicting definition");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(extension_id.as_str()).expect("valid installation id"),
+            extension_id.clone(),
+            ExtensionManifestRef::new(extension_id.clone(), original.manifest_hash().cloned()),
+            Vec::new(),
+            Utc::now(),
+            InstallationOwner::Tenant,
+        )
+        .expect("pending installation");
+        store
+            .upsert_manifest_and_installation(original.clone(), installation.clone())
+            .await
+            .expect("seed pending aggregate");
+        let service = HostedMcpPreparationService::new(
+            Arc::clone(&store)
+                as Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
+            Arc::new(RwLock::new(AvailableExtensionCatalog::from_packages(
+                Vec::new(),
+            ))),
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            Arc::new(Mutex::new(())),
+            HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        );
 
-#[derive(Clone)]
-struct SharedOAuthProfiles(Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>);
+        service
+            .checkpoint_prepared_manifest(&extension_id, &installation, enriched)
+            .await
+            .expect_err("conflicting definition must reject catalog projection");
 
-impl std::fmt::Debug for SharedOAuthProfiles {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SharedOAuthProfiles")
-    }
-}
-
-#[async_trait::async_trait]
-impl ironclaw_auth::OAuthClientProfileRegistry for SharedOAuthProfiles {
-    async fn resolve(&self, profile_id: &str) -> Option<ironclaw_auth::AdmissionClientProfile> {
-        self.0.resolve(profile_id).await
+        let persisted = store
+            .get_manifest(&extension_id)
+            .await
+            .expect("manifest readback")
+            .expect("original manifest remains");
+        assert_eq!(
+            persisted, original,
+            "projection failure must not checkpoint durable preparation state"
+        );
     }
 }

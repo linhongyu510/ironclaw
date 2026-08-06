@@ -139,6 +139,7 @@ pub struct ExtensionLifecycleManager {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    hosted_mcp_registration: Arc<crate::hosted_mcp_registration::CustomMcpRegistrationService>,
     hosted_mcp_preparation: Arc<crate::hosted_mcp_preparation::HostedMcpPreparationService>,
     // Genuinely optional (not an `optional_arc` smell): a composition without
     // product auth cannot have minted a reusable OAuth credential, so there is
@@ -288,7 +289,7 @@ impl ExtensionLifecycleManager {
         request: RegisterHostedMcpRequest,
         scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request, scope).await
+        self.hosted_mcp_registration.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -334,6 +335,13 @@ impl ExtensionLifecycleManager {
         } = dependencies;
         let catalog = Arc::new(RwLock::new(catalog));
         let operation_lock = Arc::new(Mutex::new(()));
+        let hosted_mcp_registration = Arc::new(
+            crate::hosted_mcp_registration::CustomMcpRegistrationService::new(
+                Arc::clone(&installation_store),
+                Arc::clone(&catalog),
+                &hosted_mcp_dependencies,
+            ),
+        );
         let hosted_mcp_preparation = Arc::new(
             crate::hosted_mcp_preparation::HostedMcpPreparationService::new(
                 Arc::clone(&installation_store),
@@ -350,6 +358,7 @@ impl ExtensionLifecycleManager {
             lifecycle_service,
             active_extensions,
             operation_lock,
+            hosted_mcp_registration,
             hosted_mcp_preparation,
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
@@ -4093,7 +4102,7 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     /// Regression test for the AB-BA lock-order deadlock between
-    /// `HostedMcpPreparationService::register` and
+    /// `CustomMcpRegistrationService::register` and
     /// `ExtensionLifecycleManager::import_bundle`: both coordinate the same
     /// `catalog` `RwLock` and `operation_lock` `Mutex`, and must acquire them
     /// in the same order.

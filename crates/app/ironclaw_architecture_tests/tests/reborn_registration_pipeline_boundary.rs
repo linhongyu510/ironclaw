@@ -61,7 +61,9 @@ mod ratchet_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ratchet_support::{find_workspace_root, strip_cfg_test_blocks, workspace_root};
+use ratchet_support::{
+    find_workspace_root, strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
+};
 
 /// Registration-pipeline vocabulary. Naming any of these outside the owning
 /// files below means a registration concept has entered generic code.
@@ -129,34 +131,87 @@ fn registration_boundary_allowlist_ratchets_down_only() {
 
 #[test]
 fn hosted_mcp_registration_does_not_enter_installation_lifecycle() {
-    let path = workspace_root()
-        .join("crates/extensions/ironclaw_extension_host/src/hosted_mcp_preparation.rs");
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    let register_start = source
-        .find("pub async fn register(")
-        .expect("hosted MCP registration entry point");
-    let register_end = source[register_start..]
-        .find("pub async fn prepare_if_pending(")
-        .map(|offset| register_start + offset)
-        .expect("installation preparation boundary");
-    let registration_pipeline = &source[register_start..register_end];
+    let owner = registration_owner_source(&workspace_root())
+        .unwrap_or_else(|error| panic!("registration owner could not be measured: {error}"));
 
     assert!(
-        registration_pipeline.contains("admit_package_definition("),
+        owner.contains("admit_package_definition("),
         "registration must durably admit a package definition"
     );
-    for forbidden in [
+    if let Some(forbidden) = registration_lifecycle_violations(&owner).first() {
+        panic!("registration must not enter the installation lifecycle through `{forbidden}`");
+    }
+}
+
+fn registration_owner_source(root: &Path) -> Result<String, String> {
+    let host = root.join("crates/extensions/ironclaw_extension_host/src");
+    let mut owner = String::new();
+    for relative in ["hosted_mcp_registration.rs", "hosted_mcp_auth_admission.rs"] {
+        let path = host.join(relative);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        owner.push_str(&strip_cfg_test_blocks(&strip_comments_and_strings(&source)));
+        owner.push('\n');
+    }
+    Ok(owner)
+}
+
+fn registration_lifecycle_violations(source: &str) -> Vec<&'static str> {
+    const FORBIDDEN: &[&str] = &[
         "prepare_install(",
         "upsert_manifest_and_installation(",
+        "upsert_manifest_only(",
+        "checkpoint_preparation(",
+        "finalize_preparation(",
+        "get_installation(",
         "activate_membership(",
         "operation_lock.lock(",
-    ] {
-        assert!(
-            !registration_pipeline.contains(forbidden),
-            "registration must not enter the installation lifecycle through `{forbidden}`"
-        );
-    }
+    ];
+    FORBIDDEN
+        .iter()
+        .copied()
+        .filter(|forbidden| source.contains(forbidden))
+        .collect()
+}
+
+#[test]
+fn registration_owner_gate_is_order_independent_and_ignores_decoys() {
+    let helper_before = r#"
+        fn helper() { checkpoint_preparation(); }
+        pub async fn register() { admit_package_definition(); }
+    "#;
+    let helper_after = r#"
+        pub async fn register() { admit_package_definition(); }
+        fn helper() { checkpoint_preparation(); }
+    "#;
+    assert_eq!(
+        registration_lifecycle_violations(helper_before),
+        vec!["checkpoint_preparation("]
+    );
+    assert_eq!(
+        registration_lifecycle_violations(helper_after),
+        vec!["checkpoint_preparation("]
+    );
+
+    let decoys = strip_cfg_test_blocks(&strip_comments_and_strings(
+        r#"
+            // checkpoint_preparation();
+            const DECOY: &str = "checkpoint_preparation(";
+            #[cfg(test)]
+            mod tests { fn helper() { checkpoint_preparation(); } }
+            pub async fn register() { admit_package_definition(); }
+        "#,
+    ));
+    assert!(registration_lifecycle_violations(&decoys).is_empty());
+}
+
+#[test]
+fn registration_owner_gate_fails_closed_when_an_owner_file_is_missing() {
+    let missing_root = std::env::temp_dir().join(format!(
+        "ironclaw-registration-owner-missing-{}",
+        std::process::id()
+    ));
+    assert!(registration_owner_source(&missing_root).is_err());
 }
 
 #[test]

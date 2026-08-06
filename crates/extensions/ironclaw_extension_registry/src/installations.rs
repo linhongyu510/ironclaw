@@ -3340,6 +3340,15 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                         )
                     })?
                     .into_registered_definition()?;
+                if row.path
+                    != self.registered_definition_path(record.definition().extension_id())?
+                {
+                    return Err(corrupt_row(
+                        "validate registered package definition identity",
+                        &row.path,
+                        "row extension id does not match its path",
+                    ));
+                }
                 Ok(record)
             })
             .collect::<Result<Vec<_>, ExtensionInstallationError>>()?;
@@ -5074,6 +5083,35 @@ mod tests {
                 .expect("installations")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn registered_definition_listing_rejects_path_payload_identity_mismatch() {
+        let store = installation_store().await;
+        let path_extension_id = ExtensionId::new("path-identity").expect("path extension id");
+        let payload = registered(manifest_record("payload-identity", Some("hash-one")));
+        let path = store
+            .registered_definition_path(&path_extension_id)
+            .expect("registered definition path");
+        store
+            .filesystem
+            .put(
+                &path,
+                entry_for_registered_definition(&payload).expect("registered definition entry"),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed corrupt registered definition row");
+
+        let error = store
+            .list_registered_package_definitions()
+            .await
+            .expect_err("listing must reject a row whose payload identity mismatches its path");
+
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::InvalidInstallation { .. }
+        ));
     }
 
     #[tokio::test]

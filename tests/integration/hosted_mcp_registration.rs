@@ -1861,7 +1861,7 @@ async fn concurrent_custom_mcp_registration_leaves_exactly_one_managed_definitio
             .all(|extension| extension.summary.package_ref != fixture_package_ref()),
         "the losing caller must not discover the winner's custom MCP",
     );
-    services
+    let guessed_install = services
         .lifecycle_service
         .execute(
             lifecycle_product_context(loser_scope),
@@ -1871,6 +1871,10 @@ async fn concurrent_custom_mcp_registration_leaves_exactly_one_managed_definitio
         )
         .await
         .expect_err("the losing caller cannot join by guessing the package id");
+    assert_eq!(
+        guessed_install.code,
+        ProductSurfaceErrorCode::InvalidRequest,
+    );
 }
 
 #[tokio::test]
@@ -3210,7 +3214,7 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
     );
 }
 
-// The `HostedMcpPreparationService::register` / `ExtensionLifecycleManager::
+// The `CustomMcpRegistrationService::register` / `ExtensionLifecycleManager::
 // import_bundle` lock-order regression test used to live here, driving both
 // production entry points concurrently through `lifecycle_service` with
 // `tokio::join!`. That version could not reliably force the two tasks to
