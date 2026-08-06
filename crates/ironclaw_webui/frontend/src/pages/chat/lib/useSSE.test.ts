@@ -362,7 +362,7 @@ test("useSSE does not start a competing watchdog reconnect after a 429", () => {
   assert.equal(watchdog.cleared, true);
   watchdog.handler();
 
-  assert.equal(
+  assert.strictEqual(
     stream.controller.reconnectCalls,
     0,
     "a rejected handshake must not race EventSourcePlus's automatic retry",
