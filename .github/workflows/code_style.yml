@@ -165,6 +165,7 @@ jobs:
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
+          python3 scripts/ci/test-check-guidance.py
           scripts/ci/test-hermetic-test-process.sh
           scripts/ci/test-reborn-docker-entrypoint.sh
           # #7144: this 204-test module had never been run by any lane, so five
@@ -195,6 +196,13 @@ jobs:
       # compares `cargo metadata` against the documented tree itself.
       - name: Check the crate tree matches PROPOSAL §5
         run: python3 scripts/ci/check-target-tree.py
+      # The guidance half of the same claim: every repo path the agent docs
+      # reference must be tracked, every `.claude/rules` `paths:` trigger must
+      # match at least one tracked file (a glob that matches nothing is a rule
+      # that never fires), and every crate must appear in its family's
+      # AGENTS.md crate table with a README.md (guidance-conventions.md).
+      - name: Check guidance references the tracked tree
+        run: python3 scripts/ci/check-guidance.py
       - name: Check composition mass budget
         run: bash scripts/ci/check-composition-budget.sh
       - name: Self-test the composition budget gate
