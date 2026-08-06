@@ -2837,7 +2837,7 @@ fn translate_filter(
                     operation: FilesystemOperation::Query,
                 });
             };
-            params.push(libsql::Value::Text(query.clone()));
+            params.push(libsql::Value::Text(fts5_literal_query(query)));
             out.push_str(&format!(
                 "(path IN (SELECT path FROM {fts_table} WHERE {fts_table} MATCH ?{}))",
                 params.len()
@@ -2861,6 +2861,20 @@ fn translate_filter(
         }
     }
 }
+
+/// Render a free-form FTS query as an implicit AND of FTS5 string literals.
+///
+/// Quoting each whitespace-delimited term keeps uppercase words such as
+/// `AND`, `OR`, and `NOT` from being interpreted as FTS5 syntax. Doubling
+/// embedded quotes follows FTS5's string-literal escaping rules.
+fn fts5_literal_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn translate_compound(
     path: &VirtualPath,
     children: &[Filter],
@@ -3041,6 +3055,18 @@ mod tests {
     use super::*;
     use crate::{CasExpectation, Entry, IndexName, RecordKind};
     use ironclaw_host_api::path::VirtualPath;
+
+    #[test]
+    fn fts5_literal_query_neutralizes_reserved_operators() {
+        assert_eq!(
+            fts5_literal_query("AND staging OR NOT"),
+            "\"AND\" \"staging\" \"OR\" \"NOT\""
+        );
+        assert_eq!(
+            fts5_literal_query("say \"hello\""),
+            "\"say\" \"\"\"hello\"\"\""
+        );
+    }
 
     struct DeleteIfVersionCancellationGate {
         runtime_id: usize,
