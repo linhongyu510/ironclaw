@@ -1075,15 +1075,12 @@ async fn memory_recall_across_conversations_on_production_path() {
     // The explicit tool surface must also survive natural-language queries
     // (the sanitizer regression): punctuation-laden queries succeed and find
     // the marker instead of failing the invocation. (The FTS backends match
-    // AND-of-terms, so each probe overlaps the seeded document's tokens.)
-    for probe in [
-        "unlocks staging!",
-        "staging (unlocks)",
-        "launch-code-plum-42?",
-        "AND staging",
-        "unlocks staging OR",
-        "staging NOT",
-    ] {
+    // AND-of-terms, so each probe overlaps the seeded document's tokens. The
+    // keyword probes (`AND`/`OR`/`NOT`) must SUCCEED without error — FTS5
+    // would otherwise parse the barewords as operators and fail the MATCH
+    // expression — and legitimately return zero results (the seeded document
+    // does not contain those literal tokens).
+    for probe in ["unlocks staging!", "staging (unlocks)", "launch-code-plum-42?"] {
         let found = invoke_json(
             &services,
             MEMORY_SEARCH_CAPABILITY_ID,
@@ -1104,6 +1101,23 @@ async fn memory_recall_across_conversations_on_production_path() {
                 .as_str()
                 .expect("search result content")
                 .contains(MARKER)
+        );
+    }
+    for probe in ["AND staging", "unlocks staging OR", "staging NOT"] {
+        let found = invoke_json(
+            &services,
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context_for(MEMORY_SEARCH_CAPABILITY_ID, user, "conv-b", None),
+            serde_json::json!({"query": probe, "limit": 5}),
+        )
+        .await
+        .unwrap_or_else(|failure| {
+            panic!("FTS5-keyword probe {probe:?} must not error: {failure:?}")
+        });
+        assert_eq!(
+            found["result_count"],
+            serde_json::json!(0),
+            "keyword probe {probe:?} matches only literal tokens in the document: {found}"
         );
     }
 }
