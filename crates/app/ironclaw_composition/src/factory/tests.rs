@@ -1080,7 +1080,11 @@ async fn memory_recall_across_conversations_on_production_path() {
     // would otherwise parse the barewords as operators and fail the MATCH
     // expression — and legitimately return zero results (the seeded document
     // does not contain those literal tokens).
-    for probe in ["unlocks staging!", "staging (unlocks)", "launch-code-plum-42?"] {
+    for probe in [
+        "unlocks staging!",
+        "staging (unlocks)",
+        "launch-code-plum-42?",
+    ] {
         let found = invoke_json(
             &services,
             MEMORY_SEARCH_CAPABILITY_ID,
