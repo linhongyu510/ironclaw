@@ -65,6 +65,16 @@ pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 
+/// Maximum number of tool names one `tool_describe` call may resolve.
+///
+/// Production traces show the model spending a full model round-trip per
+/// schema (seven sequential single-name describes in one run, for schemas of
+/// 372–2851 bytes each). A bounded `names` array collapses a whole
+/// `tool_search` candidate list into one round-trip; the bound keeps the saved
+/// round-trips from turning into an unbounded schema dump. Mirrors the
+/// `skill_activate` `names`/`maxItems` precedent.
+pub(crate) const MAX_DESCRIBE_NAMES: usize = 8;
+
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
         ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
@@ -434,16 +444,22 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
             ),
             bridge_tool_definition(
                 TOOL_DESCRIBE_NAME,
-                "Return the full schema for one named deferred tool.",
+                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool.",
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Provider-facing tool name to describe."
+                            "description": "Provider-facing tool name to describe. Prefer `names` when describing more than one tool."
+                        },
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            "maxItems": MAX_DESCRIBE_NAMES,
+                            "description": "Provider-facing tool names to describe in one call. Use this to load every candidate schema in a single round-trip."
                         }
                     },
-                    "required": ["name"],
                     "additionalProperties": false
                 }),
             ),
@@ -1315,6 +1331,30 @@ mod tests {
             bridges[0].parameters["required"],
             json!(["query"]),
             "tool_search requires query"
+        );
+        // `tool_describe` accepts either the original single `name` or the
+        // bounded bulk `names` array, so neither may be globally `required`.
+        // The bound is what keeps a one-round-trip bulk describe from becoming
+        // an unbounded schema dump.
+        assert_eq!(
+            bridges[1].parameters["properties"]["name"]["type"],
+            json!("string"),
+            "tool_describe keeps the back-compatible single-name argument"
+        );
+        assert_eq!(
+            bridges[1].parameters["properties"]["names"],
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1,
+                "maxItems": MAX_DESCRIBE_NAMES,
+                "description": "Provider-facing tool names to describe in one call. Use this to load every candidate schema in a single round-trip."
+            }),
+            "tool_describe advertises a bounded names array"
+        );
+        assert!(
+            bridges[1].parameters.get("required").is_none(),
+            "tool_describe accepts either argument shape, so neither is required"
         );
         assert_eq!(
             bridges[2].parameters["required"],

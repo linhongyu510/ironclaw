@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::tool_disclosure::{
-    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set,
+    ActiveSet, CapabilityCatalog, DisclosureCaps, MAX_DESCRIBE_NAMES, PromotedSet, TOOL_CALL_NAME,
+    TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json,
+    definition_matches_provider_name, is_bridge_capability_id, is_bridge_name, select_active_set,
 };
 use crate::tool_search::{
     AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
@@ -48,6 +48,84 @@ const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 /// disclosed + promoted so it becomes directly callable — the `tool_search` →
 /// `capability_info` → direct-call discovery path.
 const CAPABILITY_INFO_NAME: &str = "capability_info";
+
+const DESCRIBE_REQUIRES_NAME_MESSAGE: &str = "tool_describe requires name";
+const DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE: &str =
+    "tool_describe names must be non-empty strings";
+const DESCRIBE_BRIDGE_TARGET_MESSAGE: &str = "tool_describe target must not be a bridge";
+const DESCRIBE_UNKNOWN_TARGET_MESSAGE: &str = "tool_describe target is unknown";
+/// Must stay in sync with [`MAX_DESCRIBE_NAMES`]; pinned by
+/// `describe_bound_message_matches_the_declared_bound`.
+const DESCRIBE_TOO_MANY_NAMES_MESSAGE: &str = "tool_describe accepts at most 8 names per call";
+
+/// What a `tool_describe` call resolved to.
+///
+/// The two shapes are kept apart deliberately: `name` keeps the original flat
+/// result object (back-compat for every model and transcript that learned it),
+/// while `names` returns a `results` array whose entries can fail individually.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DescribeRequest {
+    Single(String),
+    Bulk(Vec<String>),
+}
+
+/// Parse `tool_describe` arguments into the names to resolve.
+///
+/// Accepts the original `name` string, the bulk `names` array, or both (the
+/// union, `name` first). Bounded by [`MAX_DESCRIBE_NAMES`] at invoke time as
+/// well as in the advertised schema, because a provider that ignores `maxItems`
+/// must still get a recoverable failure rather than an unbounded result.
+/// Duplicates collapse so a repeated name cannot multiply the result size.
+fn describe_request_names(arguments: &Value) -> Result<DescribeRequest, &'static str> {
+    let bulk = arguments.get("names").is_some();
+    let mut names: Vec<String> = Vec::new();
+    if let Some(name) = arguments.get("name").and_then(Value::as_str) {
+        let name = name.trim();
+        if !name.is_empty() {
+            names.push(name.to_string());
+        }
+    }
+    if let Some(values) = arguments.get("names").and_then(Value::as_array) {
+        if values.len() > MAX_DESCRIBE_NAMES {
+            return Err(DESCRIBE_TOO_MANY_NAMES_MESSAGE);
+        }
+        for value in values {
+            let Some(name) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            else {
+                return Err(DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE);
+            };
+            names.push(name.to_string());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+    if names.is_empty() {
+        return Err(DESCRIBE_REQUIRES_NAME_MESSAGE);
+    }
+    if names.len() > MAX_DESCRIBE_NAMES {
+        return Err(DESCRIBE_TOO_MANY_NAMES_MESSAGE);
+    }
+    if bulk {
+        Ok(DescribeRequest::Bulk(names))
+    } else {
+        // Exactly one name and no `names` key: the pre-bulk call shape.
+        Ok(DescribeRequest::Single(names.swap_remove(0)))
+    }
+}
+
+fn log_describe_selection(state: &ToolDisclosureTurnState, resolved_name: &str) {
+    if let Some(selected_rank) = state.search_ranks.get(resolved_name).copied() {
+        debug!(
+            target: "ironclaw::reborn::tool_search",
+            selected_rank,
+            selection_action = "describe",
+            "observed deferred-tool selection without logging tool or query metadata"
+        );
+    }
+}
 
 pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -1051,46 +1129,85 @@ impl ToolDisclosureCapabilityPort {
         request: &LoopRequest,
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
-            return Ok(failed_invalid_input("tool_describe requires name"));
+        let names = match describe_request_names(&bridge.arguments) {
+            Ok(names) => names,
+            Err(message) => return Ok(failed_invalid_input(message)),
         };
-        if is_bridge_name(name) {
-            return Ok(failed_invalid_input(
-                "tool_describe target must not be a bridge",
-            ));
+        if let DescribeRequest::Single(name) = &names
+            && is_bridge_name(name)
+        {
+            return Ok(failed_invalid_input(DESCRIBE_BRIDGE_TARGET_MESSAGE));
         }
-        let output = {
+        let (output, summary) = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
-            };
-            // #5712: same message as a truly unknown name — a narrowed profile
-            // must not learn that a non-allowlisted tool exists.
-            if !self.policy.permits_capability_id(&result.capability_id) {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+            match &names {
+                DescribeRequest::Single(name) => {
+                    let Some(result) = state.catalog.search_result(name) else {
+                        return Ok(failed_invalid_input(DESCRIBE_UNKNOWN_TARGET_MESSAGE));
+                    };
+                    // #5712: same message as a truly unknown name — a narrowed
+                    // profile must not learn that a non-allowlisted tool exists.
+                    if !self.policy.permits_capability_id(&result.capability_id) {
+                        return Ok(failed_invalid_input(DESCRIBE_UNKNOWN_TARGET_MESSAGE));
+                    }
+                    log_describe_selection(state, &result.name);
+                    state.disclosed_names.insert(name.clone());
+                    (
+                        json!({
+                            "name": result.name,
+                            "capability_id": result.capability_id.as_str(),
+                            "description": result.description,
+                            "required": result.required_params,
+                            "parameters": result.parameters,
+                        }),
+                        "tool_describe returned schema",
+                    )
+                }
+                DescribeRequest::Bulk(names) => {
+                    let mut entries = Vec::with_capacity(names.len());
+                    for name in names {
+                        entries.push(self.describe_entry(state, name));
+                    }
+                    (
+                        json!({ "results": entries }),
+                        "tool_describe returned schemas",
+                    )
+                }
             }
-            if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
-                debug!(
-                    target: "ironclaw::reborn::tool_search",
-                    selected_rank,
-                    selection_action = "describe",
-                    "observed deferred-tool selection without logging tool or query metadata"
-                );
-            }
-            state.disclosed_names.insert(name.to_string());
-            json!({
-                "name": result.name,
-                "capability_id": result.capability_id.as_str(),
-                "description": result.description,
-                "required": result.required_params,
-                "parameters": result.parameters,
-            })
         };
-        self.completed_bridge_result(request, output, "tool_describe returned schema")
-            .await
+        self.completed_bridge_result(request, output, summary).await
+    }
+
+    /// One entry of a bulk `tool_describe` result.
+    ///
+    /// Per-name failures are recoverable *entries*, never a whole-call failure:
+    /// one mistyped name in a batch of eight must not cost the model the seven
+    /// schemas it got right. Excluded and nonexistent names collapse to the
+    /// identical opaque entry (#5712, #7166 §1) so a bulk request is no more of
+    /// an enumeration oracle than a single-name describe.
+    fn describe_entry(&self, state: &mut ToolDisclosureTurnState, name: &str) -> Value {
+        if is_bridge_name(name) {
+            return json!({ "name": name, "error": DESCRIBE_BRIDGE_TARGET_MESSAGE });
+        }
+        let unknown = json!({ "name": name, "error": DESCRIBE_UNKNOWN_TARGET_MESSAGE });
+        let Some(result) = state.catalog.search_result(name) else {
+            return unknown;
+        };
+        if !self.policy.permits_capability_id(&result.capability_id) {
+            return unknown;
+        }
+        log_describe_selection(state, &result.name);
+        state.disclosed_names.insert(result.name.clone());
+        json!({
+            "name": result.name,
+            "capability_id": result.capability_id.as_str(),
+            "description": result.description,
+            "required": result.required_params,
+            "parameters": result.parameters,
+        })
     }
 
     /// Invoke an auto-schema (describe-first) bridge: return the target tool's
@@ -1856,6 +1973,421 @@ mod tests {
                 write.output.to_string().len() as u64,
             ))
         }
+    }
+
+    /// Captures the JSON payload each bridge invocation writes, so bulk
+    /// `tool_describe` tests can assert on the actual model-visible result
+    /// (per-entry schemas and per-entry failures), not just the verdict.
+    #[derive(Default)]
+    struct RecordingWriter {
+        outputs: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.outputs
+                .lock()
+                .expect("recorded outputs lock")
+                .push(write.output.clone());
+            let result_digest = ironclaw_host_api::approval::sha256_digest_token(
+                write.input_ref.as_str().as_bytes(),
+            )
+            .replace(':', ".");
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new(format!("result:{result_digest}")).expect("valid result ref"),
+                write.output.to_string().len() as u64,
+            ))
+        }
+    }
+
+    async fn invoke_bridge_call(
+        port: &ToolDisclosureCapabilityPort,
+        bridge_name: &str,
+        arguments: Value,
+    ) -> Resolution {
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                bridge_name,
+                arguments,
+            )))
+            .await
+            .expect("bridge call registers");
+        port.invoke_capability(LoopRequest {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("bridge call invokes")
+    }
+
+    fn bulk_describe_fixture_definitions() -> Vec<ProviderToolDefinition> {
+        vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.alpha", "alpha_tool", "Alpha operation"),
+            provider_definition("fixture.beta", "beta_tool", "Beta operation"),
+            provider_definition("fixture.gamma", "gamma_tool", "Gamma operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+        ]
+    }
+
+    fn spy_port_with(definitions: Vec<ProviderToolDefinition>) -> Arc<SpyPort> {
+        Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn recorded_output(writer: &RecordingWriter) -> Value {
+        writer
+            .outputs
+            .lock()
+            .expect("recorded outputs lock")
+            .last()
+            .cloned()
+            .expect("bridge wrote a result")
+    }
+
+    /// Production traces show the model burning one model round-trip per
+    /// `tool_describe` (7 sequential describes in a single run for schemas of a
+    /// few hundred bytes each). A bounded `names` array collapses that into one
+    /// round-trip: every requested schema must come back in a single result.
+    #[tokio::test]
+    async fn tool_describe_bulk_returns_every_requested_schema_in_one_result() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let writer = Arc::new(RecordingWriter::default());
+        let port = disclosure_port_with(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let outcome = invoke_bridge_call(
+            &port,
+            TOOL_DESCRIBE_NAME,
+            json!({"names": ["alpha_tool", "beta_tool", "gamma_tool"]}),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
+            "a bulk describe of known tools succeeds: {outcome:?}"
+        );
+        let output = recorded_output(&writer);
+        let results = output["results"]
+            .as_array()
+            .expect("bulk describe returns a results array");
+        assert_eq!(results.len(), 3, "one entry per requested name");
+        for (entry, expected) in results
+            .iter()
+            .zip(["alpha_tool", "beta_tool", "gamma_tool"])
+        {
+            assert_eq!(entry["name"], json!(expected));
+            assert!(
+                entry.get("parameters").is_some(),
+                "each bulk entry carries the full parameter schema: {entry:?}"
+            );
+            assert!(
+                entry.get("error").is_none(),
+                "a known tool must not report a per-entry error: {entry:?}"
+            );
+        }
+
+        // Every described tool is disclosed, exactly as a single-name describe
+        // does — otherwise the follow-up call is rejected as not model-visible.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface after bulk describe");
+        for name in ["alpha_tool", "beta_tool", "gamma_tool"] {
+            assert!(
+                surface
+                    .descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.safe_name == name),
+                "bulk describe must disclose {name} to the executor surface"
+            );
+        }
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "describe must never dispatch the described tools"
+        );
+    }
+
+    /// Back-compat: the pre-existing single `name` argument keeps its exact
+    /// flat result shape, so a model (or transcript) that learned the old shape
+    /// is unaffected by the bulk addition.
+    #[tokio::test]
+    async fn tool_describe_single_name_result_shape_is_unchanged() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let writer = Arc::new(RecordingWriter::default());
+        let port = disclosure_port_with(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let outcome =
+            invoke_bridge_call(&port, TOOL_DESCRIBE_NAME, json!({"name": "alpha_tool"})).await;
+
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
+        let output = recorded_output(&writer);
+        assert_eq!(output["name"], json!("alpha_tool"));
+        assert_eq!(output["capability_id"], json!("fixture.alpha"));
+        assert!(output.get("parameters").is_some());
+        assert!(
+            output.get("results").is_none(),
+            "single-name describe keeps the flat shape, not the bulk envelope"
+        );
+    }
+
+    /// The `names` array is bounded (schema `maxItems`) so one bulk describe can
+    /// never blow the context it is meant to save. The bound is enforced at
+    /// invoke time too — a provider that ignores `maxItems` must get a
+    /// recoverable failure, not an unbounded result.
+    #[tokio::test]
+    async fn tool_describe_bulk_rejects_more_names_than_the_bound() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let too_many: Vec<String> = (0..=MAX_DESCRIBE_NAMES)
+            .map(|index| format!("alpha_tool_{index}"))
+            .collect();
+        for (arguments, expected) in [
+            (json!({"names": too_many}), DESCRIBE_TOO_MANY_NAMES_MESSAGE),
+            (json!({"names": []}), DESCRIBE_REQUIRES_NAME_MESSAGE),
+            (
+                json!({"names": [""]}),
+                DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE,
+            ),
+            (
+                json!({"names": [7]}),
+                DESCRIBE_NAMES_MUST_BE_STRINGS_MESSAGE,
+            ),
+            (
+                json!({"names": "alpha_tool"}),
+                DESCRIBE_REQUIRES_NAME_MESSAGE,
+            ),
+        ] {
+            let outcome = invoke_bridge_call(&port, TOOL_DESCRIBE_NAME, arguments).await;
+            assert!(
+                matches!(
+                    outcome,
+                    Resolution::Done(ref output)
+                        if matches!(
+                            &output.verdict,
+                            ToolVerdict::RecoverableFailure { diagnostic, .. }
+                                if diagnostic.model_visible_text() == Some(expected)
+                        )
+                ),
+                "unexpected bulk describe outcome for {expected}: {outcome:?}"
+            );
+        }
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "bounded-input rejections must not dispatch anything"
+        );
+    }
+
+    /// Opacity (#7166 section 1 / #5712): bulk describe must not become an
+    /// enumeration oracle. A policy-excluded tool that genuinely exists and a
+    /// name that does not exist at all must produce byte-identical per-entry
+    /// outcomes, and neither may fail the whole call — the valid names in the
+    /// same request still come back with their schemas.
+    #[tokio::test]
+    async fn tool_describe_bulk_reports_denied_and_unknown_names_identically() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let writer = Arc::new(RecordingWriter::default());
+        let policy = CapabilitySurfacePolicy::allow_only(
+            ["fixture.read_file", "fixture.alpha"]
+                .into_iter()
+                .map(|id| CapabilityId::new(id).expect("valid capability id")),
+        );
+        let port = disclosure_port_with(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            Arc::new(policy),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let outcome = invoke_bridge_call(
+            &port,
+            TOOL_DESCRIBE_NAME,
+            json!({"names": ["alpha_tool", "beta_tool", "no_such_tool_at_all"]}),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
+            "per-name failures stay per-entry; the call itself succeeds: {outcome:?}"
+        );
+        let output = recorded_output(&writer);
+        let results = output["results"]
+            .as_array()
+            .expect("bulk describe returns a results array")
+            .clone();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["name"], json!("alpha_tool"));
+        assert!(
+            results[0].get("parameters").is_some(),
+            "the permitted tool still returns its schema"
+        );
+
+        // `beta_tool` exists but is excluded; `no_such_tool_at_all` does not
+        // exist. Modulo the echoed request name, the entries must be identical —
+        // no capability_id, no schema, no distinguishing message.
+        let denied = results[1].clone();
+        let unknown = results[2].clone();
+        assert_eq!(denied["name"], json!("beta_tool"));
+        assert_eq!(unknown["name"], json!("no_such_tool_at_all"));
+        let strip_name = |mut entry: Value| {
+            if let Some(object) = entry.as_object_mut() {
+                object.remove("name");
+            }
+            entry
+        };
+        assert_eq!(
+            strip_name(denied.clone()),
+            strip_name(unknown.clone()),
+            "an excluded tool and a nonexistent tool must be indistinguishable"
+        );
+        assert_eq!(
+            denied["error"],
+            json!(DESCRIBE_UNKNOWN_TARGET_MESSAGE),
+            "per-entry failure reuses the single-name opacity message"
+        );
+        assert!(denied.get("parameters").is_none());
+        assert!(denied.get("capability_id").is_none());
+
+        // The excluded tool must not be disclosed to the executor surface.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface after bulk describe");
+        assert!(
+            !surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.safe_name == "beta_tool"),
+            "a denied bulk-describe entry must not disclose the excluded tool"
+        );
+    }
+
+    /// A bridge name inside a bulk request is rejected per entry, matching the
+    /// single-name guard, and must not silently return a bridge schema.
+    #[tokio::test]
+    async fn tool_describe_bulk_rejects_bridge_names_per_entry() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let writer = Arc::new(RecordingWriter::default());
+        let port = disclosure_port_with(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let outcome = invoke_bridge_call(
+            &port,
+            TOOL_DESCRIBE_NAME,
+            json!({"names": [TOOL_SEARCH_NAME, "alpha_tool"]}),
+        )
+        .await;
+
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
+        let output = recorded_output(&writer);
+        let results = output["results"].as_array().expect("results array");
+        assert_eq!(results[0]["error"], json!(DESCRIBE_BRIDGE_TARGET_MESSAGE));
+        assert!(results[0].get("parameters").is_none());
+        assert!(
+            results[1].get("parameters").is_some(),
+            "one bad name must not cost the caller the good ones"
+        );
+    }
+
+    #[test]
+    fn describe_bound_message_matches_the_declared_bound() {
+        assert_eq!(
+            DESCRIBE_TOO_MANY_NAMES_MESSAGE,
+            format!("tool_describe accepts at most {MAX_DESCRIBE_NAMES} names per call"),
+            "the model-visible bound message drifted from MAX_DESCRIBE_NAMES"
+        );
+    }
+
+    /// Duplicates cost the caller nothing: the same name twice collapses to one
+    /// entry so a repeated name cannot multiply the result size.
+    #[tokio::test]
+    async fn tool_describe_bulk_deduplicates_repeated_names() {
+        let inner = spy_port_with(bulk_describe_fixture_definitions());
+        let writer = Arc::new(RecordingWriter::default());
+        let port = disclosure_port_with(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        invoke_bridge_call(
+            &port,
+            TOOL_DESCRIBE_NAME,
+            json!({"names": ["alpha_tool", "alpha_tool", "beta_tool"]}),
+        )
+        .await;
+
+        let output = recorded_output(&writer);
+        let results = output["results"].as_array().expect("results array");
+        assert_eq!(
+            results.len(),
+            2,
+            "repeated names collapse to one entry each: {results:?}"
+        );
     }
 
     #[tokio::test]
@@ -3553,19 +4085,35 @@ mod tests {
         run_context: LoopRunContext,
         promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     ) -> ToolDisclosureCapabilityPort {
+        disclosure_port_with(
+            inner,
+            run_context,
+            promoted_by_scope,
+            Arc::new(TestWriter),
+            // Unnarrowed — most unit tests here exercise disclosure mechanics,
+            // not profile narrowing (that's the integration tier).
+            Arc::new(CapabilitySurfacePolicy::allow_all()),
+        )
+    }
+
+    fn disclosure_port_with(
+        inner: Arc<dyn LoopCapabilityPort>,
+        run_context: LoopRunContext,
+        promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        policy: Arc<CapabilitySurfacePolicy>,
+    ) -> ToolDisclosureCapabilityPort {
         ToolDisclosureCapabilityPort {
             inner,
             run_context,
-            result_writer: Arc::new(TestWriter),
+            result_writer,
             promoted_by_scope,
             caps: DisclosureCaps {
                 max_tokens: u32::MAX,
                 max_tools: 5,
                 ctx_limit: None,
             },
-            // Unnarrowed — unit tests here exercise disclosure mechanics, not
-            // profile narrowing (that's the integration tier).
-            policy: Arc::new(CapabilitySurfacePolicy::allow_all()),
+            policy,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

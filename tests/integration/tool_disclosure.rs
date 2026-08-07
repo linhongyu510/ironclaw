@@ -59,6 +59,10 @@ const TOOL_CALL_NAME: &str = "tool_call";
 /// see `tests/snapshots/golden_payload__tool_call.snap`'s `tool_surface`).
 const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 
+/// Second deferred github tool, used to prove one bulk `tool_describe` returns
+/// several schemas in a single model round-trip.
+const SECOND_FLAT_GITHUB_TOOL_NAME: &str = "github__list_issues";
+
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
 
@@ -385,6 +389,87 @@ async fn deferred_search_describe_call_flow_uses_production_capability_chain() {
         .await
         .expect("search, describe, and call complete");
     assert_deferred_bridge_flow(&harness).await;
+}
+
+/// Bulk `tool_describe` through the production capability chain (#7166 §1).
+///
+/// Production traces show the model spending one model round-trip per schema —
+/// seven sequential single-name `tool_describe` calls in a single run, for
+/// schemas of a few hundred bytes each. One bounded `names` array must load
+/// every candidate schema in one round-trip and still dispatch the follow-up
+/// `tool_call`, and a bad name in the batch must cost only its own entry.
+#[tokio::test]
+async fn deferred_bulk_describe_loads_every_schema_in_one_round_trip() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "repository issues", "limit": 5}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_DESCRIBE_NAME,
+                serde_json::json!({
+                    "names": [
+                        FLAT_GITHUB_TOOL_NAME,
+                        SECOND_FLAT_GITHUB_TOOL_NAME,
+                        "github__no_such_tool",
+                    ]
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({
+                    "name": FLAT_GITHUB_TOOL_NAME,
+                    "arguments": r#"{"owner":"nearai","repo":"ironclaw"}"#
+                }),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the ironclaw repository and its issues")
+        .await
+        .expect("bulk describe and the follow-up call complete");
+
+    harness
+        .assert_model_message_content_contains("tool_describe returned schemas")
+        .await
+        .expect("the bulk describe completion reaches the next production model request");
+
+    // One round-trip, one result: search + describe + call is three scripted
+    // tool calls and therefore exactly three persisted results — the three
+    // schemas did NOT cost three describe round-trips. The describe result is a
+    // *success* despite carrying a bogus name, which is the per-entry
+    // recoverability property: one wrong name must not fail the whole call and
+    // cost the model the schemas it got right.
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("each scripted bridge call persists a ToolResultReference");
+    assert_eq!(
+        envelopes.len(),
+        3,
+        "expected one persisted result per scripted call (search, one bulk describe, call), got {envelopes:?}"
+    );
+    assert_eq!(
+        envelopes[1].safe_summary.as_str(),
+        "tool_describe returned schemas",
+        "the bulk describe must complete successfully with an unknown name in the batch"
+    );
+
+    harness
+        .assert_tool_invoked("github.get_repo")
+        .await
+        .expect("a bulk-described tool stays callable through the tool_call bridge");
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the bulk-describe flow");
 }
 
 /// Selector-budget regression: a physically wide catalog with only one
