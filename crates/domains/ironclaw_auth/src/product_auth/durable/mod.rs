@@ -45,6 +45,14 @@ mod tests;
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 /// Bound on legacy agent/project directories walked during migration.
 const MAX_LEGACY_OWNER_DIRS_PER_LEVEL: usize = 1024;
+/// Total directory listings one owner's legacy migration may perform.
+///
+/// The per-level caps above bound each level but not the walk, whose size is
+/// their product: agents x projects x surfaces x sessions. This is the single
+/// budget spent across every level, so a pathological layout costs a bounded
+/// number of round-trips on a read path a user is waiting on rather than the
+/// product of the caps.
+const MAX_LEGACY_MIGRATION_LISTINGS: usize = 4096;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 /// Durable evidence that an owner's accounts have been copied out of the
@@ -53,6 +61,16 @@ const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct AccountMigrationMarker {
     migrated: usize,
+    /// False when the scan hit its budget and stopped early. Recorded so the
+    /// incompleteness is visible rather than inferred from a missing marker.
+    #[serde(default = "migration_marker_complete_default")]
+    complete: bool,
+}
+
+/// Pre-budget markers predate the `complete` flag and always recorded a scan
+/// that ran to completion.
+fn migration_marker_complete_default() -> bool {
+    true
 }
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
@@ -441,13 +459,32 @@ where
         .await
     }
 
+    /// Read one account by id, following the same nearest-first chain as
+    /// [`Self::account_scopes_for_owner`].
+    ///
+    /// The fallback is load-bearing, not a convenience: a project caller can
+    /// *select* an inherited user-level account for a bind, and the OAuth
+    /// callback then reads it back by id under the project scope. Checking only
+    /// the project root returned `CredentialMissing` there, so reconnecting an
+    /// inherited credential from inside a project failed with the credential
+    /// sitting readable one root up. The manual-token bound update reads
+    /// through the same path.
     async fn read_account(
         &self,
         scope: &crate::AuthProductScope,
         account_id: CredentialAccountId,
     ) -> Result<Option<(CredentialAccount, RecordVersion)>, AuthProductError> {
-        self.read_record(&scope.resource, &account_path(scope, account_id)?)
-            .await
+        for candidate in
+            Self::account_scopes_for_owner(&CredentialAccountOwnerScope::from_scope(scope))
+        {
+            if let Some(found) = self
+                .read_record(&candidate.resource, &account_path(&candidate, account_id)?)
+                .await?
+            {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
     }
 
     async fn write_account(
@@ -623,8 +660,13 @@ where
     async fn legacy_owner_resources(
         &self,
         owner: &CredentialAccountOwnerScope,
+        budget: &mut usize,
     ) -> Result<Vec<ResourceScope>, AuthProductError> {
         let base = Self::owner_resource(owner);
+        if *budget == 0 {
+            return Ok(Vec::new());
+        }
+        *budget = budget.saturating_sub(1);
         let mut agents: Vec<Option<String>> = vec![None];
         agents.extend(
             self.legacy_child_names(&base, &legacy_agents_root()?)
@@ -635,6 +677,10 @@ where
 
         let mut resources = Vec::new();
         for agent in agents {
+            if *budget == 0 {
+                break;
+            }
+            *budget = budget.saturating_sub(1);
             let mut projects: Vec<Option<String>> = vec![None];
             projects.extend(
                 self.legacy_child_names(&base, &legacy_projects_root(agent.as_deref())?)
@@ -643,21 +689,39 @@ where
                     .map(Some),
             );
             for project in projects {
+                // silent-ok: a directory name the current validator rejects
+                // cannot have been written by a current writer, so it holds
+                // nothing to migrate — skip it the way every other directory
+                // scan in this file does (see the agent scan in
+                // `list_refresh_candidates`). Aborting instead poisoned the
+                // whole migration: the marker is written only on completion, so
+                // one unparseable directory made every credential read for that
+                // user rescan, fail, and report "needs setup" for credentials
+                // sitting valid on disk — the exact failure this change exists
+                // to remove.
+                let agent_id = match &agent {
+                    Some(agent) => match AgentId::new(agent.clone()) {
+                        Ok(agent_id) => Some(agent_id),
+                        Err(error) => {
+                            tracing::debug!(%error, "skipping unparseable legacy agent directory");
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                let project_id = match &project {
+                    Some(project) => match ProjectId::new(project.clone()) {
+                        Ok(project_id) => Some(project_id),
+                        Err(error) => {
+                            tracing::debug!(%error, "skipping unparseable legacy project directory");
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
                 let mut resource = base.clone();
-                resource.agent_id = match &agent {
-                    Some(agent) => Some(
-                        ironclaw_host_api::ids::AgentId::new(agent.clone())
-                            .map_err(|_| AuthProductError::BackendUnavailable)?,
-                    ),
-                    None => None,
-                };
-                resource.project_id = match &project {
-                    Some(project) => Some(
-                        ironclaw_host_api::ids::ProjectId::new(project.clone())
-                            .map_err(|_| AuthProductError::BackendUnavailable)?,
-                    ),
-                    None => None,
-                };
+                resource.agent_id = agent_id;
+                resource.project_id = project_id;
                 resources.push(resource);
             }
         }
@@ -667,10 +731,17 @@ where
     async fn legacy_account_scopes_for_owner(
         &self,
         owner: &CredentialAccountOwnerScope,
+        budget: &mut usize,
     ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
         let mut scopes = Vec::new();
-        for resource in self.legacy_owner_resources(owner).await? {
-            scopes.extend(self.legacy_account_scopes_under(owner, resource).await?);
+        for resource in self.legacy_owner_resources(owner, budget).await? {
+            if *budget == 0 {
+                break;
+            }
+            scopes.extend(
+                self.legacy_account_scopes_under(owner, resource, budget)
+                    .await?,
+            );
         }
         Ok(scopes)
     }
@@ -679,6 +750,7 @@ where
         &self,
         owner: &CredentialAccountOwnerScope,
         resource: ResourceScope,
+        budget: &mut usize,
     ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
@@ -690,6 +762,10 @@ where
                 );
                 continue;
             }
+            if *budget == 0 {
+                break;
+            }
+            *budget = budget.saturating_sub(1);
             let sessions_root = surface_sessions_root(&resource, surface)?;
             let mut entries = match self
                 .filesystem
@@ -733,19 +809,30 @@ where
     /// collected separately rather than removed on a read path.
     ///
     /// Everything lands at the **user level**, including records that were
-    /// under `/agents/{a}/projects/{p}/`. Inheritance runs project -> user, so
-    /// the user-level root is the one place every caller can reach; migrating a
-    /// record into a project root instead would hide it from user-level
-    /// callers. Project-scoped *writes* are a later opt-in.
+    /// under `/agents/{a}/projects/{p}/`, into the canonical root its OWN
+    /// provenance names — a record minted under project P lands in P's root,
+    /// one minted with no project lands at user level.
+    ///
+    /// Deriving the destination from the reading caller instead (an earlier
+    /// version of this) copied project A's credential into whichever project
+    /// read first, and since ownership no longer compares project, that made it
+    /// selectable there. It also made the resulting layout depend on who
+    /// happened to read first. Provenance is reader-independent and is what
+    /// `write_account` already uses, so read and write agree by construction.
     async fn migrate_legacy_accounts(
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<(), AuthProductError> {
-        let canonical_resource = Self::owner_resource(owner);
-        let marker = account_migration_marker_path(&canonical_resource)?;
+        // The marker lives at the owner's USER-level root, never the reading
+        // caller's project root. One owner gets one marker regardless of who
+        // reads first; keying it on the reader would let a project caller and a
+        // user-level caller each run the full scan.
+        let mut marker_resource = Self::owner_resource(owner);
+        marker_resource.project_id = None;
+        let marker = account_migration_marker_path(&marker_resource)?;
         if self
             .filesystem
-            .get(&canonical_resource, &marker)
+            .get(&marker_resource, &marker)
             .await
             .map_err(fs_error)?
             .is_some()
@@ -753,8 +840,40 @@ where
             return Ok(());
         }
 
+        // Serialize per owner. Without this, concurrent first reads for one
+        // owner each walk every legacy root: `CasExpectation::Absent` keeps the
+        // records correct, but the duplicated scan is pure cost on a read path
+        // a user is waiting on.
+        let migration_lock = self.lock_for(format!(
+            "account-migration:{}:{}",
+            owner.tenant_id.as_str(),
+            owner.user_id.as_str()
+        ));
+        let _migration_guard = migration_lock.lock().await;
+        // Re-check under the lock: the writer we queued behind may have just
+        // finished the whole migration.
+        if self
+            .filesystem
+            .get(&marker_resource, &marker)
+            .await
+            .map_err(fs_error)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let mut budget = MAX_LEGACY_MIGRATION_LISTINGS;
         let mut migrated = 0usize;
-        for legacy_scope in self.legacy_account_scopes_for_owner(owner).await? {
+        let mut exhausted = false;
+        for legacy_scope in self
+            .legacy_account_scopes_for_owner(owner, &mut budget)
+            .await?
+        {
+            if budget == 0 {
+                exhausted = true;
+                break;
+            }
+            budget = budget.saturating_sub(1);
             let legacy_root = legacy_account_root(&legacy_scope)?;
             let entries = match self
                 .filesystem
@@ -788,17 +907,23 @@ where
                 // (`secret_store.metadata(&account.scope.resource, ..)`), which
                 // still lives under the agent/project prefix it was written
                 // with. Rewriting the scope to match the new path would move
-                // the record and orphan its tokens. Identity now comes from
-                // which root the record sits in, so provenance can stay
-                // untouched and the credential keeps working.
-                let canonical_scope =
-                    crate::AuthProductScope::new(canonical_resource.clone(), AuthSurface::Api);
-                let canonical_path = account_path(&canonical_scope, account.id)?;
+                // the record and orphan its tokens.
+                //
+                // The destination is derived from that same provenance, NOT
+                // from the reading caller. Using the caller's scope copied a
+                // project-A credential into whichever project happened to read
+                // first — and since ownership no longer compares project, that
+                // made project A's credential selectable by project B. Deriving
+                // the destination from the record keeps each project's
+                // credentials in its own root, and makes the write-back path
+                // agree with the read path by construction: `write_account`
+                // computes exactly this path from exactly this scope.
+                let canonical_path = account_path(&account.scope, account.id)?;
                 // Create-if-absent: a record already migrated (or written fresh
                 // at the canonical path) always wins over the legacy copy.
                 match self
                     .write_record(
-                        &canonical_resource,
+                        &account.scope.resource,
                         &canonical_path,
                         &account,
                         CasExpectation::Absent,
@@ -813,15 +938,33 @@ where
         }
 
         if migrated > 0 {
-            tracing::info!(
+            // `debug!`, not `info!`: this runs from `account_records_for_owner`,
+            // which the keepalive sweep calls per owner, so an `info!` here
+            // would fire from a background task and corrupt the REPL/TUI
+            // (CLAUDE.md, "Logging levels matter for REPL/TUI").
+            tracing::debug!(
                 migrated,
                 "migrated credential accounts to the canonical owner path"
             );
         }
+        if exhausted {
+            // Converge rather than rescan forever. A layout this large will not
+            // shrink between reads, and repeating the walk would make every
+            // credential read pay it. `warn!` so an operator sees it; the
+            // marker records that the scan was incomplete.
+            tracing::warn!(
+                migrated,
+                "legacy credential migration exceeded its scan budget; \
+                 remaining legacy roots were not migrated"
+            );
+        }
         self.write_record(
-            &canonical_resource,
+            &marker_resource,
             &marker,
-            &AccountMigrationMarker { migrated },
+            &AccountMigrationMarker {
+                migrated,
+                complete: !exhausted,
+            },
             CasExpectation::Any,
         )
         .await?;
@@ -833,17 +976,32 @@ where
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
         self.migrate_legacy_accounts(owner).await?;
-        let mut accounts = Vec::new();
+        let mut accounts: Vec<CredentialAccount> = Vec::new();
+        // Nearest root wins, PER PROVIDER. The roots are ordered project-then-
+        // user, but order alone is not precedence: merging both roots made a
+        // project override and the user-level default it overrides look like two
+        // candidates for one provider, which resolves as ambiguity (or picks the
+        // most recent) instead of letting the project win. Skipping only the
+        // providers a nearer root already answered keeps inheritance intact for
+        // every other provider — a project that overrides Notion must still
+        // inherit GitHub.
+        let mut answered: std::collections::BTreeSet<crate::AuthProviderId> =
+            std::collections::BTreeSet::new();
         for scope in Self::account_scopes_for_owner(owner) {
-            accounts.extend(
-                self.account_records_under_scope_root_with_limit(
+            let from_root = self
+                .account_records_under_scope_root_with_limit(
                     &scope,
                     Some(MAX_OWNER_RECORDS_PER_ROOT),
                 )
                 .await?
                 .into_iter()
-                .filter(|account| owner.matches(account)),
-            );
+                .filter(|account| owner.matches(account))
+                .filter(|account| !answered.contains(&account.provider))
+                .collect::<Vec<_>>();
+            for account in &from_root {
+                answered.insert(account.provider.clone());
+            }
+            accounts.extend(from_root);
         }
         accounts.sort_by_key(|account| account.id);
         accounts.dedup_by_key(|account| account.id);

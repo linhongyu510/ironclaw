@@ -207,7 +207,7 @@ registerPack("ar", {
   "authGate.expiresAt": "انتهاء الصلاحية",
   "authGate.oauthProviderFallback": "الموفر",
   "authGate.authorizationUnavailable":
-    "تعذّر على IronClaw بدء تفويض {provider}. المزوّد غير قابل للوصول أو لم يُهيّأ بعد، لذا لا يوجد ما يمكن فتحه. أعد تشغيل العملية أو تحقّق من إعداد الإضافة.",
+    "تعذّر على IronClaw بدء تفويض {provider}. المزوّد غير قابل للوصول أو لم يُهيّأ بعد أو أعاد رابط تفويض غير صالح، لذا لا يوجد ما يمكن فتحه. أعد تشغيل العملية أو تحقّق من إعداد الإضافة.",
   "authGate.serviceUnavailable": "الخدمة غير متوفرة",
   "authGate.popupBlocked": "تم حظر النافذة المنبثقة للتفويض.",
   "authGate.pillAuthorize": "التفويض",

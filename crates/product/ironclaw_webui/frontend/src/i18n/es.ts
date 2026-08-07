@@ -207,7 +207,7 @@ registerPack("es", {
   "authGate.expiresAt": "Caduca",
   "authGate.oauthProviderFallback": "el proveedor",
   "authGate.authorizationUnavailable":
-    "IronClaw no pudo iniciar la autorización de {provider}. El proveedor no está accesible o aún no está configurado, así que no hay nada que abrir. Reintenta la ejecución o revisa la configuración de la extensión.",
+    "IronClaw no pudo iniciar la autorización de {provider}. El proveedor no está accesible, aún no está configurado o devolvió un enlace de autorización inservible, así que no hay nada que abrir. Reintenta la ejecución o revisa la configuración de la extensión.",
   "authGate.serviceUnavailable": "Servicio no disponible",
   "authGate.popupBlocked": "La ventana emergente de autorización fue bloqueada.",
   "authGate.pillAuthorize": "Autorizar",

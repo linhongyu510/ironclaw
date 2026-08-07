@@ -415,6 +415,38 @@ async fn binding_crosses_surface_and_session_for_the_same_owner() {
     assert_eq!(bound.id, created.id);
 }
 
+/// The owner boundary, asserted at THIS seam.
+///
+/// The two deleted cross-surface/session cases were the only ones here that
+/// drove `select_configured_account_for_binding` toward a rejection, and their
+/// replacement above asserts only the positive. `binding_scope_owns_account`
+/// and the durable store are pinned elsewhere, but neither covers this
+/// selector, which layers `finalize_selection` and the visibility policy on top
+/// of the owner filter — so a regression in that stack would land here first.
+#[tokio::test]
+async fn binding_never_crosses_the_owner_boundary() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    ConfiguredAccount::new(owner_auth_scope("alice"), "google")
+        .create(&accounts)
+        .await;
+    let selector = selector_for(accounts);
+
+    let mallory = owner_auth_scope("mallory");
+    let error = selector
+        .select_configured_account_for_binding(
+            CredentialAccountSelectionRequest::new(
+                mallory.clone(),
+                AuthProviderId::new("google").unwrap(),
+            )
+            .for_extension(ExtensionId::new("google-calendar").unwrap()),
+            mallory,
+        )
+        .await
+        .expect_err("a different user must never bind another user's credential");
+
+    assert_eq!(error, AuthProductError::CredentialMissing);
+}
+
 #[tokio::test]
 async fn binding_matches_account_within_same_session() {
     // The flip side of `binding_does_not_cross_session_boundary`: a reconnect on

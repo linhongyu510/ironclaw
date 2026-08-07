@@ -163,6 +163,15 @@ test("AuthOauthCard renders an unavailable state when the gate carries no author
   );
   assert.equal(openCalls.length, 0, "nothing may open during render");
   assert.equal(openAuthPopupCalls.length, 0);
+
+  // Asserting on render alone would not prove the CTA is inert — the disabled
+  // prop could be dropped and this test would still pass. Drive the handler the
+  // way a click would and assert nothing navigates.
+  const openAuth = findHandler(rendered, "openAuth");
+  assert.ok(openAuth, "the handler is still wired for the guard to reject");
+  openAuth({ preventDefault() {} });
+  assert.equal(openCalls.length, 0, "a disabled CTA must not open a popup");
+  assert.equal(openAuthPopupCalls.length, 0, "a disabled CTA must not navigate");
 });
 
 // The inverse guard: a gate that CAN be authorized must not be degraded into

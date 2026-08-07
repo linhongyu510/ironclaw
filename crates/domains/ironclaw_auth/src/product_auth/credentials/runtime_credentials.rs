@@ -264,7 +264,9 @@ enum AccountSelectionPurpose<'a> {
         provider_scopes: &'a [ProviderScope],
     },
     /// OAuth bind — match the owner's existing account regardless of scopes,
-    /// but only within the flow's own `session_id` (see the filter below).
+    /// surface, or session. Accounts live at one address per credential owner,
+    /// so the owner filter is the whole boundary; there is no session or
+    /// surface narrowing left for this arm to apply.
     Binding,
 }
 

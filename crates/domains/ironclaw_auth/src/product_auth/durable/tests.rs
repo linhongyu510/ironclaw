@@ -4740,3 +4740,86 @@ async fn legacy_accounts_from_every_layout_survive_the_migration() {
     let again = service.accounts_for_owner(&owner_scope).await.unwrap();
     assert_eq!(again.len(), expected.len(), "migration must be idempotent");
 }
+
+/// Migration must not widen a project-scoped credential's reach, and the
+/// resulting layout must not depend on who happens to read first.
+///
+/// The destination used to be derived from the reading caller's scope, so a
+/// legacy project-A credential landed in whichever project root read first —
+/// and since ownership no longer compares project, project B could then select
+/// project A's credential and its secret provenance. The destination is now
+/// derived from each record's own provenance, which is both reader-independent
+/// and what `write_account` uses, so read and write agree.
+#[tokio::test]
+async fn migration_keeps_each_project_credential_in_its_own_root() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let service = test_service(filesystem, secret_store);
+
+    let project_a = ironclaw_host_api::ids::ProjectId::new("project-a").unwrap();
+    let project_b = ironclaw_host_api::ids::ProjectId::new("project-b").unwrap();
+
+    // A legacy credential minted inside project A, under a legacy agent root.
+    let mut legacy_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
+    legacy_scope.resource.agent_id = Some(ironclaw_host_api::ids::AgentId::new("agent-a").unwrap());
+    legacy_scope.resource.project_id = Some(project_a.clone());
+    let account = CredentialAccount {
+        id: CredentialAccountId::new(),
+        scope: legacy_scope.clone(),
+        provider: google_provider(),
+        label: CredentialAccountLabel::new("project-a google").unwrap(),
+        status: CredentialAccountStatus::Configured,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: Vec::new(),
+        access_secret: Some(SecretHandle::new("project-a-access").unwrap()),
+        refresh_secret: None,
+        scopes: Vec::new(),
+        provider_identity: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let legacy_path = super::paths::legacy_account_root(&legacy_scope)
+        .and_then(|root| super::paths::join_scoped(&root, &format!("{}.json", account.id)))
+        .unwrap();
+    service
+        .write_record(
+            &legacy_scope.resource,
+            &legacy_path,
+            &account,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    // Project B reads first, which is what used to decide the destination.
+    let mut b_resource = test_scope().resource;
+    b_resource.project_id = Some(project_b);
+    b_resource.invocation_id = InvocationId::new();
+    let b_scope = AuthProductScope::credential_owner(&b_resource, AuthSurface::Api);
+    let seen_by_b = service.accounts_for_owner(&b_scope).await.unwrap();
+    assert!(
+        !seen_by_b.iter().any(|found| found.id == account.id),
+        "project B must never resolve project A's credential"
+    );
+
+    // Project A still resolves it — migration preserved the narrowing rather
+    // than dropping it.
+    let mut a_resource = test_scope().resource;
+    a_resource.project_id = Some(project_a);
+    a_resource.invocation_id = InvocationId::new();
+    let a_scope = AuthProductScope::credential_owner(&a_resource, AuthSurface::Api);
+    let seen_by_a = service.accounts_for_owner(&a_scope).await.unwrap();
+    assert!(
+        seen_by_a.iter().any(|found| found.id == account.id),
+        "project A must still resolve its own credential after migration"
+    );
+
+    // And a user-level caller does not inherit upward from a project.
+    let user_scope = AuthProductScope::credential_owner(&test_scope().resource, AuthSurface::Api);
+    let seen_by_user = service.accounts_for_owner(&user_scope).await.unwrap();
+    assert!(
+        !seen_by_user.iter().any(|found| found.id == account.id),
+        "a project sub-credential must not leak to user-level callers"
+    );
+}

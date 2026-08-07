@@ -1172,15 +1172,28 @@ mod tests {
             );
         }
 
-        // The boundary that still holds: a different user is never the owner.
-        let mut foreign_resource = owner_resource(InvocationId::new());
-        foreign_resource.user_id = UserId::new("mallory").unwrap();
+        // The boundary that still holds. Both identifiers are asserted: this is
+        // the test that pins tenant+user as *the* security boundary after four
+        // rejection cases were deleted, so an edit that drops either comparison
+        // must fail here.
+        let mut foreign_user = owner_resource(InvocationId::new());
+        foreign_user.user_id = UserId::new("mallory").unwrap();
         assert!(
             !binding_scope_owns_account(
-                &AuthProductScope::new(foreign_resource, AuthSurface::Api),
+                &AuthProductScope::new(foreign_user, AuthSurface::Api),
                 &account
             ),
             "a different user must never bind another user's credential"
+        );
+
+        let mut foreign_tenant = owner_resource(InvocationId::new());
+        foreign_tenant.tenant_id = TenantId::new("tenant-other").unwrap();
+        assert!(
+            !binding_scope_owns_account(
+                &AuthProductScope::new(foreign_tenant, AuthSurface::Api),
+                &account
+            ),
+            "a different tenant must never bind another tenant's credential"
         );
     }
 }
