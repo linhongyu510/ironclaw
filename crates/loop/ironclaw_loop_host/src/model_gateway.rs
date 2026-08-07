@@ -2741,7 +2741,8 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         ),
         LlmError::AuthFailed { .. }
         | LlmError::SessionExpired { .. }
-        | LlmError::SessionRenewalFailed { .. } => HostManagedModelError::safe(
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::SessionRenewalUnavailable { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             "model credentials are unavailable",
         ),
