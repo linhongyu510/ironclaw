@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
 import assert from "node:assert/strict";
-import React from "react";
+import React, { act } from "react";
+import { hydrateRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
@@ -43,7 +44,25 @@ function renderPanel({
   currentTarget?: Record<string, unknown> | null;
   currentStatus?: "none_configured" | "available" | "unavailable";
 }) {
-  const deliveryState = {
+  return renderToStaticMarkup(
+    <AutomationDeliveryDefaultsPanel
+      deliveryState={deliveryState({ targets, currentTarget, currentStatus })}
+    />,
+  );
+}
+
+function deliveryState({
+  targets,
+  currentTarget = null,
+  currentStatus = "none_configured",
+  saveFinalReplyTarget = vi.fn(() => Promise.resolve()),
+}: {
+  targets: ReturnType<typeof target>[];
+  currentTarget?: Record<string, unknown> | null;
+  currentStatus?: "none_configured" | "available" | "unavailable";
+  saveFinalReplyTarget?: ReturnType<typeof vi.fn>;
+}) {
+  return {
     targets,
     finalReplyTargets: targets.filter((option) => option.capabilities.final_replies),
     currentTarget,
@@ -51,12 +70,8 @@ function renderPanel({
     isLoading: false,
     isSaving: false,
     saveError: null,
-    saveFinalReplyTarget: vi.fn(() => Promise.resolve()),
+    saveFinalReplyTarget,
   };
-
-  return renderToStaticMarkup(
-    <AutomationDeliveryDefaultsPanel deliveryState={deliveryState} />,
-  );
 }
 
 function parseMarkup(html: string) {
@@ -147,4 +162,78 @@ test("a configured target that becomes unavailable stays visible and leaves Web 
   );
   assert.ok(webFallback);
   assert.equal(webFallback.disabled, false);
+});
+
+test("a hydrated panel drops a draft target when it becomes unavailable", async () => {
+  const currentTarget = {
+    target_id: "slack-current",
+    display_name: "Current Slack DM",
+  };
+  const saveFinalReplyTarget = vi.fn((_targetId: string | null) => Promise.resolve());
+  const initialState = deliveryState({
+    targets: [
+      target("slack-current", "available"),
+      target("slack-next", "available"),
+    ],
+    currentTarget,
+    currentStatus: "available",
+    saveFinalReplyTarget,
+  });
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(
+    <AutomationDeliveryDefaultsPanel deliveryState={initialState} />,
+  );
+  document.body.append(container);
+  const root = hydrateRoot(
+    container,
+    <AutomationDeliveryDefaultsPanel deliveryState={initialState} />,
+  );
+
+  try {
+    await act(async () => {});
+    const nextTarget = container.querySelector<HTMLInputElement>(
+      'input[value="slack-next"]',
+    );
+    assert.ok(nextTarget);
+    await act(async () => nextTarget.click());
+    assert.equal(nextTarget.checked, true);
+
+    const unavailableState = deliveryState({
+      targets: [
+        target("slack-current", "available"),
+        target("slack-next", "unavailable", {
+          unavailable_reason: "Reconnect Slack to resume delivery.",
+        }),
+      ],
+      currentTarget,
+      currentStatus: "available",
+      saveFinalReplyTarget,
+    });
+    await act(async () => {
+      root.render(
+        <AutomationDeliveryDefaultsPanel deliveryState={unavailableState} />,
+      );
+    });
+
+    assert.equal(container.querySelector('input[value="slack-next"]'), null);
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "automations.delivery.save",
+    );
+    assert.ok(saveButton);
+    assert.equal(saveButton.disabled, true);
+    await act(async () => saveButton.click());
+    assert.equal(saveFinalReplyTarget.mock.calls.length, 0);
+
+    const webFallback = container.querySelector<HTMLInputElement>(
+      '[role="radiogroup"] input[value=""]',
+    );
+    assert.ok(webFallback);
+    await act(async () => webFallback.click());
+    assert.equal(saveButton.disabled, false);
+    await act(async () => saveButton.click());
+    assert.deepEqual(saveFinalReplyTarget.mock.calls, [[null]]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });

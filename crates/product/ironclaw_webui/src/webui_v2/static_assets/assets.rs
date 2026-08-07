@@ -520,6 +520,10 @@ mod tests {
             defaults_panel.contains(r#"label={t("automations.delivery.pill.unavailable")}"#),
             "unavailable delivery target rows must carry the unavailable badge"
         );
+        assert!(
+            app_bundle.contains("data-delivery-target-status"),
+            "served WebUI bundle must include unavailable delivery target rows; run the frontend build after editing frontend/src/**"
+        );
 
         let defaults_hook = source_text("pages/automations/hooks/useOutboundDeliveryDefaults.ts");
         assert!(defaults_hook.contains("listOutboundDeliveryTargets"));
