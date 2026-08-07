@@ -506,19 +506,19 @@ mod tests {
             source_text("pages/automations/components/automation-delivery-defaults-panel.tsx");
         assert!(defaults_panel.contains("finalReplyTargets"));
         assert!(defaults_panel.contains("saveFinalReplyTarget"));
-        // Unavailable targets remain visible, but must be rendered outside the
-        // selectable target list with their unavailable status.
+        // The real unavailable response has no target summary or list option,
+        // so recovery must be driven by the preference status itself.
         assert!(
-            defaults_panel.contains("!deliveryTargetIsUnavailable(option"),
-            "selectable delivery targets must exclude unavailable options"
+            defaults_panel.contains("hasUnavailablePreference && draftTargetId === \"\""),
+            "an unavailable preference must make the Web App fallback saveable"
         );
         assert!(
-            defaults_panel.contains("unavailableFinalReplyTargets.map"),
-            "unavailable delivery targets must remain visible as read-only rows"
+            defaults_panel.contains("Boolean(currentTargetId) || hasUnavailablePreference"),
+            "an unresolved saved binding must retain an explicit clear path"
         );
         assert!(
-            defaults_panel.contains(r#"label={t("automations.delivery.pill.unavailable")}"#),
-            "unavailable delivery target rows must carry the unavailable badge"
+            defaults_panel.contains("data-delivery-target-status=\"unavailable\""),
+            "an unresolved saved binding must render unavailable status information"
         );
         assert!(
             app_bundle.contains("data-delivery-target-status"),

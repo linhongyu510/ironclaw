@@ -5,22 +5,6 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
 
-function deliveryTargetStatus(option) {
-  return option?.target?.status ?? option?.status ?? "available";
-}
-
-function deliveryTargetIsUnavailable(option, currentTargetId, currentStatus) {
-  const targetId = option?.target?.target_id ?? "";
-  return (
-    deliveryTargetStatus(option) === "unavailable" ||
-    (targetId === currentTargetId && currentStatus === "unavailable")
-  );
-}
-
-function deliveryTargetUnavailableReason(option, fallback) {
-  return option?.target?.unavailable_reason ?? option?.unavailable_reason ?? fallback;
-}
-
 /**
  * Interpolate a simple {placeholder} template — used for the footnote.
  * Returns an array of string/element segments so React renders the <code> inline.
@@ -40,21 +24,15 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   const [draftTargetId, setDraftTargetId] = React.useState(currentTargetId);
   const [showSaved, setShowSaved] = React.useState(false);
   const savedTimerRef = React.useRef(null);
+  const hasUnavailablePreference = currentStatus === "unavailable";
   const availableFinalReplyTargets = React.useMemo(
     () =>
       deliveryState.finalReplyTargets.filter(
         (option) =>
-          !deliveryTargetIsUnavailable(option, currentTargetId, currentStatus),
+          !hasUnavailablePreference ||
+          option?.target?.target_id !== currentTargetId,
       ),
-    [currentStatus, currentTargetId, deliveryState.finalReplyTargets],
-  );
-  const unavailableFinalReplyTargets = React.useMemo(
-    () =>
-      deliveryState.finalReplyTargets.filter(
-        (option) =>
-          deliveryTargetIsUnavailable(option, currentTargetId, currentStatus),
-      ),
-    [currentStatus, currentTargetId, deliveryState.finalReplyTargets],
+    [currentTargetId, deliveryState.finalReplyTargets, hasUnavailablePreference],
   );
   const availableTargetIds = React.useMemo(
     () =>
@@ -87,22 +65,27 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
     [],
   );
 
-  const isDirty = draftTargetId !== currentTargetId;
+  const isRecoveringUnavailablePreference =
+    hasUnavailablePreference && draftTargetId === "";
+  const isDirty =
+    draftTargetId !== currentTargetId || isRecoveringUnavailablePreference;
   const isBusy = deliveryState.isLoading || deliveryState.isSaving;
   const draftTargetIsSelectable =
     draftTargetId === "" || availableTargetIds.has(draftTargetId);
   const canSave = isDirty && !isBusy && draftTargetIsSelectable;
-  // Clear is only meaningful when there is a saved target to remove, and
-  // nothing is in-flight.
-  const canClear = Boolean(currentTargetId) && !isBusy;
 
   const hasAvailableTargets = availableFinalReplyTargets.length > 0;
-  const hasUnavailableTargets = unavailableFinalReplyTargets.length > 0;
   // The external-channel approval footnote only makes sense when an external
   // target exists at all. Web-only deployments shouldn't see a
   // "reply in the channel" hint.
-  const hasExternalTargets = hasAvailableTargets || hasUnavailableTargets;
-  const canSelectWebFallback = Boolean(currentTargetId) || hasAvailableTargets;
+  const hasExternalTargets =
+    hasAvailableTargets || Boolean(currentTargetId) || hasUnavailablePreference;
+  const canSelectWebFallback =
+    Boolean(currentTargetId) || hasAvailableTargets || hasUnavailablePreference;
+  // An unresolved saved binding has no target summary/id, but still needs an
+  // explicit clear path to remove the stale preference.
+  const canClear =
+    (Boolean(currentTargetId) || hasUnavailablePreference) && !isBusy;
 
   // Flash the "Saved" confirmation; the mutation's rejection is reflected
   // through `deliveryState.saveError` (rendered below), so the catch here only
@@ -199,6 +182,9 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               {t("automations.delivery.currentDefault")}
             </span>
             <div
+              data-delivery-target-status={
+                hasUnavailablePreference ? "unavailable" : undefined
+              }
               className={cn(
                 "flex items-center gap-3 rounded-xl border px-4 py-3",
                 currentStatus === "unavailable"
@@ -310,42 +296,28 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
 
           </div>
 
-          {/* Unavailable targets stay visible as status information, outside
-               the selectable radio group. */}
-          {hasUnavailableTargets &&
-          (<div className="mt-3 flex flex-col gap-3">
-            {unavailableFinalReplyTargets.map((option) => {
-              const tid = option?.target?.target_id ?? "";
-              const label =
-                option?.target?.display_name || option?.target?.target_id ||
-                t("automations.delivery.unavailableNotice");
-              const reason = deliveryTargetUnavailableReason(
-                option,
-                t("automations.delivery.unavailableDesc"),
-              );
-              return (
-                <div
-                  key={tid}
-                  data-delivery-target-status="unavailable"
-                  className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
-                >
-                  <span className="text-base shrink-0 opacity-70">📎</span>
-                  <div className="flex-1 min-w-0">
-                    <span className="text-sm font-semibold text-[var(--v2-text-muted)]">
-                      {label}
-                    </span>
-                    <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-faint)]">
-                      {reason}
-                    </div>
-                  </div>
-                  <Badge
-                    tone="warning"
-                    label={t("automations.delivery.pill.unavailable")}
-                    className="shrink-0"
-                  />
-                </div>
-              );
-            })}
+          {/* An unresolved saved binding has no target summary in the real
+               preferences response, so render a generic recovery row. */}
+          {hasUnavailablePreference &&
+          !currentTargetId &&
+          (<div
+            data-delivery-target-status="unavailable"
+            className="mt-3 flex items-center gap-3 rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
+          >
+            <span className="text-base shrink-0 opacity-70">📎</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-semibold text-[var(--v2-text-muted)]">
+                {t("automations.delivery.unavailableNotice")}
+              </span>
+              <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-faint)]">
+                {t("automations.delivery.unavailableDesc")}
+              </div>
+            </div>
+            <Badge
+              tone="warning"
+              label={t("automations.delivery.pill.unavailable")}
+              className="shrink-0"
+            />
           </div>)}
         </div>
 
