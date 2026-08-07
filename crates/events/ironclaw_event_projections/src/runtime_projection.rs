@@ -403,7 +403,10 @@ fn capability_activity_status_for_event(
         | RuntimeEventKind::HookDispatched
         | RuntimeEventKind::HookDecisionEmitted
         | RuntimeEventKind::HookFailed
-        | RuntimeEventKind::FailureRecovered => None,
+        | RuntimeEventKind::FailureRecovered
+        // Pure measurement. A metrics record must never move a capability
+        // activity's status, or observability would rewrite run state.
+        | RuntimeEventKind::ModelCallMetricsRecorded => None,
     }
 }
 
@@ -444,7 +447,9 @@ fn run_status_for_event(
         | RuntimeEventKind::CapabilityActivityRequested
         | RuntimeEventKind::CapabilityActivitySucceeded
         | RuntimeEventKind::CapabilityActivityFailed
-        | RuntimeEventKind::FailureRecovered => {
+        | RuntimeEventKind::FailureRecovered
+        // Pure measurement: it observes the run, it does not advance it.
+        | RuntimeEventKind::ModelCallMetricsRecorded => {
             current_status.unwrap_or(RunProjectionStatus::Running)
         }
     }

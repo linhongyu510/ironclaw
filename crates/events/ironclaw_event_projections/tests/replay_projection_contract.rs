@@ -1694,6 +1694,7 @@ async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_b
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     let backend = Arc::new(StaticDurableEventLog {
         entries: vec![EventLogEntry {
@@ -2407,6 +2408,7 @@ async fn replay_projection_re_sanitizes_recovery_labels_from_custom_backend() {
         recovery_stage: Some(raw.to_string()),
         recovery_class: Some(raw.to_string()),
         recovery_disposition: Some(raw.to_string()),
+        model_call_metrics: None,
     };
     let backend = Arc::new(StaticDurableEventLog {
         entries: vec![EventLogEntry {
@@ -2471,6 +2473,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     let decision = RuntimeEvent {
         event_id: RuntimeEventId::new(),
@@ -2494,6 +2497,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     let failed = RuntimeEvent {
         event_id: RuntimeEventId::new(),
@@ -2517,6 +2521,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
 
     let backend = Arc::new(StaticDurableEventLog {
@@ -2599,6 +2604,7 @@ async fn non_hook_runtime_events_project_with_no_hook_metadata() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     let backend = Arc::new(StaticDurableEventLog {
         entries: vec![EventLogEntry {
@@ -2669,6 +2675,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     // … then emit hook telemetry that, if the projection mistakenly treated
     // hook events as lifecycle transitions, would either flip the run to
@@ -2695,6 +2702,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
     let hook_decision_after_completion = RuntimeEvent {
         event_id: RuntimeEventId::new(),
@@ -2718,6 +2726,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
 
     let backend = Arc::new(StaticDurableEventLog {
@@ -2784,6 +2793,7 @@ async fn hook_only_runtime_events_default_run_status_to_running() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
 
     let backend = Arc::new(StaticDurableEventLog {

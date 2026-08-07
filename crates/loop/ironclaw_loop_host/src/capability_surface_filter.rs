@@ -75,6 +75,15 @@ impl CapabilitySurfaceVisibleFilter {
 
 #[async_trait]
 impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
+    fn tool_disclosure_metrics(
+        &self,
+    ) -> Option<ironclaw_loop_contracts::ToolDisclosureCallMetrics> {
+        // MUST delegate: the default returns `None`, which would erase the
+        // disclosure rollout evidence for every run wrapped by this decorator
+        // without producing any error to notice.
+        self.inner.tool_disclosure_metrics()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| {
@@ -172,6 +181,15 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
 
 #[async_trait]
 impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
+    fn tool_disclosure_metrics(
+        &self,
+    ) -> Option<ironclaw_loop_contracts::ToolDisclosureCallMetrics> {
+        // MUST delegate: the default returns `None`, which would erase the
+        // disclosure rollout evidence for every run wrapped by this decorator
+        // without producing any error to notice.
+        self.inner.tool_disclosure_metrics()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| {

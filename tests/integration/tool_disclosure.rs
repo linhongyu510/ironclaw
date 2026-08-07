@@ -843,3 +843,172 @@ async fn unnarrowed_policy_keeps_full_tool_search_catalog() {
         "an unrestricted policy must surface the full catalog's matches, got only {ids:?}"
     );
 }
+
+/// Rollout evidence (#7166 §5): the production loop host must record one
+/// durable-bound measurement per model call, carrying the disclosure numbers
+/// that until now existed only as ephemeral `debug!` shadow logs.
+///
+/// The assertion is at the milestone seam because that is exactly what
+/// `DurableLoopHostMilestoneSink` projects into the durable runtime event log
+/// (`RuntimeEventKind::ModelCallMetricsRecorded`); the milestone -> event ->
+/// page half of the path is pinned at the crate tier in `ironclaw_turn_runner`
+/// and `ironclaw_event_projections`.
+///
+/// Four scripted replies means four model calls, and each one must leave a
+/// record — a per-turn or per-run summary could not answer "which call paid the
+/// discovery round trip".
+#[tokio::test]
+async fn deferred_bridge_flow_records_disclosure_metrics_for_every_model_call() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script(deferred_bridge_script())
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+    let baseline = harness
+        .milestone_len()
+        .await
+        .expect("milestone baseline reads");
+
+    harness
+        .submit_turn("get the ironclaw repo")
+        .await
+        .expect("turn completes");
+    assert_deferred_bridge_flow(&harness).await;
+
+    let records = harness
+        .assert_model_call_metrics_recorded_since(baseline, deferred_bridge_script().len())
+        .await
+        .expect("one metrics record per model call");
+
+    for record in &records {
+        assert!(
+            !record.requested_model.as_str().is_empty(),
+            "the run-profile query dimension must be populated on every record"
+        );
+    }
+
+    let disclosure: Vec<_> = records
+        .iter()
+        .filter_map(|record| record.disclosure)
+        .collect();
+    assert_eq!(
+        disclosure.len(),
+        records.len(),
+        "a bridged run must carry disclosure numbers on every model call, not just the first"
+    );
+
+    let first = disclosure.first().expect("at least one model call");
+    assert!(
+        first.deferred,
+        "a wide github catalog is over the caps, so the run must actually be deferring"
+    );
+    assert!(
+        first.full_tool_count > first.advertised_tool_count,
+        "deferral must advertise fewer tools ({}) than the authorized catalog holds ({})",
+        first.advertised_tool_count,
+        first.full_tool_count
+    );
+    assert!(
+        first.advertised_schema_tokens < first.full_schema_tokens,
+        "the recorded schema-token pair must show the saving disclosure exists for: \
+         advertised {} vs full {}",
+        first.advertised_schema_tokens,
+        first.full_schema_tokens
+    );
+    assert_eq!(
+        first.catalog_size_bucket(),
+        ironclaw_loop_contracts::CatalogSizeBucket::Wide,
+        "a 48-tool catalog is the wide cohort the rollout comparison is about"
+    );
+
+    // Counters are cumulative over the run, so the last record is the run
+    // total. The script searches once, describes once, then calls the target.
+    let last = disclosure.last().expect("at least one model call");
+    assert_eq!(
+        last.tool_search_count, 1,
+        "the one scripted tool_search must be counted exactly once"
+    );
+    assert_eq!(
+        last.empty_search_count, 0,
+        "a search that returned the target must not count as an empty search"
+    );
+    assert_eq!(
+        last.outside_surface_attempts, 0,
+        "every scripted target is on the authorized surface"
+    );
+    assert!(
+        last.promotions >= 1,
+        "calling a discovered deferred tool must be recorded as a promotion"
+    );
+    assert_eq!(
+        last.selected_result_rank,
+        Some(1),
+        "the target was the top-ranked search result, and the rank the model acted on \
+         is the retrieval-quality signal"
+    );
+}
+
+/// The counters must distinguish a search that found nothing and a call that
+/// aimed outside the authorized surface from a clean run — otherwise the
+/// rollout evidence cannot tell "disclosure worked" from "disclosure sent the
+/// model somewhere that does not exist".
+#[tokio::test]
+async fn empty_search_and_outside_surface_attempts_are_counted_separately() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "zzzznosuchtoolvocabulary", "limit": 5}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({
+                    "name": "nonexistent__tool",
+                    "arguments": "{}",
+                }),
+            ),
+            RebornScriptedReply::text("giving up"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+    let baseline = harness
+        .milestone_len()
+        .await
+        .expect("milestone baseline reads");
+
+    harness
+        .submit_turn("use a tool that does not exist")
+        .await
+        .expect("both misses stay recoverable and the turn completes");
+
+    let records = harness
+        .assert_model_call_metrics_recorded_since(baseline, 3)
+        .await
+        .expect("one metrics record per model call");
+    let last = records
+        .last()
+        .and_then(|record| record.disclosure)
+        .expect("bridged run records disclosure numbers");
+
+    assert_eq!(
+        last.tool_search_count, 1,
+        "the no-match search still counts as a search"
+    );
+    assert_eq!(
+        last.empty_search_count, 1,
+        "a search returning zero results is the no-match signal the corpus work needs"
+    );
+    assert_eq!(
+        last.outside_surface_attempts, 1,
+        "the call to a nonexistent tool must be recorded as an outside-surface attempt"
+    );
+    assert!(
+        last.recoveries >= 1,
+        "the outside-surface attempt was answered recoverably, not by ending the run"
+    );
+}

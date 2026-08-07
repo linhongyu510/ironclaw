@@ -843,6 +843,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         recovery_stage: None,
         recovery_class: None,
         recovery_disposition: None,
+        model_call_metrics: None,
     };
 
     let json = serde_json::to_string(&event).expect("serialize");

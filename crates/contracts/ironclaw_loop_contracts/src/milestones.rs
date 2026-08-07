@@ -13,6 +13,7 @@ use ironclaw_host_api::turn::{
     TurnId, TurnRunId, TurnScope,
 };
 
+use super::host::LoopModelUsage;
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
     LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRecoveryClass,
@@ -20,7 +21,38 @@ use super::host::{
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
+use crate::disclosure_metrics::ToolDisclosureCallMetrics;
 use crate::{LoopCompletionKind, LoopFailureKind};
+
+/// Cost, latency, and tool-disclosure measurements for one completed model
+/// call.
+///
+/// Everything here is either a number or a closed-vocabulary label, which is
+/// what allows a durable-event adapter to project it without a redaction
+/// review per field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallMetricsRecord {
+    /// Zero-based agent-loop iteration this call belongs to.
+    pub iteration: u32,
+    /// Requested run/model profile — the "run profile" rollout dimension.
+    pub requested_model: ModelProfileId,
+    /// Concrete provider model that served the call, when the gateway
+    /// reported one. Diagnostic evidence, never a routing input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Index into the ordered fallback chain. Nonzero means the call ran on a
+    /// fallback route rather than the primary — the observable retry signal.
+    pub fallback_index: u32,
+    /// `None` on success; the failure classification otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<AgentLoopHostErrorKind>,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+    /// Absent when tool disclosure was not in play for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<ToolDisclosureCallMetrics>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopHostMilestone {
@@ -95,6 +127,14 @@ pub enum LoopHostMilestoneKind {
     },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
+    },
+    /// Measurements for one completed model call, success or failure.
+    ///
+    /// Separate from `ModelCompleted`/`ModelFailed`, which are lifecycle
+    /// transitions the driver reacts to. This carries no authority and drives
+    /// no decision: it exists so the rollout numbers survive the process.
+    ModelCallMetricsRecorded {
+        record: ModelCallMetricsRecord,
     },
     CapabilityInvoked {
         activity_id: CapabilityActivityId,
@@ -282,6 +322,7 @@ impl LoopHostMilestoneKind {
             Self::CompactionCompleted { .. } => "compaction_completed",
             Self::CompactionFailed { .. } => "compaction_failed",
             Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
+            Self::ModelCallMetricsRecorded { .. } => "model_call_metrics_recorded",
             Self::AssistantReplyFinalized { .. } => "assistant_reply_finalized",
             Self::Blocked { .. } => "blocked",
             Self::Completed { .. } => "completed",
@@ -502,6 +543,14 @@ where
         reason_kind: AgentLoopHostErrorKind,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::ModelFailed { reason_kind })
+            .await
+    }
+
+    pub async fn model_call_metrics_recorded(
+        &self,
+        record: ModelCallMetricsRecord,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelCallMetricsRecorded { record })
             .await
     }
 

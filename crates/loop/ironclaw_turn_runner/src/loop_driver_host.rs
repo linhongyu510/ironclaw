@@ -281,6 +281,15 @@ fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
+    fn tool_disclosure_metrics(
+        &self,
+    ) -> Option<ironclaw_loop_contracts::ToolDisclosureCallMetrics> {
+        // MUST delegate: the default returns `None`, which would erase the
+        // disclosure rollout evidence for every run wrapped by this decorator
+        // without producing any error to notice.
+        self.inner.tool_disclosure_metrics()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
     }
@@ -1918,6 +1927,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        model_call_metrics_sink: Some(Arc::clone(&self.milestone_sink)),
                     },
                 ))
             } else {
@@ -1937,6 +1947,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        model_call_metrics_sink: Some(Arc::clone(&self.milestone_sink)),
                     },
                 ))
             };
@@ -2197,6 +2208,15 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
+    fn tool_disclosure_metrics(
+        &self,
+    ) -> Option<ironclaw_loop_contracts::ToolDisclosureCallMetrics> {
+        // MUST delegate: the default returns `None`, which would erase the
+        // disclosure rollout evidence for every run wrapped by this decorator
+        // without producing any error to notice.
+        self.capabilities.tool_disclosure_metrics()
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.capabilities.tool_definitions()
     }

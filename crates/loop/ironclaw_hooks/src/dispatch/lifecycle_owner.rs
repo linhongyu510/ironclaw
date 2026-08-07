@@ -82,7 +82,10 @@ pub(crate) fn is_lifecycle_kind(kind: RuntimeEventKind) -> bool {
         | RuntimeEventKind::ProcessCompleted
         | RuntimeEventKind::ProcessFailed
         | RuntimeEventKind::ProcessKilled
-        | RuntimeEventKind::FailureRecovered => false,
+        | RuntimeEventKind::FailureRecovered
+        // Loop-host measurement. It carries no hook identity, so its owner is
+        // never registry-resolved.
+        | RuntimeEventKind::ModelCallMetricsRecorded => false,
     }
 }
 

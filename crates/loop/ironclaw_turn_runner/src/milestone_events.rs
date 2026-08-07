@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_event_log::{DurableEventLog, EventError, RuntimeEvent, RuntimeEventId};
+use ironclaw_event_log::{
+    DurableEventLog, EventError, ModelCallMetrics, ModelCallOutcome, RuntimeEvent, RuntimeEventId,
+    ToolDisclosureMetrics,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
-    LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, ModelCallMetricsRecord,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::TurnRunId;
@@ -34,6 +37,49 @@ fn recovery_event_id(run_id: TurnRunId, sequence: u64) -> RuntimeEventId {
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     RuntimeEventId::from_bytes(bytes)
+}
+
+/// Project a loop-tier model-call measurement onto the durable event wire.
+///
+/// The two shapes are deliberately separate types: the loop tier speaks in
+/// typed profile ids and error kinds, while the event log speaks in sanitized
+/// labels it can guarantee are redaction-safe. This is the conversion, and it
+/// is the only place the two vocabularies meet.
+fn model_call_metrics(record: &ModelCallMetricsRecord) -> ModelCallMetrics {
+    let usage = record.usage.unwrap_or_default();
+    ModelCallMetrics {
+        iteration: record.iteration,
+        requested_model: record.requested_model.as_str().to_string(),
+        effective_model: record.effective_model.clone(),
+        fallback_index: record.fallback_index,
+        outcome: match record.failure_kind {
+            Some(_) => ModelCallOutcome::Failed,
+            None => ModelCallOutcome::Succeeded,
+        },
+        failure_kind: record.failure_kind.map(|kind| kind.as_str().to_string()),
+        duration_ms: record.duration_ms,
+        prompt_tokens: u64::from(usage.input_tokens),
+        cached_prompt_tokens: u64::from(usage.cache_read_input_tokens),
+        cache_creation_tokens: u64::from(usage.cache_creation_input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        disclosure: record
+            .disclosure
+            .as_ref()
+            .map(|disclosure| ToolDisclosureMetrics {
+                deferred: disclosure.deferred,
+                full_tool_count: disclosure.full_tool_count,
+                advertised_tool_count: disclosure.advertised_tool_count,
+                full_schema_tokens: disclosure.full_schema_tokens,
+                advertised_schema_tokens: disclosure.advertised_schema_tokens,
+                catalog_size_bucket: disclosure.catalog_size_bucket().as_str().to_string(),
+                tool_search_count: disclosure.tool_search_count,
+                empty_search_count: disclosure.empty_search_count,
+                selected_result_rank: disclosure.selected_result_rank,
+                promotions: disclosure.promotions,
+                recoveries: disclosure.recoveries,
+                outside_surface_attempts: disclosure.outside_surface_attempts,
+            }),
+    }
 }
 
 /// Scope authority bound into the sink at construction time.
@@ -218,6 +264,21 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(MODEL_CAPABILITY_ID)?,
                 reason_kind.as_str(),
             ),
+            // Measurement, not a lifecycle transition. It is projected here
+            // rather than kept in the milestone substrate (the default for
+            // counter-carrying milestones) because rollout evidence is
+            // worthless if it dies with the process: internal production has
+            // been running progressive tool disclosure with nothing durable
+            // behind it. The record is numbers plus closed-vocabulary labels
+            // only, so it carries no prompt, query, tool name, or schema into
+            // the event log.
+            LoopHostMilestoneKind::ModelCallMetricsRecorded { record } => {
+                RuntimeEvent::model_call_metrics_recorded(
+                    scope,
+                    capability_id(MODEL_CAPABILITY_ID)?,
+                    model_call_metrics(record),
+                )
+            }
             LoopHostMilestoneKind::CapabilityInvoked {
                 activity_id,
                 capability_id,
@@ -416,8 +477,9 @@ mod tests {
         runtime::RuntimeKind,
     };
     use ironclaw_loop_contracts::{
-        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
-        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
+        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopModelUsage, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary, ModelProfileId,
+        ToolDisclosureCallMetrics,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
@@ -463,6 +525,128 @@ mod tests {
         )
         .expect("durable milestone scope requires owner user — fixture supplies one");
         DurableLoopHostMilestoneSink::new(event_log, milestone_scope)
+    }
+
+    /// Rollout evidence (#7166 §5): a model-call measurement must reach the
+    /// durable event log with every query dimension intact. If any of these
+    /// fields is dropped in the projection, the metrics are still "recorded"
+    /// but no longer answer the question they exist for.
+    #[test]
+    fn model_call_metrics_milestone_projects_every_query_dimension() {
+        let disclosure = ToolDisclosureCallMetrics {
+            deferred: true,
+            full_tool_count: 48,
+            advertised_tool_count: 4,
+            full_schema_tokens: 12_000,
+            advertised_schema_tokens: 1_956,
+            tool_search_count: 3,
+            empty_search_count: 1,
+            selected_result_rank: Some(2),
+            promotions: 1,
+            recoveries: 2,
+            outside_surface_attempts: 1,
+        };
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::ModelCallMetricsRecorded {
+                record: ModelCallMetricsRecord {
+                    iteration: 7,
+                    requested_model: ModelProfileId::new("balanced").expect("model profile id"),
+                    effective_model: Some("provider/model-x".to_string()),
+                    fallback_index: 1,
+                    failure_kind: None,
+                    duration_ms: 1_234,
+                    usage: Some(LoopModelUsage {
+                        input_tokens: 900,
+                        output_tokens: 120,
+                        cache_read_input_tokens: 700,
+                        cache_creation_input_tokens: 40,
+                    }),
+                    disclosure: Some(disclosure),
+                },
+            });
+        let sink = projector_for(thread_id, run_id);
+
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("metrics milestone projects")
+            .expect("metrics milestone produces an event");
+
+        assert_eq!(event.kind, RuntimeEventKind::ModelCallMetricsRecorded);
+        let metrics = event
+            .model_call_metrics
+            .as_ref()
+            .expect("a metrics event must carry its payload");
+        assert_eq!(metrics.iteration, 7);
+        assert_eq!(metrics.requested_model, "balanced");
+        assert_eq!(metrics.effective_model.as_deref(), Some("provider/model-x"));
+        assert_eq!(metrics.fallback_index, 1, "route retries must survive");
+        assert_eq!(metrics.outcome, ModelCallOutcome::Succeeded);
+        assert_eq!(metrics.failure_kind, None);
+        assert_eq!(metrics.duration_ms, 1_234);
+        assert_eq!(metrics.prompt_tokens, 900);
+        assert_eq!(metrics.cached_prompt_tokens, 700);
+        assert_eq!(metrics.cache_creation_tokens, 40);
+        assert_eq!(metrics.output_tokens, 120);
+
+        let projected = metrics
+            .disclosure
+            .as_ref()
+            .expect("a bridged call must carry disclosure numbers");
+        assert_eq!(projected.full_tool_count, 48);
+        assert_eq!(projected.advertised_tool_count, 4);
+        assert_eq!(projected.full_schema_tokens, 12_000);
+        assert_eq!(projected.advertised_schema_tokens, 1_956);
+        assert_eq!(
+            projected.catalog_size_bucket, "wide",
+            "the catalog cohort is carried, not left for the reader to re-derive"
+        );
+        assert_eq!(projected.tool_search_count, 3);
+        assert_eq!(projected.empty_search_count, 1);
+        assert_eq!(projected.selected_result_rank, Some(2));
+        assert_eq!(projected.promotions, 1);
+        assert_eq!(projected.recoveries, 2);
+        assert_eq!(projected.outside_surface_attempts, 1);
+    }
+
+    /// A failed model call is the one the rollout most needs to see — timeouts
+    /// and throttling only show up there. `ModelCompleted` never fires for it,
+    /// so the metrics event has to carry the failure itself.
+    #[test]
+    fn failed_model_call_metrics_record_their_failure_classification() {
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::ModelCallMetricsRecorded {
+                record: ModelCallMetricsRecord {
+                    iteration: 0,
+                    requested_model: ModelProfileId::new("balanced").expect("model profile id"),
+                    effective_model: None,
+                    fallback_index: 0,
+                    failure_kind: Some(AgentLoopHostErrorKind::Unavailable),
+                    duration_ms: 30_000,
+                    usage: None,
+                    disclosure: None,
+                },
+            });
+        let sink = projector_for(thread_id, run_id);
+
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("metrics milestone projects")
+            .expect("metrics milestone produces an event");
+        let metrics = event
+            .model_call_metrics
+            .as_ref()
+            .expect("a metrics event must carry its payload");
+
+        assert_eq!(metrics.outcome, ModelCallOutcome::Failed);
+        assert_eq!(metrics.failure_kind.as_deref(), Some("unavailable"));
+        assert_eq!(
+            metrics.prompt_tokens, 0,
+            "absent usage records as zero, not as a missing call"
+        );
+        assert!(
+            metrics.disclosure.is_none(),
+            "no disclosure on this call is a distinct finding from zeroed counters"
+        );
     }
 
     #[test]

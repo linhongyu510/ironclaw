@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use crate::{CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter};
@@ -15,7 +18,7 @@ use ironclaw_loop_contracts::{
     CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    ToolDisclosureCallMetrics, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
@@ -82,7 +85,82 @@ impl ToolDisclosureCapabilityDecorator {
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
+            counters: DisclosureRunCounters::default(),
         })
+    }
+}
+
+/// Run-scoped disclosure counters.
+///
+/// Deliberately outside [`ToolDisclosureTurnState`]: that state is rebuilt
+/// whenever the authorized surface fingerprint changes mid-turn (an activated
+/// extension, a completed OAuth connect), and a counter that resets on a
+/// surface refresh would silently under-report exactly the runs where the most
+/// discovery happened. Atomics rather than a mutex so recording a measurement
+/// can never contend with, or deadlock against, the turn-state lock.
+#[derive(Debug, Default)]
+struct DisclosureRunCounters {
+    tool_search_count: AtomicU32,
+    empty_search_count: AtomicU32,
+    /// 1-based rank of the most recent ranked selection; 0 means "none yet",
+    /// which is why the accessor maps 0 back to `None`.
+    selected_result_rank: AtomicU32,
+    promotions: AtomicU32,
+    recoveries: AtomicU32,
+    outside_surface_attempts: AtomicU32,
+}
+
+impl DisclosureRunCounters {
+    fn increment(counter: &AtomicU32) {
+        // Saturating: a counter that wrapped would read as a *lower* number and
+        // quietly understate a pathological run — the one case an operator most
+        // needs to see.
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        });
+    }
+
+    fn record_search(&self, empty_result: bool) {
+        Self::increment(&self.tool_search_count);
+        if empty_result {
+            Self::increment(&self.empty_search_count);
+        }
+    }
+
+    fn record_selected_rank(&self, rank: usize) {
+        let rank = u32::try_from(rank).unwrap_or(u32::MAX);
+        self.selected_result_rank.store(rank, Ordering::Relaxed);
+    }
+
+    fn record_promotion(&self) {
+        Self::increment(&self.promotions);
+    }
+
+    fn record_recovery(&self) {
+        Self::increment(&self.recoveries);
+    }
+
+    /// A search/describe/call that named a tool the authorized surface does not
+    /// expose. Also counted as a recovery: the model got a correctable outcome
+    /// rather than a dead run.
+    fn record_outside_surface_attempt(&self) {
+        Self::increment(&self.outside_surface_attempts);
+        Self::increment(&self.recoveries);
+    }
+
+    fn snapshot(&self) -> (u32, u32, Option<u32>, u32, u32, u32) {
+        let selected_result_rank = match self.selected_result_rank.load(Ordering::Relaxed) {
+            0 => None,
+            rank => Some(rank),
+        };
+        (
+            self.tool_search_count.load(Ordering::Relaxed),
+            self.empty_search_count.load(Ordering::Relaxed),
+            selected_result_rank,
+            self.promotions.load(Ordering::Relaxed),
+            self.recoveries.load(Ordering::Relaxed),
+            self.outside_surface_attempts.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -100,6 +178,7 @@ struct ToolDisclosureCapabilityPort {
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
+    counters: DisclosureRunCounters,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +266,37 @@ impl PromotionScopeKey {
 
 #[async_trait]
 impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
+    fn tool_disclosure_metrics(&self) -> Option<ToolDisclosureCallMetrics> {
+        // Read-only. Every number here was already computed for the shadow
+        // logs; this returns them instead of recomputing, so the durable
+        // record and the log line can never disagree.
+        let guard = self.turn_state().ok()?;
+        let state = guard.as_ref()?;
+        let (full_tool_count, full_schema_tokens) = state.catalog.effective_metrics(&self.policy);
+        let (
+            tool_search_count,
+            empty_search_count,
+            selected_result_rank,
+            promotions,
+            recoveries,
+            outside_surface_attempts,
+        ) = self.counters.snapshot();
+        Some(ToolDisclosureCallMetrics {
+            deferred: state.active.deferred,
+            full_tool_count: u32::try_from(full_tool_count).unwrap_or(u32::MAX),
+            advertised_tool_count: u32::try_from(state.active.definitions.len())
+                .unwrap_or(u32::MAX),
+            full_schema_tokens,
+            advertised_schema_tokens: state.active.advertised_tokens,
+            tool_search_count,
+            empty_search_count,
+            selected_result_rank,
+            promotions,
+            recoveries,
+            outside_surface_attempts,
+        })
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let state = self.turn_state()?;
         let Some(state) = state.as_ref() else {
@@ -701,7 +811,9 @@ impl ToolDisclosureCapabilityPort {
         let Some((name, selected_rank)) = target else {
             return Ok(());
         };
+        self.counters.record_promotion();
         if let Some(selected_rank) = selected_rank {
+            self.counters.record_selected_rank(selected_rank);
             debug!(
                 target: "ironclaw::reborn::tool_search",
                 selected_rank,
@@ -911,6 +1023,10 @@ impl ToolDisclosureCapabilityPort {
         replay_tool_name: ProviderToolName,
         target_name: &str,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        // Describe-first turns a blind call that would have failed validation
+        // into a schema the model can retry against — a recovery, and the one
+        // the missing-id loop used to die on.
+        self.counters.record_recovery();
         let Some(definition) = bridge_tool_definitions()
             .into_iter()
             .find(|definition| definition.name.as_str() == TOOL_DESCRIBE_NAME)
@@ -975,13 +1091,17 @@ impl ToolDisclosureCapabilityPort {
             BridgeKind::Describe => self.invoke_tool_describe(&request, &bridge).await,
             BridgeKind::DescribeFirst => self.invoke_describe_first(&request, &bridge).await,
             BridgeKind::Call if decode_tool_call_arguments(&bridge.arguments).is_none() => {
+                self.counters.record_recovery();
                 Ok(failed_invalid_input(
                     "tool_call arguments must be a JSON object encoded as a string",
                 ))
             }
-            BridgeKind::Call => Ok(failed_invalid_input(
-                "tool_call target is not a known tool; use tool_search to find the correct tool name",
-            )),
+            BridgeKind::Call => {
+                self.counters.record_outside_surface_attempt();
+                Ok(failed_invalid_input(
+                    "tool_call target is not a known tool; use tool_search to find the correct tool name",
+                ))
+            }
         }
     }
 
@@ -1014,6 +1134,7 @@ impl ToolDisclosureCapabilityPort {
             };
             let search_started_at = std::time::Instant::now();
             let outcome = state.search_index.search(query, limit);
+            self.counters.record_search(outcome.names.is_empty());
             debug!(
                 target: "ironclaw::reborn::tool_search",
                 query_class = outcome.query_class.as_str(),
@@ -1065,14 +1186,20 @@ impl ToolDisclosureCapabilityPort {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
             let Some(result) = state.catalog.search_result(name) else {
+                self.counters.record_outside_surface_attempt();
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
             };
             // #5712: same message as a truly unknown name — a narrowed profile
             // must not learn that a non-allowlisted tool exists.
             if !self.policy.permits_capability_id(&result.capability_id) {
+                // Counted the same as a truly unknown name. The counter is
+                // host-side telemetry, not a model-visible signal, so it cannot
+                // become the existence oracle the shared message avoids.
+                self.counters.record_outside_surface_attempt();
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
             }
             if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
+                self.counters.record_selected_rank(selected_rank);
                 debug!(
                     target: "ironclaw::reborn::tool_search",
                     selected_rank,
@@ -3569,6 +3696,7 @@ mod tests {
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
+            counters: DisclosureRunCounters::default(),
         }
     }
 

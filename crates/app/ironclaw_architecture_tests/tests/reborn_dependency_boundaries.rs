@@ -628,7 +628,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // CapabilitySurfacePolicy and capability-id scope algebra are neutral
         // host declarations; enforcement remains in host_runtime/loop_host.
         ("ironclaw_host_api", 18_784),
-        ("ironclaw_loop_contracts", 14_479),
+        // Raised 14_479 -> 14_530 by #7166 §5 (queryable rollout metrics): the
+        // growth is the `disclosure_metrics` vocabulary — a numbers-only
+        // per-model-call measurement DTO, its catalog-size bucket enum, and the
+        // milestone record that carries them. Declarations only; the counters
+        // are computed in ironclaw_loop_host and projected in
+        // ironclaw_turn_runner / ironclaw_event_projections.
+        ("ironclaw_loop_contracts", 14_530),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

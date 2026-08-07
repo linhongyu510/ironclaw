@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
 use crate::content_digest::ContentDigest;
+use crate::disclosure_metrics::ToolDisclosureCallMetrics;
 use crate::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopResultRef};
 
@@ -546,6 +547,18 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
+    }
+
+    /// Progressive-tool-disclosure measurements for the surface this port is
+    /// currently presenting, or `None` when disclosure is not in play.
+    ///
+    /// Read-only observation of numbers the port already computed — never a
+    /// recomputation and never an authority. Any port that wraps another MUST
+    /// delegate this: a decorator that silently keeps the default `None`
+    /// erases the rollout evidence for every run that goes through it, and
+    /// does so without any error to notice.
+    fn tool_disclosure_metrics(&self) -> Option<ToolDisclosureCallMetrics> {
+        None
     }
 
     fn provider_tool_call_capability_ids(

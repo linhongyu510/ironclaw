@@ -30,8 +30,14 @@ use thiserror::Error;
 
 pub use ironclaw_event_log::EventCursor;
 
+mod model_call_metrics;
 mod runtime_checkpoint_cache;
 mod runtime_projection;
+use model_call_metrics::project_model_call_metrics;
+pub use model_call_metrics::{
+    ModelCallMetricsAggregate, ModelCallMetricsEntry, ModelCallMetricsGroupKey,
+    ModelCallMetricsPage,
+};
 use runtime_checkpoint_cache::{RuntimeProjectionCheckpointCache, after_for_checkpoint};
 use runtime_projection::{RuntimeProjectionState, capability_activity_transition_for_entry};
 
@@ -232,6 +238,7 @@ pub enum TimelineEntryKind {
     HookDecisionEmitted,
     HookFailed,
     FailureRecovered,
+    ModelCallMetricsRecorded,
 }
 
 impl From<RuntimeEventKind> for TimelineEntryKind {
@@ -259,6 +266,7 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::HookDecisionEmitted => Self::HookDecisionEmitted,
             RuntimeEventKind::HookFailed => Self::HookFailed,
             RuntimeEventKind::FailureRecovered => Self::FailureRecovered,
+            RuntimeEventKind::ModelCallMetricsRecorded => Self::ModelCallMetricsRecorded,
         }
     }
 }
@@ -638,6 +646,25 @@ pub trait EventProjectionService: Send + Sync {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError>;
+
+    /// Per-model-call rollout evidence for the requested scope and window.
+    ///
+    /// Separate from `snapshot`/`updates` on purpose: those are live product
+    /// projections on the request path, while this is an operator/analysis
+    /// read. Keeping it apart means adding measurement dimensions never
+    /// widens the payload every product transport already ships.
+    ///
+    /// The default refuses loudly rather than returning an empty page: a
+    /// service that cannot answer must say so, because "no metrics" and "zero
+    /// model calls" are conclusions an operator would act on very differently.
+    async fn model_call_metrics(
+        &self,
+        _request: ProjectionRequest,
+    ) -> Result<ModelCallMetricsPage, ProjectionError> {
+        Err(ProjectionError::InvalidRequest {
+            reason: "this projection service does not serve model-call metrics",
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -960,6 +987,20 @@ impl EventProjectionService for ReplayEventProjectionService {
             capability_activity_transitions,
             runs,
             capability_activities,
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+        })
+    }
+
+    async fn model_call_metrics(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ModelCallMetricsPage, ProjectionError> {
+        let page = self.read_runtime(request).await?;
+        let (entries, completed_run_ids) = project_model_call_metrics(&page.entries);
+        Ok(ModelCallMetricsPage {
+            entries,
+            completed_run_ids,
             next_cursor: page.next_cursor,
             truncated: page.truncated,
         })

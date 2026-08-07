@@ -1080,6 +1080,45 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the production loop host published one durable-bound
+    /// `ModelCallMetricsRecorded` measurement per model call, and hand the
+    /// disclosure half of those records back for per-field assertions.
+    ///
+    /// This is the seam the durable event log is fed from
+    /// (`DurableLoopHostMilestoneSink::runtime_event_for_milestone` projects
+    /// this exact milestone into `RuntimeEventKind::ModelCallMetricsRecorded`),
+    /// so asserting here proves the production path produces the evidence —
+    /// not merely that a helper can compute it.
+    pub async fn assert_model_call_metrics_recorded_since(
+        &self,
+        baseline: usize,
+        expected_model_calls: usize,
+    ) -> HarnessResult<Vec<ironclaw_loop_contracts::ModelCallMetricsRecord>> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        let records: Vec<_> = since
+            .iter()
+            .filter_map(|milestone| match &milestone.kind {
+                LoopHostMilestoneKind::ModelCallMetricsRecorded { record } => Some(record.clone()),
+                _ => None,
+            })
+            .collect();
+        if records.len() != expected_model_calls {
+            return Err(format!(
+                "expected {expected_model_calls} model-call metrics records since baseline                  {baseline}, saw {}",
+                records.len()
+            )
+            .into());
+        }
+        Ok(records)
+    }
+
     /// Assert the always-wired security-audit recorder captured an event with
     /// the expected stable boundary/decision/code tuple.
     pub async fn assert_security_audit_event_recorded(

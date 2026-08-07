@@ -7,9 +7,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
-    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority,
+    InstructionMaterializationStore, LoopCapabilityPort, LoopHostMilestoneSink, LoopModelGateway,
+    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+    LoopModelResponse, LoopPromptBundleAuthority,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -41,6 +41,11 @@ where
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    /// Run milestone sink, used ONLY for the per-model-call metrics record.
+    /// The inner model port is where the disclosure numbers are reachable, but
+    /// it must not also republish the lifecycle milestones the outer port
+    /// already owns — see `ThreadBackedLoopModelPort::model_call_metrics_sink`.
+    pub model_call_metrics_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
 
 /// Resolves a thread's transcript into a host-managed model request.
@@ -68,6 +73,7 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    model_call_metrics_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -89,6 +95,7 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            model_call_metrics_sink,
         } = parts;
         Self {
             thread_service,
@@ -103,6 +110,7 @@ where
             context_window_cache,
             attachment_read_port,
             prompt_diagnostic_sink,
+            model_call_metrics_sink,
         }
     }
 }
@@ -167,6 +175,9 @@ where
         }
         if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
             model_port = model_port.with_prompt_diagnostic_sink(Arc::clone(sink));
+        }
+        if let Some(sink) = self.model_call_metrics_sink.as_ref() {
+            model_port = model_port.with_model_call_metrics_sink(Arc::clone(sink));
         }
         if let Some(progress_sink) = progress_sink {
             model_port = model_port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {

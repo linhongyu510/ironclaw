@@ -27,6 +27,7 @@ mod checkpoint_payload;
 mod compaction;
 mod content_digest;
 mod context_budget;
+mod disclosure_metrics;
 mod driver;
 mod host;
 mod instruction_bundle;
@@ -54,6 +55,7 @@ pub use compaction::{
 };
 pub use content_digest::{ContentDigest, ContentDigestError, normalize_for_hash};
 pub use context_budget::PromptContextTokenBudget;
+pub use disclosure_metrics::{CatalogSizeBucket, ToolDisclosureCallMetrics};
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest,
@@ -102,8 +104,8 @@ pub use memory_context::{
 pub use milestones::{
     HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,
     InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,
-    LoopHostMilestoneKind, LoopHostMilestoneSink, PromptSkillContextMetadata,
-    RunScopedHookMilestoneSink,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, ModelCallMetricsRecord,
+    PromptSkillContextMetadata, RunScopedHookMilestoneSink,
 };
 pub use model::{
     LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,

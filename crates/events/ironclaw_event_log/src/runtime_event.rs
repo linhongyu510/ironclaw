@@ -67,6 +67,122 @@ pub enum RuntimeEventKind {
     HookDecisionEmitted,
     HookFailed,
     FailureRecovered,
+    /// One completed model call's cost/latency/tool-disclosure measurements.
+    ///
+    /// Deliberately separate from [`Self::ModelCompleted`]: that event is a
+    /// lifecycle transition and is emitted only on success, while rollout
+    /// evidence has to include the failed calls (that is where timeouts,
+    /// throttling, and invalid-output loops show up). One event per model
+    /// call, so "model calls per completed task" is a count of these under a
+    /// run whose [`Self::LoopCompleted`] is present.
+    ModelCallMetricsRecorded,
+}
+
+/// Whether the model call this record describes returned a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallOutcome {
+    Succeeded,
+    Failed,
+}
+
+impl ModelCallOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Progressive-tool-disclosure measurements for one model call, in durable
+/// wire form.
+///
+/// Numbers and closed-vocabulary labels only — no tool names, no search
+/// queries, no schemas, no descriptions. That is what makes this record
+/// admissible in the redaction-bound runtime event log.
+///
+/// Counters are cumulative over the run, so a per-call delta is a subtraction
+/// between consecutive records and a per-run total is the last record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDisclosureMetrics {
+    /// Whether this call actually deferred rather than advertising the full
+    /// surface flat. Disclosure can be wired but inert below the caps.
+    pub deferred: bool,
+    /// Authorized, policy-effective tool count before narrowing.
+    pub full_tool_count: u32,
+    /// Tool count actually advertised to the provider on this call.
+    pub advertised_tool_count: u32,
+    /// Estimated schema tokens for the full authorized surface.
+    pub full_schema_tokens: u32,
+    /// Estimated schema tokens actually advertised on this call.
+    pub advertised_schema_tokens: u32,
+    /// Coarse catalog-size cohort, one of the three rollout query dimensions.
+    /// Carried rather than re-derived so a bucket-definition change cannot
+    /// silently re-cohort already-recorded history.
+    pub catalog_size_bucket: String,
+    pub tool_search_count: u32,
+    pub empty_search_count: u32,
+    /// 1-based rank of the most recently selected deferred tool within its
+    /// originating search result list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_result_rank: Option<u32>,
+    pub promotions: u32,
+    pub recoveries: u32,
+    pub outside_surface_attempts: u32,
+}
+
+/// Cost, latency, and disclosure measurements for one completed model call.
+///
+/// Attached to a [`RuntimeEventKind::ModelCallMetricsRecorded`] event. Model
+/// identifiers are sanitized telemetry labels, not routing authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallMetrics {
+    /// Zero-based agent-loop iteration this call belongs to.
+    pub iteration: u32,
+    /// Requested run-profile / model-profile label — the "run profile" query
+    /// dimension.
+    pub requested_model: String,
+    /// Concrete provider model that handled the call — the "model" query
+    /// dimension. Absent when the gateway could not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Index into the ordered fallback chain used for this call. A nonzero
+    /// value is a route retry: the call ran on a fallback route rather than
+    /// the primary.
+    pub fallback_index: u32,
+    pub outcome: ModelCallOutcome,
+    /// Closed-vocabulary failure classification when `outcome` is `Failed`.
+    /// Timeout-class failures land in the transient/unavailable labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    /// Wall-clock latency of the call as measured at the loop-host boundary.
+    pub duration_ms: u64,
+    pub prompt_tokens: u64,
+    /// Prompt tokens served from the provider's cache.
+    pub cached_prompt_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub output_tokens: u64,
+    /// Absent when tool disclosure was not in play for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<ToolDisclosureMetrics>,
+}
+
+impl ModelCallMetrics {
+    /// Re-run the label guards. Called on every wire crossing so a directly
+    /// constructed value cannot smuggle raw text through the durable log,
+    /// matching the `error_kind` treatment on [`RuntimeEvent`].
+    fn sanitized(&self) -> Self {
+        let mut sanitized = self.clone();
+        sanitized.requested_model = sanitize_model_label(sanitized.requested_model);
+        sanitized.effective_model = sanitized.effective_model.map(sanitize_model_label);
+        sanitized.failure_kind = sanitized.failure_kind.map(sanitize_error_kind);
+        if let Some(disclosure) = sanitized.disclosure.as_mut() {
+            disclosure.catalog_size_bucket =
+                sanitize_telemetry_label(std::mem::take(&mut disclosure.catalog_size_bucket));
+        }
+        sanitized
+    }
 }
 
 /// Redacted runtime event payload.
@@ -129,6 +245,9 @@ pub struct RuntimeEvent {
     pub recovery_class: Option<String>,
     /// Closed-vocabulary recovery action (`retried` or `model_visible`).
     pub recovery_disposition: Option<String>,
+    /// Cost/latency/tool-disclosure measurements. Present only on
+    /// [`RuntimeEventKind::ModelCallMetricsRecorded`].
+    pub model_call_metrics: Option<ModelCallMetrics>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -170,6 +289,8 @@ struct RuntimeEventWire {
     recovery_class: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_call_metrics: Option<ModelCallMetrics>,
 }
 
 impl Serialize for RuntimeEvent {
@@ -212,6 +333,10 @@ impl Serialize for RuntimeEvent {
                 .recovery_disposition
                 .clone()
                 .map(sanitize_telemetry_label),
+            model_call_metrics: self
+                .model_call_metrics
+                .as_ref()
+                .map(ModelCallMetrics::sanitized),
         };
         wire.serialize(serializer)
     }
@@ -269,6 +394,8 @@ struct TrustedRuntimeEventWire {
     recovery_class: Option<String>,
     #[serde(default)]
     recovery_disposition: Option<String>,
+    #[serde(default)]
+    model_call_metrics: Option<ModelCallMetrics>,
 }
 
 impl RuntimeEventWire {
@@ -299,6 +426,10 @@ impl RuntimeEventWire {
             recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
             recovery_class: self.recovery_class.map(sanitize_telemetry_label),
             recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
+            model_call_metrics: self
+                .model_call_metrics
+                .as_ref()
+                .map(ModelCallMetrics::sanitized),
         }
     }
 }
@@ -331,6 +462,10 @@ impl TrustedRuntimeEventWire {
             recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
             recovery_class: self.recovery_class.map(sanitize_telemetry_label),
             recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
+            model_call_metrics: self
+                .model_call_metrics
+                .as_ref()
+                .map(ModelCallMetrics::sanitized),
         }
     }
 }
@@ -664,7 +799,26 @@ impl RuntimeEvent {
             recovery_stage: None,
             recovery_class: None,
             recovery_disposition: None,
+            model_call_metrics: None,
         }
+    }
+
+    /// One completed model call's measurements.
+    ///
+    /// Best-effort observability: callers append it outside the run's success
+    /// path so a failed append cannot end a run that otherwise succeeded.
+    pub fn model_call_metrics_recorded(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        metrics: ModelCallMetrics,
+    ) -> Self {
+        let mut event = Self::new_metadata_only(
+            RuntimeEventKind::ModelCallMetricsRecorded,
+            scope,
+            capability_id,
+        );
+        event.model_call_metrics = Some(metrics.sanitized());
+        event
     }
 
     pub fn capability_activity_requested(
@@ -1155,6 +1309,37 @@ pub fn sanitize_recovery_label(label: impl Into<String>) -> String {
     sanitize_telemetry_label(label)
 }
 
+/// Maximum length of a model identity label in a durable metrics record.
+const MAX_MODEL_LABEL_LEN: usize = 128;
+
+/// Collapse an unsafe model-identity label into the fixed `unclassified`
+/// token before it crosses a durable boundary.
+///
+/// Model identifiers are a wider vocabulary than the `lower_snake_case`
+/// telemetry labels — real provider model ids look like
+/// `anthropic/claude-opus-4.5` and would be destroyed by the stricter guard —
+/// so this allows ASCII alphanumerics plus `_ - . : /` only. Everything else
+/// (whitespace, quotes, control characters, anything non-ASCII) is rejected,
+/// which is what stops a label assembled from untrusted text from smuggling
+/// prose, a filesystem path fragment, or a token-shaped secret into the log.
+pub fn sanitize_model_label(label: impl Into<String>) -> String {
+    let value = label.into();
+    if is_safe_model_label(&value) {
+        value
+    } else {
+        UNCLASSIFIED_HOOK_LABEL.to_string()
+    }
+}
+
+fn is_safe_model_label(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_MODEL_LABEL_LEN {
+        return false;
+    }
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+    })
+}
+
 fn sanitize_telemetry_label(label: impl Into<String>) -> String {
     let value = label.into();
     if is_safe_telemetry_label(&value) {
@@ -1225,6 +1410,104 @@ mod tests {
         // 64-char lowercase hex matching the blake3 hook id shape produced by
         // `ironclaw_hooks::HookId::to_hex`.
         "0123456789abcdef".repeat(4)
+    }
+
+    fn sample_model_call_metrics() -> ModelCallMetrics {
+        ModelCallMetrics {
+            iteration: 3,
+            requested_model: "balanced".to_string(),
+            effective_model: Some("provider/model-x".to_string()),
+            fallback_index: 0,
+            outcome: ModelCallOutcome::Succeeded,
+            failure_kind: None,
+            duration_ms: 900,
+            prompt_tokens: 1_200,
+            cached_prompt_tokens: 1_000,
+            cache_creation_tokens: 50,
+            output_tokens: 80,
+            disclosure: Some(ToolDisclosureMetrics {
+                deferred: true,
+                full_tool_count: 48,
+                advertised_tool_count: 4,
+                full_schema_tokens: 12_000,
+                advertised_schema_tokens: 1_956,
+                catalog_size_bucket: "wide".to_string(),
+                tool_search_count: 2,
+                empty_search_count: 0,
+                selected_result_rank: Some(1),
+                promotions: 1,
+                recoveries: 0,
+                outside_surface_attempts: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn model_call_metrics_round_trip_through_the_durable_wire() {
+        let event = RuntimeEvent::model_call_metrics_recorded(
+            scope(),
+            capability(),
+            sample_model_call_metrics(),
+        );
+        let wire = serde_json::to_string(&event).expect("serialize metrics event");
+        let decoded =
+            runtime_event_from_trusted_json_str(&wire).expect("deserialize metrics event");
+
+        assert_eq!(decoded.kind, RuntimeEventKind::ModelCallMetricsRecorded);
+        assert_eq!(decoded.model_call_metrics, event.model_call_metrics);
+    }
+
+    /// Backward compatibility: every runtime event written before this field
+    /// existed must still decode. The durable log is an append-only JSON blob
+    /// stream with no migration, so a decode failure here would be an
+    /// unreadable history, not a degraded one.
+    #[test]
+    fn runtime_events_written_before_model_call_metrics_still_decode() {
+        let legacy = RuntimeEvent::model_completed(scope(), capability());
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&legacy).expect("serialize legacy event"))
+                .expect("legacy event is a JSON object");
+        assert!(
+            wire.get("model_call_metrics").is_none(),
+            "an event with no metrics must not write the field at all"
+        );
+        // Belt and braces: an explicitly absent field decodes the same way.
+        wire.as_object_mut()
+            .expect("legacy event is a JSON object")
+            .remove("model_call_metrics");
+
+        let decoded = runtime_event_from_trusted_json_str(&wire.to_string())
+            .expect("a pre-metrics event must still decode");
+        assert_eq!(decoded.kind, RuntimeEventKind::ModelCompleted);
+        assert_eq!(decoded.model_call_metrics, None);
+    }
+
+    /// The struct fields are `pub`, so an in-process caller can assign a raw
+    /// label directly. The redaction guard has to run on the wire crossing,
+    /// exactly as it does for `error_kind` — otherwise a model id assembled
+    /// from untrusted text could ride into the durable log unsanitized.
+    #[test]
+    fn model_call_metrics_labels_are_sanitized_on_the_way_out() {
+        let mut metrics = sample_model_call_metrics();
+        metrics.effective_model =
+            Some("provider model with spaces and /path/to/secret".to_string());
+        let mut event =
+            RuntimeEvent::model_call_metrics_recorded(scope(), capability(), metrics.clone());
+        // Bypass the constructor the way a direct struct assignment would.
+        event.model_call_metrics = Some(metrics);
+
+        let wire = serde_json::to_string(&event).expect("serialize metrics event");
+        let decoded =
+            runtime_event_from_trusted_json_str(&wire).expect("deserialize metrics event");
+        let effective_model = decoded
+            .model_call_metrics
+            .and_then(|metrics| metrics.effective_model)
+            .expect("effective model survives as a sanitized label");
+
+        assert_ne!(
+            effective_model, "provider model with spaces and /path/to/secret",
+            "an unsanitized label must not reach the durable wire verbatim"
+        );
     }
 
     #[test]

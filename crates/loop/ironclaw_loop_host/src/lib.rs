@@ -208,9 +208,9 @@ use ironclaw_loop_contracts::{
     LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
     LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
     LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
-    sort_instruction_snippets_for_prompt,
+    ModelCallMetricsRecord, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -1191,6 +1191,17 @@ where
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    /// Sink for the per-model-call metrics milestone only.
+    ///
+    /// Deliberately NOT `milestone_sink`: in the production assembly the
+    /// lifecycle milestones (`ModelStarted` / `ModelCompleted` / `ModelFailed`)
+    /// are published by the OUTER `HostManagedLoopModelPort`, which holds the
+    /// run's sink. Reusing `milestone_sink` here to reach that same sink would
+    /// double-publish every lifecycle transition and corrupt the run-status
+    /// projection. Disclosure numbers are only visible at this inner port (it
+    /// is the one holding `capabilities`), so the metrics milestone gets its
+    /// own, single-purpose channel.
+    model_call_metrics_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -1222,7 +1233,16 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            model_call_metrics_sink: None,
         }
+    }
+
+    /// Attach the sink that receives this port's per-model-call metrics
+    /// milestone. See the field docs for why it is separate from
+    /// `with_milestone_sink`.
+    pub fn with_model_call_metrics_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
+        self.model_call_metrics_sink = Some(sink);
+        self
     }
 
     pub fn with_milestone_sink(
@@ -1250,6 +1270,7 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            model_call_metrics_sink: None,
         }
     }
 
@@ -1414,6 +1435,12 @@ where
         // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
+        // Captured before the diagnostic block consumes the originals. The
+        // metrics record is emitted whether or not a diagnostic sink is
+        // configured, so it cannot borrow that block's sink-gated values.
+        let requested_model_profile_id_for_metrics = requested_model_profile_id
+            .clone()
+            .unwrap_or_else(|| model_profile_id.clone());
         let diagnostic_requested_model = self.prompt_diagnostic_sink.as_ref().map(|_| {
             requested_model_profile_id
                 .as_ref()
@@ -1537,6 +1564,8 @@ where
             self.gateway.stream_model(host_request).await
         };
 
+        let diagnostic_duration_ms =
+            u64::try_from(diagnostic_timer.elapsed().as_millis()).unwrap_or(u64::MAX);
         let diagnostic_effective_model = match &gateway_result {
             Ok(response) => response
                 .diagnostic_effective_model
@@ -1586,6 +1615,7 @@ where
             Err(error) => Err(model_gateway_error(error)),
         };
 
+        let diagnostic_effective_model_for_metrics = diagnostic_effective_model.clone();
         if let (Some(sink), Some((requested_model, _)), Some(call_id)) = (
             self.prompt_diagnostic_sink.as_ref(),
             diagnostic_model.as_ref(),
@@ -1619,11 +1649,24 @@ where
                     started_at: diagnostic_started_at,
                 },
                 completed_at: Utc::now(),
-                duration_ms: u64::try_from(diagnostic_timer.elapsed().as_millis())
-                    .unwrap_or(u64::MAX),
+                duration_ms: diagnostic_duration_ms,
                 outcome,
             });
         }
+
+        // Durable rollout evidence for this call, success or failure. Emitted
+        // before the lifecycle milestone so a call that ends the run still
+        // leaves its measurement behind; best-effort, so a sink failure is
+        // logged and never changes the call's outcome.
+        self.emit_model_call_metrics(
+            request.iteration,
+            requested_model_profile_id_for_metrics,
+            diagnostic_effective_model_for_metrics,
+            request.fallback_index,
+            &host_response_result,
+            diagnostic_duration_ms,
+        )
+        .await;
 
         match host_response_result {
             Ok(response) => {
@@ -1666,6 +1709,56 @@ where
                     "loop model_completed milestone failed after successful model response"
                 );
             }
+        }
+    }
+
+    /// Publish one model call's cost/latency/disclosure measurements.
+    ///
+    /// Best-effort observability, exactly like the lifecycle milestones next
+    /// to it: a failed publish is logged at debug and swallowed. Losing a
+    /// measurement is an evidence gap; failing the run over one would be a
+    /// self-inflicted outage caused by telemetry.
+    async fn emit_model_call_metrics(
+        &self,
+        iteration: u32,
+        requested_model: ModelProfileId,
+        effective_model: Option<String>,
+        fallback_index: u32,
+        result: &Result<LoopModelResponse, AgentLoopHostError>,
+        duration_ms: u64,
+    ) {
+        let Some(milestone_sink) = &self.model_call_metrics_sink else {
+            return;
+        };
+        let (failure_kind, usage) = match result {
+            Ok(response) => (None, response.usage),
+            Err(error) => (Some(error.kind), error.usage),
+        };
+        // Read the disclosure numbers the port already computed. A port that
+        // is not doing disclosure returns `None`, which is recorded as "no
+        // disclosure on this call" rather than as zeroed counters — the two
+        // are different findings for a rollout comparison.
+        let disclosure = self
+            .capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.tool_disclosure_metrics());
+        let record = ModelCallMetricsRecord {
+            iteration,
+            requested_model,
+            effective_model,
+            fallback_index,
+            failure_kind,
+            duration_ms,
+            usage: diagnostic_usage(usage),
+            disclosure,
+        };
+        let milestones =
+            LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
+        if let Err(error) = milestones.model_call_metrics_recorded(record).await {
+            tracing::debug!(
+                kind = ?error.kind,
+                "loop model call metrics milestone failed; rollout evidence for this call is lost"
+            );
         }
     }
 
