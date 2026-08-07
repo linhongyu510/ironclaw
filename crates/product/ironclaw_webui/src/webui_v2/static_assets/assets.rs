@@ -506,15 +506,19 @@ mod tests {
             source_text("pages/automations/components/automation-delivery-defaults-panel.tsx");
         assert!(defaults_panel.contains("finalReplyTargets"));
         assert!(defaults_panel.contains("saveFinalReplyTarget"));
-        // Badge label must branch on optStatus — unavailable targets must not
-        // display the "ready" label.
+        // Unavailable targets remain visible, but must be rendered outside the
+        // selectable target list with their unavailable status.
         assert!(
-            defaults_panel.contains("automations.delivery.pill.unavailable"),
-            "unavailable badge label key must be used in the target option rows"
+            defaults_panel.contains("!deliveryTargetIsUnavailable(option"),
+            "selectable delivery targets must exclude unavailable options"
         );
         assert!(
-            !defaults_panel.contains(r#"label={t("automations.delivery.pill.ready")}"#),
-            "target option badge label must not be unconditionally hardcoded to .pill.ready"
+            defaults_panel.contains("unavailableFinalReplyTargets.map"),
+            "unavailable delivery targets must remain visible as read-only rows"
+        );
+        assert!(
+            defaults_panel.contains(r#"label={t("automations.delivery.pill.unavailable")}"#),
+            "unavailable delivery target rows must carry the unavailable badge"
         );
 
         let defaults_hook = source_text("pages/automations/hooks/useOutboundDeliveryDefaults.ts");
