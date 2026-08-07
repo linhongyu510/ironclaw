@@ -124,20 +124,10 @@ function findByTestId(node, testId, seen = new Set()) {
   return null;
 }
 
-// `AuthPromptChallengeKind::OAuthUrl` deliberately permits an absent
-// `authorization_url` -- see the variant's contract in
-// `ironclaw_extension_contracts::auth_prompt`: "When the provider is
-// unavailable or unconfigured, the URL may be absent so UI can still render an
-// OAuth-specific unavailable state instead of the generic auth fallback."
-//
-// The one backend producer of that state is the blocked-auth fallback in
-// `ironclaw_auth::product_prompt::auth_prompt_from_credential_requirement`,
-// which stamps `OAuthUrl` from the persisted credential setup when the auth
-// engine could not mint a challenge (vendor unreachable, DCR failed, client
-// unconfigured). This card never implemented the unavailable state, so it
-// offered a live "Open <provider> authorization" button whose only possible
-// outcome was the post-click "Service unavailable" error -- the user could not
-// tell a working gate from a broken one until they clicked it.
+// The URL-less `oauth_url` state and why it exists are documented once, on
+// `unavailable` in auth-oauth-card.tsx. Keeping the contract quote in one place
+// means a change to the upstream wording cannot leave a stale copy here
+// asserting a permitted wire state that no longer is.
 test("AuthOauthCard renders an unavailable state when the gate carries no authorization url", () => {
   const { rendered, openCalls, openAuthPopupCalls } = renderCard({
     gate: defaultGate({ authorizationUrl: null }),

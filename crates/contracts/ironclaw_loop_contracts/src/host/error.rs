@@ -355,3 +355,42 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod reason_kind_tests {
+    use super::AgentLoopHostErrorReasonKind as R;
+
+    /// `as_str` is hand-written while serde derives `rename_all = "snake_case"`,
+    /// and `as_str` feeds user-visible `RuntimeEvent` payloads
+    /// (`milestone_events.rs`). Nothing compared the two sources, so a typo in
+    /// one would ship a wrong string with every routing test still green — those
+    /// compare enum variants, not text.
+    ///
+    /// The match is exhaustive on purpose: a new variant fails here until its
+    /// wire string is pinned.
+    #[test]
+    fn reason_kind_as_str_matches_its_serde_wire_string() {
+        for reason in [
+            R::ModelCreditsExhausted,
+            R::ModelProviderUnconfigured,
+            R::ModelProviderSessionUnavailable,
+        ] {
+            let expected = match reason {
+                R::ModelCreditsExhausted => "model_credits_exhausted",
+                R::ModelProviderUnconfigured => "model_provider_unconfigured",
+                R::ModelProviderSessionUnavailable => "model_provider_session_unavailable",
+            };
+            assert_eq!(reason.as_str(), expected, "as_str drifted for {reason:?}");
+
+            let serialized = serde_json::to_string(&reason).expect("reason kind serializes");
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "serde wire string drifted from as_str for {reason:?}"
+            );
+            let round_tripped: R =
+                serde_json::from_str(&serialized).expect("reason kind round-trips");
+            assert_eq!(round_tripped, reason);
+        }
+    }
+}

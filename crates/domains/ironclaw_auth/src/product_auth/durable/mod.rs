@@ -478,7 +478,10 @@ where
             Self::account_scopes_for_owner(&CredentialAccountOwnerScope::from_scope(scope))
         {
             if let Some(found) = self
-                .read_record(&candidate.resource, &account_path(&candidate, account_id)?)
+                .read_record(
+                    &candidate.resource,
+                    &account_path(&candidate.resource, account_id)?,
+                )
                 .await?
             {
                 return Ok(Some(found));
@@ -494,7 +497,7 @@ where
     ) -> Result<RecordVersion, AuthProductError> {
         self.write_record(
             &account.scope.resource,
-            &account_path(&account.scope, account.id)?,
+            &account_path(&account.scope.resource, account.id)?,
             account,
             cas,
         )
@@ -535,7 +538,7 @@ where
         scope: &crate::AuthProductScope,
         max_records: Option<usize>,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
-        let root = account_root(scope)?;
+        let root = account_root(&scope.resource)?;
         let entries = match max_records {
             Some(max_records) => {
                 self.filesystem
@@ -738,30 +741,28 @@ where
             if *budget == 0 {
                 break;
             }
-            scopes.extend(
-                self.legacy_account_scopes_under(owner, resource, budget)
-                    .await?,
-            );
+            scopes.extend(self.legacy_account_scopes_under(resource, budget).await?);
         }
         Ok(scopes)
     }
 
     async fn legacy_account_scopes_under(
         &self,
-        owner: &CredentialAccountOwnerScope,
         resource: ResourceScope,
         budget: &mut usize,
     ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
             scopes.push(crate::AuthProductScope::new(resource.clone(), surface));
-            if let Some(session_id) = &owner.session_id {
-                scopes.push(
-                    crate::AuthProductScope::new(resource.clone(), surface)
-                        .with_session_id(session_id.clone()),
-                );
-                continue;
-            }
+            // Always enumerate sessions from disk. This inherited the old
+            // steady-state read logic, which narrowed to the caller's own
+            // session when it had one — correct for a read, wrong for a
+            // one-shot migration: the marker is written afterwards, so a
+            // session-bound first reader (manual-token completion, or a
+            // blocked-turn gate scope) migrated only its own session and then
+            // suppressed the walk forever, stranding every other session's
+            // credentials permanently. That is the failure this change exists
+            // to remove, reintroduced one layer down.
             if *budget == 0 {
                 break;
             }
@@ -918,7 +919,7 @@ where
                 // credentials in its own root, and makes the write-back path
                 // agree with the read path by construction: `write_account`
                 // computes exactly this path from exactly this scope.
-                let canonical_path = account_path(&account.scope, account.id)?;
+                let canonical_path = account_path(&account.scope.resource, account.id)?;
                 // Create-if-absent: a record already migrated (or written fresh
                 // at the canonical path) always wins over the legacy copy.
                 match self
@@ -1137,109 +1138,23 @@ where
                     continue; // silent-ok: unparseable user directory name; skip
                 };
 
-                // Collect every owner scope for this (tenant, user):
-                //   1. plain (no agent, no project)
-                //   2. for each agent dir: agent-only
-                //   3. for each agent+project dir: agent+project
-                //   4. for each project dir (top-level): project-only
+                // Every owner scope for this (tenant, user): the user
+                // itself, plus one per top-level project directory.
+                //
+                // The agent enumeration this used to do is gone with the
+                // `agent_id` field: a credential is owned by a tenant+user (and
+                // optionally a project), so an agent subtree names no owner the
+                // sweep could refresh. Legacy accounts still sitting under
+                // `/secrets/agents/**` are reached by the migration that
+                // `account_records_for_owner` runs, not by widening this walk.
                 let mut owner_scopes: Vec<CredentialAccountOwnerScope> = Vec::new();
-
-                // 1. Plain user scope.
                 owner_scopes.push(CredentialAccountOwnerScope {
                     tenant_id: tenant_id.clone(),
                     user_id: user_id.clone(),
-                    agent_id: None,
                     project_id: None,
-                    mission_id: None,
-                    thread_id: None,
-                    session_id: None,
                 });
 
-                // 2 + 3. Enumerate /tenants/<t>/users/<u>/secrets/agents/
-                let agents_dir = format!(
-                    "/tenants/{}/users/{}/secrets/agents",
-                    tenant_entry.name, user_entry.name
-                );
-                if let Ok(agents_path) = VirtualPath::new(&agents_dir) {
-                    match root.list_dir(&agents_path).await {
-                        Ok(agent_entries) => {
-                            for agent_entry in agent_entries {
-                                if agent_entry.file_type != FileType::Directory {
-                                    continue;
-                                }
-                                let Ok(agent_id) = AgentId::new(&agent_entry.name) else {
-                                    continue; // silent-ok: unparseable agent dir; skip
-                                };
-                                // 2. Agent-only scope.
-                                owner_scopes.push(CredentialAccountOwnerScope {
-                                    tenant_id: tenant_id.clone(),
-                                    user_id: user_id.clone(),
-                                    agent_id: Some(agent_id.clone()),
-                                    project_id: None,
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
-                                });
-                                // 3. Agent+project scopes.
-                                let agent_projects_dir =
-                                    format!("{}/{}/projects", agents_dir, agent_entry.name);
-                                if let Ok(ap_path) = VirtualPath::new(&agent_projects_dir) {
-                                    match root.list_dir(&ap_path).await {
-                                        Ok(proj_entries) => {
-                                            for proj_entry in proj_entries {
-                                                if proj_entry.file_type != FileType::Directory {
-                                                    continue;
-                                                }
-                                                let Ok(project_id) =
-                                                    ProjectId::new(&proj_entry.name)
-                                                else {
-                                                    continue; // silent-ok: unparseable project dir; skip
-                                                };
-                                                owner_scopes.push(CredentialAccountOwnerScope {
-                                                    tenant_id: tenant_id.clone(),
-                                                    user_id: user_id.clone(),
-                                                    agent_id: Some(agent_id.clone()),
-                                                    project_id: Some(project_id),
-                                                    mission_id: None,
-                                                    thread_id: None,
-                                                    session_id: None,
-                                                });
-                                            }
-                                        }
-                                        Err(
-                                            FilesystemError::NotFound { .. }
-                                            | FilesystemError::Unsupported { .. },
-                                        ) => {}
-                                        Err(error) => {
-                                            tracing::debug!(
-                                                tenant = %tenant_entry.name,
-                                                user = %user_entry.name,
-                                                agent = %agent_entry.name,
-                                                %error,
-                                                "account sweep: failed to list agent/projects dir; skipping"
-                                                // silent-ok: one bad agent subtree must not abort the sweep
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(
-                            FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. },
-                        ) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                tenant = %tenant_entry.name,
-                                user = %user_entry.name,
-                                %error,
-                                "account sweep: failed to list agents dir; skipping"
-                                // silent-ok: one bad user subtree must not abort the sweep
-                            );
-                        }
-                    }
-                }
-
-                // 4. Top-level project-only scopes.
+                // One scope per top-level project directory.
                 // /tenants/<t>/users/<u>/secrets/projects/
                 let projects_dir = format!(
                     "/tenants/{}/users/{}/secrets/projects",
@@ -1258,11 +1173,7 @@ where
                                 owner_scopes.push(CredentialAccountOwnerScope {
                                     tenant_id: tenant_id.clone(),
                                     user_id: user_id.clone(),
-                                    agent_id: None,
                                     project_id: Some(project_id),
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
                                 });
                             }
                         }

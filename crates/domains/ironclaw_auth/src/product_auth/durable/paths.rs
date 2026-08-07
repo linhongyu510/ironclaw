@@ -56,23 +56,22 @@ pub(super) fn interaction_path(
     ))
 }
 
+/// Account addressing takes a [`ResourceScope`], not an `AuthProductScope`:
+/// surface and session no longer segment an account path, so accepting a full
+/// scope would leave a no-op parameter that reads as if addressing still
+/// depended on it.
 pub(super) fn account_path(
-    scope: &crate::AuthProductScope,
+    resource: &ResourceScope,
     account_id: CredentialAccountId,
 ) -> Result<ScopedPath, AuthProductError> {
     scoped_path(&format!(
         "{}/accounts/{account_id}.json",
-        credential_owner_root(&scope.resource)
+        credential_owner_root(resource)
     ))
 }
 
-pub(super) fn account_root(
-    scope: &crate::AuthProductScope,
-) -> Result<ScopedPath, AuthProductError> {
-    scoped_path(&format!(
-        "{}/accounts",
-        credential_owner_root(&scope.resource)
-    ))
+pub(super) fn account_root(resource: &ResourceScope) -> Result<ScopedPath, AuthProductError> {
+    scoped_path(&format!("{}/accounts", credential_owner_root(resource)))
 }
 
 /// Legacy account root: the pre-migration layout, keyed by agent, project,

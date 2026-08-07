@@ -947,7 +947,7 @@ async fn filesystem_account_record_source_rejects_malformed_scan_records() {
         .unwrap();
 
     let malformed_account_id = crate::CredentialAccountId::new();
-    let malformed_path = super::paths::account_path(&scope, malformed_account_id)
+    let malformed_path = super::paths::account_path(&scope.resource, malformed_account_id)
         .expect("account path derivation must succeed");
     let malformed = ironclaw_filesystem::Entry::bytes(b"{ malformed account json".to_vec())
         .with_content_type(ironclaw_filesystem::ContentType::json());
@@ -2432,7 +2432,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    let path = super::paths::account_path(&scope, account_id)
+    let path = super::paths::account_path(&scope.resource, account_id)
         .expect("account path derivation must succeed");
     let json = serde_json::to_vec(&dummy_account).expect("serialization must succeed");
     use ironclaw_filesystem::{ContentType, Entry};
@@ -3807,7 +3807,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    let path = super::paths::account_path(&scope, account_id)
+    let path = super::paths::account_path(&scope.resource, account_id)
         .expect("account path derivation must succeed");
     let json = serde_json::to_vec(&dummy_account).expect("serialization must succeed");
     use ironclaw_filesystem::{ContentType, Entry};
@@ -4822,4 +4822,79 @@ async fn migration_keeps_each_project_credential_in_its_own_root() {
         !seen_by_user.iter().any(|found| found.id == account.id),
         "a project sub-credential must not leak to user-level callers"
     );
+}
+
+/// The selection completion path crosses surface and session for one owner,
+/// exactly like its manual-token twin.
+///
+/// The two negative cases this replaces asserted the old exact-match rule. Only
+/// the manual-token twin got an affirmative replacement, leaving the two
+/// completion paths asymmetrically covered — so a regression that rejected here
+/// (or a change that never actually reached this path) would look identical to
+/// green.
+#[tokio::test]
+async fn filesystem_complete_credential_selection_crosses_surface_and_session_for_same_owner() {
+    use crate::{AuthFlowKind, CredentialSelectionInput};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+
+    // Account minted the way the blocked-turn gate mints one.
+    let mut account_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Callback);
+    account_scope.session_id = Some(AuthSessionId::new("session-s1").unwrap());
+
+    // Selection flow arriving from a different surface and session, same owner.
+    let mut flow_resource = test_scope().resource;
+    flow_resource.invocation_id = InvocationId::new();
+    let mut flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Web);
+    flow_scope.session_id = Some(AuthSessionId::new("session-s2").unwrap());
+
+    let service = test_service(filesystem, secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: account_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("sel-cross-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
+            id: None,
+            scope: flow_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            requester_extension: None,
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    service
+        .complete_credential_selection(
+            &flow_scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("the owner's credential must be selectable across surface and session");
 }

@@ -1,9 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::{
-    AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
-};
+use ironclaw_host_api::ids::{ExtensionId, ProjectId, SecretHandle, TenantId, UserId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 
@@ -531,19 +529,20 @@ pub trait CredentialAccountService: Send + Sync {
     ) -> Result<CredentialRefreshReport, AuthProductError>;
 }
 
-/// Stable credential-account owner fields used by read models that need to
-/// find accounts across transient invocation ids, product surfaces, or runtime
-/// sub-scopes. Missing mission/thread/session ids match both global and
-/// scoped accounts for the owner; present ids match only that exact scope.
+/// Who owns a credential: a tenant + user, optionally narrowed to a project
+/// beneath them.
+///
+/// These are exactly the fields the ownership rule compares — nothing here is
+/// carried for a future reader. `agent_id`, `mission_id`, `thread_id` and
+/// `session_id` were dropped once [`Self::matches`] stopped comparing them and
+/// the migration's legacy walk stopped narrowing by session: they were
+/// populated on every construction and read nowhere, while their doc still
+/// advertised a wildcard rule that no longer existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountOwnerScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
-    pub mission_id: Option<MissionId>,
-    pub thread_id: Option<ThreadId>,
-    pub session_id: Option<crate::AuthSessionId>,
 }
 
 impl CredentialAccountOwnerScope {
@@ -551,11 +550,7 @@ impl CredentialAccountOwnerScope {
         Self {
             tenant_id: scope.resource.tenant_id.clone(),
             user_id: scope.resource.user_id.clone(),
-            agent_id: scope.resource.agent_id.clone(),
             project_id: scope.resource.project_id.clone(),
-            mission_id: scope.resource.mission_id.clone(),
-            thread_id: scope.resource.thread_id.clone(),
-            session_id: scope.session_id.clone(),
         }
     }
 
