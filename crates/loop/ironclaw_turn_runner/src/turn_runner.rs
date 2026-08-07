@@ -17,6 +17,7 @@ use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY, MODEL_PROVIDER_UNCONFIGURED_CATEGORY,
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
@@ -53,6 +54,12 @@ pub(crate) fn sanitized_driver_failure(
         reason_kind,
         MODEL_CREDITS_EXHAUSTED_CATEGORY
             | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+            // Siblings of the credential category, split out so each names its
+            // own fix. They must survive here for the same reason it does: the
+            // generic `driver_failed` fallback would erase the one thing that
+            // makes them worth distinguishing.
+            | MODEL_PROVIDER_UNCONFIGURED_CATEGORY
+            | MODEL_PROVIDER_SESSION_UNAVAILABLE_CATEGORY
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
             | TRANSCRIPT_WRITE_FAILED_CATEGORY

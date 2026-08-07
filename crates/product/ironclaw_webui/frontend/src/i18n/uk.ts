@@ -206,6 +206,8 @@ registerPack("uk", {
   "authGate.authorizing": "Очікування {provider}…",
   "authGate.expiresAt": "Термін дії закінчується",
   "authGate.oauthProviderFallback": "постачальник",
+  "authGate.authorizationUnavailable":
+    "IronClaw не зміг почати авторизацію {provider}. Постачальник недоступний або ще не налаштований, тож немає чого відкривати. Повторіть запуск або перевірте налаштування розширення.",
   "authGate.serviceUnavailable": "Сервіс недоступний",
   "authGate.popupBlocked": "Спливаюче вікно авторизації заблоковано.",
   "authGate.pillAuthorize": "Авторизуватися",

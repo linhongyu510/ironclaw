@@ -126,14 +126,39 @@ impl AgentLoopHostErrorKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Qualifies an [`AgentLoopHostErrorKind`] whose user-facing cause is narrower
+/// than the kind itself.
+///
+/// `CredentialUnavailable` is the motivating case: it is the correct *kind* for
+/// three faults — a genuine credential rejection, a deployment with no model
+/// provider configured, and an unreadable saved provider session — because all
+/// three must fail the run fast rather than ride availability backoff. But they
+/// have three different fixes, and the kind alone is what the product
+/// projection keys its user-facing sentence off. A reason kind is how a shared
+/// kind carries a distinct category downstream without inventing a kind whose
+/// only purpose is display.
+///
+/// Adding a variant obliges a routing arm in
+/// `ironclaw_turn_runner::model_failure_mapping::host_stage_failure_category`;
+/// `every_model_stage_reason_kind_routes_to_its_own_category` fails until it
+/// has one.
 pub enum AgentLoopHostErrorReasonKind {
     ModelCreditsExhausted,
+    /// No model provider is configured at all. There is no API key or base URL
+    /// to check, so this must never render as a credential-validity problem.
+    ModelProviderUnconfigured,
+    /// The selected provider's saved session could not be read (missing or
+    /// unreadable session storage). The fix is signing in again, not editing a
+    /// key.
+    ModelProviderSessionUnavailable,
 }
 
 impl AgentLoopHostErrorReasonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ModelCreditsExhausted => "model_credits_exhausted",
+            Self::ModelProviderUnconfigured => "model_provider_unconfigured",
+            Self::ModelProviderSessionUnavailable => "model_provider_session_unavailable",
         }
     }
 }

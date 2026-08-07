@@ -111,6 +111,78 @@ function findHandler(node, bodyMarker, seen = new Set()) {
   return null;
 }
 
+// Walks the rendered node tree for the first element carrying `data-testid`.
+function findByTestId(node, testId, seen = new Set()) {
+  if (!node || typeof node !== "object" || seen.has(node)) return null;
+  seen.add(node);
+  if (node.props && node.props["data-testid"] === testId) return node;
+  const children = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) {
+    const found = findByTestId(child, testId, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+// `AuthPromptChallengeKind::OAuthUrl` deliberately permits an absent
+// `authorization_url` -- see the variant's contract in
+// `ironclaw_extension_contracts::auth_prompt`: "When the provider is
+// unavailable or unconfigured, the URL may be absent so UI can still render an
+// OAuth-specific unavailable state instead of the generic auth fallback."
+//
+// The one backend producer of that state is the blocked-auth fallback in
+// `ironclaw_auth::product_prompt::auth_prompt_from_credential_requirement`,
+// which stamps `OAuthUrl` from the persisted credential setup when the auth
+// engine could not mint a challenge (vendor unreachable, DCR failed, client
+// unconfigured). This card never implemented the unavailable state, so it
+// offered a live "Open <provider> authorization" button whose only possible
+// outcome was the post-click "Service unavailable" error -- the user could not
+// tell a working gate from a broken one until they clicked it.
+test("AuthOauthCard renders an unavailable state when the gate carries no authorization url", () => {
+  const { rendered, openCalls, openAuthPopupCalls } = renderCard({
+    gate: defaultGate({ authorizationUrl: null }),
+  });
+
+  assert.match(
+    JSON.stringify(rendered),
+    /authGate\.authorizationUnavailable/,
+    "the card must say up front that authorization cannot be started"
+  );
+
+  const openButton = findByTestId(rendered, "auth-oauth-open");
+  assert.ok(openButton, "the OAuth-specific affordance is still rendered");
+  assert.equal(
+    openButton.props.disabled,
+    true,
+    "a gate with no authorization url must not offer a clickable authorize CTA"
+  );
+  assert.equal(
+    openButton.props.href,
+    undefined,
+    "no href may be offered when there is no authorization url"
+  );
+  assert.equal(openCalls.length, 0, "nothing may open during render");
+  assert.equal(openAuthPopupCalls.length, 0);
+});
+
+// The inverse guard: a gate that CAN be authorized must not be degraded into
+// the unavailable state, or the fix above would break every working OAuth gate.
+test("AuthOauthCard keeps the authorize CTA live when the gate carries a url", () => {
+  const { rendered } = renderCard({ gate: defaultGate() });
+
+  const openButton = findByTestId(rendered, "auth-oauth-open");
+  assert.ok(openButton, "the authorize CTA is rendered");
+  assert.notEqual(
+    openButton.props.disabled,
+    true,
+    "an actionable gate must keep its CTA enabled"
+  );
+  assert.ok(
+    !JSON.stringify(rendered).includes("authGate.authorizationUnavailable"),
+    "an actionable gate must not claim authorization is unavailable"
+  );
+});
+
 test("AuthOauthCard renders a display name, never the raw provider id", () => {
   const { rendered } = renderCard({ gate: defaultGate() });
   const body = JSON.stringify(rendered);
