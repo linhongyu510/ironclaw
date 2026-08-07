@@ -16,7 +16,7 @@ mod tests {
     use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
     use ironclaw_host_api::{
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
-        ids::{MissionId, SecretHandle, TenantId, ThreadId, UserId},
+        ids::{AgentId, MissionId, SecretHandle, TenantId, ThreadId, UserId},
         resource::ResourceScope,
     };
     use ironclaw_product_contracts::surface::ProductSurfaceCaller;
@@ -247,9 +247,12 @@ mod tests {
     #[tokio::test]
     async fn extension_oauth_start_handler_does_not_bind_across_owner_boundary() {
         // Owner isolation guard for defect A: an account owned by a DIFFERENT
-        // agent must never be bound by this owner's reconnect. tenant/user/
-        // agent/project stay hard-`==` in the owner match, so a cross-owner
-        // account is invisible and the flow starts with no update binding.
+        // USER must never be bound by this owner's reconnect. Ownership is
+        // tenant/user plus a project that inherits downward, so a foreign
+        // owner's account is invisible and the flow starts with no update
+        // binding. (Agent was part of that match until credentials became
+        // tenant+user-owned; the same-user/different-agent case is now a
+        // rebind, asserted in the sibling test below.)
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
@@ -273,7 +276,7 @@ mod tests {
             .create_account(NewCredentialAccount {
                 scope: AuthProductScope::new(other_owner, AuthSurface::Callback),
                 provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("other-agent notion").expect("label"),
+                label: CredentialAccountLabel::new("other-user notion").expect("label"),
                 status: CredentialAccountStatus::Configured,
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
