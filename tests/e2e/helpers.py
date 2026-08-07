@@ -305,6 +305,8 @@ SEL_V2 = {
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "thread_search": "input[placeholder='Search chats...']",
     "thread_load_more": "[data-testid='thread-load-more']",
+    "thread_new": "[data-testid='new-chat']",
+    "thread_item": "[data-testid='thread-item']",
     "sign_out_button": "button[title='Sign out']",
     "nav_chat": "a[href='/chat']",
     "nav_settings_inference": "a[href='/settings/inference']",
@@ -319,6 +321,12 @@ SEL_V2 = {
     "connection_status": "[data-testid='connection-status']",
     "connection_status_toggle": "[data-testid='connection-status-toggle']",
     "connection_status_label": "[data-testid='connection-status-label']",
+    "inspector_panel": "[data-testid='inspector-panel']",
+    "inspector_prompt_content": "[data-testid='inspector-prompt-content']",
+    "inspector_tab_stats": "[data-testid='inspector-tab-stats']",
+    "inspector_stats_content": "[data-testid='inspector-stats-content']",
+    "inspector_close": "[data-testid='inspector-close']",
+    "inspector_open": "[data-testid='inspector-open']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -450,6 +458,16 @@ SEL_V2 = {
     ),
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
+    ),
+    "automation_action_for": (
+        "[data-testid='automation-action-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_for": (
+        "[data-testid='automation-delete-button'][data-automation-id='{id}']"
+    ),
+    "automation_delete_dialog_for": (
+        "[data-testid='automation-delete-dialog'][data-automation-id='{id}'] "
+        "[role='dialog']"
     ),
     "automation_filter_for": (
         "[data-testid='automation-filter'][data-filter='{filter}']"

@@ -61,6 +61,16 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "github.event.schedule == '30 5 * * 1'",
         "provider-matrix:",
     ),
+    ".github/workflows/code_style.yml": (
+        # The docs publication-boundary gate: the job, its self-test step, its
+        # check step, and the roll-up guard that fails closed BEFORE the
+        # has_code early exit (docs-only PRs have has_code=false, so a guard
+        # placed after it could never block).
+        "docs-publication-boundary:",
+        "python3 scripts/ci/test_docs_publication_boundary.py",
+        "python3 scripts/ci/docs_publication_boundary.py",
+        '"${{ needs.docs-publication-boundary.result }}" != "success"',
+    ),
     ".github/workflows/reborn-playwright.yml": (
         "python3 scripts/ci/ws12_suite_shards.py --github-output",
         'test "${{ matrix.retry }}" = "never"',
@@ -108,14 +118,14 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("crates/ironclaw_webui/src/lib.rs", True),
     # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
     # every one of these.
-    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
     ("docs/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
     ("README.md", False),
-    ("docs/plans/whatever.md", False),
+    ("docs/internal/plans/whatever.md", False),
     (".github/workflows/code_style.yml", False),
     ("src/main.rs", False),
 )
@@ -184,6 +194,66 @@ PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 
 # ---------------------------------------------------------------------------
+# Docs publication-boundary guard ordering
+#
+# The guard in the code-style roll-up must run BEFORE the has_code early
+# exit: a docs-only PR has has_code=false, so a guard placed after `exit 0`
+# can never block. REQUIRED_MARKERS is presence-only and cannot see order —
+# relocating the guard below the early exit leaves every marker in the file
+# while the gate is fully broken — so the ordering is pinned separately here.
+# ---------------------------------------------------------------------------
+
+CODE_STYLE_DOCS_GUARD_MARKER = (
+    '"${{ needs.docs-publication-boundary.result }}" != "success"'
+)
+CODE_STYLE_HAS_CODE_EXIT_MARKER = (
+    'echo "No code changes — style checks skipped correctly"'
+)
+
+
+def validate_code_style_docs_guard_order(text: str) -> list[str]:
+    """Return every way the docs-gate guard could sit past the early exit.
+
+    Only executable occurrences count: comment lines are stripped first, so a
+    commented-out copy of the guard above the early exit (a refactor
+    leftover) cannot satisfy the pin, and EVERY live guard occurrence must
+    precede the first early-exit occurrence.
+    """
+
+    executable = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    early_exit = executable.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
+    guard_positions: list[int] = []
+    cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER)
+    while cursor != -1:
+        guard_positions.append(cursor)
+        cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER, cursor + 1)
+    if not guard_positions or early_exit == -1:
+        # Presence itself is REQUIRED_MARKERS' job; report only what this pin
+        # cannot delegate — a missing EXECUTABLE anchor makes the order
+        # unassertable (a comment-only occurrence lands here on purpose).
+        missing = "guard" if not guard_positions else "has_code early-exit"
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
+                f"no executable {missing} marker"
+            )
+        ]
+    if any(position > early_exit for position in guard_positions):
+        return [
+            (
+                f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard "
+                "sits after the has_code early exit — docs-only PRs "
+                "(has_code=false) exit 0 before the guard runs, so the gate "
+                "cannot block them. Move the guard above the early exit in "
+                "the roll-up step"
+            )
+        ]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Per-package clippy target selection (#6965)
 #
 # `Check production-target lints` runs `cargo clippy -p <changed package> …`,
@@ -192,7 +262,7 @@ STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 #
 #   * `--lib` is a hard error on a bin-only package ("no library targets found
 #     in package `ironclaw`"), so a PR whose only changed package is
-#     crates/ironclaw_reborn_cli fails the lane on the flag, not on a lint;
+#     crates/ironclaw_cli fails the lane on the flag, not on a lint;
 #   * `--bins` on a lib-only package is "target filter `bins` specified, but no
 #     targets matched; this is a no-op" — the lane reports green having linted
 #     nothing, which is the worse failure of the two;
@@ -213,7 +283,7 @@ STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 # catching is a flag added back by hand, not a disguise.
 #
 # Known gap, deliberately unguarded: a package with neither a lib nor a bin
-# target (today only `ironclaw_reborn_integration_tests`) lints nothing and
+# target (today only `ironclaw_integration_tests`) lints nothing and
 # exits 0 without even the `no targets matched` warning. Unreachable while
 # `changed_workspace_packages.py` only selects the root package for a
 # `Cargo.toml`/`Cargo.lock` change — which selects every other package too — so
@@ -366,25 +436,54 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "crates/ironclaw_llm/src/lib.rs",
-            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
-        out_of_scope=("README.md", "docs/plans/whatever.md", "openwiki/index.md"),
+        out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
+    ),
+    # The guidance-surface companion to `has_code`: check-guidance.py scans
+    # `.claude/` rules and skills, the root AGENTS.md/CLAUDE.md pair, and
+    # resolves references into docs/, none of which `has_code` covers (the row
+    # above pins docs/ OUT of it on purpose). This filter OR-s into
+    # fast-checks' condition only, so a `.claude/`-only PR runs the gate built
+    # for exactly that change shape (#7306 review: the gate must run for the
+    # files it governs).
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_guidance",
+        anchor="\\.claude/",
+        kind="regex",
+        in_scope=(
+            ".claude/rules/testing.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/reborn/guidance-conventions.md",
+        ),
+        out_of_scope=(
+            # Crate-tier guidance rides `has_code`'s `crates/` prefix; this
+            # filter must stay the narrow guidance-surface half, and the root
+            # README is not a guidance scan surface.
+            "crates/AGENTS.md",
+            "crates/domains/ironclaw_llm/AGENTS.md",
+            "README.md",
+            "openwiki/index.md",
+        ),
     ),
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",
-        anchor="ironclaw_reborn_cli",
+        anchor="ironclaw_cli",
         kind="regex",
         crates=(
-            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
-            ("ironclaw_reborn_cli", "src/main.rs"),
-            ("ironclaw_reborn_config", "src/lib.rs"),
-            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+            ("ironclaw_cli", "src/main.rs"),
+            ("ironclaw_config", "src/lib.rs"),
+            ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),
         in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
         out_of_scope=(
@@ -392,8 +491,39 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # and is deliberately NOT triggered by every crate.
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
-            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_docs",
+        # Not crate-keyed: docs/ is deliberately outside the has_code scope,
+        # so this trigger is the ONLY thing that runs the publication-boundary
+        # gate on a docs-only PR. A narrowed grep here skips the gate with
+        # nothing red anywhere — the same silent-skip class as the crate
+        # filters, pinned the same way.
+        anchor="docs_publication_boundary",
+        kind="regex",
+        in_scope=(
+            "docs/index.mdx",
+            # Both halves of the gate's contract: navigation (docs.json) and
+            # the fence (.mintignore). A future markdown-only narrowing of
+            # the grep would drop them while every .mdx probe stays green.
+            "docs/docs.json",
+            "docs/.mintignore",
+            "docs/internal/plans/whatever.md",
+            # The gate's own files (review-discipline.md "Guardrails are
+            # code": checks must run when their own files change).
+            "scripts/ci/docs_publication_boundary.py",
+            "scripts/ci/test_docs_publication_boundary.py",
+            ".github/workflows/code_style.yml",
+        ),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "README.md",
+            "openwiki/index.md",
         ),
     ),
     CrateScopeFilter(
@@ -659,7 +789,7 @@ def validate_crate_scope_filters(
 # directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
 # block (12), and a `working-directory:` key (4). Two more workflows spelled a
 # single crate's Cargo.toml / source path directly: docker.yml's release
-# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# VERSION extraction (`ironclaw_cli`) and nightly-deep-ci.yml's
 # mutation-audit target (`ironclaw_capabilities`). All of these break the
 # moment their crate moves into a family directory (crates/<family>/
 # ironclaw_*, PROPOSAL §5).
@@ -690,8 +820,14 @@ DOCKER_WORKFLOW = ".github/workflows/docker.yml"
 NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
 
 WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+# One directory level deeper than the crate sits TODAY. WS7 moved the crate
+# into `crates/product/`, so the single-`*` form now matches its real location
+# and stopped being a depth probe — the gate below rejects exactly that ("not
+# depth-tolerant, just broad"). Two `*` segments keep the spare one level below
+# wherever the crate actually is; `*` does not cross `/` in a GitHub glob, so
+# this cannot collapse back onto the flat line.
 WEBUI_NESTED_LOCKFILE_PATTERN = (
-    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    f"crates/*/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
 )
 
 
@@ -746,8 +882,12 @@ def validate_webui_frontend_sites(
         )
     flat_pattern = github_glob_to_regex(flat_lockfile)
     nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    # Two family segments, matching WEBUI_NESTED_LOCKFILE_PATTERN's depth: the
+    # probe has to be one level below where the crate sits today, and today it
+    # already sits inside a family directory (WS7).
     nested_probe = (
-        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+        f"crates/{NESTED_FAMILY}/{NESTED_FAMILY}/"
+        f"{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
     )
     if not flat_pattern.match(flat_lockfile):
         errors.append(
@@ -807,7 +947,7 @@ def validate_webui_frontend_sites(
 # once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
 # itself going stale — a rename or deletion the workflow never followed.
 CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
-    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (DOCKER_WORKFLOW, "ironclaw_cli"),
     (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
 )
 
@@ -860,6 +1000,7 @@ def validate_workflow_texts(
     code_style = workflows.get(CODE_STYLE_WORKFLOW)
     if code_style is not None:
         errors.extend(validate_production_lint_targets(code_style))
+        errors.extend(validate_code_style_docs_guard_order(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))

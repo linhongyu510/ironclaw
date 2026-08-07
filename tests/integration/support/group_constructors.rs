@@ -11,6 +11,9 @@
 
 use std::sync::Arc;
 
+use ironclaw_filesystem::RootFilesystem;
+
+use super::super::builder::StorageMode;
 use super::super::harness::HostRuntimeCapabilityHarness;
 use super::super::harness::options::ToolsProfile;
 use super::{
@@ -63,6 +66,15 @@ impl RebornIntegrationGroup {
     /// Auto-approve is enabled for all capability ids in the group scope.
     pub async fn builtin_tools() -> HarnessResult<Self> {
         Self::builder().builtin_tools().await
+    }
+
+    /// Core built-ins plus the native memory lifecycle over one shared libSQL
+    /// composite. This is the production-backend shape required for proactive
+    /// cross-thread recall tests.
+    pub async fn builtin_tools_with_native_memory_libsql() -> HarnessResult<Self> {
+        Self::builder()
+            .builtin_tools_with_native_memory_libsql()
+            .await
     }
 
     /// Group with the core built-in tools but NO memory package registered —
@@ -327,6 +339,38 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
+    /// Build memory tools and host-managed lifecycle consumers over the same
+    /// libSQL filesystem. A separate constructor keeps the ordinary
+    /// core-builtins tests lightweight and makes a backend downgrade in the
+    /// recall scenario impossible to miss.
+    pub async fn builtin_tools_with_native_memory_libsql(
+        mut self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        self.storage = StorageMode::LibSql;
+        let base = self.build_base().await?;
+        let user_id = base.canonical_subject_user()?;
+        let filesystem: Arc<dyn RootFilesystem> = base.composite.clone();
+        let provider: Arc<dyn ironclaw_memory::MemoryService> = Arc::new(
+            ironclaw_memory_native::NativeMemoryService::from_filesystem(
+                Arc::clone(&filesystem),
+                None,
+            ),
+        );
+        let lifecycle =
+            ironclaw_host_runtime::memory_native_extension::native_memory_provider_bundle()?
+                .lifecycle;
+        self.bound_memory = Some((provider, lifecycle));
+
+        let host_runtime =
+            super::super::harness::profiles::core_builtin::core_builtin_tools_over_shared_filesystem(
+                Arc::clone(&base.turn_root),
+                Arc::clone(&base.composite),
+                user_id,
+            )?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
     /// Build a core built-in tools group whose runtime registry carries NO
     /// memory package — the `Disabled` memory-binding shape. See
     /// [`RebornIntegrationGroup::builtin_tools_without_memory`].
@@ -408,11 +452,11 @@ impl RebornIntegrationGroupBuilder {
         // so the service's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -440,11 +484,11 @@ impl RebornIntegrationGroupBuilder {
         // `RebornServices`, keyed to the group's dispatch scope.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -470,11 +514,11 @@ impl RebornIntegrationGroupBuilder {
         .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -688,12 +732,11 @@ impl RebornIntegrationGroupBuilder {
             thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
-        let scoped_view =
-            ironclaw_reborn_composition::test_support::scoped_workspace_mount_view_for_test(
-                &caller_scope,
-                ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            )
-            .map_err(|error| format!("scoped workspace mount view: {error}"))?;
+        let scoped_view = ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
+            &caller_scope,
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+        )
+        .map_err(|error| format!("scoped workspace mount view: {error}"))?;
         let mut profile =
             super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
         profile.capability_ids.extend([

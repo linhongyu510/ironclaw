@@ -64,7 +64,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 
 Totals: **51** group scenarios · **54** flat integration bins (48 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**867** test functions).
+**102** Python scenario files (**868** test functions).
 
 ---
 
@@ -116,7 +116,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (5)
+### 3.4 Memory — `group_memory/` (6)
 
 | The user can… | Evidence |
 |---|---|
@@ -125,6 +125,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | See the real folder structure of their memory | `scenario_memory_tree_reflects_structure.rs` |
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
+| Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's — through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -179,6 +180,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Behavior | Evidence |
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
+| Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
@@ -186,6 +188,8 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
 | Bridged tool disclosure mode reaches production's decorator wiring | `tool_disclosure.rs` |
+| Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
+| Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
@@ -289,7 +293,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 867 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 869 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -308,12 +312,15 @@ entries.
 | See their message immediately, keep it through a reconnect/reload, and not see it duplicated once confirmed | `test_reborn_webui_v2_legacy_pending_messages.py` (12), `test_pending_user_messages.py` (8) |
 | Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |
+| Click "+ New" or open a thread and start typing immediately — focus lands in the composer without a second click | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_takes_focus_from_sidebar_navigation` |
 | Start a new chat while a run is active (the #5256 deadlock regression) | `test_reborn_webui_v2_smoke.py` |
 | Page through older messages/threads without losing scroll position | `test_reborn_webui_v2_smoke.py::test_reborn_v2_timeline_pagination`, `…::test_reborn_v2_loading_older_messages_preserves_viewport` |
 | Keep DOM bounded on huge histories, without SSE timer leaks | `test_reborn_webui_v2_legacy_dom_resource_limits.py` (4) |
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
+| Opt into the inspector, preserve its selected tab while closing, resizing, and reloading, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
+| Inspect the bounded host-resolved prompt and model-call statistics for a completed run | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
 | Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
@@ -368,7 +375,7 @@ entries.
 ### 6.6 Automations, routines & projects
 | The user can… | Evidence |
 |---|---|
-| Create/rename/filter automations in the UI, retry failed runs, dismiss error toasts | `test_reborn_webui_v2_smoke.py` (automation tests), `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
+| Create an automation through chat; rename, pause, resume, reload, and delete it through the UI with persisted API state; filter automations, retry failed runs, and dismiss error toasts | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, other automation tests in that file, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |
@@ -450,7 +457,7 @@ verify it.
 | **Sub-agents** have no group scenario | `reborn_subagent_spawn_e2e.rs` + `subagent_await_edge.rs` only. |
 | **Python E2E skip/xfail debt** | Tracked separately in `tests/e2e/E2E_DEBT.md` (ClawHub skills, legacy Gmail/MCP OAuth prerequisites, Telegram OAuth placeholders, portfolio widget, v2 auth/OAuth xfails). Do not silently un-xfail. |
 | **Live-model tool-misuse patterns** are documented but not gated | `tests/e2e/LIVE_TOOL_FAILURES.md` — the assistant claiming a write it never made, etc. No test fails on these today. |
-| **Observability** has no scenario coverage | Only `log` and `noop` backends ship (root `CLAUDE.md` → Current Limitations). |
+| **Observability** has no scenario coverage | `crates/substrates/ironclaw_observability` is latency-trace macros over `tracing` only — there is no exporter backend to exercise. |
 
 ---
 

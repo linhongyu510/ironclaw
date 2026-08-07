@@ -17,11 +17,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_assistant::{
+    DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
+};
+use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_event_projections::{
     EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
     ProjectionSnapshot, ReplayEventProjectionService,
 };
-use ironclaw_events::InMemoryDurableEventLog;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
     IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
@@ -43,32 +47,31 @@ use ironclaw_loop_host::{
     JsonSpawnSubagentInputCodec, RejectingInputEnqueue,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_product::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
-use ironclaw_product::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
 };
-use ironclaw_runner::subagent::{
+use ironclaw_threads::{
+    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
+    ThreadMessageRecord, ThreadScope,
+};
+use ironclaw_turn_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
 };
-use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
-use ironclaw_runner::{
+use ironclaw_turn_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
+use ironclaw_turn_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
         RebornRuntimeLoopComposition, build_default_planned_runtime,
     },
-};
-use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -796,7 +799,7 @@ impl RebornBinaryE2EHarness {
             Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
         let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
-            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
+            Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_event_log::DurableEventLog>,
             DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
         ));
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
@@ -856,7 +859,9 @@ impl RebornBinaryE2EHarness {
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
                 Arc::clone(&await_edge_store)
-                    as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                    as Arc<
+                        dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore,
+                    >,
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
@@ -878,7 +883,7 @@ impl RebornBinaryE2EHarness {
             subagent_await_edge_settler: await_edge_resolver
                 as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
-                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_turn_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
@@ -903,6 +908,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            prompt_diagnostic_sink: None,
             reply_attachment_intent_port: Some(Arc::new(
                 ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
             )
@@ -910,7 +916,7 @@ impl RebornBinaryE2EHarness {
             gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
-        let binding_service: Arc<dyn ConversationBindingService> =
+        let binding_service: Arc<dyn ProductBindingResolver> =
             Arc::new(product_harness.binding_service()?);
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
             Arc::clone(&binding_service),
@@ -1621,6 +1627,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelRespons
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         effective_fallback_index: Some(0),
+        diagnostic_effective_model: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
