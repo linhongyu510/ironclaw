@@ -57,6 +57,17 @@ const DESCRIBE_UNKNOWN_TARGET_MESSAGE: &str = "tool_describe target is unknown";
 /// Must stay in sync with [`MAX_DESCRIBE_NAMES`]; pinned by
 /// `describe_bound_message_matches_the_declared_bound`.
 const DESCRIBE_TOO_MANY_NAMES_MESSAGE: &str = "tool_describe accepts at most 8 names per call";
+const DESCRIBE_NAME_TOO_LONG_MESSAGE: &str = "tool_describe name is too long";
+
+/// Longest tool name `tool_describe` will echo back.
+///
+/// A per-name failure entry echoes the *requested* spelling so the model can
+/// tell which name failed. Without a length bound, `MAX_DESCRIBE_NAMES`
+/// caps the entry count but not the result bytes — eight junk names of
+/// arbitrary length would be reflected verbatim. Real provider tool names are
+/// validated identifiers far shorter than this, so the cap only ever rejects
+/// input that could not have resolved anyway.
+const MAX_DESCRIBE_NAME_BYTES: usize = 128;
 
 /// What a `tool_describe` call resolved to.
 ///
@@ -107,6 +118,14 @@ fn describe_request_names(arguments: &Value) -> Result<DescribeRequest, &'static
     }
     if names.len() > MAX_DESCRIBE_NAMES {
         return Err(DESCRIBE_TOO_MANY_NAMES_MESSAGE);
+    }
+    // Bound the bytes as well as the entry count: a per-name failure entry
+    // echoes the requested spelling, so unbounded names would defeat the cap.
+    if names
+        .iter()
+        .any(|name| name.len() > MAX_DESCRIBE_NAME_BYTES)
+    {
+        return Err(DESCRIBE_NAME_TOO_LONG_MESSAGE);
     }
     if bulk {
         Ok(DescribeRequest::Bulk(names))
@@ -2199,6 +2218,16 @@ mod tests {
             (
                 json!({"names": "alpha_tool"}),
                 DESCRIBE_REQUIRES_NAME_MESSAGE,
+            ),
+            // Byte bound: a per-entry failure echoes the requested spelling, so
+            // an over-long name must be rejected rather than reflected back.
+            (
+                json!({"names": ["a".repeat(MAX_DESCRIBE_NAME_BYTES + 1)]}),
+                DESCRIBE_NAME_TOO_LONG_MESSAGE,
+            ),
+            (
+                json!({"name": "a".repeat(MAX_DESCRIBE_NAME_BYTES + 1)}),
+                DESCRIBE_NAME_TOO_LONG_MESSAGE,
             ),
         ] {
             let outcome = invoke_bridge_call(&port, TOOL_DESCRIBE_NAME, arguments).await;

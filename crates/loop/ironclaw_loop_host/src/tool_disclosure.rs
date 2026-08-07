@@ -444,7 +444,7 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
             ),
             bridge_tool_definition(
                 TOOL_DESCRIBE_NAME,
-                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool.",
+                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool. At most 8 names per call — to describe more, emit several of these calls in parallel in the same response.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -457,7 +457,7 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
                             "items": { "type": "string" },
                             "minItems": 1,
                             "maxItems": MAX_DESCRIBE_NAMES,
-                            "description": "Provider-facing tool names to describe in one call. Use this to load every candidate schema in a single round-trip."
+                            "description": "Provider-facing tool names to describe in one call, at most 8. Use this to load every candidate schema in a single round-trip; for more than 8 candidates, split them across parallel tool_describe calls in the same response."
                         }
                     },
                     "additionalProperties": false
@@ -1341,16 +1341,24 @@ mod tests {
             json!("string"),
             "tool_describe keeps the back-compatible single-name argument"
         );
+        let names_schema = &bridges[1].parameters["properties"]["names"];
+        assert_eq!(names_schema["type"], json!("array"));
+        assert_eq!(names_schema["items"], json!({"type": "string"}));
+        assert_eq!(names_schema["minItems"], json!(1));
         assert_eq!(
-            bridges[1].parameters["properties"]["names"],
-            json!({
-                "type": "array",
-                "items": { "type": "string" },
-                "minItems": 1,
-                "maxItems": MAX_DESCRIBE_NAMES,
-                "description": "Provider-facing tool names to describe in one call. Use this to load every candidate schema in a single round-trip."
-            }),
+            names_schema["maxItems"],
+            json!(MAX_DESCRIBE_NAMES),
             "tool_describe advertises a bounded names array"
+        );
+        // The model only learns the bound from prose, so the advertised text
+        // must state it and say what to do with a longer candidate list.
+        let names_description = names_schema["description"]
+            .as_str()
+            .expect("names carries a description");
+        assert!(
+            names_description.contains(&MAX_DESCRIBE_NAMES.to_string())
+                && names_description.contains("parallel"),
+            "names description must state the bound and the split-into-parallel remedy: {names_description}"
         );
         assert!(
             bridges[1].parameters.get("required").is_none(),
