@@ -73,7 +73,7 @@ pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 /// `tool_search` candidate list into one round-trip; the bound keeps the saved
 /// round-trips from turning into an unbounded schema dump. Mirrors the
 /// `skill_activate` `names`/`maxItems` precedent.
-pub(crate) const MAX_DESCRIBE_NAMES: usize = 8;
+pub(crate) const MAX_DESCRIBE_BATCH_SIZE: usize = 8;
 
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
@@ -444,7 +444,7 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
             ),
             bridge_tool_definition(
                 TOOL_DESCRIBE_NAME,
-                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool. At most 8 names per call — to describe more, emit several of these calls in parallel in the same response.",
+                "Return the full schema for one or more named deferred tools. Pass every candidate from a tool_search in a single `names` array instead of one call per tool. At most 8 names per call — to describe more, emit several of these calls in parallel in the same response. Two spellings of the same tool collapse to one entry.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -456,8 +456,8 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
                             "type": "array",
                             "items": { "type": "string" },
                             "minItems": 1,
-                            "maxItems": MAX_DESCRIBE_NAMES,
-                            "description": "Provider-facing tool names to describe in one call, at most 8. Use this to load every candidate schema in a single round-trip; for more than 8 candidates, split them across parallel tool_describe calls in the same response."
+                            "maxItems": MAX_DESCRIBE_BATCH_SIZE,
+                            "description": "Provider-facing tool names to describe in one call, at most 8 names. Use this to load every candidate schema in a single round-trip; two spellings of the same tool collapse to one entry. For more than 8 candidates, split them across parallel tool_describe calls in the same response."
                         }
                     },
                     "additionalProperties": false
@@ -1347,18 +1347,44 @@ mod tests {
         assert_eq!(names_schema["minItems"], json!(1));
         assert_eq!(
             names_schema["maxItems"],
-            json!(MAX_DESCRIBE_NAMES),
+            json!(MAX_DESCRIBE_BATCH_SIZE),
             "tool_describe advertises a bounded names array"
         );
-        // The model only learns the bound from prose, so the advertised text
-        // must state it and say what to do with a longer candidate list.
+        // The model only learns the bound from prose, so every advertised text
+        // that states it must be pinned with the exact bound phrase: a
+        // substring pin on the digit alone would let a stale "at most 8" pass
+        // if the bound ever grew to a value containing the digit 8 (18, 80). A
+        // `MAX_DESCRIBE_BATCH_SIZE` change must fail loudly here instead of leaving
+        // the model reading a stale bound.
+        let bound_phrase = format!("at most {MAX_DESCRIBE_BATCH_SIZE} names");
         let names_description = names_schema["description"]
             .as_str()
             .expect("names carries a description");
         assert!(
-            names_description.contains(&MAX_DESCRIBE_NAMES.to_string())
-                && names_description.contains("parallel"),
-            "names description must state the bound and the split-into-parallel remedy: {names_description}"
+            names_description.contains(&bound_phrase),
+            "names description must state the bound: {names_description}"
+        );
+        let bridge_description = bridges[1].description.as_str();
+        assert!(
+            bridge_description
+                .contains(&format!("At most {MAX_DESCRIBE_BATCH_SIZE} names per call"))
+                && bridge_description.contains("parallel")
+                && bridge_description.contains("collapse to one entry"),
+            "bridge description must state the bound, the split-into-parallel remedy, and the alias collapse: {bridge_description}"
+        );
+        let protocol = include_str!("../prompts/tool_disclosure_protocol.md");
+        assert!(
+            protocol.contains(&bound_phrase),
+            "the disclosure protocol prompt must state the bound it instructs the model to respect"
+        );
+        // The round-trip collapse is a model-behavior nudge, so the protocol's
+        // step-2 instruction to batch all schema loads into one response must
+        // be pinned too: a drift that reverts step 2 to one describe per tool
+        // would silently re-introduce the per-schema round-trips this feature
+        // exists to remove.
+        assert!(
+            protocol.contains("single response") && protocol.contains("parallel"),
+            "the protocol must instruct batching describes into one response"
         );
         assert!(
             bridges[1].parameters.get("required").is_none(),

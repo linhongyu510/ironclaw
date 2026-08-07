@@ -393,11 +393,10 @@ async fn deferred_search_describe_call_flow_uses_production_capability_chain() {
 
 /// Bulk `tool_describe` through the production capability chain (#7166 §1).
 ///
-/// Production traces show the model spending one model round-trip per schema —
-/// seven sequential single-name `tool_describe` calls in a single run, for
-/// schemas of a few hundred bytes each. One bounded `names` array must load
-/// every candidate schema in one round-trip and still dispatch the follow-up
-/// `tool_call`, and a bad name in the batch must cost only its own entry.
+/// One bounded `names` array must load every candidate schema in one
+/// round-trip (see `MAX_DESCRIBE_BATCH_SIZE` in `tool_disclosure.rs` for the
+/// production-trace motivation) and still dispatch the follow-up `tool_call`,
+/// and a bad name in the batch must cost only its own entry.
 #[tokio::test]
 async fn deferred_bulk_describe_loads_every_schema_in_one_round_trip() {
     let harness = RebornIntegrationHarness::test_default()
@@ -462,6 +461,18 @@ async fn deferred_bulk_describe_loads_every_schema_in_one_round_trip() {
         "the bulk describe must complete successfully with an unknown name in the batch"
     );
 
+    // Per-entry failures mean the call succeeds even if a schema were
+    // silently dropped, so the envelope-count and summary assertions above
+    // alone cannot pin that every requested schema materialized. The
+    // model-visible rendering strips describe payload keys (empirically:
+    // neither "capability_id" nor the "results" envelope nor the bogus
+    // name's error entry appear in the captured model messages, and
+    // tool-result content lives in the result store behind opaque refs),
+    // so content-level delivery cannot be asserted through this harness
+    // message seam — it is pinned at unit tier instead by
+    // `tool_describe_bulk_returns_every_requested_schema_in_one_result`
+    // and the per-entry failure tests.
+
     harness
         .assert_tool_invoked("github.get_repo")
         .await
@@ -470,6 +481,55 @@ async fn deferred_bulk_describe_loads_every_schema_in_one_round_trip() {
         .assert_reply_contains("done")
         .await
         .expect("turn completes after the bulk-describe flow");
+}
+
+/// A bulk describe whose entries all fail keeps the single-name verdict
+/// class end-to-end: a recoverable failure with the "returned no schemas"
+/// summary, so failure-kind tracking and recovery routing see it through
+/// the production chain — not a success verdict claiming progress.
+#[tokio::test]
+async fn deferred_bulk_describe_all_entries_failing_is_recoverable() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_DESCRIBE_NAME,
+                serde_json::json!({"names": ["github__no_such_a", "github__no_such_b"]}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("inspect the ironclaw repository")
+        .await
+        .expect("an all-failed bulk describe stays recoverable");
+
+    // The all-failed batch must surface as a recoverable tool error with the
+    // honest summary, and must not persist a result envelope as if schemas
+    // were returned.
+    harness
+        .assert_tool_error_summary_contains("tool_describe returned no schemas")
+        .await
+        .expect("an all-error bulk describe reports the no-schemas failure summary");
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("persisted results are readable");
+    assert!(
+        envelopes
+            .iter()
+            .all(|envelope| envelope.safe_summary.as_str() != "tool_describe returned schemas"),
+        "an all-error batch must not persist a success-shaped describe envelope: {envelopes:?}"
+    );
+
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the recoverable describe failure");
 }
 
 /// Selector-budget regression: a physically wide catalog with only one
