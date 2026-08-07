@@ -355,6 +355,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
           (
             <span
               role="alert"
+              data-delivery-save-error=""
               className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
             >
               <Icon name="close" className="h-3 w-3" />
@@ -367,6 +368,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
         {hasExternalTargets &&
         (
           <div
+            data-delivery-external-target-hint=""
             className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
           >
             {footnoteSegments}

@@ -35,14 +35,21 @@ function renderPanel({
   targets,
   currentTarget = null,
   currentStatus = "none_configured",
+  saveError = null,
 }: {
   targets: ReturnType<typeof target>[];
   currentTarget?: Record<string, unknown> | null;
   currentStatus?: "none_configured" | "available" | "unavailable";
+  saveError?: Error | null;
 }) {
   return renderToStaticMarkup(
     <AutomationDeliveryDefaultsPanel
-      deliveryState={deliveryState({ targets, currentTarget, currentStatus })}
+      deliveryState={deliveryState({
+        targets,
+        currentTarget,
+        currentStatus,
+        saveError,
+      })}
     />,
   );
 }
@@ -51,11 +58,13 @@ function deliveryState({
   targets,
   currentTarget = null,
   currentStatus = "none_configured",
+  saveError = null,
   saveFinalReplyTarget = vi.fn(() => Promise.resolve()),
 }: {
   targets: ReturnType<typeof target>[];
   currentTarget?: Record<string, unknown> | null;
   currentStatus?: "none_configured" | "available" | "unavailable";
+  saveError?: Error | null;
   saveFinalReplyTarget?: ReturnType<typeof vi.fn>;
 }) {
   return {
@@ -65,7 +74,7 @@ function deliveryState({
     currentStatus,
     isLoading: false,
     isSaving: false,
-    saveError: null,
+    saveError,
     saveFinalReplyTarget,
   };
 }
@@ -93,6 +102,27 @@ test("available delivery targets remain selectable", () => {
   );
   assert.match(html, /slack-ready name/);
   assert.match(html, /automations\.delivery\.pill\.ready/);
+  assert.match(html, /data-delivery-external-target-hint/);
+});
+
+test("save errors surface while Web-only deployments hide the external hint", () => {
+  const markup = parseMarkup(
+    renderPanel({
+      targets: [],
+      saveError: new Error("backend detail must not be rendered"),
+    }),
+  );
+
+  assert.ok(markup.querySelector('[data-delivery-save-error=""]'));
+  assert.match(
+    markup.querySelector('[role="alert"]')?.textContent ?? "",
+    /automations\.delivery\.saveFailed/,
+  );
+  assert.doesNotMatch(markup.textContent ?? "", /backend detail/);
+  assert.equal(
+    markup.querySelector('[data-delivery-external-target-hint=""]'),
+    null,
+  );
 });
 
 test("the real unavailable preference response exposes a Web App recovery path", () => {
@@ -124,6 +154,9 @@ test("the real unavailable preference response exposes a Web App recovery path",
   assert.equal(
     buttonByLabel(markup, "automations.delivery.clear")?.disabled,
     false,
+  );
+  assert.ok(
+    markup.querySelector('[data-delivery-external-target-hint=""]'),
   );
 });
 
