@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { hydrateRoot } from "react-dom/client";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup, renderToString } from "react-dom/server";
 import { test, vi } from "vitest";
 
 vi.mock("../../../lib/i18n", () => ({
@@ -158,7 +158,7 @@ test("a hydrated panel recovers when the saved target no longer resolves", async
     saveFinalReplyTarget,
   });
   const container = document.createElement("div");
-  container.innerHTML = renderToStaticMarkup(
+  container.innerHTML = renderToString(
     <AutomationDeliveryDefaultsPanel deliveryState={initialState} />,
   );
   document.body.append(container);
