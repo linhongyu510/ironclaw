@@ -2046,6 +2046,16 @@ async fn stage_credential_material(
             tracing::debug!(err = %e, "stage_credential_material: consume failed");
             crate::services::stage_secret_error(e)
         })?;
+    // A configured account whose resolved material is empty cannot
+    // authenticate anything. Surface the typed re-auth signal at
+    // authorization time instead of letting the guest fail opaquely.
+    if secret.expose_secret().is_empty() {
+        tracing::debug!(
+            handle = %target.as_str(),
+            "stage_credential_material: resolved credential material is empty; requiring re-auth"
+        );
+        return Err(CredentialStageError::AuthRequired);
+    }
     secret_injections
         .insert(target_scope, capability_id, target, secret)
         .map_err(|e| {
