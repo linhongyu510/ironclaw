@@ -2,7 +2,7 @@
 
 **Status:** Design draft for issue #3492
 **Date:** 2026-05-11
-**Target crates:** `ironclaw_trust`, `ironclaw_turns`, `ironclaw_memory`, `ironclaw_skills`, `ironclaw_host_runtime`, `ironclaw_architecture`, plus touched substrate crates
+**Target crates:** `ironclaw_trust`, `ironclaw_turns`, `ironclaw_memory`, `ironclaw_skills`, `ironclaw_host_runtime`, `ironclaw_architecture_tests`, plus touched substrate crates
 **Depends on:** [`kernel-boundary.md`](kernel-boundary.md), [`host-api.md`](host-api.md), [`memory.md`](memory.md), [`host-runtime.md`](host-runtime.md), [`runtime-selection.md`](runtime-selection.md), [`loop-exit.md`](loop-exit.md)
 
 ---
@@ -74,8 +74,8 @@ Use one of these patterns:
 
 Existing examples to follow:
 
-- `crates/ironclaw_product_adapters/src/auth.rs`: `ProtocolAuthEvidence` can serialize verified evidence but only failed evidence can deserialize from wire; verified evidence is host-minted through a private seal.
-- `crates/ironclaw_trust`: privileged `EffectiveTrustClass` values are host-policy-only; manifest requests do not become grants.
+- `crates/contracts/ironclaw_host_api/src/product_adapter/auth.rs`: `ProtocolAuthEvidence` can serialize verified evidence but only failed evidence can deserialize from wire; verified evidence is host-minted through a private seal.
+- `crates/kernel/ironclaw_trust`: privileged `EffectiveTrustClass` values are host-policy-only; manifest requests do not become grants.
 
 ### 3.3 Loop-exit policy implication
 
@@ -183,7 +183,17 @@ Names can vary if semantics stay explicit.
 - missing durable store, missing configured policy sink, missing required runtime adapter -> `Misconfigured`.
 - authorization denial, stale surface, scope mismatch, output/resource limit, prompt policy refusal -> `PolicyDenied`.
 
-Existing `AgentLoopHostErrorKind` can remain the specific kind surface, but it should map to a shared class for runner/operator decisions. Raw backend/provider details stay behind diagnostic refs.
+Existing `AgentLoopHostErrorKind` can remain the specific kind surface, but it should map to a shared class for runner/operator decisions. Recovery-relevant causes cross only through the bounded, secret-scrubbed inline diagnostic channel; raw backend/provider details stay behind host adapters.
+
+The caller-path regression is `tests/integration/mcp.rs` test
+`mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request`.
+It drives a whole turn through the real MCP/runtime/loop/model-request path and
+asserts that the useful cause reaches the next model request while a credential
+token and text beyond the shared byte cap do not. Run:
+
+```bash
+cargo test -p ironclaw_integration_tests --test reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request -- --exact
+```
 
 ---
 
@@ -343,7 +353,7 @@ Foundation PR verification should include:
 - `cargo fmt --all -- --check`;
 - targeted unit tests for new primitives;
 - targeted architecture/checklist test if a mechanical guard is added;
-- `cargo test -p ironclaw_architecture` if boundary rules or audit harness tests change;
+- `cargo test -p ironclaw_architecture_tests` if boundary rules or audit harness tests change;
 - targeted crate tests for any migrated trust-bearing type.
 
 Later migration PRs must add caller-level tests when the primitive gates side effects such as prompt assembly, dispatch, persistence, runtime execution, network egress, approvals, resources, or events.

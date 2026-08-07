@@ -15,26 +15,38 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
-use ironclaw_events::InMemoryDurableEventLog;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_assistant::{RebornServices, RebornStreamEventsRequest};
+use ironclaw_composition::test_support::BudgetTestGateway;
+use ironclaw_composition::{
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    standalone_runtime_policy,
+};
+use ironclaw_event_log::InMemoryDurableEventLog;
+use ironclaw_extension_registry::{
+    CapabilityProviderHostApiContract, ExtensionInstallation, ExtensionInstallationId,
+    ExtensionManifestRecord, ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
+};
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
+    capability::{EffectKind, PermissionMode},
+    ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
 };
-use ironclaw_product_adapters::ProductOutboundPayload;
-use ironclaw_product_workflow::{
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
-    RebornStreamEventsRequest,
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
-use ironclaw_reborn_composition::test_support::BudgetTestGateway;
-use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    build_webui_services, local_dev_runtime_policy,
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -45,8 +57,9 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
+use secrecy::SecretString;
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -62,24 +75,24 @@ async fn thread_history_cold_get_and_libsql_reopen() {
     // Cold-GET mechanics mirror `assert_reply_persists_after_reopen`'s LibSql
     // branch: a genuinely fresh `libsql::Database` connection to the on-disk
     // file, independent of the live composite `Arc`.
-    let db_path = h
-        ._shared
-        .libsql_db_path
-        .clone()
-        .expect("LibSql storage mode has a db path");
+    let reborn_support::builder::StorageReopen::LibSql { db_path } = &h._shared.storage_reopen
+    else {
+        panic!("LibSql storage mode has a db path");
+    };
+    let db_path = db_path.clone();
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     fresh_fs
         .run_migrations()
         .await
         .expect("migrations on fresh libsql reopen are idempotent");
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )
@@ -177,7 +190,7 @@ impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
     // composition-tier catalog test (#5459 P1).
     async fn list_operator_tools(
         &self,
-        _caller: &ironclaw_host_api::UserId,
+        _caller: &ironclaw_host_api::ids::UserId,
     ) -> Vec<RebornOperatorToolInfo> {
         vec![RebornOperatorToolInfo {
             capability_id: CapabilityId::new("builtin.http").expect("capability id"),
@@ -250,7 +263,7 @@ async fn settings_tool_permission_post_then_cold_read() {
         .service_instance()
         .expect("fresh thread service instance");
     let (fresh_overrides, fresh_auto_approve, fresh_persistent_policies) =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_settings_stores_for_test(
+        ironclaw_composition::test_support::open_standalone_approval_settings_stores_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await
@@ -290,14 +303,16 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-import-agent").expect("agent id");
     let user_id = UserId::new("webui-import-operator").expect("user id");
-    let input = RebornBuildInput::local_dev(user_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input =
+        ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+            .with_bundled_first_party_for_test()
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -310,17 +325,14 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        user_id,
-        Some(agent_id),
-        None,
-    );
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
     let bundle = importable_extension_zip("webui-uploaded");
 
     let (status, body) = post_raw(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller.clone()),
+        mount_webui_v2_router(Arc::clone(&webui), caller.clone()),
         "/api/webchat/v2/extensions/import",
         bundle.clone(),
     )
@@ -338,12 +350,10 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     );
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.api),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
-    .layer(axum::Extension(
-        caller.clone().with_operator_webui_config(true),
-    ))
+    .layer(axum::Extension(caller.clone().with_operator_config(true)))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
     }));
@@ -354,8 +364,8 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
 
     let (status, body) = get_json(
         mount_webui_v2_router(
-            Arc::clone(&webui.api),
-            ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+            Arc::clone(&webui),
+            ProductSurfaceCaller::new(
                 caller.tenant_id.clone(),
                 caller.user_id.clone(),
                 caller.agent_id.clone(),
@@ -398,14 +408,18 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     let tenant_id = TenantId::new("webui-legacy-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-legacy-agent").expect("agent id");
     let operator_id = UserId::new("webui-legacy-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_composition::local_filesystem_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -418,21 +432,17 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id.clone(),
-        operator_id,
-        Some(agent_id.clone()),
-        None,
-    );
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let operator_caller =
+        ProductSurfaceCaller::new(tenant_id.clone(), operator_id, Some(agent_id.clone()), None);
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.api),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
-    .layer(axum::Extension(
-        operator_caller.with_operator_webui_config(true),
-    ))
+    .layer(axum::Extension(operator_caller.with_operator_config(true)))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
     }));
@@ -447,20 +457,18 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 
     let alice_id = UserId::new("alice").expect("alice id");
     let bob_id = UserId::new("bob").expect("bob id");
-    let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": "legacy-members"}
-    });
     for (name, user_id) in [("Alice", alice_id.clone()), ("Bob", bob_id.clone())] {
-        let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-            tenant_id.clone(),
-            user_id,
-            Some(agent_id.clone()),
-            None,
-        );
+        let caller =
+            ProductSurfaceCaller::new(tenant_id.clone(), user_id, Some(agent_id.clone()), None);
+        // #6520: install requires a client gesture id on the wire.
+        let install_request = serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "legacy-members"},
+            "client_action_id": format!("legacy-canonicalize-install-{name}")
+        });
         let (status, body) = post_json(
-            mount_webui_v2_router(Arc::clone(&webui.api), caller),
+            mount_webui_v2_router(Arc::clone(&webui), caller),
             "/api/webchat/v2/extensions/install",
-            install_request.clone(),
+            install_request,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
@@ -470,36 +478,61 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let state_path = storage_root.join("system/extensions/.installations/state.json");
-    let mut state: Value = serde_json::from_slice(
-        &std::fs::read(&state_path).expect("read extension installation state"),
-    )
-    .expect("extension installation state is JSON");
-    let rows = state["installations"]
-        .as_array()
-        .expect("installations array");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open extension installation store");
+    let rows = store
+        .list_installations()
+        .await
+        .expect("list extension installations");
     assert_eq!(rows.len(), 1, "member installs must already share one row");
-    let mut alice_row = rows[0].clone();
-    alice_row["installation_id"] = Value::String("legacy-alice-legacy-members".to_string());
-    alice_row["owner"] = serde_json::json!({"kind": "user", "user_id": "alice"});
-    let mut bob_row = rows[0].clone();
-    bob_row["installation_id"] = Value::String("legacy-bob-legacy-members".to_string());
-    bob_row["owner"] = serde_json::json!({"kind": "user", "user_id": "bob"});
-    state["installations"] = serde_json::json!([alice_row, bob_row]);
-    std::fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&state).expect("serialize legacy installation state"),
-    )
-    .expect("write legacy installation state");
+    let canonical = rows.into_iter().next().expect("one installation row");
+    store
+        .delete_installation(canonical.installation_id())
+        .await
+        .expect("delete canonical installation row");
+    for (installation_id, owner) in [
+        (
+            "legacy-alice-legacy-members",
+            InstallationOwner::user(alice_id.clone()),
+        ),
+        (
+            "legacy-bob-legacy-members",
+            InstallationOwner::user(bob_id.clone()),
+        ),
+    ] {
+        store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(installation_id).expect("valid installation id"),
+                    canonical.extension_id().clone(),
+                    canonical.manifest_ref().clone(),
+                    canonical.credential_bindings().to_vec(),
+                    canonical.updated_at(),
+                    owner,
+                )
+                .expect("legacy installation row"),
+            )
+            .await
+            .expect("write legacy installation row");
+    }
+    drop(store);
 
-    let rebuilt_input = RebornBuildInput::local_dev("webui-legacy-operator", storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let rebuilt_input = ironclaw_composition::local_filesystem_build_input(
+        "webui-legacy-operator",
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -512,14 +545,16 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .await
     .expect("rebuilt production Reborn runtime builds");
-    let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+    let rebuilt_webui = rebuilt_runtime
+        .product_surface(None)
+        .expect("rebuilt product surface builds");
 
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("reopen canonical extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("reopen canonical extension installation store");
     let installations = store
         .list_installations()
         .await
@@ -542,14 +577,10 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     );
     assert!(members.contains(&bob_id), "canonical owner contains Bob");
 
-    let alice_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id.clone(),
-        alice_id,
-        Some(agent_id.clone()),
-        None,
-    );
+    let alice_caller =
+        ProductSurfaceCaller::new(tenant_id.clone(), alice_id, Some(agent_id.clone()), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), alice_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), alice_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -564,14 +595,9 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .unwrap_or_else(|| panic!("Alice should see private legacy-members: {body}"));
     assert_eq!(alice_extension["install_scope"], "private");
 
-    let bob_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        bob_id,
-        Some(agent_id),
-        None,
-    );
+    let bob_caller = ProductSurfaceCaller::new(tenant_id, bob_id, Some(agent_id), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), bob_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), bob_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -612,14 +638,18 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let tenant_id = TenantId::new("webui-orphan-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-orphan-agent").expect("agent id");
     let operator_id = UserId::new("webui-orphan-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_composition::local_filesystem_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -632,8 +662,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let operator_caller = ProductSurfaceCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
         Some(agent_id.clone()),
@@ -641,12 +673,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     );
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.api),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
-    .layer(axum::Extension(
-        operator_caller.with_operator_webui_config(true),
-    ))
+    .layer(axum::Extension(operator_caller.with_operator_config(true)))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
     }));
@@ -659,7 +689,8 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     assert_eq!(status, StatusCode::OK, "operator response: {body}");
     assert_eq!(body["success"], true);
     let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": "catalog-present"}
+        "package_ref": {"kind": "extension", "id": "catalog-present"},
+        "client_action_id": "webui-api2-catalog-present-operator-install"
     });
     let (status, body) = post_json(
         operator_router,
@@ -673,63 +704,81 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    // Hand-edit the persisted state file the way a standalone v1->Reborn
-    // migration tool would: add a manifest + installation row for an
-    // extension id that has no corresponding materialized catalog package
-    // (no `/system/extensions/<id>/` files were written for it), simulating
-    // a migration that has not yet materialized catalog packages.
-    let state_path = storage_root.join("system/extensions/.installations/state.json");
-    let mut state: Value = serde_json::from_slice(
-        &std::fs::read(&state_path).expect("read extension installation state"),
+    // Seed the same shape a standalone v1->Reborn migration tool would: add a
+    // manifest + installation row for an extension id that has no corresponding
+    // materialized catalog package (no `/system/extensions/<id>/` files were
+    // written for it), simulating a migration that has not yet materialized
+    // catalog packages.
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open extension installation store");
+    let catalog_extension_id = ExtensionId::new("catalog-present").expect("extension id");
+    let catalog_manifest = store
+        .get_manifest(&catalog_extension_id)
+        .await
+        .expect("read catalog-present manifest")
+        .expect("catalog-present manifest exists");
+    let catalog_installation = store
+        .list_installations()
+        .await
+        .expect("list extension installations")
+        .into_iter()
+        .find(|installation| installation.extension_id() == &catalog_extension_id)
+        .expect("catalog-present installation exists");
+    let orphan_extension_id = ExtensionId::new("orphan-migrated").expect("extension id");
+    let orphan_raw_toml = catalog_manifest
+        .raw_toml()
+        .replace("catalog-present", orphan_extension_id.as_str());
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(
+            CapabilityProviderHostApiContract::new().expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    let orphan_manifest = ExtensionManifestRecord::from_toml(
+        orphan_raw_toml,
+        catalog_manifest.manifest().source,
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+        catalog_manifest.manifest_hash().cloned(),
+        &contracts,
+        None,
     )
-    .expect("extension installation state is JSON");
-    let manifests = state["manifests"]
-        .as_array()
-        .expect("manifests array")
-        .clone();
-    let mut orphan_manifest = manifests
-        .first()
-        .expect("at least one manifest present")
-        .clone();
-    orphan_manifest["raw_toml"] = Value::String(
-        orphan_manifest["raw_toml"]
-            .as_str()
-            .expect("raw_toml is a string")
-            .replace("catalog-present", "orphan-migrated"),
-    );
-    let mut new_manifests = manifests;
-    new_manifests.push(orphan_manifest);
-    state["manifests"] = Value::Array(new_manifests);
+    .expect("orphan manifest parses");
+    store
+        .upsert_manifest_and_installation(
+            orphan_manifest,
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new("orphan-migrated").expect("valid installation id"),
+                orphan_extension_id.clone(),
+                ExtensionManifestRef::new(
+                    orphan_extension_id,
+                    catalog_manifest.manifest_hash().cloned(),
+                ),
+                catalog_installation.credential_bindings().to_vec(),
+                catalog_installation.updated_at(),
+                catalog_installation.owner().clone(),
+            )
+            .expect("orphan installation row"),
+        )
+        .await
+        .expect("write orphan manifest and installation rows");
+    drop(store);
 
-    let installations = state["installations"]
-        .as_array()
-        .expect("installations array")
-        .clone();
-    let mut orphan_row = installations
-        .first()
-        .expect("at least one installation present")
-        .clone();
-    orphan_row["installation_id"] = Value::String("orphan-migrated".to_string());
-    orphan_row["extension_id"] = Value::String("orphan-migrated".to_string());
-    orphan_row["manifest_ref"]["extension_id"] = Value::String("orphan-migrated".to_string());
-    let mut new_installations = installations;
-    new_installations.push(orphan_row);
-    state["installations"] = Value::Array(new_installations);
-
-    std::fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&state).expect("serialize orphan installation state"),
+    let rebuilt_input = ironclaw_composition::local_filesystem_build_input(
+        "webui-orphan-operator",
+        storage_root.clone(),
     )
-    .expect("write orphan installation state");
-
-    let rebuilt_input = RebornBuildInput::local_dev("webui-orphan-operator", storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -742,21 +791,23 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .await
     .expect("rebuilt production Reborn runtime builds despite the orphan installation row");
-    let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+    let rebuilt_webui = rebuilt_runtime
+        .product_surface(None)
+        .expect("rebuilt product surface builds");
 
     // The orphan row is preserved untouched (never deleted or rewritten) so
     // it can restore once the migration tool later materializes its catalog
     // package.
-    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("reopen canonical extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("reopen canonical extension installation store");
     assert!(
         store
             .get_installation(
-                &ironclaw_extensions::ExtensionInstallationId::new("orphan-migrated")
+                &ironclaw_extension_registry::ExtensionInstallationId::new("orphan-migrated")
                     .expect("valid installation id")
             )
             .await
@@ -766,15 +817,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     );
 
     // The catalog-present installation still restores and is reachable
-    // through the real WebUI facade.
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        operator_id,
-        Some(agent_id),
-        None,
-    );
+    // through the real product surface.
+    let operator_caller = ProductSurfaceCaller::new(tenant_id, operator_id, Some(agent_id), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), operator_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), operator_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -791,7 +837,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
                 .find(|extension| extension["package_ref"]["id"] == "catalog-present")
         })
         .unwrap_or_else(|| panic!("catalog-present extension must still restore: {body}"));
-    assert_eq!(present_extension["install_scope"], "shared");
+    // #6520 membership: every install is caller-private — the operator's own
+    // restored install projects as private (operator role never creates a
+    // tenant-wide membership).
+    assert_eq!(present_extension["install_scope"], "private");
 
     drop(store);
     drop(rebuilt_webui);
@@ -801,28 +850,28 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("rebuilt runtime shuts down");
 }
 
-/// Pins PR #5499 private-install membership through the PRODUCTION webui
-/// facade, mirroring the crate-tier invariants in
-/// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`
-/// (`members_install_the_same_tool_independently` +
-/// `operator_install_evicts_member_installs_to_tenant_shared`), but driven
-/// through the real HTTP router instead of the facade directly.
+/// Pins caller-owned installation membership through the production WebUI
+/// facade. Operator authorization grants access to deployment configuration;
+/// it does not turn that operator's personal install into tenant-wide state.
 #[tokio::test]
-async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_facade()
- {
+async fn users_and_operator_install_and_remove_independently_through_production_webui_facade() {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-eviction-agent").expect("agent id");
     let operator_id = UserId::new("webui-eviction-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_composition::local_filesystem_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -835,21 +884,23 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
 
     let extension_id = "member-eviction-fixture";
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let operator_caller = ProductSurfaceCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
         Some(agent_id.clone()),
         None,
     );
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.api),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(
-        operator_caller.clone().with_operator_webui_config(true),
+        operator_caller.clone().with_operator_config(true),
     ))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
@@ -867,22 +918,20 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     let bob_id = UserId::new("bob").expect("bob id");
     let carol_id = UserId::new("carol").expect("carol id");
     let caller_for = |user_id: UserId| {
-        ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-            tenant_id.clone(),
-            user_id,
-            Some(agent_id.clone()),
-            None,
-        )
+        ProductSurfaceCaller::new(tenant_id.clone(), user_id, Some(agent_id.clone()), None)
     };
-    let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": extension_id}
-    });
+    let install_request = |client_action_id: &str| {
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": extension_id},
+            "client_action_id": client_action_id
+        })
+    };
 
     // 1: alice installs -> private install created.
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(alice_id.clone())),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-alice-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "alice install response: {body}");
@@ -890,9 +939,9 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     // 2: bob installs the SAME id -> joins the membership, not a duplicate error.
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(bob_id.clone())),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(bob_id.clone())),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-bob-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "bob install response: {body}");
@@ -901,7 +950,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     // 3: both members see a PRIVATE entry.
     for (name, user_id) in [("alice", alice_id.clone()), ("bob", bob_id.clone())] {
         let (status, body) = get_json(
-            mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
             "/api/webchat/v2/extensions",
         )
         .await;
@@ -919,7 +968,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     // 4: carol, never a member, does not see the entry at all (masked visibility).
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id.clone())),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id.clone())),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -934,14 +983,16 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     );
 
     // 5: carol attempting to remove the member-private id gets the masked
-    // "is not installed" denial (`ProductWorkflowError::InvalidBindingRequest`
+    // "is not installed" denial (`ProductSurfaceFailure::InvalidBindingRequest`
     // via `install_policy::ensure_caller_may_operate`, mapped to 400 by
     // `map_lifecycle_error` in `lifecycle_setup.rs`) rather than a 403/404 that
     // would let a non-member distinguish "not installed" from "not yours".
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id.clone())),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-carol-remove-private"
+        }),
     )
     .await;
     assert_ne!(
@@ -960,24 +1011,26 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
         "masked denial must not leak member identities: {body}"
     );
 
-    // 6: operator installs the same id -> evicts both members to Tenant.
+    // 6: the operator installs for their own user. Administrative authority
+    // does not evict Alice/Bob or install anything for Carol.
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
+        mount_webui_v2_router(Arc::clone(&webui), operator_caller.clone()),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-operator-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator install response: {body}");
-    assert_eq!(body["success"], true, "operator eviction response: {body}");
+    assert_eq!(body["success"], true, "operator install response: {body}");
 
-    // 7: everyone now sees the SHARED (tenant) entry.
+    // 7: only the three callers who installed see private state; Carol stays
+    // uninstalled.
     for (name, user_id) in [
         ("alice", alice_id.clone()),
         ("bob", bob_id.clone()),
-        ("carol", carol_id.clone()),
+        ("operator", operator_id.clone()),
     ] {
         let (status, body) = get_json(
-            mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
             "/api/webchat/v2/extensions",
         )
         .await;
@@ -989,33 +1042,715 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
                     .iter()
                     .find(|extension| extension["package_ref"]["id"] == extension_id)
             })
-            .unwrap_or_else(|| panic!("{name} should see shared {extension_id}: {body}"));
-        assert_eq!(entry["install_scope"], "shared", "{name} scope: {body}");
+            .unwrap_or_else(|| panic!("{name} should see private {extension_id}: {body}"));
+        assert_eq!(entry["install_scope"], "private", "{name} scope: {body}");
     }
-
-    // 8: a former member cannot remove the now-tenant row; the operator can.
-    let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
-        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id)),
+        "/api/webchat/v2/extensions",
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "alice must not be able to remove the tenant-shared row: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "carol extensions response: {body}");
+    assert!(body["extensions"].as_array().is_some_and(|extensions| {
+        !extensions
+            .iter()
+            .any(|extension| extension["package_ref"]["id"] == extension_id)
+    }));
+
+    // 8: each caller removes only their own membership. Alice's removal does
+    // not affect Bob or the operator.
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(alice_id.clone())),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-alice-remove-shared"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alice remove response: {body}");
+
+    for (name, user_id) in [("bob", bob_id.clone()), ("operator", operator_id.clone())] {
+        let (status, body) = get_json(
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
+            "/api/webchat/v2/extensions",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} extensions response: {body}");
+        assert!(body["extensions"].as_array().is_some_and(|extensions| {
+            extensions
+                .iter()
+                .any(|extension| extension["package_ref"]["id"] == extension_id)
+        }));
+    }
 
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller),
+        mount_webui_v2_router(Arc::clone(&webui), operator_caller.clone()),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-operator-remove"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator remove response: {body}");
 
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(bob_id)),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-bob-final-remove"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "bob final remove response: {body}");
+
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Deployment configuration is discovered from the manifest catalog, not from
+/// per-user installation state. An operator must therefore see first-party
+/// channel configuration on a fresh runtime before any user installs either
+/// extension, and secret fields must remain value-free in the response.
+#[tokio::test]
+async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_redacted() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-config-operator").expect("user id");
+    let input = ironclaw_composition::local_filesystem_build_input(
+        user_id.as_str(),
+        root.path().join("local-dev"),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_build_input(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-config-source".to_string(),
+                reply_target_binding_id: "webui-admin-config-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller.with_operator_config(true)))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let (status, body) = get_json(
+        operator_router,
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    let groups = body["groups"].as_array().expect("configuration groups");
+    for group_id in ["extension.slack", "extension.telegram"] {
+        assert!(
+            groups.iter().any(|group| group["group_id"] == group_id),
+            "manifest-declared group {group_id} must be listed before installation: {body}"
+        );
+    }
+    for secret_field in groups
+        .iter()
+        .flat_map(|group| group["fields"].as_array().into_iter().flatten())
+        .filter(|field| field["secret"] == true)
+    {
+        assert!(
+            secret_field.get("value").is_none_or(Value::is_null),
+            "secret fields must never expose a value: {secret_field}"
+        );
+    }
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// The public save path must cross the production generic invoke conduit and
+/// then return the authoritative redacted query state. A successful first
+/// replacement advances revision zero to one; the subsequent GET must observe
+/// the same revision without exposing any submitted secret material.
+#[tokio::test]
+async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-save-operator").expect("user id");
+    let input = ironclaw_composition::local_filesystem_build_input(
+        user_id.as_str(),
+        root.path().join("local-dev"),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_build_input(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-save-source".to_string(),
+                reply_target_binding_id: "webui-admin-save-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None)
+        .with_operator_config(true);
+    let operator_router = || {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&webui),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller.clone()))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    };
+    let submitted_secret = "xoxb-redaction-sentinel-never-return";
+
+    let (save_status, saved) = put_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values(submitted_secret, "T-SAVED"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-save-1",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(save_status, StatusCode::OK, "save response: {saved}");
+    assert_eq!(
+        saved["group_id"], "extension.slack",
+        "save response: {saved}"
+    );
+    assert_eq!(saved["revision"], 1, "save response: {saved}");
+    assert_eq!(read_status, StatusCode::OK, "read response: {read_body}");
+    let slack = read_body["groups"]
+        .as_array()
+        .and_then(|groups| {
+            groups
+                .iter()
+                .find(|group| group["group_id"] == "extension.slack")
+        })
+        .unwrap_or_else(|| panic!("Slack configuration missing after save: {read_body}"));
+    assert_eq!(slack["revision"], 1, "read response: {read_body}");
+    assert_eq!(slack["complete"], true, "read response: {read_body}");
+    assert!(
+        !saved.to_string().contains(submitted_secret)
+            && !read_body.to_string().contains(submitted_secret),
+        "secret material must be redacted from save and read responses"
+    );
+    let bot_token = slack["fields"]
+        .as_array()
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| field["handle"] == "slack_bot_token")
+        })
+        .unwrap_or_else(|| panic!("Slack bot-token field missing: {read_body}"));
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "stored secret value must not be returned: {bot_token}"
+    );
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Operator capability is a transport authorization boundary. An ordinary
+/// authenticated user may neither discover tenant deployment configuration nor
+/// submit a replacement, even when the request body is otherwise valid.
+#[tokio::test]
+async fn non_operator_cannot_read_or_replace_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("non-operator").await;
+    let (get_status, get_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    let (put_status, put_body) = put_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values("forbidden-secret", "T-FORBIDDEN"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-forbidden-1",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (get_status, put_status),
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN),
+        "non-operator GET body: {get_body}; PUT body: {put_body}"
+    );
+    for forbidden in [
+        "slack_bot_token",
+        "slack_signing_secret",
+        "slack_oauth_client_id",
+        "slack_oauth_client_secret",
+        "forbidden-secret",
+        "T-FORBIDDEN",
+    ] {
+        assert!(
+            !get_body.to_string().contains(forbidden) && !put_body.to_string().contains(forbidden),
+            "unauthorized response leaked administrator metadata `{forbidden}`: GET {get_body}; \
+             PUT {put_body}"
+        );
+    }
+    fixture.shutdown().await;
+}
+
+/// Optimistic concurrency belongs to the generic manifest configuration
+/// service. Two distinct requests cannot both replace revision zero: after the
+/// first commit, a second request carrying the stale revision is a conflict.
+#[tokio::test]
+async fn stale_admin_configuration_revision_is_rejected() {
+    let fixture = AdminConfigurationFixture::new("stale-revision").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("first-secret", "T-FIRST"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-first-1",
+        }),
+    )
+    .await;
+    let (stale_status, stale_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("stale-secret", "T-STALE"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-stale-2",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, stale_status),
+        (StatusCode::OK, StatusCode::CONFLICT),
+        "first response: {first_body}; stale response: {stale_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// Empty secret inputs are the UI's explicit "keep the existing secret"
+/// sentinel. A later replacement may update inline values while preserving the
+/// prior secret reference and advancing the group revision.
+#[tokio::test]
+async fn blank_admin_secret_preserves_stored_value() {
+    let fixture = AdminConfigurationFixture::new("blank-secret").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("retained-secret", "T-ORIGINAL"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-secret-first",
+        }),
+    )
+    .await;
+    let (second_status, second_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("", "T-UPDATED"),
+            "expected_revision": 1,
+            "idempotency_key": "webui-admin-secret-second",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, second_status, read_status),
+        (StatusCode::OK, StatusCode::OK, StatusCode::OK),
+        "first response: {first_body}; second response: {second_body}; read response: {read_body}"
+    );
+    let slack = configuration_group(&read_body, "extension.slack");
+    assert_eq!(slack["revision"], 2, "read response: {read_body}");
+    let bot_token = configuration_field(slack, "slack_bot_token");
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "retained secret remains redacted: {bot_token}"
+    );
+    let team_id = configuration_field(slack, "slack_team_id");
+    assert_eq!(team_id["value"], "T-UPDATED", "read response: {read_body}");
+    fixture.shutdown().await;
+}
+
+/// Installation membership and tenant deployment configuration are distinct
+/// lifecycles. Removing a user's extension installation cannot delete the
+/// operator's manifest-group revision or configured values.
+#[tokio::test]
+async fn user_extension_removal_does_not_erase_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("remove-preserves-config").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-before-user-remove",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"},
+            "client_action_id": "webui-api2-admin-config-member-install"
+        }),
+    )
+    .await;
+    let (remove_status, remove_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/remove",
+        serde_json::json!({
+            "client_action_id": "webui-api2-admin-config-member-remove"
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (save_status, install_status, remove_status, read_status),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; remove: {remove_body}; read: {read_body}"
+    );
+    let telegram = configuration_group(&read_body, "extension.telegram");
+    assert_eq!(telegram["revision"], 1, "read response: {read_body}");
+    assert_eq!(telegram["complete"], true, "read response: {read_body}");
+    assert_eq!(
+        configuration_field(telegram, "telegram_bot_token")["provided"],
+        true,
+        "read response: {read_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// Tenant administrator configuration is consumed by the channel host but is
+/// never projected onto an ordinary caller's personal setup surface. Pairing
+/// still proves the manifest-declared consumer received the saved deployment
+/// values without exposing their handles or labels through the setup API.
+#[tokio::test]
+async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consumes_it() {
+    let fixture = AdminConfigurationFixture::new("effective-consumer").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-effective-consumer",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"},
+            "client_action_id": "webui-api2-effective-consumer-member-install"
+        }),
+    )
+    .await;
+    let (setup_status, setup_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/setup",
+    )
+    .await;
+    let (list_status, list_body) =
+        get_json(fixture.member_router(), "/api/webchat/v2/extensions").await;
+    let (registry_status, registry_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/registry",
+    )
+    .await;
+    let (caller_admin_submit_status, caller_admin_submit_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/setup",
+        serde_json::json!({
+            "action": "submit",
+            "payload": {
+                "fields": {
+                    "bot_username": "caller-must-not-configure-deployment"
+                }
+            }
+        }),
+    )
+    .await;
+    let (pairing_status, pairing_body) = post_json(
+        fixture.pairing_member_router(),
+        "/api/webchat/v2/extensions/telegram/pairing/mint",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            save_status,
+            install_status,
+            setup_status,
+            list_status,
+            registry_status,
+            caller_admin_submit_status,
+            pairing_status,
+        ),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; setup: {setup_body}; list: {list_body}; \
+         registry: {registry_body}; caller admin submit: {caller_admin_submit_body}; pairing: \
+         {pairing_body}"
+    );
+    let ordinary_caller_wires = [
+        ("setup", setup_body.to_string()),
+        ("installed-list", list_body.to_string()),
+        ("registry", registry_body.to_string()),
+    ];
+    for forbidden in [
+        "telegram_bot_token",
+        "telegram_webhook_secret",
+        "telegram_webhook_url",
+        "bot_username",
+        "Bot token",
+        "Webhook secret token",
+        "Public webhook URL",
+        "Bot username",
+        "Telegram deployment configuration",
+    ] {
+        for (surface, wire) in &ordinary_caller_wires {
+            assert!(
+                !wire.contains(forbidden),
+                "ordinary caller {surface} leaked administrator metadata `{forbidden}`: {wire}"
+            );
+        }
+    }
+    assert!(
+        setup_body.get("fields").is_none(),
+        "caller setup must not expose an administrator field collection: {setup_body}"
+    );
+    assert!(
+        pairing_body["code"]
+            .as_str()
+            .is_some_and(|code| !code.is_empty()),
+        "pairing mint omitted its code: {pairing_body}"
+    );
+    assert!(
+        pairing_body["deep_link"]
+            .as_str()
+            .is_some_and(|link| link.starts_with("https://t.me/ironclaw_test_bot?start=")),
+        "pairing mint did not consume the manifest-configured deep-link value: {pairing_body}"
+    );
+    fixture.shutdown().await;
+}
+
+struct AdminConfigurationFixture {
+    _root: TempDir,
+    runtime: RebornRuntime,
+    webui: Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+}
+
+impl AdminConfigurationFixture {
+    async fn new(name: &str) -> Self {
+        let root = tempdir().expect("runtime storage tempdir");
+        let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
+        let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
+        let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
+        let input = ironclaw_composition::local_filesystem_build_input(
+            user_id.as_str(),
+            root.path().join("local-dev"),
+        )
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+        .with_bundled_first_party_for_test()
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_build_input(input)
+                .with_identity(RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: format!("webui-admin-{name}-source"),
+                    reply_target_binding_id: format!("webui-admin-{name}-reply"),
+                })
+                .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                    "unused", 0, 0,
+                ))),
+        )
+        .await
+        .expect("production Reborn runtime builds");
+        let webui = runtime
+            .product_surface(None)
+            .expect("production product surface builds");
+        let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
+        Self {
+            _root: root,
+            runtime,
+            webui,
+            caller,
+        }
+    }
+
+    fn member_router(&self) -> Router {
+        mount_webui_v2_router(Arc::clone(&self.webui), self.caller.clone())
+    }
+
+    fn operator_router(&self) -> Router {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&self.webui),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(
+            self.caller.clone().with_operator_config(true),
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    }
+
+    fn pairing_member_router(&self) -> Router {
+        let pairing = ironclaw_webui::channel_pairing_route_mount(
+            self.runtime
+                .channel_pairing_registry()
+                .expect("Telegram pairing registry"),
+        );
+        pairing
+            .router
+            .layer(axum::Extension(self.caller.clone()))
+            .layer(axum::Extension(WebUiV2Capabilities::default()))
+    }
+
+    async fn shutdown(self) {
+        let Self { runtime, webui, .. } = self;
+        drop(webui);
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+}
+
+async fn put_json(router: Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "response body is not valid JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    };
+    (status, body)
+}
+
+fn slack_admin_configuration_values(bot_token: &str, team_id: &str) -> Value {
+    serde_json::json!([
+        {"handle": "slack_bot_token", "value": bot_token},
+        {"handle": "slack_signing_secret", "value": "signing-secret"},
+        {"handle": "slack_team_id", "value": team_id},
+        {"handle": "slack_api_app_id", "value": "A-APP"},
+        {"handle": "slack_installation_id", "value": "I-INSTALL"},
+        {"handle": "slack_bot_user_id", "value": "U-BOT"},
+        {"handle": "slack_oauth_client_id", "value": "oauth-client"},
+        {"handle": "slack_oauth_client_secret", "value": "oauth-secret"}
+    ])
+}
+
+fn telegram_admin_configuration_values() -> Value {
+    serde_json::json!([
+        {"handle": "telegram_bot_token", "value": "telegram-bot-secret"},
+        {"handle": "telegram_webhook_secret", "value": "telegram-webhook-secret"},
+        {"handle": "telegram_webhook_url", "value": "https://example.test/telegram/updates"},
+        {"handle": "bot_username", "value": "ironclaw_test_bot"}
+    ])
+}
+
+fn configuration_group<'a>(body: &'a Value, group_id: &str) -> &'a Value {
+    body["groups"]
+        .as_array()
+        .and_then(|groups| groups.iter().find(|group| group["group_id"] == group_id))
+        .unwrap_or_else(|| panic!("configuration group {group_id} missing: {body}"))
+}
+
+fn configuration_field<'a>(group: &'a Value, handle: &str) -> &'a Value {
+    group["fields"]
+        .as_array()
+        .and_then(|fields| fields.iter().find(|field| field["handle"] == handle))
+        .unwrap_or_else(|| panic!("configuration field {handle} missing: {group}"))
 }
 
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
@@ -1091,11 +1826,11 @@ output_schema_ref = "schemas/run.output.json"
     writer.finish().expect("finish zip").into_inner()
 }
 
-/// W5-WEBUI-API-1 scenario 2: drives `RebornServicesApi::stream_events`
+/// W5-WEBUI-API-1 scenario 2: drives `ProductSurface::stream_events`
 /// directly (SSE handler is a polling wrapper over the same drain, per
 /// W5-WEBUI-SPIKE). Proves a lifecycle event delivers once and reconnect
 /// with `after_cursor` past it doesn't redeliver. Uses Enabler A's narrowed
-/// `build_webui_event_stream_for_test` (see its doc for the divergence).
+/// `build_product_event_stream_for_test` (see its doc for the divergence).
 #[tokio::test]
 async fn sse_activity_stream_replay_and_reconnect() {
     let h = RebornIntegrationHarness::test_default()
@@ -1107,8 +1842,8 @@ async fn sse_activity_stream_replay_and_reconnect() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api-1-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
-    let event_stream = ironclaw_reborn_composition::test_support::build_webui_event_stream_for_test(
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
+    let event_stream = ironclaw_composition::test_support::build_product_event_stream_for_test(
         event_log,
         turn_event_source,
         h.coordinator.clone(),
@@ -1175,17 +1910,15 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// and resolve a pending approval gate. Mounts the real `webui_v2` router
 /// over a hand-built `RebornServices` facade wired with the harness's own
 /// turn-state-converged `ApprovalInteractionService`
-/// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
+/// (`standalone_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`
-/// wires into `DefaultProductWorkflow`) and the production event-stream
+/// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
 ///
-/// "Refresh" is simulated the same way that precedent does: a fresh
-/// `stream_events` drain with `after_cursor: None` — the SSE handler is a
-/// polling wrapper over the same drain (W5-WEBUI-SPIKE), so this is
-/// behaviorally equivalent to a browser opening a brand new `EventSource`
-/// after a cold reload, without the fragility of reading a chunked HTTP body
-/// through `tower::ServiceExt::oneshot`.
+/// "Refresh" is simulated by opening a fresh continuous event subscription
+/// with `after_cursor: None`, then consuming that same subscription until the
+/// pending gate is replayed. This matches the SSE handler without the
+/// fragility of reading a chunked HTTP body through `tower::ServiceExt::oneshot`.
 #[tokio::test]
 async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let group = RebornIntegrationGroup::live_approvals()
@@ -1211,7 +1944,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 
     // Wire the REAL approval interaction service over the group's own shared
     // turn-state store — same test-support seam
-    // `with_real_gate_dispatch_services` uses for `DefaultProductWorkflow`,
+    // `with_real_gate_dispatch_services` uses for `DefaultProductSurface`,
     // applied here directly to a webui-level `RebornServices` instead.
     let capability_harness = group
         .capability_harness()
@@ -1220,9 +1953,9 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         .reborn_services_for_test()
         .expect("live_approvals harness is built via new_with_options");
     let approval_interactions = reborn_services
-        .local_dev_approval_interaction_service_with_turn_state_for_test(
+        .standalone_approval_interaction_service_with_turn_state_for_test(
             h.coordinator.clone(),
-            h.turn_store.clone(),
+            h.process_gates_for_test(),
         )
         .expect("local-dev capability policy is valid")
         .expect("harness has a local-dev runtime");
@@ -1230,14 +1963,14 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api2-test").expect("valid reply target binding ref");
-    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
-    let event_stream = ironclaw_reborn_composition::test_support::build_webui_event_stream_for_test(
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
+    let event_stream = ironclaw_composition::test_support::build_product_event_stream_for_test(
         event_log,
         turn_event_source,
         h.coordinator.clone(),
         reply_target_binding_ref,
     );
-    let services: Arc<dyn RebornServicesApi> = Arc::new(
+    let services: Arc<dyn ProductSurface> = Arc::new(
         RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
             .with_event_stream(event_stream)
             .with_approval_interactions(approval_interactions),
@@ -1245,49 +1978,52 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let caller = webui_caller_for(&h.binding);
     let thread_id = h.binding.thread_id.as_str().to_string();
 
-    // --- simulate a cold browser refresh: first drain starts without a cursor,
-    // then follows the cursor exactly like the SSE handler's polling wrapper. ---
+    // --- simulate a cold browser refresh: open one continuous subscription
+    // without a cursor, exactly like a new browser EventSource connection. ---
     // The hot turn-state cache can expose BlockedApproval just before the
     // best-effort Blocked lifecycle event reaches the durable projection source.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut after_cursor = None;
+    let mut replayed = tokio::time::timeout_at(
+        deadline,
+        services.stream_events(
+            caller.clone(),
+            ProductSurfaceStreamRequest {
+                stream_id: Some(thread_id.clone()),
+                after_cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("post-refresh subscription opens before the deadline")
+    .expect("post-refresh subscription opens");
+    let subscription = replayed
+        .subscription
+        .take()
+        .expect("post-refresh stream carries its live continuation");
     let gate_prompt = loop {
-        let replayed = services
-            .stream_events(
-                caller.clone(),
-                RebornStreamEventsRequest {
-                    thread_id: thread_id.clone(),
-                    after_cursor: after_cursor.clone(),
-                },
-            )
-            .await
-            .expect("post-refresh drain succeeds");
-        if let Some(prompt) = replayed
+        let events = replayed
             .events
-            .iter()
-            .find_map(|envelope| match &envelope.payload {
-                ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
-                    Some(view.clone())
-                }
-                _ => None,
-            })
-        {
+            .into_iter()
+            .map(serde_json::from_value::<ProductOutboundEnvelope>)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("stream events decode");
+        if let Some(prompt) = events.iter().find_map(|envelope| match &envelope.payload {
+            ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
+                Some(view.clone())
+            }
+            _ => None,
+        }) {
             break prompt;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "expected the replayed cold-refresh drain to surface a GatePrompt for {gate_ref:?}: {:?}",
-                replayed.events
-            );
-        }
-        if let Some(cursor) = replayed
-            .events
-            .last()
-            .map(|envelope| envelope.projection_cursor.clone())
-        {
-            after_cursor = Some(cursor);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        replayed = tokio::time::timeout_at(deadline, subscription.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "expected the post-refresh subscription to surface a GatePrompt for {gate_ref:?} before the deadline; last events: {events:?}"
+                )
+            })
+            .expect("post-refresh subscription remains open")
+            .expect("post-refresh subscription event succeeds");
     };
     assert_eq!(
         gate_prompt.turn_run_id, run_id,
@@ -1316,4 +2052,320 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     h.assert_workspace_file_contains("api2_refresh_approved.txt", "API2_REFRESH_PAYLOAD")
         .await
         .expect("the approved write actually re-dispatched and persisted");
+}
+
+// ---------------------------------------------------------------------------
+// PR-2 WebUI command palette (Task 4): `GET /commands` / `POST
+// /threads/:thread_id/commands` mounted over the real `ProductSurface`.
+// ---------------------------------------------------------------------------
+
+/// Minimal `AdminUserService` double for the command-palette scenarios below.
+/// `caller_is_command_admin`
+/// (`crates/product/ironclaw_assistant/src/reborn_services/product_commands.rs`) only
+/// ever calls `get_user` on this port; every other method fails closed
+/// exactly like the production default (`RejectingAdminUserService`), since
+/// this fixture never exercises them.
+///
+/// A hand-built `RebornServices` in this file has no admin directory wired by
+/// default, so it falls back to that same rejecting default — proven at the
+/// crate tier by
+/// `list_commands_surfaces_directory_unavailable_as_retryable_503`
+/// (`crates/product/ironclaw_assistant/tests/reborn_services_contract.rs`). Without this
+/// double, every caller here would get a retryable 503 instead of a genuine
+/// member/admin result, so the audience-filtering distinction below could
+/// never reach the WebUI route as a 200.
+#[derive(Default)]
+struct StaticAdminUserService {
+    admin: Option<AdminUserRecord>,
+}
+
+impl StaticAdminUserService {
+    fn with_admin(user_id: &UserId, role: AdminUserRole) -> Self {
+        Self {
+            admin: Some(AdminUserRecord {
+                user_id: user_id.clone(),
+                email: None,
+                display_name: None,
+                status: AdminUserStatus::Active,
+                role,
+                created_at: "2026-07-29T00:00:00Z".to_string(),
+                updated_at: "2026-07-29T00:00:00Z".to_string(),
+                created_by: None,
+                last_login_at: None,
+                metadata: std::collections::BTreeMap::new(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for StaticAdminUserService {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        _status: Option<AdminUserStatus>,
+        _after: Option<&UserId>,
+        _limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        Ok(self
+            .admin
+            .as_ref()
+            .filter(|record| &record.user_id == user_id)
+            .cloned())
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        _fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+        _material: SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
+/// `GET /commands` filters the registry by the caller's command-admin
+/// audience (member sees only the five `User`-audience commands; admin sees
+/// the full 15-entry registry, including the `Lifecycle` family), and
+/// executing an `Admin`-audience action (`/model set ...`) as a member is
+/// rejected at the audience gate before the LLM-config seam ever runs — a 200
+/// response carrying a body-level `rejection`, never a transport error. See
+/// `StaticAdminUserService` above for why the fake admin directory is needed.
+#[tokio::test]
+async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
+    let h = RebornIntegrationHarness::test_default()
+        .build()
+        .await
+        .expect("harness builds");
+    let member_caller = webui_caller_for(&h.binding);
+    let admin_user_id = UserId::new("command-palette-admin").expect("user id");
+    let admin_caller = ProductSurfaceCaller::new(
+        member_caller.tenant_id.clone(),
+        admin_user_id.clone(),
+        member_caller.agent_id.clone(),
+        member_caller.project_id.clone(),
+    );
+    let services: Arc<dyn ProductSurface> = Arc::new(
+        RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+            .with_admin_user_service(Arc::new(StaticAdminUserService::with_admin(
+                &admin_user_id,
+                AdminUserRole::Admin,
+            ))),
+    );
+
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&services), member_caller.clone()),
+        "/api/webchat/v2/commands",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "member list response: {body}");
+    let member_names: Vec<&str> = body["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name is a string"))
+        .collect();
+    assert_eq!(
+        member_names,
+        vec!["model", "status", "new", "stop", "interrupt"],
+        "member must see only the User-audience commands: {body}"
+    );
+
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&services), admin_caller),
+        "/api/webchat/v2/commands",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "admin list response: {body}");
+    let admin_names: Vec<&str> = body["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name is a string"))
+        .collect();
+    assert_eq!(
+        admin_names.len(),
+        15,
+        "admin must see the full registry including the Lifecycle family: {body}"
+    );
+    assert!(
+        admin_names.contains(&"extension_list"),
+        "admin list must include a Lifecycle-family command: {body}"
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), member_caller),
+        &format!(
+            "/api/webchat/v2/threads/{}/commands",
+            h.binding.thread_id.as_str()
+        ),
+        serde_json::json!({"text": "/model set some-model"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "member model-set response: {body}");
+    assert!(body["result"].is_null(), "{body}");
+    assert_eq!(body["rejection"]["kind"], "access_denied", "{body}");
+}
+
+/// `/status` on an owned thread with a completed run reflects real per-thread
+/// state (a `Run` field is present). A thread the caller does not own is
+/// intentionally indistinguishable from one that was never created at all —
+/// both settle to the same idle `CommandResultView`, never a 404. This
+/// mirrors the crate-tier design pin
+/// (`execute_status_on_foreign_thread_is_indistinguishable_from_unknown` in
+/// `crates/product/ironclaw_assistant/tests/reborn_services_contract.rs`): leaking
+/// "this thread_id exists but isn't yours" through a 404-vs-200 split would
+/// let a caller probe for other users' thread ids one guess at a time.
+#[tokio::test]
+async fn execute_status_command_reflects_owned_thread_and_hides_foreign_thread_existence() {
+    let h = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("pong")])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("ping").await.expect("turn completes");
+
+    let services: Arc<dyn ProductSurface> = Arc::new(RebornServices::new(
+        h.thread_harness.service.clone(),
+        h.coordinator.clone(),
+    ));
+    let owner_caller = webui_caller_for(&h.binding);
+    let owned_thread_path = format!(
+        "/api/webchat/v2/threads/{}/commands",
+        h.binding.thread_id.as_str()
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), owner_caller),
+        &owned_thread_path,
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "owner /status response: {body}");
+    assert!(body["rejection"].is_null(), "{body}");
+    assert_eq!(body["result"]["title"], "Status", "{body}");
+    let owner_fields = body["result"]["fields"].as_array().expect("fields array");
+    assert!(
+        owner_fields.iter().any(|field| field["label"] == "Run"),
+        "an owned thread with a completed run must surface its Run id: {body}"
+    );
+
+    // A caller who does not own this thread must get the SAME answer as a
+    // thread_id nobody ever created — never a 404 that would confirm the
+    // thread exists.
+    let foreign_caller = ProductSurfaceCaller::new(
+        h.binding.tenant_id.clone(),
+        UserId::new("command-palette-foreign-user").expect("user id"),
+        h.binding.agent_id.clone(),
+        h.binding.project_id.clone(),
+    );
+    let (status, foreign_body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), foreign_caller.clone()),
+        &owned_thread_path,
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "foreign-thread /status response: {foreign_body}"
+    );
+    assert!(foreign_body["rejection"].is_null(), "{foreign_body}");
+    assert_eq!(foreign_body["result"]["title"], "Status", "{foreign_body}");
+    assert_eq!(
+        foreign_body["result"]["fields"],
+        serde_json::json!([{"label": "State", "value": "idle"}]),
+        "a foreign thread must render the idle placeholder, not owner state: {foreign_body}"
+    );
+
+    let (status, never_created_body) = post_json(
+        mount_webui_v2_router(services, foreign_caller),
+        "/api/webchat/v2/threads/thread-command-palette-never-created/commands",
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "never-created-thread /status response: {never_created_body}"
+    );
+    assert_eq!(
+        foreign_body, never_created_body,
+        "a foreign thread must be indistinguishable from a nonexistent one"
+    );
 }

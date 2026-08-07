@@ -17,8 +17,7 @@
 //!   completes its run without an error-shaped tool result.
 //! - **Phase 4 — one correctly-scoped Google account serves both packages.**
 //!   After the wrongly-scoped account is revoked and a fresh `google`
-//!   account with calendar+drive scopes plus Gmail readonly (required by the
-//!   Calendar package's daily-brief capability) exists, both activations complete —
+//!   account with calendar+drive scopes exists, both activations complete —
 //!   the credential-appears → activation-completes arm, and the
 //!   one-account-many-extensions shape.
 //!
@@ -44,8 +43,8 @@ const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
-    let google_provider = ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-        .map_err(|error| error.to_string())?;
+    let google_provider =
+        ironclaw_host_api::ids::VendorId::new("google").map_err(|error| error.to_string())?;
 
     // ── Phase 1: calendar install parks at the google gate despite the
     //    existing (gmail-scoped) google account ─────────────────────────────
@@ -54,10 +53,6 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({"extension_id": "google-calendar"}),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
                 json!({"extension_id": "google-calendar"}),
             ),
             // Consumed by the post-deny resume model call in phase 3.
@@ -93,18 +88,14 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 calendar_state.credential_requirements
             )
         })?;
-    for expected_scope in [
-        GOOGLE_CALENDAR_READONLY_SCOPE,
-        GOOGLE_CALENDAR_EVENTS_SCOPE,
-        GOOGLE_GMAIL_READONLY_SCOPE,
-    ] {
+    for expected_scope in [GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE] {
         if !calendar_requirement
             .provider_scopes
             .iter()
             .any(|scope| scope == expected_scope)
         {
             return Err(format!(
-                "the parked requirement must carry the Calendar package's required \
+                "the parked requirement must carry the SELECTED capability's calendar \
                  scopes (what the OAuth card renders); missing {expected_scope}; got {:?}",
                 calendar_requirement.provider_scopes
             )
@@ -121,10 +112,6 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({"extension_id": "google-drive"}),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
                 json!({"extension_id": "google-drive"}),
             ),
             RebornScriptedReply::text("drive needs authorization"),
@@ -195,21 +182,22 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 4: one correctly-scoped google account unlocks BOTH packages ──
     // Retire the gmail-scoped account so account selection is unambiguous,
     // then connect a fresh google account carrying the calendar+drive scopes
-    // plus Gmail readonly for the Calendar daily brief (what completing the
-    // real popup would have granted).
-    let calendar_restore = g
+    // (what completing the real popup would have granted).
+    // A fresh composition represents retry after the denied setup-needed
+    // memberships were removed/reset. The credential is present before the
+    // only public lifecycle action, so install can auto-reconcile to active.
+    let restored_group =
+        RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+    let calendar_restore = restored_group
         .thread("google-family-calendar-restore")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "google-calendar"}),
             ),
             RebornScriptedReply::text("calendar authorized"),
         ])
         .build()
-        .await?;
-    calendar_restore
-        .revoke_capability_credential_accounts("google")
         .await?;
     calendar_restore
         .seed_capability_credential_account(
@@ -225,26 +213,32 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
         )
         .await?;
     calendar_restore
-        .submit_turn("activate google calendar again")
+        .submit_turn("install google calendar")
         .await?;
     calendar_restore
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
+        .await?;
+    calendar_restore
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
-    let drive_restore = g
+    let drive_restore = restored_group
         .thread("google-family-drive-restore")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "google-drive"}),
             ),
             RebornScriptedReply::text("drive authorized"),
         ])
         .build()
         .await?;
-    drive_restore.submit_turn("activate google drive").await?;
+    drive_restore.submit_turn("install google drive").await?;
     drive_restore
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
+        .await?;
+    drive_restore
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
     Ok(())

@@ -26,11 +26,9 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
-    "channel-delivery",
-    "channel-host",
-    "reborn-migration",
-    "telegram-extension",
-    "adapters-misc"
+    "channel-adapters",
+    "extension-operator",
+    "architecture-misc"
   ];
 
   def bucket_map:
@@ -40,34 +38,32 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_agent_loop: "agent-runtime",
       ironclaw_approvals: "agent-runtime",
       ironclaw_capabilities: "agent-runtime",
-      ironclaw_dispatcher: "agent-runtime",
       ironclaw_host_api: "agent-runtime",
+      ironclaw_loop_contracts: "agent-runtime",
       ironclaw_loop_host: "agent-runtime",
 
-      ironclaw_runner: "reborn-core",
+      ironclaw_turn_runner: "reborn-core",
       ironclaw: "reborn-core",
-      ironclaw_reborn_config: "reborn-core",
-      ironclaw_reborn_event_store: "reborn-core",
-      ironclaw_reborn_identity: "reborn-core",
-      ironclaw_reborn_openai_compat: "reborn-core",
+      ironclaw_config: "reborn-core",
+      ironclaw_event_store: "reborn-core",
+      ironclaw_identity: "reborn-core",
+      ironclaw_openai_compat: "reborn-core",
 
-      ironclaw_reborn_composition: "composition-core",
+      ironclaw_composition: "composition-core",
 
-      ironclaw_product_adapter_registry: "product-workflow",
-      ironclaw_product_adapters: "product-workflow",
-      ironclaw_product_context: "product-workflow",
-      ironclaw_product_workflow: "product-workflow",
+      ironclaw_assistant: "product-workflow",
+      # The product-tier contract crate rides with the product workflow it
+      # describes: a change to the membrane or its DTOs breaks product first.
+      # Buckets group by what a change can break, not by layer.
+      ironclaw_product_contracts: "product-workflow",
 
       ironclaw_attachments: "webui-ingress",
-      ironclaw_projects: "webui-ingress",
       ironclaw_webui: "webui-ingress",
       ironclaw_resources: "webui-ingress",
 
-      ironclaw_first_party_extension_ports: "wasm-sandbox",
-      ironclaw_first_party_extensions: "wasm-sandbox",
+      ironclaw_extension_support: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
-      ironclaw_wasm_product_adapters: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
 
       ironclaw_filesystem: "llm-mcp",
@@ -75,15 +71,14 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_mcp: "llm-mcp",
       ironclaw_network: "llm-mcp",
       ironclaw_outbound: "llm-mcp",
-      ironclaw_process_sandbox: "llm-mcp",
+      ironclaw_sandbox: "llm-mcp",
       ironclaw_processes: "llm-mcp",
 
       ironclaw_conversations: "events-conversations",
       ironclaw_event_projections: "events-conversations",
       ironclaw_event_streams: "events-conversations",
-      ironclaw_events: "events-conversations",
+      ironclaw_event_log: "events-conversations",
       ironclaw_prompt_envelope: "events-conversations",
-      ironclaw_run_state: "events-conversations",
       ironclaw_threads: "events-conversations",
       ironclaw_turns: "events-conversations",
 
@@ -98,25 +93,26 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_extractors: "memory-skills",
       ironclaw_memory: "memory-skills",
       ironclaw_memory_native: "memory-skills",
+      ironclaw_memory_mem0: "memory-skills",
       ironclaw_observability: "memory-skills",
-      ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 
-      # These packages dominate cold/partial-cache wall time. Keep each in its
-      # own matrix lane so compilation overlaps instead of serializing behind
-      # the miscellaneous adapters bucket.
-      ironclaw_channel_delivery: "channel-delivery",
-      ironclaw_channel_host: "channel-host",
-      ironclaw_reborn_migration: "reborn-migration",
-      ironclaw_telegram_extension: "telegram-extension",
+      ironclaw_host_ingress: "channel-adapters",
+      ironclaw_slack_extension: "channel-adapters",
+      ironclaw_telegram_extension: "channel-adapters",
 
-      ironclaw_architecture: "adapters-misc",
-      ironclaw_common: "adapters-misc",
-      ironclaw_extensions: "adapters-misc",
-      ironclaw_reborn_traces: "adapters-misc",
-      ironclaw_slack_v2_adapter: "adapters-misc",
-      ironclaw_telegram_v2_adapter: "adapters-misc"
+      ironclaw_extension_contracts: "extension-operator",
+      ironclaw_extension_host: "extension-operator",
+      ironclaw_extension_manager: "extension-operator",
+      ironclaw_extension_registry: "extension-operator",
+      ironclaw_operator: "extension-operator",
+
+      ironclaw_architecture_tests: "architecture-misc",
+      ironclaw_common: "architecture-misc",
+      ironclaw_libsql_runtime: "architecture-misc",
+      ironclaw_trace_commons: "architecture-misc",
+      ironclaw_triggers: "architecture-misc"
     };
 
   bucket_map as $bucket_map
@@ -126,7 +122,7 @@ jq -c -n --argjson packages "${packages_json}" '
         name: $bucket,
         packages: [
           $packages[]?
-          | select(($bucket_map[.] // "adapters-misc") == $bucket)
+          | select(($bucket_map[.] // "architecture-misc") == $bucket)
         ]
       }
     | select(.packages | length > 0)

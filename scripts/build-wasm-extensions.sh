@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build all WASM tools and channels from source.
+# Build WASM tools and channels that still have local source entries.
 #
-# Verifies that every tool/channel in the registry compiles against the
-# current WIT definitions. Used by CI and can be run locally.
+# Verifies local-source registry entries compile against the current WIT
+# definitions. Registry entries that only publish release artifacts are skipped.
 #
 # Prerequisites:
 #   rustup target add wasm32-wasip2
@@ -14,11 +14,60 @@
 #   ./scripts/build-wasm-extensions.sh --tools    # tools only
 #   ./scripts/build-wasm-extensions.sh --channels # channels only
 #   ./scripts/build-wasm-extensions.sh --first-party # first-party extensions only
+#
+# The package root is resolved from the crate inventory
+# (scripts/ci/lib/crate_tree.py) by crate NAME, not from a literal path, so the
+# target-architecture family move (crates/<family>/ironclaw_*, PROPOSAL §5)
+# does not leave this script unable to find the manifests it is supposed to
+# build (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+#
+# WS2 moved the packages out of the support crate: they were
+# `<support-crate>/assets/<ext>/`, they are now `packages/<ext>/` SIBLING to
+# the support crate (PROPOSAL §5 — a package directory is self-contained and
+# is not owned by any crate). So discovery still anchors on the crate name and
+# then steps to its sibling, which keeps both properties: name-keyed (survives
+# a family move) and following the code (survives this one).
+#
+# Override for tests: FIRST_PARTY_ASSETS_ROOT bypasses discovery.
 
 set -euo pipefail
 shopt -s nullglob
 
 cd "$(dirname "$0")/.."
+
+FIRST_PARTY_CRATE="${FIRST_PARTY_CRATE:-ironclaw_extension_support}"
+
+# Resolve the crate that owns the first-party extension assets, at any depth.
+# Failing here is deliberate: "cannot find the crate" must be an actionable
+# repoint, not an empty build that looks like there was nothing to do.
+resolve_first_party_assets_root() {
+    if [ -n "${FIRST_PARTY_ASSETS_ROOT:-}" ]; then
+        printf '%s\n' "${FIRST_PARTY_ASSETS_ROOT}"
+        return 0
+    fi
+
+    local inventory match count discovery_error
+    # stdout and stderr are captured separately on purpose: merging them with
+    # `2>&1` would fold any Python warning into the inventory itself and turn a
+    # benign diagnostic into a bogus crate directory.
+    discovery_error="$(mktemp)"
+    if ! inventory=$(python3 scripts/ci/lib/crate_tree.py . 2>"${discovery_error}"); then
+        echo "  FAIL first-party discovery (crate discovery failed: $(cat "${discovery_error}"))" >&2
+        rm -f "${discovery_error}"
+        return 1
+    fi
+    rm -f "${discovery_error}"
+    match=$(printf '%s\n' "${inventory}" | awk -F/ -v want="${FIRST_PARTY_CRATE}" '$NF == want')
+    count=$(printf '%s' "${match}" | grep -c . || true)
+    if [ "${count}" -ne 1 ]; then
+        echo "  FAIL first-party discovery (expected exactly one crate named \
+'${FIRST_PARTY_CRATE}', found ${count} — repoint FIRST_PARTY_CRATE in the same PR that \
+renamed or moved it)" >&2
+        return 1
+    fi
+    # `packages/` sits beside the support crate, not inside it.
+    printf '%s/packages\n' "$(dirname "${match}")"
+}
 
 # cargo-component may be installed under ~/.cargo while Homebrew rustc wins PATH on
 # developer machines. Force rustup rustc when available so installed WASI targets are
@@ -97,17 +146,25 @@ build_extension() {
         return 0
     fi
 
-    if ! source_dir=$(jq -r '.source.dir' "$manifest_path"); then
+    if ! source_dir=$(jq -r '.source.dir // empty' "$manifest_path"); then
         fail_build "$(basename "$manifest_path" .json)" "could not read source dir"
         return 0
     fi
-    if ! crate_name=$(jq -r '.source.crate_name' "$manifest_path"); then
+    if ! crate_name=$(jq -r '.source.crate_name // empty' "$manifest_path"); then
         fail_build "$(basename "$manifest_path" .json)" "could not read crate name"
         return 0
     fi
     local name
     name=$(basename "$manifest_path" .json)
 
+    if [ -z "$source_dir" ]; then
+        echo "  SKIP $name (registry entry has no local source)"
+        return 0
+    fi
+    if [ -z "$crate_name" ]; then
+        echo "  SKIP $name (registry entry has no local crate name)"
+        return 0
+    fi
     if [ ! -d "$source_dir" ]; then
         echo "  SKIP $name (source dir $source_dir not found)"
         return 0
@@ -187,19 +244,29 @@ build_first_party_extension() {
     echo "  OK   $name"
 }
 
+# `${arr[@]+"${arr[@]}"}` rather than `"${arr[@]}"`: under `set -u`, bash before
+# 4.4 (macOS ships 3.2) treats an empty array expansion as an unbound variable
+# and dies with a shell diagnostic instead of reaching build_manifest_set's
+# "no manifests found" guard. Same outcome either way — non-zero — but only this
+# form reports WHICH set was empty, which is the actionable half.
 if $BUILD_TOOLS; then
     tool_manifests=(registry/tools/*.json)
-    build_manifest_set "WASM tools" build_extension "${tool_manifests[@]}"
+    build_manifest_set "WASM tools" build_extension ${tool_manifests[@]+"${tool_manifests[@]}"}
 fi
 
 if $BUILD_FIRST_PARTY; then
-    first_party_manifests=(crates/ironclaw_first_party_extensions/assets/*/manifest.toml)
-    build_manifest_set "first-party WASM extensions" build_first_party_extension "${first_party_manifests[@]}"
+    if first_party_assets=$(resolve_first_party_assets_root); then
+        first_party_manifests=("${first_party_assets}"/*/manifest.toml)
+    else
+        first_party_manifests=()
+    fi
+    build_manifest_set "first-party WASM extensions" build_first_party_extension \
+        ${first_party_manifests[@]+"${first_party_manifests[@]}"}
 fi
 
 if $BUILD_CHANNELS; then
     channel_manifests=(registry/channels/*.json)
-    build_manifest_set "WASM channels" build_extension "${channel_manifests[@]}"
+    build_manifest_set "WASM channels" build_extension ${channel_manifests[@]+"${channel_manifests[@]}"}
 fi
 
 echo ""

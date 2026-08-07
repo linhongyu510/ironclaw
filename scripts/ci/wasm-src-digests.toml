@@ -1,0 +1,19 @@
+# Source digests for the committed WASM artifacts under
+# `crates/extensions/packages/*/wasm/`. Each value is a sha256 over the
+# package's `wasm-src/` tree (paths + contents, `target/` and `Cargo.lock`
+# excluded).
+#
+# Regenerate ONLY after rebuilding and committing the artifacts:
+#   ./scripts/build-wasm-extensions.sh --first-party
+#   python3 scripts/ci/check-wasm-artifact-freshness.py --update
+#
+# Updating this file without rebuilding launders a stale artifact past the
+# gate, which is the exact failure it exists to catch.
+
+[packages]
+github = "ed1b32e5051ea943a018d09c8b74fa7d56b52741cf2e5927d1c8494cc98ce103"
+google-docs = "ef9038dbb780fca98c160f1192478fa278638c5d959ab5d4f09a9d3bf1509e88"
+google-drive = "06e1bcd0147b5d6a9e5e272a6a50360a4f6fda3b22ffef025c2282784e828cda"
+google-sheets = "922011b70f0ce7f9f0312561cf809fb85bf4a12f580c5933fb33bfabc8b594c4"
+google-slides = "7fd29c48b5c563f04ddbf8187ad2a8009e7ce5e7da3036fe0f67b3eaa05c6bb4"
+slack = "97dae5cd1d9b4c2476164a358bfde09da0c18295081899a250c2175011cec3e3"

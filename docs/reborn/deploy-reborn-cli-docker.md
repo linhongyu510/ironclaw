@@ -191,29 +191,48 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/pr
 
 ## Slack
 
-Slack routes are compiled into the image, but they are disabled by the default
-config. On Railway, prefer the env toggle so the seeded config can stay
-unchanged:
+Slack routes are compiled into the image and mounted unconditionally. No
+environment variable and no `config.toml` key enables or disables Slack for a
+deployment, so there is nothing Slack-specific to add to the Railway service
+variables or to a mounted config file. The Slack webhook answers
+`503 temporarily_unavailable` until the Slack extension's ingress signing
+secret is registered.
 
-```bash
-IRONCLAW_REBORN_SLACK_ENABLED=true
-```
+Once the container is running, open the WebUI at `/extensions`, install the
+Slack extension, and complete its setup. Slack app ids, the bot token, the
+signing secret, and channel mappings are all configured there after the
+container starts.
 
-The env var overrides only the Slack route enablement gate. `true`/`1` enables
-Slack, while `false`/`0` forces Slack off for the deployment.
+There is no `IRONCLAW_REBORN_SLACK_ENABLED` toggle — the enablement gate it fed
+was removed in #6116, and nothing has read the variable since. Do not add a
+`[slack]` section either: the retired setup keys (`signing_secret_env`,
+`bot_token_env`, `installation_id`, `team_id`, `api_app_id`, `channel_routes`,
+…) make `ironclaw serve` **refuse to start**.
 
-You can also enable Slack by editing `$IRONCLAW_REBORN_HOME/config.toml` or
-mounting a config file with:
-
-```toml
-[slack]
-enabled = true
-```
-
-Then configure Slack app ids, the bot token, signing secret, and channel
-mappings from WebUI channel setup after the container starts.
+A volume seeded before #6116 may still carry a `[slack]` section. What happens
+on boot depends on what the section holds. `enabled` on its own is inert and
+keeps booting (with a deprecation notice in the serve log). The one shape the
+entrypoint migrates for you is the old shipped default — an explicit
+`enabled = false` next to `signing_secret_env`/`bot_token_env`: those two
+fields are stripped on start and the container boots. Every other combination
+that includes a retired setup key — `enabled = true` beside them, the legacy
+fields without an explicit `enabled = false` line, or any of the other setup
+keys listed above — is left alone deliberately and fails startup with a
+migration pointer, rather than a live-looking channel config being rewritten
+underneath you.
 
 Set the WebUI identity environment variables as usual.
 
 Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens
-and signing secrets are stored from WebUI channel setup.
+and signing secrets are stored from the WebUI extension setup.
+
+Migrating an existing config file: a mounted or previously seeded
+`config.toml` that still carries a `[slack]` or `[telegram]` section keeps
+parsing. Outside the one entrypoint-migrated shape above (`enabled = false`
+beside `signing_secret_env`/`bot_token_env`), a leftover Slack *setup* field
+(`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`,
+`shared_subject_user_id`, `channel_routes`, `signing_secret_env`,
+`bot_token_env`) fails container startup with a migration pointer rather than
+being silently ignored; a section left with only inert keys still starts, and
+logs a deprecation notice. Delete the section from the mounted file — nothing
+reads it.

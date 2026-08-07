@@ -5,18 +5,18 @@ paths:
 ---
 # Reborn testing rules
 
-## Integration-first coverage
+## Caller-first coverage
 
-New or changed production-wired behavior ships with a test in
-`tests/integration/` using the production composition and asserting at a
-meaningful seam: captured model request, mediated egress, durable store reopen,
-event/projection output, capability evidence, approval state, or runtime result.
-Waiting only for a completed status is not sufficient.
+New or changed production-wired behavior needs a caller-level test at the
+nearest meaningful seam: route response, mediated egress, durable store
+reopen, event/projection output, capability evidence, approval state, or
+runtime result. Waiting only for a completed status is not sufficient.
 
 Crate-tier tests are appropriate for local invariants and public contract
-conformance. They may replace an integration test only when the integration
-harness cannot reach the path; explain that limitation in the PR. Never add
-test-only wiring for behavior production does not wire.
+conformance. Use `tests/integration/` when behavior crosses crates, turns,
+runtime lanes, persistence, or external-service seams. Do not add integration
+wiring for a route or local contract that its crate-level caller test can
+cover. Never add test-only wiring for behavior production does not wire.
 
 Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
 `tests/integration/CLAUDE.md` before adding a cross-layer scenario.
@@ -26,21 +26,25 @@ Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
 1. **Unit/contract:** pure logic and local public contracts —
    `cargo test -p OWNING_CRATE`.
 2. **In-process Reborn integration:** whole deterministic turns with the real
-   product workflow, runner, loop, decorator chain, and in-memory filesystem —
+   product orchestration, runner, loop, decorator chain, and in-memory filesystem —
    `cargo test --test reborn_integration_SCENARIO`.
 3. **Architecture:** dependency and composition boundaries —
-   `cargo test -p ironclaw_architecture`.
+   `cargo test -p ironclaw_architecture_tests`.
 4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
-   use the owning feature-gated suite and `cargo test --features integration`
-   when required by its guide.
+   use the owning crate's feature-gated suite
+   (`cargo test -p <owning-crate> --features integration`, e.g.
+   `-p ironclaw_hooks` for the Postgres/libSQL hooks parity matrix) when its
+   guide requires it. The workspace-root `integration` feature is empty with no
+   consumers, so a bare root `cargo test --features integration` adds nothing
+   over `cargo test`.
 5. **Recorded model behavior:** hermetic fixtures for tool choice/request shape;
    validate with `scripts/ci/check-reborn-qa-fixtures.sh`.
 6. **Browser/E2E:** user-visible WebUI flows under `tests/e2e/`.
 7. **Live canary:** ignored, credentialed drift checks; supplemental only.
 
 Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
-behavior changes. Verify workflow coverage rather than assuming a green PR ran
-every integration tier.
+behavior changes. Choose the smallest tier that reaches the changed contract;
+a green PR does not prove that unselected tiers ran.
 
 ## Test through the caller
 
@@ -88,4 +92,4 @@ workflow, or capability dispatch. Re-derive exact commands from
 `crates/AGENTS.md` and the owning crate guide rather than copying stale commands.
 
 Reborn dependency/composition boundary enforcement is
-`cargo test -p ironclaw_architecture`.
+`cargo test -p ironclaw_architecture_tests`.

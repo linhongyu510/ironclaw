@@ -7,15 +7,273 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-08-03
+
+First release candidate since 1.0.0. The headline work is extension reach —
+registering arbitrary hosted MCP servers, installing from IronHub deep links,
+durable file attachments that cross channels, and Slack `/ironclaw` slash
+commands — plus a broad pass on making failures legible: to the model, which
+now gets told what to do next instead of an opaque stop, and to the user, who
+gets localized, actionable errors instead of silent dead ends.
+
+**Upgrading from 1.0.0.** No migration steps. Extension lifecycle state moved
+to a normalized on-disk shape; rows written by 1.0.0 keep deserializing. The
+one behavioral removal is the `/webhooks/slack/events` compatibility alias
+(see Removed).
+
+### Added
+
+- **Custom MCP servers.** Register a hosted MCP server from the WebUI and use
+  its tools like any other extension: discovery accepts bounded
+  OpenAPI-derived tool catalogs within the manifest's declared tool budget,
+  auth is resolved during registration, and the registered tools are exposed
+  to the model.
+- **IronHub install flow.** Install extensions from an IronHub deep link,
+  including private manifest sources, through a register/install gateway.
+- **Attachments.** Durable cross-channel file flows: a file sent on one
+  channel stays retrievable from the others and from the WebUI.
+- **Slack slash commands.** Native `/ironclaw` commands in Slack, backed by a
+  role-filtered command palette in the WebUI and role gating on admin command
+  actions.
+- **Memory as an extension.** The memory provider is modeled as a userland
+  extension with a host-managed lifecycle and a contract built around declared
+  capabilities, so a provider advertises what it can actually do instead of
+  being assumed uniform.
+- **Sandbox lane (opt-in, partly unwired).** A `RuntimeKind::Sandbox` runtime
+  lane with credential reuse, leaf-scoped mount containment, per-user sandbox
+  identity primitives, and a credential placeholder registry. Docker-connect
+  retry, the egress allowlist, and shell limits ship unwired in this release.
+- **Trigger poller on production-shaped runtimes** (opt-in), and the SSO/admin
+  identity resolver wired into those runtimes.
+- **QA run artifacts.** Caller-scoped run and full-thread artifact export,
+  gated off by default, plus a regression promotion loop for the test suite.
+- **`BENCHMARKING_MODE`.** An opt-in system-prompt addendum for unattended
+  evaluation runs.
+
+### Changed
+
+- **Extension persistence:** normalize filesystem-backed extension lifecycle
+  state into typed installation (with the embedded, hash-pinned manifest
+  definition), user-membership, and credential-binding records with bounded
+  CAS updates, a CAS-protected mutation lease for membership and removal
+  transitions, `removed_at` soft-removal tombstones, legacy aggregate
+  compatibility views, and restart repair. Retires the per-installation
+  diagnostic health snapshot: it was always `healthy`, never read, and never
+  surfaced, while the host's activation record already owns extension failure
+  state. Rows written by the previous release keep deserializing.
+- **Model failures now carry a next step.** Every termination path — no
+  progress, iteration limit, disabled capability, denied call, provider error
+  — tells the model what would unlock the call instead of stopping opaquely.
+- **WebUI performance:** route-level code splitting, deferred Markdown and
+  syntax highlighting during chat streaming, optimized embedded static-asset
+  delivery, and pagination for the sidebar thread list, admin users list, and
+  older logs.
+- **Shared WebUI controls:** a common settings `Switch`, a shared
+  `ConfirmDialog` replacing native browser confirmations, and normalized
+  control typography.
+
+### Fixed
+
+- **libSQL prefix queries scanned the whole table:** record reads, subtree
+  deletes, and FTS backfill matched descendants with `path LIKE ? ESCAPE '!'`,
+  which cannot use the primary key, so every one of them scanned all of
+  `root_filesystem_entries`. Their cost therefore grew with the total size of
+  the database — threads, turns, memory, events — rather than with what the
+  caller asked for. They now use the same `path >= ? AND path < ?` bounds the
+  Postgres backend and libSQL's own `list_dir` already used, so each seeks the
+  path index. Measured end-to-end on a 200k-row database:
+  `/api/webchat/v2/extensions` 260ms -> 28ms and `.../extensions/registry`
+  380ms -> 20ms. This is what made the hosted Extensions page take seconds and
+  left removed extensions on screen until a manual refresh: the page's
+  post-removal refetch was aborted before the server answered.
+
+- **Extension list issued a query per installation:** normalizing the
+  aggregate into child rows made `list_installations` read each installation's
+  membership and credential-binding rows separately, costing `1 + 2N` round
+  trips. Both child collections are now read once and joined in memory (`3`
+  queries regardless of installation count).
+
+- **Agent-loop termination recovery:** tell the model when no-progress or the
+  iteration limit would otherwise stop a run, preserve that one-shot warning
+  across checkpoints, and allow one normal capability-enabled recovery turn
+  before taking the existing typed failure path.
+- **Recoverable capability errors:** carry the complete producer-scrubbed cause
+  through the bounded model diagnostic channel, including path-shaped context,
+  and emit an explicit fallback when a runtime supplies no usable detail.
+- **Skill selection:** instruct the model to review visible skills before
+  answering and clarify that `skill_activate` loads full instructions for
+  relevant skills selected by exact listed name.
+- **Model recovery:** preserve typed, sanitized context-overflow,
+  content-filter, and invalid-output recovery controls across checkpoints so a
+  restarted turn can still ask the model to recover without exposing provider
+  diagnostics or granting an unbounded retry budget.
+- **Generic channel pairing:** accept command-wrapped proof codes only through
+  bounded manifest-declared prefixes; Telegram now declares `/start`, while
+  undeclared commands remain ordinary inbound messages.
+- **Extension OAuth authorization:** resolve provider, account label, and
+  scopes from the installed extension's manifest requirement instead of
+  accepting browser-selected credential authority; after OAuth, retry only
+  internal caller-scoped readiness until the extension is active, without a
+  second provider exchange or public activation step.
+- **Hosted MCP discovery:** accept bounded OpenAPI-derived tool catalogs within
+  the manifest's declared tool budget, reject malformed catalogs atomically,
+  and never publish bundled static declarations as a fallback for failed live
+  discovery.
+- **Channel delivery:** consume durable turn-lifecycle events through the
+  generic, source-route-revalidating coordinator so OAuth-delayed final replies
+  return to Slack, Telegram, and future channels without a polling watcher.
+- **Automation delivery:** honor each trigger's creator-selected outbound
+  target at fire time instead of silently falling back to the user-wide
+  default.
+- **Telegram automation delivery:** expose paired Telegram DMs through the
+  generic outbound-target registry so creator-selected routine results resolve
+  and deliver through the shipping Telegram channel.
+- **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
+  through the shared lifecycle before deleting any channel installation, so
+  removing Telegram, Slack, or a future channel unpairs it on every surface.
+- **One authorization per vendor account:** authorizing a vendor now covers
+  every installed extension sharing that account, instead of re-prompting per
+  extension. Token response scopes are trusted over the OAuth redirect echo.
+- **Extension package roots** are persisted rather than fabricated on load, so
+  a stale or partial catalog entry no longer takes down startup.
+- **Tool disclosure** is narrowed by the caller's allow-set, closing three
+  paths that leaked tool definitions the caller was not granted.
+- **Provider errors are classified correctly:** rate limits are no longer read
+  as auth failures, a missing model is not retried, adapters report the
+  provider's real finish reason, and the runner stops silently retrying
+  model-stage failures that cannot succeed.
+- **Context overflow and compaction:** secret matches are redacted during
+  compaction and a run recovers from context overflow instead of terminating.
+- **libSQL durability:** writers are serialized, cancelled transactions and
+  interrupted history migrations recover, and transient writer contention no
+  longer surfaces as a failed run.
+- **Panic and cancellation safety** on the run path, plus bounded
+  deterministic gateway failures so a wedged model stage cannot hang a turn.
+- **WebUI streaming and navigation:** smooth streaming with preserved model
+  phases, route state and workspace-tree state preserved across SPA
+  navigation, viewport preserved while loading older messages, message actions
+  kept visible, and active run state preserved when cancellation fails.
+- **WebUI correctness and a11y:** localized chat/extension/OAuth failure
+  messages, surfaced admin user-management failures, recovery from transient
+  session checks, focus trapping in the extension configuration modal, no
+  crash on admin configuration paste, pairing prompts rendered without a text
+  input, tool-permission selection retained while saving, always-allow reset
+  when the approval gate changes, and authenticated previews for workspace
+  file links.
+- **Automations** inherit the implicit source channel target, and the
+  outbound delivery-target registry is caller-scoped structurally rather than
+  by convention.
+- **Skills:** the model is told to review the available skills before
+  answering.
+- **`ironclaw service`:** the generated systemd unit no longer quotes
+  `WorkingDirectory=`.
+- **Projects** show only API-backed data instead of placeholder rows.
+
+### Performance
+
+- **Hosted Postgres API capacity** regressed by the row-native process journal
+  is recovered.
+- **Durable turn-event reads** are served by an indexed scope+cursor query
+  instead of a scan.
+
+### Removed
+
+- **Slack compatibility route:** retire the one-release
+  `/webhooks/slack/events` forwarding alias. Slack Event Subscriptions must use
+  `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
+  unchanged.
+
+## [1.0.0] - 2026-07-27
+
+First stable release of a rearchitected IronClaw. This is not an increment on
+the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
+
+**The `ironclaw` binary is the rearchitected CLI.** The v1 monolith builds as
+the `ironclaw-legacy` binary and is not published; 1.0.0 publishes the new
+`ironclaw` binary only.
+
+### This is not an in-place upgrade from 0.29.x
+
+There is no migration for v1 config, databases, settings, or secrets, and
+installing 1.0.0 does not touch your existing v1 data. Treat it as a fresh
+install: point `IRONCLAW_REBORN_HOME` at a new directory, run
+`ironclaw onboard`, and reconnect your providers and channels. Do not point it
+at a v1 data directory.
+
+### What ships
+
+- **Platforms.** Seven targets — macOS (Apple Silicon, Intel), Linux
+  (`x86_64`/`aarch64`, gnu and static musl), and Windows (`x86_64`), with shell,
+  PowerShell, and MSI installers.
+- **Guided setup.** `ironclaw onboard` provisions the config, the encrypted
+  credential store, an LLM provider (interactive key entry with a live probe),
+  a WebUI login token, and — on macOS and Linux — the background service. The
+  credential store's master key is provisioned in the OS keychain when one is
+  available, falling back to a locally cached key file otherwise.
+- **Model providers.** 26 providers in the built-in catalog, including NEAR AI,
+  OpenAI, Anthropic, Gemini, Bedrock, Ollama, OpenRouter, Groq, DeepSeek, and
+  any OpenAI-compatible endpoint. Manage routes with `ironclaw models`.
+- **Web UI.** `ironclaw serve` starts the WebChat v2 interface with the frontend
+  embedded in the binary — no separate asset deploy. Chat, extensions,
+  automations, settings, and admin surfaces are served from root-level routes.
+- **Extensions.** Twelve first-party extensions ship embedded and install
+  without a network fetch: GitHub, Gmail, Google Calendar, Docs, Drive, Sheets,
+  Slides, Notion, NEAR AI MCP, Slack, Telegram, and web access. Manage them with
+  `ironclaw extension` or the WebUI registry.
+- **Channels.** Slack and Telegram, both configured from the WebUI; Slack
+  connects per user through OAuth, Telegram through a per-user pairing code.
+- **Runtime.** Skills, scheduled and triggered automations, subagents, workspace
+  memory, and trace capture.
+- **Storage.** File-backed libSQL by default, so a stock install needs no
+  external database; PostgreSQL is opt-in via `[storage]`.
+- **Service management.** `ironclaw service install|start|stop|restart|status|uninstall`
+  runs the binary as a launchd user agent (macOS) or systemd user unit (Linux).
+
+### Known limitations
+
+- `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
+  return an explicit "not implemented yet" error.
+- `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
+- `onboard --import-history` parses but does nothing.
+- `skills` is list-only from the CLI.
+- `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
+  the `local-dev` profile, where both are fully supported (as under
+  `local-dev-yolo`, `hosted-single-tenant`, and `hosted-single-tenant-volume`).
+  Only operators who explicitly choose `production` or `migration-dry-run`
+  hit a clear error instead.
+
+Please report problems at https://github.com/nearai/ironclaw/issues — include
+`ironclaw status --json` output.
+
+The itemized changes since 1.0.0-rc.1 follow; see the 1.0.0-rc.1 entry below for
+everything that landed between 0.29.1 and the release candidate.
+
+### Fixed
+
+- *(webui)* restore SSE streams across navigation, so chat keeps streaming when
+  the user moves between WebUI routes mid-turn ([#6425](https://github.com/nearai/ironclaw/pull/6425)).
+- *(webui)* stop the WebChat "Disconnected" lockout caused by rate-limit budget
+  exhaustion and navigation-race SSE thrash ([#6592](https://github.com/nearai/ironclaw/pull/6592)).
+
+### CI / Release
+
+- *(release)* update the Reborn Dockerfile and make the Reborn Docker image
+  buildable ([#6612](https://github.com/nearai/ironclaw/pull/6612)).
+- *(ci)* run the full Reborn test and E2E gates on `release-fix-*` pull-request
+  branches ([#6537](https://github.com/nearai/ironclaw/pull/6537)).
+
 ## [1.0.0-rc.1] - 2026-07-20
 
-First release candidate of the rearchitected IronClaw, internally called
-**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
-rebuild of the agent runtime, storage, extension host, and web UI.
+First release candidate of a rearchitected IronClaw. This is not an increment
+on the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
 
-**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
-the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
-the Reborn `ironclaw` binary only.
+**The `ironclaw` binary is now the rearchitected CLI.** The v1 monolith now
+builds as the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1
+publishes the new `ironclaw` binary only.
 
 ### This is not an in-place upgrade from 0.29.x
 
@@ -59,8 +317,8 @@ it at a v1 data directory.
 - `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
   return an explicit "not implemented yet" error.
 - `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
-  Reborn equivalent; MCP servers and memory are reached through extensions and
-  the WebUI instead.
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
 - `onboard --import-history` parses but does nothing.
 - `skills` is list-only from the CLI.
 - `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
@@ -81,6 +339,8 @@ The itemized changes since 0.29.1 follow.
 
 ### Fixed
 
+- *(reborn)* OAuth setup flows survive service restarts and replica hand-offs: the setup-lane PKCE verifier is stored durably per flow (secret store, flow-scoped TTL) instead of only process-locally, terminal callback outcomes discard it, and lifecycle cleanup drops verifiers for canceled flows eagerly.
+- *(reborn)* `ironclaw serve` rejects populated legacy `[slack]` setup fields at startup with a pointer to the WebUI extensions page instead of silently ignoring them (`[slack].enabled` alone stays tolerated).
 - *(reborn)* route Rig-backed model calls through provider streaming for WebUI v2 runs, cover delayed/broken/cancelled/transient mock LLM behavior in served E2E tests, and verify failed runs can retry after a transient checkpoint-state outage, including failures before the first checkpoint.
 - *(reborn)* activating an extension whose OAuth provider was never configured on the instance now fails immediately with the exact `ironclaw config set` commands and restart step, instead of parking an unresolvable auth gate ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
 - *(reborn)* host-authored remediation text reaches the model intact again instead of degrading to "capability summary unavailable" ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
@@ -99,6 +359,7 @@ The itemized changes since 0.29.1 follow.
 
 ### Changed
 
+- *(reborn-extensions)* every first-party integration (GitHub, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Telegram, Web Access) now ships as a self-contained module under `ironclaw_first_party_extensions::packages`, carrying its manifest/WASM embeds, onboarding copy, OAuth-setup credential, and host trust effects as opaque bundle data. Composition builds them via `bundled_packages()` and the built-in trust policy iterates the inventory generically — generic host code no longer names a concrete extension for package machinery (P7b, DEL-8 lane A).
 - *(reborn)* move product-neutral channel delivery into its own crate and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
 - *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
@@ -106,6 +367,8 @@ The itemized changes since 0.29.1 follow.
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 - *(reborn-cli)* **Breaking:** `ironclaw serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-extensions)* the credential-authority type is now `VendorId` end-to-end (renamed from `ProviderId` / `RuntimeCredentialAccountProviderId`); stored vendor id strings are unchanged and the persisted wire field stays `provider`. Extension manifests adopt schema `reborn.extension_manifest.v3` (explicit `[channel]` and `[auth.<vendor>]` sections); the v2 reader still parses and normalizes old manifests into the same resolved model (P1, MAN-11/MAN-2).
+- *(reborn)* outbound delivery is unified behind a single host-owned delivery coordinator — the sole delivery-state writer; channel adapters render and send through `ChannelAdapter::deliver` with no store access, and there is no direct product send path (P5, OUT-1/OUT-4).
 
 ### CI / Release
 
@@ -113,7 +376,9 @@ The itemized changes since 0.29.1 follow.
 
 ### Removed
 
+- *(reborn)* retire the `ProductAdapter` trait and its `ironclaw_wasm_product_adapters` host-runtime crate as a consolidation; the live external-protocol contract is `ChannelAdapter`, onto which ProductAdapter's conformance and outbound-delivery suites were ported unweakened (P7b, DEL-5). The `*_v2` adapter crates were renamed to `*_extension` (DEL-2).
 - *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-auth)* delete the per-vendor auth machinery — the provider-string multiplexor, `HostOAuthProviderSpec` and the per-vendor provider specs, the per-vendor gate providers/registries, and the Slack/Google serve branches — in favor of one recipe-driven `ironclaw_auth::AuthEngine` (`oauth2_code` + `api_key`). All five current vendors (Slack, Google, Notion, GitHub, NEAR AI) are expressed as manifest recipes with no per-vendor code path in the engine and no auth trait in the extension ABI (P3, AUTH-1/AUTH-16).
 
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
 

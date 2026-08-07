@@ -166,7 +166,7 @@ pub trait AgentLoopHost {
     async fn visible_capabilities(&self, run: RunHandle) -> Result<VisibleCapabilitySurface>;
     async fn stream_model(&self, request: ModelStreamRequest) -> Result<ModelStream>;
 
-    async fn invoke_capability(&self, request: CapabilityInvocation) -> Result<CapabilityOutcome>;
+    async fn invoke_capability(&self, request: LoopRequest) -> Result<CapabilityOutcome>;
 
     async fn append_milestone(&self, milestone: TranscriptMilestone) -> Result<()>;
     async fn publish_event(&self, event: RuntimeEvent) -> Result<()>;
@@ -205,7 +205,7 @@ Tool execution is a wrapper around `CapabilityHost`:
 
 ```text
 model tool call
-  -> normalize to CapabilityInvocation
+  -> normalize to LoopRequest
   -> CapabilityHost.invoke_json(...)
   -> CapabilityAccessManager action-time authorization
   -> Approval/Auth/Resource gates if needed
@@ -465,7 +465,7 @@ host surface: AgentLoopHost facade only
 
 Generated extensions cannot create new parent-loop authority surfaces. They may provide capabilities that this loop can call, subject to normal capability registration, grants, approvals, and runtime dispatch.
 
-`ironclaw_extensions` may register bundled package metadata if useful, but it must not execute the loop. Loop execution belongs to the configured loop runner/service that owns the `AgentLoopHost` facade and remains subject to kernel-mediated policy.
+`ironclaw_extension_registry` may register bundled package metadata if useful, but it must not execute the loop. Loop execution belongs to the configured loop runner/service that owns the `AgentLoopHost` facade and remains subject to kernel-mediated policy.
 
 ---
 

@@ -11,13 +11,13 @@
 //!
 //! Zero production-crate changes: `DefaultPlannedRuntimeParts` is already
 //! `pub` with `pub` fields and no `#[non_exhaustive]`
-//! (`crates/ironclaw_runner/src/runtime.rs:260-326`), so this file only reads
+//! (`crates/loop/ironclaw_turn_runner/src/runtime.rs:260-326`), so this file only reads
 //! it from test-tree code.
 
 use ironclaw_loop_host::HostManagedModelGateway;
-use ironclaw_runner::runtime::DefaultPlannedRuntimeParts;
+use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 14 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 19 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -27,8 +27,13 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
     pub attachment_read_port: bool,
+    pub prompt_diagnostic_sink: bool,
+    pub reply_attachment_intent_port: bool,
     pub gate_record_store: bool,
     pub input_queue: bool,
+    pub input_queue_reconcile: bool,
+    pub memory_context_service: bool,
+    pub after_turn_memory_writer: bool,
     pub model_policy_guard: bool,
     pub model_budget_accountant: bool,
     pub safety_context: bool,
@@ -41,7 +46,7 @@ pub struct DefaultPlannedRuntimePartsShape {
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 32 fields is named explicitly here (the 19 required
+/// Every one of the 38 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -53,17 +58,15 @@ where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let DefaultPlannedRuntimeParts {
-        turn_state: _,
+        process_system: _,
         thread_service: _,
         thread_scope: _,
         model_gateway: _,
-        checkpoint_state_store: _,
         loop_checkpoint_store: _,
         milestone_sink: _,
         capability_factory: _,
         capability_surface_resolver: _,
         capability_result_writer: _,
-        subagent_goal_store: _,
         subagent_await_edge_writer: _,
         subagent_await_edge_settler: _,
         subagent_await_edge_evidence: _,
@@ -76,10 +79,15 @@ where
         cancellation_factory,
         skill_context_source,
         attachment_read_port,
+        prompt_diagnostic_sink,
+        reply_attachment_intent_port,
         gate_record_store,
         input_queue,
+        input_queue_reconcile,
         identity_context_source: _,
         user_profile_source: _,
+        memory_context_service,
+        after_turn_memory_writer,
         model_policy_guard,
         model_budget_accountant,
         safety_context,
@@ -94,8 +102,13 @@ where
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),
         attachment_read_port: attachment_read_port.is_some(),
+        prompt_diagnostic_sink: prompt_diagnostic_sink.is_some(),
+        reply_attachment_intent_port: reply_attachment_intent_port.is_some(),
         gate_record_store: gate_record_store.is_some(),
         input_queue: input_queue.is_some(),
+        input_queue_reconcile: input_queue_reconcile.is_some(),
+        memory_context_service: memory_context_service.is_some(),
+        after_turn_memory_writer: after_turn_memory_writer.is_some(),
         model_policy_guard: model_policy_guard.is_some(),
         model_budget_accountant: model_budget_accountant.is_some(),
         safety_context: safety_context.is_some(),

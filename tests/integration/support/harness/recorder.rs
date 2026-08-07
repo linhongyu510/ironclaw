@@ -1,9 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{CapabilityId, ResourceScope, RuntimeHttpEgressRequest};
+use ironclaw_host_api::turn::TurnGateRef;
+use ironclaw_host_api::{
+    http::RuntimeHttpEgressRequest, ids::CapabilityId, resource::ResourceScope,
+};
+use ironclaw_loop_contracts::LoopRequest;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_turns::{GateRef, run_profile::CapabilityInvocation};
+use ironclaw_resources::ResourceGovernor;
 
 use super::super::doubles::RecordingTestCapabilityPort;
 use super::{HarnessResult, HostRuntimeCapabilityHarness};
@@ -21,7 +25,7 @@ pub(crate) enum HarnessCapabilityRecorder {
 }
 
 impl HarnessCapabilityRecorder {
-    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         match self {
             Self::Recording(port) => port.invocations(),
             Self::HostRuntime(harness) => harness.invocations(),
@@ -66,7 +70,7 @@ impl HarnessCapabilityRecorder {
     /// Echo backend and HostRuntime harnesses without a local-dev workspace filesystem.
     pub(crate) fn attachment_test_support(
         &self,
-    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+    ) -> Option<ironclaw_composition::AttachmentTestSupport> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.attachment_test_support_for_test(),
@@ -96,6 +100,19 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no network response script".into())
+            }
+            Self::HostRuntime(harness) => harness.install_network_response_script(status, body),
+        }
+    }
+
     /// S1 seam: requests that reached the real-egress-pipeline's wire-level
     /// transport recorder. Empty for every backend but
     /// `BuiltinHttpToolsRealEgress`.
@@ -106,21 +123,24 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    pub(crate) async fn approve_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_standalone_gate(
+        &self,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())
             }
-            Self::HostRuntime(harness) => harness.approve_local_dev_gate(gate_ref).await,
+            Self::HostRuntime(harness) => harness.approve_standalone_gate(gate_ref).await,
         }
     }
 
-    pub(crate) async fn deny_local_dev_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())
             }
-            Self::HostRuntime(harness) => harness.deny_local_dev_gate(gate_ref).await,
+            Self::HostRuntime(harness) => harness.deny_standalone_gate(gate_ref).await,
         }
     }
 
@@ -144,10 +164,19 @@ impl HarnessCapabilityRecorder {
 
     pub(crate) fn approval_requests_store(
         &self,
-    ) -> Option<Arc<dyn ironclaw_run_state::ApprovalRequestStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.approval_requests_store(),
+        }
+    }
+
+    /// The exact resource governor composed into the production capability
+    /// path, when this recorder wraps that path.
+    pub(crate) fn resource_governor(&self) -> Option<Arc<dyn ResourceGovernor>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.resource_governor_for_test(),
         }
     }
 }

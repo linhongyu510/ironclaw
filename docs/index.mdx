@@ -6,6 +6,8 @@ icon: "book"
 
 IronClaw is a secure, open-source AI agent framework built in Rust and deployed on NEAR AI Cloud. It enables creating AI agents with access to your tools and services, while keeping your credentials safe and private.
 
+The fastest way to get started is the [Agent Hub](https://agent.near.ai) — sign in, spin up a private instance, and chat with your agent immediately. For local deployment, IronClaw ships as a single binary that runs a web interface on your machine where you chat with the agent, manage projects and jobs, connect channels, and change settings.
+
 <Card title="Get started" icon="rocket" href="/quickstart" horizontal>
   Deploy your first agent in minutes.
 </Card>
@@ -15,42 +17,41 @@ IronClaw is a secure, open-source AI agent framework built in Rust and deployed 
 ## Key Capabilities
 
 <CardGroup cols={3}>
-  <Card title="Multi-Channel" icon="message" href="/channels">
-    Access IronClaw via web browser, Telegram, terminal UI, or HTTP webhooks
+  <Card title="Multi-Channel" icon="message" href="/channels/overview">
+    Reach IronClaw from the web interface, Slack, Telegram, or the terminal
   </Card>
 
   <Card title="Security-First" icon="shield-check" href="/security">
-    Multi-layer defense: safety layer, WASM sandbox, Docker isolation, encrypted secrets
+    Multi-layer defense: safety layer, WASM sandbox, process isolation, encrypted secrets
   </Card>
 
-  <Card title="Multi-Provider LLM" icon="brain">
-    Choose from 7+ providers: NEAR AI, Anthropic, OpenAI, Ollama, Tinfoil, and more
+  <Card title="Multi-Provider LLM" icon="brain" href="/capabilities/llm-providers">
+    Choose from 25+ providers: NEAR AI, Anthropic, OpenAI, Gemini, Ollama, Tinfoil, and more
   </Card>
 
   <Card title="Extensions" icon="hammer" href="/extensions/overview">
     Give your agent access to complex tools so it can perform real-world tasks
   </Card>
 
-  <Card title="Parallel Jobs" icon="briefcase" href="/capabilities/jobs">
+  <Card title="Parallel Jobs" icon="briefcase" href="/capabilities/jobs/jobs">
     Execute multiple tasks concurrently with state machine and self-repair
   </Card>
 
-  <Card title="Persistent Memory" icon="database" href="/capabilities/memory/identity">
+  <Card title="Persistent Memory" icon="database" href="/capabilities/memory/memory">
     Hybrid search (FTS + vector) with identity files and heartbeat system
   </Card>
 </CardGroup>
 
-## Resources
+## Get started
 
-<Card title="Get started" icon="rocket" href="/quickstart" horizontal>
-  Deploy your first agent in minutes.
+<Card title="Agent Hub" icon="sliders" href="https://agent.near.ai/" horizontal>
+  Spin up a private instance in minutes — no installation needed.
 </Card>
 
-<Columns cols={2}>
-  <Card title="Agent Dashboard" icon="sliders" href="https://agent.near.ai/">
-    Manage your agents in one place.
-  </Card>
-  <Card title="NEAR AI Cloud" icon="cloud" href="https://cloud.near.ai/">
-    The secure cloud platform for AI agents.
-  </Card>
-</Columns>
+<Card title="Install Locally" icon="rocket" href="/quickstart" horizontal>
+  Run IronClaw on your own machine with the single binary.
+</Card>
+
+<Card title="IronHub" icon="archive" href="/hub/overview" horizontal>
+  Discover and install tools and skills from the signed catalog.
+</Card>

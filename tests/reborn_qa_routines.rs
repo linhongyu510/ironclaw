@@ -31,23 +31,27 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_composition::{
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
+};
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{AgentId, CapabilityGrantId, CapabilityId, ExtensionId, RunId, TenantId, UserId},
+    mount::MountView,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
-};
-use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};
 use ironclaw_turns::TurnStatus;
@@ -269,7 +273,7 @@ async fn build_qa_fire_runtime(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         QA_USER,
         root.path().join("local-dev"),
         RebornRuntimeProfileOptions {
@@ -277,8 +281,9 @@ async fn build_qa_fire_runtime(
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
-    let input = RebornRuntimeInput::from_services(input)
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
+    let input = RebornRuntimeInput::from_build_input(input)
+        .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),
@@ -300,8 +305,7 @@ async fn build_qa_fire_runtime(
 
 async fn seed_qa_fire_auto_approve(runtime: &RebornRuntime) {
     let auto_approve = runtime
-        .services()
-        .local_dev_auto_approve_settings_for_test()
+        .standalone_auto_approve_settings_for_test()
         .expect("QA fire runtime exposes local-dev auto-approve settings");
     auto_approve
         .set(AutoApproveSettingInput {
@@ -342,9 +346,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
     );
     assert_eq!(created["trigger"]["state"], json!("scheduled"));
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(QA_TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]
@@ -496,9 +498,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
     .await;
     assert_eq!(created["trigger"]["state"], json!("scheduled"));
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(QA_TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]
@@ -565,11 +565,11 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .expect("the fired routine's action must reach the model");
     // Issue #5838: a result under the inline first-look preview cap
-    // (`LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
+    // (`STANDALONE_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
     // `detail.preview` so the model does not need a follow-up `result_read`
     // call; the marker here is well under the cap. Mirrors
-    // `assert_local_dev_result_reference` in
-    // `crates/ironclaw_reborn_composition/src/runtime.rs`.
+    // `assert_standalone_result_reference` in
+    // `crates/app/ironclaw_composition/src/runtime.rs`.
     assert!(
         tool_result.content.contains(QA_DM_ACTION_MARKER),
         "a result under the first-look preview cap should appear inline in model replay: {}",
@@ -605,12 +605,10 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     let host_runtime = runtime
-        .services()
-        .host_runtime
-        .as_deref()
+        .host_runtime_for_test()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
@@ -663,5 +661,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.tenant_id = tenant_id;
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
+    context.run_id = Some(RunId::new());
     context
 }

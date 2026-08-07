@@ -27,9 +27,12 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, test_support::build_google_oauth_product_auth_for_test,
+use ironclaw_composition::{
+    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
+};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
 };
 use reborn_support::oauth_flow::connect_google_account;
 
@@ -126,14 +129,10 @@ async fn invalid_grant_sweep_marks_account_revoked() {
 
     // Freeze the clock 3 days ahead so the account (just created,
     // updated_at ≈ now) appears idle past the 2-day threshold.
-    let frozen_now = Utc::now() + Duration::days(3);
+    let frozen_now = Utc::now() + Duration::days(4);
 
     bundle
-        .sweep_for_refresh(
-            vec![account],
-            CredentialRefreshSettings::enabled(),
-            frozen_now,
-        )
+        .sweep_for_refresh(vec![account], KeepaliveSweepSettings::enabled(), frozen_now)
         .await;
 
     assert_eq!(
@@ -178,13 +177,9 @@ async fn normal_sweep_does_not_mark_account_revoked() {
     let account_id = account.id;
 
     // No error response is queued; the default 200 egress is used throughout.
-    let frozen_now = Utc::now() + Duration::days(3);
+    let frozen_now = Utc::now() + Duration::days(4);
     bundle
-        .sweep_for_refresh(
-            vec![account],
-            CredentialRefreshSettings::enabled(),
-            frozen_now,
-        )
+        .sweep_for_refresh(vec![account], KeepaliveSweepSettings::enabled(), frozen_now)
         .await;
 
     assert_eq!(
@@ -225,11 +220,14 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 /// verify the FIFO + fallback path and [`captured_count`] in isolation.
 #[tokio::test]
 async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
+    use ironclaw_composition::test_support::ScriptedOAuthTokenEgress;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeHttpEgress,
-        RuntimeHttpEgressRequest, RuntimeKind, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        http::{RuntimeHttpEgress, RuntimeHttpEgressRequest},
+        ids::{CapabilityId, InvocationId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
-    use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
 
     let egress = ScriptedOAuthTokenEgress::with_error_response(400, "invalid_grant");
 

@@ -3,7 +3,7 @@
 **Status:** Implementation-ready
 **Date:** 2026-05-19
 **Parent:** [`README.md`](./README.md) (overarching design)
-**Scope:** `crates/ironclaw_turns`, `crates/ironclaw_agent_loop`, `crates/ironclaw_runner`
+**Scope:** `crates/kernel/ironclaw_turns`, `crates/loop/ironclaw_agent_loop`, `crates/loop/ironclaw_turn_runner`
 
 > **Status: partially superseded (2026-07).** The contracts below (lineage fields,
 > `CapabilityOutcome`/gate-kind variants, `prepare_turn`) are partially live in
@@ -15,7 +15,7 @@
 > through §3.2/§3.3/§3.6** (direction files, the flavor table, and its tests —
 > the same scope §3's own intro note flags), which is historical: v1's two
 > flavors (`general`, `researcher`) shipped as four (`General`, `Explorer`,
-> `Coder`, `Planner`, `crates/ironclaw_runner/src/subagent/flavors.rs`) —
+> `Coder`, `Planner`, `crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs`) —
 > `thread-harness-design.md` §10 is canonical for the current flavor set and
 > naming.
 >
@@ -69,8 +69,8 @@ they are the seam.
 | New store atomic (companion) | `release_tree_descendants(scope: &TurnScope, root: TurnRunId, delta: u32) -> Result<(), TurnError>` | P1.A | P2.A partial-spawn rollback; scoped to the exact reservation key |
 | New turn error category | `TurnError::CapacityExceeded { resource: &'static str, cap: u64 }` or the equivalent existing capacity/admission variant if present at implementation time | P1.A | `reserve_tree_descendants` rejects over-cap without mutation; P2.A maps only this typed error to `tree_descendant_cap_exceeded` |
 | New coordinator hook | `DefaultTurnCoordinator::with_event_sink(Arc<dyn TurnEventSink>)` | P1.A | live `SubagentCompletionObserver` notification (P2.D/P3) |
-| New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_runner::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
-| New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_runner::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
+| New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_turn_runner::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
+| New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_turn_runner::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
 
 ### 0.2 Wire-string contract for the new enum variants
 
@@ -115,7 +115,7 @@ production.** Can be built in parallel with Phase 1 (no shared files).
 
 ### P0.1 — The gap this closes
 
-`block_run()` (`crates/ironclaw_turns/src/memory.rs:688-705`) only:
+`block_run()` (`crates/kernel/ironclaw_turns/src/memory.rs:688-705`) only:
 1. Updates the run's `TurnStatus` to `BlockedApproval` / `BlockedAuth` / `BlockedResource`.
 2. Pushes a `TurnLifecycleEvent { kind: Blocked, … }` to the turn event buffer
    scoped to `TurnScope`.
@@ -147,7 +147,7 @@ restart-safe; idempotent. No `block_run()` hook required.
 ### P0.3 — Contracts to add
 
 - **Neutral read-model sink** — define a Reborn-neutral projection target in
-  `crates/ironclaw_event_projections/` (for example
+  `crates/events/ironclaw_event_projections/` (for example
   `PendingGateProjectionSink`) with `upsert_pending_gate` /
   `remove_pending_gate` methods over neutral DTOs. The existing root
   `src/gate/pending.rs` store is adapted to that sink only from the
@@ -159,7 +159,7 @@ restart-safe; idempotent. No `block_run()` hook required.
   are metadata only; no raw prompts, tool input, secret material, host paths, or
   backend errors may enter the event. If a block event lacks this metadata, the
   projection fails closed for that row and emits a redacted projection error.
-- **Projection consumer** — lives in `crates/ironclaw_event_projections/`
+- **Projection consumer** — lives in `crates/events/ironclaw_event_projections/`
   (the Reborn read-model boundary). Consumes `TurnLifecycleEvent`. Per event:
   - `kind = Blocked` with `status` ∈ {`BlockedApproval`, `BlockedAuth`,
     `BlockedResource`, `BlockedDependentRun` (new — from P1.A)} →
@@ -181,7 +181,7 @@ restart-safe; idempotent. No `block_run()` hook required.
 Pseudo code (Rust-shaped):
 
 ```rust
-// crates/ironclaw_event_projections/src/pending_gate_projection.rs
+// crates/events/ironclaw_event_projections/src/pending_gate_projection.rs
 #[async_trait]
 pub trait PendingGateProjectionSink: Send + Sync {
     async fn upsert_pending_gate(&self, row: PendingGateProjectionRow) -> Result<(), ProjectionError>;
@@ -254,7 +254,7 @@ Land P0 with the writer surface narrowed to the projection consumer only.
 
 ### P0.7 — Owner
 
-Lives in `crates/ironclaw_event_projections/` (new module
+Lives in `crates/events/ironclaw_event_projections/` (new module
 `pending_gate_projection.rs`). Reader surface remains in `/src/gate/pending.rs`.
 
 ---
@@ -269,16 +269,16 @@ durable lineage fields on `TurnRunRecord`, and a `children_of` store query.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
-| `crates/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
-| `crates/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
-| `crates/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
-| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants` on `TurnStateStore` trait |
-| `crates/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
-| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
-| `crates/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
-| `crates/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
-| `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
+| `crates/kernel/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
+| `crates/kernel/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
+| `crates/kernel/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
+| `crates/kernel/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
+| `crates/kernel/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants` on `TurnStateStore` trait |
+| `crates/kernel/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
+| `crates/kernel/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
+| `crates/kernel/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
+| `crates/kernel/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
+| `crates/kernel/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
 
 `request.rs` (`SubmitTurnRequest`) **is** modified in Phase 1. Without request
 fields, P2.A has no caller-level way to carry lineage into the store, so
@@ -558,7 +558,7 @@ impl BlockedReason {
 `TurnStatus` is `Copy`; `BlockedDependentRun` is a unit variant so `Copy` holds.
 
 **Exhaustive `match` sites on `TurnStatus` to update** — grep
-`TurnStatus::Blocked` in `crates/ironclaw_turns/src`:
+`TurnStatus::Blocked` in `crates/kernel/ironclaw_turns/src`:
 
 1. **`memory.rs` `resume_turn_once`** (lines 1215–1218) — the resume-eligibility
    guard. **Must add `BlockedDependentRun`:**
@@ -1265,7 +1265,7 @@ coordinator operation; the store remains the durable source of truth.
 
 ### 1.9 Unit tests to add (P1.A)
 
-Place in the existing `crates/ironclaw_turns/tests/` integration tests and/or
+Place in the existing `crates/kernel/ironclaw_turns/tests/` integration tests and/or
 `#[cfg(test)] mod tests` blocks. Required:
 
 1. **`CapabilityOutcome::SpawnedChildRun` serde round-trip** — serialize and
@@ -1344,11 +1344,11 @@ maps for the new gate/result outcomes.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_agent_loop/src/families/subagent.rs` | **new** — `subagent` family factory, fingerprint, digest |
-| `crates/ironclaw_agent_loop/src/families/mod.rs` | declare `subagent` module + re-export `subagent::subagent()` and `SUBAGENT_FAMILY_DIGEST` |
-| `crates/ironclaw_agent_loop/src/family.rs` | + `LoopFamilyId::SUBAGENT` associated const |
-| `crates/ironclaw_agent_loop/src/strategies/gate.rs` | + `GateKind::AwaitDependentRun` |
-| `crates/ironclaw_agent_loop/src/strategies/mod.rs` | no change — `GateKind` already re-exported |
+| `crates/loop/ironclaw_agent_loop/src/families/subagent.rs` | **new** — `subagent` family factory, fingerprint, digest |
+| `crates/loop/ironclaw_agent_loop/src/families/mod.rs` | declare `subagent` module + re-export `subagent::subagent()` and `SUBAGENT_FAMILY_DIGEST` |
+| `crates/loop/ironclaw_agent_loop/src/family.rs` | + `LoopFamilyId::SUBAGENT` associated const |
+| `crates/loop/ironclaw_agent_loop/src/strategies/gate.rs` | + `GateKind::AwaitDependentRun` |
+| `crates/loop/ironclaw_agent_loop/src/strategies/mod.rs` | no change — `GateKind` already re-exported |
 
 > **[CORRECTION]** `families/mod.rs` today is *not* a module-directory hub — it
 > contains the `default()` family inline (the directory only holds `mod.rs` +
@@ -1416,7 +1416,7 @@ use crate::strategies::DefaultBudgetStrategy;
 
 /// Iteration ceiling for the subagent family. Lower than the default 32:
 /// subagents are scoped, single-purpose runs. The per-flavor iteration budget
-/// in `ironclaw_runner` is resolved into the run profile (P1.C / P2.C); this
+/// in `ironclaw_turn_runner` is resolved into the run profile (P1.C / P2.C); this
 /// is the family-level hard safety net.
 const SUBAGENT_ITERATION_LIMIT: u32 = 16;
 
@@ -1666,16 +1666,16 @@ In `strategies/gate.rs` `#[cfg(test)] mod tests`:
 
 ---
 
-## 3. P1.C — `ironclaw_runner` data: directions, goal stores, flavor table
+## 3. P1.C — `ironclaw_turn_runner` data: directions, goal stores, flavor table
 
-**Goal:** land the *pure data* the subagent feature needs in `ironclaw_runner` —
+**Goal:** land the *pure data* the subagent feature needs in `ironclaw_turn_runner` —
 direction prompt `.md` files, the goal-store contract plus production/test
 implementations, and the static built-in flavor table. No driver, no observer,
 no runtime wiring (those are Phase 2/3).
 
 **Flavor naming below is historical (v1 proposal: `general`/`researcher`,
 §3.2/§3.3/§3.6).** The shipped set is four flavors — `General`, `Explorer`,
-`Coder`, `Planner` (`crates/ironclaw_runner/src/subagent/flavors.rs`,
+`Coder`, `Planner` (`crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs`,
 `.../directions/{general,explorer,coder,planner}.md`) — per
 `thread-harness-design.md` §10, which is canonical for flavor naming. The
 goal-store contract (§3.4) is unaffected by this and remains accurate as
@@ -1685,15 +1685,15 @@ written.
 
 | File | Purpose |
 |---|---|
-| `crates/ironclaw_runner/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
-| `crates/ironclaw_runner/src/directions/general.md` | direction prompt for the `general` flavor |
-| `crates/ironclaw_runner/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
-| `crates/ironclaw_runner/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
-| `crates/ironclaw_runner/src/subagent/flavors.rs` | static built-in subagent flavor table |
-| `crates/ironclaw_runner/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
-| `crates/ironclaw_runner/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
+| `crates/loop/ironclaw_turn_runner/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
+| `crates/loop/ironclaw_turn_runner/src/directions/general.md` | direction prompt for the `general` flavor |
+| `crates/loop/ironclaw_turn_runner/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
+| `crates/loop/ironclaw_turn_runner/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
+| `crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs` | static built-in subagent flavor table |
+| `crates/loop/ironclaw_turn_runner/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
+| `crates/loop/ironclaw_turn_runner/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
 
-> **[NOTE]** `ironclaw_runner/src` is currently a *flat* directory of modules
+> **[NOTE]** `ironclaw_turn_runner/src` is currently a *flat* directory of modules
 > plus two subdirectories (`loop_exit_applier/`, `turn_runner/`). `directions/`
 > and `subagent/` follow that same module-directory pattern. The crate
 > `CLAUDE.md` says "Add a new file when adding a new … concern" and "The public
@@ -1932,19 +1932,11 @@ the final child `TurnRunId` before the goal row is written.
 //! `subagent/goal_store.rs` — subagent goal store contract.
 //!
 //! Holds the parent-injected goal for a child run, keyed by the child's
-//! `TurnRunId`. Bounded: a hard entry cap with eviction of the oldest entry.
-//! A `get` miss is an error, never an empty goal (design §6 goal durability:
-//! a miss "fails the child run loudly").
-
-use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+//! scoped owner and `TurnRunId`. Durable: backed by the runner-owned scoped
+//! filesystem store. A `get` miss is an error, never an empty goal (design §6
+//! goal durability: a miss "fails the child run loudly").
 
 use ironclaw_turns::TurnRunId;
-
-/// Hard cap on stored goals. Eviction is oldest-first when the cap is reached.
-/// Sized well above any plausible concurrent in-flight subagent count; an
-/// eviction under normal load indicates a leak and is logged at `debug`.
-const MAX_GOAL_ENTRIES: usize = 4096;
 
 /// Maximum byte length of a stored goal payload. A larger payload is rejected
 /// at `put` time — the goal is model-generated and must not be unbounded.
@@ -1997,128 +1989,11 @@ pub trait SubagentGoalStore: Send + Sync {
     async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError>;
 }
 
-/// Production goal store. Backs `SubagentGoalStore` with the same DB substrate
-/// that persists turn-state records, so a child goal survives process restart.
-///
-/// Implementation note: add the goal row/table beside turn persistence for both
-/// libSQL and PostgreSQL, or add a typed extension table to the existing
-/// turn-state DB adapter. Do not hide this behind a generic filesystem mount.
-pub struct DbBackedSubagentGoalStore {
-    // Concrete backend handle added by the implementer.
-}
-
-/// Bounded, in-process, fail-loud subagent goal store for unit tests and local
-/// harnesses only. This implementation is not restart-durable and must be
-/// marked `NonDurable` in production-readiness checks.
-///
-/// Thread-safe (`Mutex`). The `insertion_order` deque tracks FIFO eviction
-/// order so the cap is enforced in O(1) amortized.
-pub struct BoundedSubagentGoalStore {
-    inner: Mutex<GoalStoreInner>,
-}
-
-struct GoalStoreInner {
-    goals: HashMap<TurnRunId, SubagentGoal>,
-    insertion_order: VecDeque<TurnRunId>,
-}
-
-impl BoundedSubagentGoalStore {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(GoalStoreInner {
-                goals: HashMap::new(),
-                insertion_order: VecDeque::new(),
-            }),
-        }
-    }
-
-    /// Store the goal for a child run.
-    ///
-    /// - Rejects a payload over `MAX_GOAL_BYTES` (`PayloadTooLarge`).
-    /// - Rejects a re-insert of an existing key (`DuplicateKey`) — child run
-    ///   ids are unique per spawn, so a duplicate is a bug, not a refresh.
-    /// - When at `MAX_GOAL_ENTRIES`, evicts the oldest entry first.
-    pub fn put(
-        &self,
-        run_id: TurnRunId,
-        goal: SubagentGoal,
-    ) -> Result<(), SubagentGoalStoreError> {
-        let bytes = goal.byte_len();
-        if bytes > MAX_GOAL_BYTES {
-            return Err(SubagentGoalStoreError::PayloadTooLarge {
-                bytes,
-                max: MAX_GOAL_BYTES,
-            });
-        }
-        let mut inner = lock(&self.inner);
-        if inner.goals.contains_key(&run_id) {
-            return Err(SubagentGoalStoreError::DuplicateKey { run_id });
-        }
-        if inner.goals.len() >= MAX_GOAL_ENTRIES {
-            // Evict oldest. The loop drains stale order entries whose key was
-            // already removed by a prior `take`.
-            while let Some(oldest) = inner.insertion_order.pop_front() {
-                if inner.goals.remove(&oldest).is_some() {
-                    tracing::debug!(
-                        evicted_run_id = %oldest,
-                        "subagent goal store at capacity; evicted oldest goal"
-                    );
-                    break;
-                }
-            }
-        }
-        inner.goals.insert(run_id, goal);
-        inner.insertion_order.push_back(run_id);
-        Ok(())
-    }
-
-    /// Fetch the goal for a child run. A miss is a hard error — the caller
-    /// (P2.B prompt composition) must fail the child run, never proceed with an
-    /// empty `## Task`.
-    pub fn get(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError> {
-        let inner = lock(&self.inner);
-        inner
-            .goals
-            .get(&run_id)
-            .cloned()
-            .ok_or(SubagentGoalStoreError::NotFound { run_id })
-    }
-}
-
-impl Default for BoundedSubagentGoalStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl SubagentGoalStore for BoundedSubagentGoalStore {
-    async fn put_goal(
-        &self,
-        run_id: TurnRunId,
-        goal: SubagentGoal,
-    ) -> Result<(), SubagentGoalStoreError> {
-        self.put(run_id, goal)
-    }
-
-    async fn get_goal(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError> {
-        self.get(run_id)
-    }
-
-    async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError> {
-        let mut inner = lock(&self.inner);
-        inner.goals.remove(&run_id);
-        Ok(())
-    }
-}
-
-fn lock(inner: &Mutex<GoalStoreInner>) -> std::sync::MutexGuard<'_, GoalStoreInner> {
-    // The store holds no `LLM data` — only an in-flight goal. A poisoned mutex
-    // is recoverable here; mirror the `InMemoryTurnStateStore` pattern.
-    match inner.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+/// Production goal store. Backs `SubagentGoalStore` with a scoped filesystem
+/// mount owned by runner/composition wiring, so a child goal survives process
+/// restart without a bespoke in-process cache.
+pub struct SubagentGoalStore<F> {
+    // Concrete scoped filesystem handle supplied by the implementer.
 }
 ```
 
@@ -2126,16 +2001,13 @@ Design decisions:
 - **`get` borrows-and-clones, does not remove.** README §6 says `put`/`get`;
   it does not say `get` consumes. A child may need its goal more than once
   (e.g. recovery re-materialisation), and a process restart must be able to
-  re-read it from the DB-backed implementation. Eviction is by cap in the
-  in-memory test implementation, not by read. (If Phase 2 finds it genuinely
-  needs a one-shot `take`, add it then — but the contract here is non-consuming
-  `get_goal`.)
+  re-read it from the filesystem-backed implementation. (If Phase 2 finds it
+  genuinely needs a one-shot `take`, add it then — but the contract here is
+  non-consuming `get_goal`.)
 - **`DuplicateKey` is an error.** Child `TurnRunId`s are freshly minted per
   spawn; a duplicate `put` means a wiring bug — fail loud.
-- `tracing::debug!` for eviction, never `info!`/`warn!` (project rule: `info!`
-  corrupts the REPL/TUI; background subagent paths must use `debug!`).
-- The store is `Send + Sync` (`Mutex` + `Send` contents) so Phase 2 can wrap it
-  in `Arc` and share it with the capability port and the prompt port.
+- The store is `Send + Sync` so Phase 2 can wrap it in `Arc` and share it with
+  the capability port and the prompt port.
 
 ### 3.5 `lib.rs` + `subagent/mod.rs` wiring
 
@@ -2158,12 +2030,12 @@ pub mod subagent;
 
 No `pub use` flattening — consistent with the `lib.rs` doc comment ("a directory
 of modules, not a shopping list of types"). Downstream Phase 2 code reaches in
-by path: `ironclaw_runner::subagent::flavors::lookup_flavor`,
-`ironclaw_runner::subagent::goal_store::SubagentGoalStore`,
-`ironclaw_runner::directions::direction_prompt`.
+by path: `ironclaw_turn_runner::subagent::flavors::lookup_flavor`,
+`ironclaw_turn_runner::subagent::goal_store::SubagentGoalStore`,
+`ironclaw_turn_runner::directions::direction_prompt`.
 
-`thiserror` must be available to `ironclaw_runner` for `SubagentGoalStoreError`.
-Check `crates/ironclaw_runner/Cargo.toml` `[dependencies]` — it is **not**
+`thiserror` must be available to `ironclaw_turn_runner` for `SubagentGoalStoreError`.
+Check `crates/loop/ironclaw_turn_runner/Cargo.toml` `[dependencies]` — it is **not**
 currently listed (the crate uses `serde`, `tracing`, etc.). **Add
 `thiserror = "1"`** to `[dependencies]` as part of P1.C (every other crate in
 the workspace pins `thiserror = "1"` per `error.rs` convention).
@@ -2186,17 +2058,16 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
 4. **`put_rejects_duplicate_key`** — `put_goal` twice for the same `run_id` → second
    call `Err(DuplicateKey { .. })`.
 
-5. **`bounded_store_evicts_oldest`** — insert `MAX_GOAL_ENTRIES + 1` goals;
-   assert the very first inserted key is now a `get` miss (`NotFound`), the
-   second-inserted and the last-inserted keys are still present. Confirms FIFO
-   eviction and the cap.
+5. **`goal_store_keys_goals_by_scope_and_run_id`** — write the same
+   `TurnRunId` under distinct owner scopes and assert lookups are isolated by
+   scope and run id.
 
-6. **`bounded_store_stays_at_cap`** — after inserting `MAX_GOAL_ENTRIES + N`
-   entries, assert the live entry count never exceeds `MAX_GOAL_ENTRIES` (expose
-   a `#[cfg(test)] fn len(&self)` or assert via successful/missed `get`s).
+6. **`filesystem_goal_store_reopens_over_same_backend`** — write through one
+   filesystem-backed store, construct a second store over the same backend, and
+   assert the goal is still readable.
 
 7. **`goal_store_is_send_sync`** — `fn assert_send_sync<T: Send + Sync>(){}`;
-   `assert_send_sync::<Arc<dyn SubagentGoalStore>>()` — Phase 2 shares it via
+   `assert_send_sync::<Arc<dyn SubagentGoalStorePort>>()` — Phase 2 shares it via
    `Arc`.
 
 Shared `SubagentGoalStore` contract tests must run against:
@@ -2217,7 +2088,7 @@ The shared contract covers:
 Backend parity commands:
 
 ```bash
-cargo test -p ironclaw_runner subagent_goal_store_contract
+cargo test -p ironclaw_turn_runner subagent_goal_store_contract
 ```
 - restart/reopen: write a goal through the DB-backed store, drop/recreate the
   store over the same backend, then `get_goal` returns the same value
@@ -2310,12 +2181,11 @@ with whichever of A/B is chosen.
   contain **no `{{placeholder}}`-style templating** and read as a static system
   prompt. The goal injection is a *separate user message* (Phase 2); a templated
   direction file would reopen the prompt-injection hole the design closes.
-- The goal-store cap (`MAX_GOAL_ENTRIES`) and payload cap (`MAX_GOAL_BYTES`) are
-  proposed numbers — confirm with the design owner. Too small a cap silently
-  evicts a live in-flight subagent's goal, which P2.B then turns into a loud
-  child-run failure (acceptable fail-loud behavior, but undesirable under normal
-  load — hence the `debug!` log on eviction as an early-warning signal).
-- `thiserror` must be added to `ironclaw_runner/Cargo.toml` (§3.5) or
+- The goal-store payload cap (`MAX_GOAL_BYTES`) is a proposed number — confirm
+  with the design owner. Too small a payload cap fails a live in-flight
+  subagent's goal at spawn time; that is acceptable fail-loud behavior but
+  undesirable under normal load.
+- `thiserror` must be added to `ironclaw_turn_runner/Cargo.toml` (§3.5) or
   `SubagentGoalStoreError` will not compile.
 
 ### 4.5 Phase 1 exit criteria
@@ -2328,7 +2198,7 @@ Phase 1 is done when, per workstream:
 - **P1.B** — `ironclaw_agent_loop` compiles **against the Phase-1 `ironclaw_turns`**
   and `cargo test -p ironclaw_agent_loop` green; `SUBAGENT_FAMILY_DIGEST`
   filled in with the real hash; all §2.6 tests passing.
-- **P1.C** — `ironclaw_runner` compiles; `cargo test -p ironclaw_runner` green;
+- **P1.C** — `ironclaw_turn_runner` compiles; `cargo test -p ironclaw_turn_runner` green;
   all §3.6 tests passing across bounded, libSQL, and PostgreSQL backends;
   `thiserror` added to `Cargo.toml`.
 - Workspace-wide `cargo fmt` clean and `cargo clippy --all --benches --tests

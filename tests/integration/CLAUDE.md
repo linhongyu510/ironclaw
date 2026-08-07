@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
@@ -99,7 +104,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - `harness_mcp.rs` — the mock-MCP scaffolding extracted from the harness:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
-  `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`,
+  `mock_mcp_extension_package`, `standalone_host_runtime_with_registry_egress_and_mcp`,
   and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
   lives in `harness/profiles/mock_mcp.rs` (part of the `ToolsProfile` split below);
   it delegates the MCP wiring to the `pub(super)` factories in `harness_mcp.rs`.
@@ -219,7 +224,7 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
 - `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
 
@@ -283,6 +288,15 @@ Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
 
+User-registered hosted-MCP admission and lifecycle behavior belongs in
+`reborn_integration_hosted_mcp_registration` rather than the single-tool turn
+harness above. Its loopback server in
+`tests/support/hosted_mcp_registration_server.rs` drives registration,
+discovery, ordinary install/auth/activation, credential injection, restore,
+and invocation through production seams. Keep live public-server checks
+explicitly ignored canaries; deterministic cases use the recorded MCP fixture
+under `tests/fixtures/hosted_mcp/`.
+
 ### Credential injection (GitHub)
 
 `.with_github_issue_tools()` wires the real GitHub first-party WASM
@@ -335,7 +349,7 @@ scripted default id is not a vision pattern, so image parts are dropped for it.
 
 ### OAuth / product-auth
 
-Available from crate `ironclaw_reborn_composition::test_support`, gated on
+Available from crate `ironclaw_composition::test_support`, gated on
 `#[cfg(feature = "test-support")]`.
 
 **`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
@@ -377,23 +391,33 @@ On a harness built from a `live_approvals` group:
 - `deny_gate(run_id, &gate_ref)` — resolves to `Denied` and resumes with `GateResumeDisposition::Denied`; the executor surfaces a non-retryable authorization failure to the model.
 - `wait_for_status(run_id, expected)` — polls the turn-state store until the run reaches `expected`; fails fast on a different terminal status.
 - `enable_auto_approve()` — flips the per-`(tenant, user)` CAS-persisted auto-approve toggle ON; the flip persists across threads in the group because the store is shared.
+- `assert_process_ownership(run_ids)` — validates the row-native process tree while a run may still be executing.
+- `assert_no_orphan_runs_or_reservations(run_ids)` — combines process ownership with zero capability-governor holds at a blocked or terminal quiescent boundary. Do not use the combined form while a capability is legitimately in flight.
 
 ### Test-support crate accessors
 
 `HostRuntimeCapabilityHarness` (in `harness/mod.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
 
-- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
+- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
-`ironclaw_reborn_composition::test_support` exposes:
+`ironclaw_composition::test_support` exposes:
 
-- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
+- `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
-`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`RebornRuntime` (returned by `build_runtime`, test-only methods defined in
+`crates/app/ironclaw_composition/src/runtime.rs` and
+`crates/app/ironclaw_composition/src/runtime/test_support.rs`) exposes:
 
-- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
-- `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
+- `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
+  stores, including the reply-intent store shared by the built-in
+  reply-attachment capability and planned-runtime transcript finalizer. Group
+  harnesses must wire this same handle; a separate store makes successful tool
+  intents disappear at finalization.
+- `standalone_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
+- `standalone_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
-Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornServices` from `build_reborn_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornRuntime` from `build_runtime` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
 
 All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
@@ -406,6 +430,14 @@ runtime. Cross-thread persistence is real — thread A
 writes, thread B sees it. Single-shot `test_default()` is a degenerate
 one-thread group (its own storage, baseline = 0); all existing tests are
 byte-identical after this refactor.
+
+For restart recovery tests, `restart_planned_runtime(self)` consumes a LibSQL
+group and reconstructs the scheduler, coordinator, executor, scope gateway,
+checkpoint adapters, and process journal over a fresh database connection.
+Every thread harness must be dropped first so no old coordinator remains live.
+The external capability backend is retained to model durable approval/host
+state. InMemory and Postgres modes fail loudly because they do not provide this
+hermetic fresh-connection restart recipe.
 
 ### When to use a group (vs a flat test)
 
@@ -493,7 +525,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 |---|---|---|
 | `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
-| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
@@ -501,7 +533,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 | `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
 | `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
-| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
+| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesService` (C-SYNTH) | enabled |
 
 ### Auth-gate resolution (C-JOURNEY)
 
@@ -513,7 +545,7 @@ On a `live_auth_and_approval()` group thread:
   (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
   `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
   re-dispatches and completes. Only valid on this group (needs the
-  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  `build_reborn_runtime` product-auth wiring; `live_auth_gate()`'s
   lower-level fixture cannot complete an auth resume).
 - `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
 

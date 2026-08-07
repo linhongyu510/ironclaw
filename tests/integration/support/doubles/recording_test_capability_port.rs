@@ -9,22 +9,22 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
-use ironclaw_host_api::{Resolution, ResolutionBatch};
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
 };
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
-};
+use ironclaw_turns::LoopGateRef;
 use serde_json::json;
 
 pub(crate) const TEST_CAPABILITY_ID: &str = "test.echo";
@@ -37,7 +37,7 @@ pub struct RecordingTestCapabilityPort {
     mode: CapabilityMode,
     expose_spawn_subagent: bool,
     use_subagent_allowed_tool: bool,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
 }
@@ -45,9 +45,12 @@ pub struct RecordingTestCapabilityPort {
 #[derive(Debug, Clone, Copy)]
 enum CapabilityMode {
     Echo,
+    NoProgress,
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
+    RecoverablePortError,
+    InvalidInputThenEcho,
 }
 
 impl RecordingTestCapabilityPort {
@@ -55,10 +58,35 @@ impl RecordingTestCapabilityPort {
         Self::new(CapabilityMode::Echo, false, false)
     }
 
-    /// Every capability invocation fails with a scripted host invocation error
-    /// (fault-matrix P4: non-model capability-stage failure).
+    pub fn no_progress() -> Self {
+        Self::new(CapabilityMode::NoProgress, false, false)
+    }
+
+    /// Every capability invocation returns a scripted **caller-shaped** port
+    /// error (`InvalidInvocation`). Before #6284's capability-stage fix, any
+    /// non-`Cancelled` port error ended the run; now caller-shaped kinds
+    /// surface model-visibly and the run continues. Pairs with
+    /// [`Self::invocation_error`], which uses a kind that is still terminal.
+    pub fn recoverable_port_error() -> Self {
+        Self::new(CapabilityMode::RecoverablePortError, false, false)
+    }
+
+    /// Every capability invocation fails with a scripted TERMINAL host fault
+    /// (`Unavailable` — fault-matrix P4: non-model capability-stage failure).
+    /// Deliberately a kind in the executor's terminal set
+    /// (`capability_port_error_is_terminal`): caller-shaped kinds such as
+    /// `InvalidInvocation` now surface model-visibly and the run recovers
+    /// in-loop, which would defeat the run-failed → user-retry journeys this
+    /// double exists to drive.
     pub fn invocation_error() -> Self {
         Self::new(CapabilityMode::InvocationError, false, false)
+    }
+
+    /// First invocation is a model-actionable invalid input; a changed second
+    /// invocation succeeds. Used to prove the whole-turn correction loop
+    /// independently of any one capability producer.
+    pub fn invalid_input_then_echo() -> Self {
+        Self::new(CapabilityMode::InvalidInputThenEcho, false, false)
     }
 
     pub fn echo_with_spawn_subagent() -> Self {
@@ -141,7 +169,7 @@ impl RecordingTestCapabilityPort {
         ))
     }
 
-    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -159,11 +187,16 @@ impl RecordingTestCapabilityPort {
 
     fn completed_result(&self) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
+        let progress = if matches!(self.mode, CapabilityMode::NoProgress) {
+            ironclaw_loop_contracts::CapabilityProgress::NoChange
+        } else {
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress
+        };
         resolution::completed(
             ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
             "echo: hi".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            progress,
             false,
             0,
             None,
@@ -179,6 +212,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             capability_id: self.primary_capability_id(),
             name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
+            description_trust: Default::default(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -192,6 +226,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
                     .expect("provider tool name"),
                 description: "Spawn a child subagent run and wait for its result".to_string(),
+                description_trust: Default::default(),
                 parameters: build_spawn_subagent_parameters_schema(&[]),
             });
         }
@@ -200,7 +235,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
+        request: ironclaw_loop_contracts::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let call = request.tool_call;
         let capability_id = self.capability_id_for_provider_tool(&call.name)?;
@@ -236,6 +271,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.primary_tool_name().to_string(),
             safe_description: "Echo a test payload".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
@@ -246,6 +282,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: "Spawn a child subagent run and wait for its result".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             });
@@ -260,13 +297,41 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
+            // Terminal host fault: `Unavailable` stays in the executor's
+            // terminal set, so the run fails with a retryable checkpoint
+            // instead of recovering in-loop (see `invocation_error()`).
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "scripted capability invocation failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::RecoverablePortError) {
+            // Caller-shaped host fault: the model can act on it, so the
+            // executor surfaces it as a tool error and the run continues.
+            //
+            // `InvalidInvocation` (not `Unauthorized`) on purpose: the summary
+            // prefix for `Authorization` is "capability failed with
+            // authorization: ", and "authorization:" is a banned marker in the
+            // loop-safe validator, so that kind fail-softs to the redacted
+            // fallback and would hide the very kind this test asserts on.
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
-                "scripted capability invocation failure",
+                "scripted caller-shaped capability port failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::InvalidInputThenEcho)
+            && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Ok(resolution::failed(
+                ironclaw_host_api::result_meta::FailureKind::InputEncode,
+                "capability input failed validation".to_string(),
+                ironclaw_loop_contracts::CapabilityFailureDetail::Diagnostic {
+                    text: "capability input failed validation".to_string(),
+                },
             ));
         }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)
@@ -300,7 +365,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let stop_on_first_suspension = request.stop_on_first_suspension;
         let mut resolutions = Vec::new();

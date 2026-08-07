@@ -2,8 +2,8 @@
 //!
 //! Unlike the other `profiles/*` domains, this harness does NOT flow through
 //! `new_with_options`/`RebornServices` — it builds the `HostRuntime` directly
-//! via `local_dev_host_runtime_with_http_egress` /
-//! `local_dev_host_runtime_with_live_http_egress` and assembles
+//! via `standalone_host_runtime_with_http_egress` /
+//! `standalone_host_runtime_with_live_http_egress` and assembles
 //! `HostRuntimeCapabilityHarness` by hand (`core_builtin_tools_from_runtime`),
 //! so it does not go through `ToolsProfile`/`.build()`.
 
@@ -13,20 +13,26 @@ use std::sync::{Arc, Mutex};
 
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
-    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
-    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
-    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
+    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy, memory_mounts,
+    standalone_host_runtime_with_http_egress, standalone_host_runtime_with_live_http_egress,
+    standalone_host_runtime_with_real_egress_pipeline, workspace_mounts,
 };
+use ironclaw_extension_registry::ExtensionRegistry;
+use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, RuntimeKind, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    TIME_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -38,11 +44,11 @@ pub(crate) enum EgressMode {
     /// policy enforcement or leak scan runs; requests/responses are scripted
     /// and captured on the harness).
     Recording,
-    /// `local_dev_host_runtime_with_live_http_egress`: real HTTP egress over
+    /// `standalone_host_runtime_with_live_http_egress`: real HTTP egress over
     /// the real network. No recording `RuntimeHttpEgress`/process port is
     /// captured on the harness.
     Live,
-    /// S1 seam: `local_dev_host_runtime_with_real_egress_pipeline` — the REAL
+    /// S1 seam: `standalone_host_runtime_with_real_egress_pipeline` — the REAL
     /// production egress pipeline (network-policy enforcement + leak scan)
     /// with only the wire-level transport recorded.
     RealPipeline,
@@ -65,6 +71,13 @@ pub(crate) struct CoreBuiltinOptions {
     /// `Recording`; set via `.with_live_http_egress()` /
     /// `.with_real_egress_pipeline()`.
     pub(crate) egress: EgressMode,
+    /// `true` (default) registers the bound memory provider's package
+    /// (native, mirroring the default binding) so the four
+    /// `ironclaw.memory.*` tools reach the model surface.
+    /// `.without_memory_package()` mirrors the `Disabled` binding shape:
+    /// composition registers NO memory package, so zero memory tools are
+    /// advertised. Recording-egress mode only.
+    pub(crate) include_memory_package: bool,
 }
 
 impl Default for CoreBuiltinOptions {
@@ -73,6 +86,7 @@ impl Default for CoreBuiltinOptions {
             network_policy: http_test_policy(),
             recording_process: true,
             egress: EgressMode::Recording,
+            include_memory_package: true,
         }
     }
 }
@@ -101,6 +115,13 @@ impl CoreBuiltinOptions {
         self.egress = EgressMode::RealPipeline;
         self
     }
+
+    /// The `Disabled` memory-binding shape: no memory package is registered,
+    /// so zero `ironclaw.memory.*` tools reach the model surface.
+    pub(crate) fn without_memory_package(mut self) -> Self {
+        self.include_memory_package = false;
+        self
+    }
 }
 
 /// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
@@ -112,7 +133,18 @@ pub(crate) async fn core_builtin_tools(
         network_policy,
         recording_process,
         egress,
+        include_memory_package,
     } = options;
+    // Fail loud instead of silently ignoring the knob: only the
+    // recording-egress branch threads a caller-shaped registry; the Live and
+    // RealPipeline builders wire their own fixed registries.
+    if !include_memory_package && !matches!(egress, EgressMode::Recording) {
+        return Err(
+            "without_memory_package() is only supported with recording egress; the Live/\
+             RealPipeline harness builders wire fixed registries"
+                .into(),
+        );
+    }
     // Inject the inert recording port by default so `builtin.shell`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets
@@ -131,7 +163,7 @@ pub(crate) async fn core_builtin_tools(
         EgressMode::RealPipeline => {
             let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
             let transport = RecordingNetworkHttpTransport::with_body(br#"{"ok":true}"#.to_vec());
-            let runtime = local_dev_host_runtime_with_real_egress_pipeline(
+            let runtime = standalone_host_runtime_with_real_egress_pipeline(
                 storage_root.clone(),
                 transport.clone(),
                 process_port_dyn,
@@ -149,7 +181,7 @@ pub(crate) async fn core_builtin_tools(
         }
         EgressMode::Live => {
             let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
-            let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+            let runtime = standalone_host_runtime_with_live_http_egress(storage_root.clone())?;
             core_builtin_tools_from_runtime(
                 root,
                 workspace_root,
@@ -163,23 +195,58 @@ pub(crate) async fn core_builtin_tools(
             let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true}"#.to_vec(),
             ));
-            let runtime = local_dev_host_runtime_with_http_egress(
-                storage_root.clone(),
-                Arc::clone(&runtime_http_egress),
-                process_port_dyn,
-            )?;
-            let mut harness = core_builtin_tools_from_runtime(
+            let runtime = if include_memory_package {
+                standalone_host_runtime_with_http_egress(
+                    storage_root.clone(),
+                    Arc::clone(&runtime_http_egress),
+                    process_port_dyn,
+                )?
+            } else {
+                // The `Disabled` binding shape: builtin package only — the
+                // registry (and therefore the model tool surface) carries no
+                // memory package at all.
+                let mut registry = ironclaw_extension_registry::ExtensionRegistry::new();
+                registry.insert(ironclaw_host_runtime::builtin_first_party_package()?)?;
+                super::super::assembly::standalone_host_runtime_with_registry_and_runtime_http_egress(
+                    storage_root.clone(),
+                    registry,
+                    Arc::clone(&runtime_http_egress),
+                    process_port_dyn,
+                )?
+            };
+            recording_harness_from_runtime(
                 root,
                 workspace_root,
                 runtime,
                 network_policy,
                 UserId::new("reborn-e2e-core-builtins-user")?,
-            )?;
-            harness.http_egress = Some(runtime_http_egress);
-            harness.process_port = recording_process_port;
-            Ok(harness)
+                runtime_http_egress,
+                recording_process_port,
+            )
         }
     }
+}
+
+/// Shared tail for the recording-egress harness shape: wrap a built runtime
+/// in the harness with the recording HTTP egress and (optionally) the
+/// recording process port attached. Both the storage-root branch of
+/// [`core_builtin_tools`] and the shared-filesystem variant
+/// [`core_builtin_tools_over_shared_filesystem`] assemble this exact shape,
+/// differing only in how the runtime is constructed.
+fn recording_harness_from_runtime(
+    root: Arc<tempfile::TempDir>,
+    workspace_root: PathBuf,
+    runtime: Arc<dyn HostRuntime>,
+    network_policy: NetworkPolicy,
+    user_id: UserId,
+    runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<super::super::super::process::RecordingProcessPort>>,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness =
+        core_builtin_tools_from_runtime(root, workspace_root, runtime, network_policy, user_id)?;
+    harness.http_egress = Some(runtime_http_egress);
+    harness.process_port = process_port;
+    Ok(harness)
 }
 
 /// Zero-arg convenience; most callers want this and never touch
@@ -188,9 +255,50 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
     core_builtin_tools(CoreBuiltinOptions::default()).await
 }
 
+/// Core built-ins over the group's production-shaped shared filesystem. This
+/// is intentionally separate from `core_builtin_tools_default`: ordinary tool
+/// tests keep their lightweight private memory mount, while the memory-recall
+/// scenario must prove that the tool handler and prompt lifecycle read the
+/// same libSQL rows.
+pub(crate) fn core_builtin_tools_over_shared_filesystem(
+    root: Arc<tempfile::TempDir>,
+    filesystem: Arc<CompositeRootFilesystem>,
+    user_id: UserId,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(ironclaw_host_runtime::builtin_first_party_package()?)?;
+    registry.insert(ironclaw_host_runtime::native_memory_first_party_package()?)?;
+    let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"accepted":true}"#.to_vec(),
+    ));
+    let process_port = Arc::new(super::super::super::process::RecordingProcessPort::new());
+    let runtime = super::super::assembly::standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+            filesystem,
+            registry,
+            Arc::clone(&runtime_http_egress),
+            Some(Arc::clone(&process_port) as Arc<dyn RuntimeProcessPort>),
+        )?;
+    recording_harness_from_runtime(
+        root.clone(),
+        root.path().join("workspace"),
+        runtime,
+        http_test_policy(),
+        user_id,
+        runtime_http_egress,
+        Some(process_port),
+    )
+}
+
+pub(crate) async fn core_builtin_tools_with_durable_capability_io()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;
+    harness.durable_capability_io_requested = true;
+    Ok(harness)
+}
+
 /// Harness-port-seam Change 4: the SAME `core_builtin_tools_default` backend,
 /// with an additional confirmed `/host` mount grant layered onto the
-/// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
+/// workspace mount view — mirrors `standalone_mounts::ambient_workspace_mount_view`
 /// appending a `/host` alias when `host_home_aliases` is non-empty. This is
 /// the ONLY integration-tier construction with a confirmed host-home mount,
 /// so it is the sole way to observe `wrap_surface_disclosure`'s
@@ -252,9 +360,21 @@ fn core_builtin_tools_from_runtime(
         // like the four memory_* capabilities above.
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
     ];
+    let effect_kinds = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
+        // must include it or the authorizer denies the capability before
+        // it reaches the process port.
+        EffectKind::ExecuteCode,
+    ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
+        resource_governor: None,
         approval_parts: None,
         gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
@@ -273,21 +393,24 @@ fn core_builtin_tools_from_runtime(
             .collect(),
         capability_ids: core_builtin_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: vec![
-            EffectKind::DispatchCapability,
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::Network,
-            EffectKind::SpawnProcess,
-            // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
-            // must include it or the authorizer denies the capability before
-            // it reaches the process port.
-            EffectKind::ExecuteCode,
-        ],
+        effect_kinds,
         network_policy,
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-        additional_provider_trust: Vec::new(),
+        // The memory provider's trust ceiling mirrors production
+        // (production_first_party_trust_policy + the bundled manifest): the
+        // memory tools carry only dispatch + filesystem effects. Granting the
+        // full builtin set here (Network/SpawnProcess/ExecuteCode) would make
+        // the harness ceiling wider than production and mask authority-ceiling
+        // denials production would enforce.
+        additional_provider_trust: vec![(
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+        )],
         user_id,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),

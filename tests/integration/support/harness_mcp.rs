@@ -10,15 +10,23 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
-    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    ExtensionRegistry, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, PermissionMode,
-    RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, PackageId},
+    path::VirtualPath,
+    runtime::{RuntimeKind, TrustClass},
+    trust::RequestedTrustClass,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
@@ -29,11 +37,13 @@ use ironclaw_mcp::{
     StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
-use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_root_filesystem};
+use super::harness::{
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -60,13 +70,13 @@ pub(super) fn build_loopback_mcp_runtime(mcp_url: &str) -> HarnessResult<Arc<Loo
     Ok(mcp_runtime)
 }
 
-/// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// Variant of `standalone_host_runtime_with_registry_and_runtime_http_egress`
 /// that also wires a loopback MCP runtime for the mock-MCP integration test.
 ///
 /// The `first_party_egress` covers any first-party tool calls (recording, no
 /// network). The `mcp_runtime` is a concrete loopback runtime that makes real
 /// HTTP requests to the test-local mock MCP server.
-pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
+pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     first_party_egress: Arc<RecordingRuntimeHttpEgress>,
@@ -75,13 +85,13 @@ pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -124,25 +134,28 @@ pub(super) fn mock_mcp_extension_package(
             url: Some(mcp_url.to_string()),
         },
         host_apis: Vec::new(),
+        host_api_surfaces: Vec::new(),
         hooks: Vec::new(),
         capabilities: vec![CapabilityManifest {
             id: CapabilityId::new(capability_id)?,
-            implements: Vec::new(),
             description: "Mock MCP capability".to_string(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             visibility: CapabilityVisibility::Model,
+            standard_op: None,
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
-            output_schema_ref: CapabilityProfileSchemaRef::new(
+            output_schema_ref: Some(CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.output.v1.json",
-            )?,
+            )?),
             prompt_doc_ref: None,
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             resource_profile: None,
+            origin_gate_matrix: None,
         }],
     };
     // Inline schema so surface_descriptor returns Ok(descriptor) without
@@ -159,7 +172,10 @@ pub(super) fn mock_mcp_extension_package(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
+        standard_op: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

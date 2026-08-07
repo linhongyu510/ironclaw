@@ -43,6 +43,14 @@ slack:
         - files:write
         - reactions:read
         - reactions:write
+        - search:read
+    - token: emulate-slack-channel-token
+      user: reborn-user
+      scopes:
+        - chat:write
+        - channels:read
+        - channels:history
+        - channels:join
     - token: emulate-slack-limited-token
       user: qa-reviewer
       scopes:

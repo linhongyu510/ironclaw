@@ -11,7 +11,8 @@
 //! Tool names recorded at this seam are the model-facing names the Reborn
 //! gateway advertises, which equal capability ids (`builtin.trigger_create`)
 //! for every first-party tool except `builtin.skill_activate` (advertised as
-//! `builtin__skill_activate`); the QA phrases do not exercise that tool.
+//! `builtin__skill_activate`). Recorded QA phrases may exercise that tool before
+//! continuing with the selected skill's workflow.
 
 #![allow(dead_code)] // Shared by the QA recorder/replay test binaries only.
 
@@ -21,14 +22,24 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_assistant::RebornOutboundDeliveryTargetId;
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
     GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount, ProviderScope,
 };
-use ironclaw_first_party_extensions::GoogleCredentialResolver;
+use ironclaw_composition::{
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
+    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
+};
+use ironclaw_config::{RebornConfigFile, RebornHome};
+use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, Principal, ResourceScope, SecretHandle, TenantId, UserId,
+    ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_llm::{
     LlmConfig, LlmProvider, NearAiConfig, ProviderProtocol, RegistryProviderConfig, SessionConfig,
@@ -38,23 +49,16 @@ use ironclaw_llm::{
         ReplayingHttpInterceptor,
     },
 };
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
-use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
-    RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_reborn_services,
-    local_runtime_build_input_with_options,
-};
-use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
-use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus, run_profile::ModelProfileId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::support::trace_llm::{LlmTrace, TraceResponse};
@@ -76,7 +80,7 @@ const QA_CREDENTIAL_SOURCE_ROOT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURC
 const QA_CREDENTIAL_SOURCE_TENANT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_TENANT";
 const QA_CREDENTIAL_SOURCE_USER_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER";
 const QA_CREDENTIAL_SOURCE_AGENT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_AGENT";
-const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
+const STANDALONE_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
 /// Tenant id the QA-trace runtime is composed with — replay assertions need
 /// it to query tenant-scoped state (e.g. the trigger repository).
@@ -85,7 +89,7 @@ pub fn qa_trace_tenant_id() -> &'static str {
 }
 
 /// The model profile id the composed Reborn runtime routes turns through;
-/// must match `wrap_swappable_gateway` in `ironclaw_reborn_composition`.
+/// must match `wrap_swappable_gateway` in `ironclaw_composition`.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
 struct LiveCredentialSeed {
@@ -353,7 +357,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let mut input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         QA_USER,
         root.path().join("local-dev"),
         RebornRuntimeProfileOptions {
@@ -361,14 +365,14 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
     if let Some((interceptor, mode)) = http_interceptor {
         input = input.with_network_http_egress_for_test(Arc::new(TraceHttpNetworkEgress::new(
             interceptor,
             mode,
         )));
     }
-    let mut input = RebornRuntimeInput::from_services(input)
+    let mut input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),
@@ -402,8 +406,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
 
 async fn seed_qa_auto_approve(runtime: &RebornRuntime) {
     let auto_approve = runtime
-        .services()
-        .local_dev_auto_approve_settings_for_test()
+        .standalone_auto_approve_settings_for_test()
         .expect("QA runtime exposes local-dev auto-approve settings");
     auto_approve
         .set(AutoApproveSettingInput {
@@ -475,24 +478,18 @@ async fn seed_live_credentials_for_fixture(
         "[RebornQaTrace] importing {} credential account(s) from Reborn source root {} \
          tenant={} user={} agent={}",
         seeds.len(),
-        source.local_dev_root.display(),
+        source.standalone_root.display(),
         source.tenant,
         source.user,
         source.agent
     );
     let source_services = source.build_services().await;
-    let source_product_auth = source_services
-        .product_auth
-        .as_ref()
-        .expect("Reborn source runtime exposes product auth services");
+    let source_product_auth = source_services.product_auth_for_test();
     let source_secret_store = source_services.secret_store_for_test();
     let source_auth_scope = AuthProductScope::credential_owner(&source.scope(), AuthSurface::Api);
 
-    let services = runtime.services();
-    let product_auth = services
-        .product_auth
-        .as_ref()
-        .expect("QA runtime exposes product auth services");
+    let services = runtime;
+    let product_auth = services.product_auth_for_test();
     let secret_store = services.secret_store_for_test();
     let scope = qa_recording_resource_scope();
     let auth_scope = AuthProductScope::credential_owner(&scope, AuthSurface::Api);
@@ -586,7 +583,7 @@ async fn seed_live_credentials_for_fixture(
             .expect("seed Reborn credential account");
         preflight_seeded_qa_credential(
             fixture_name,
-            product_auth,
+            &product_auth,
             secret_store.as_ref(),
             &created_account,
         )
@@ -598,7 +595,7 @@ async fn seed_live_credentials_for_fixture(
 async fn preflight_seeded_qa_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let Some(access_secret) = account.access_secret.as_ref() else {
@@ -657,7 +654,7 @@ async fn preflight_seeded_qa_credential(
 async fn preflight_seeded_google_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let required_extension_scopes = match fixture_name {
@@ -766,7 +763,7 @@ fn qa_runtime_credential_binding(
 }
 
 struct RebornQaCredentialSource {
-    local_dev_root: PathBuf,
+    standalone_root: PathBuf,
     tenant: String,
     user: String,
     agent: String,
@@ -780,7 +777,7 @@ impl RebornQaCredentialSource {
             .unwrap_or_else(|error| panic!("load Reborn QA credential source config: {error}"));
         let identity = config_file.as_ref().and_then(|file| file.identity.as_ref());
         let default_identity = RebornRuntimeIdentity::reborn_cli();
-        let local_dev_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
+        let standalone_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|| home.path().join("local-dev"));
         let tenant = env_or_config_identity(
@@ -799,7 +796,7 @@ impl RebornQaCredentialSource {
             &default_identity.agent_id,
         );
         Self {
-            local_dev_root,
+            standalone_root,
             tenant,
             user,
             agent,
@@ -818,11 +815,11 @@ impl RebornQaCredentialSource {
         }
     }
 
-    async fn build_services(&self) -> ironclaw_reborn_composition::RebornServices {
+    async fn build_services(&self) -> ironclaw_composition::RebornRuntime {
         let input = local_runtime_build_input_with_options(
-            RebornCompositionProfile::LocalDev,
+            RebornCompositionProfile::Standalone,
             &self.user,
-            self.local_dev_root.clone(),
+            self.standalone_root.clone(),
             RebornRuntimeProfileOptions::default(),
         )
         .expect("Reborn QA credential source input")
@@ -830,7 +827,7 @@ impl RebornQaCredentialSource {
             TenantId::new(&self.tenant).expect("source tenant id"),
             AgentId::new(&self.agent).expect("source agent id"),
         );
-        build_reborn_services(input)
+        build_runtime(RebornRuntimeInput::from_build_input(input))
             .await
             .expect("build Reborn QA credential source services")
     }
@@ -858,7 +855,7 @@ impl RebornQaCredentialSource {
 }
 
 async fn select_source_credential_account(
-    product_auth: &ironclaw_reborn_composition::RebornProductAuthServices,
+    product_auth: &ironclaw_auth::RebornProductAuthServices,
     source: &RebornQaCredentialSource,
     source_auth_scope: &AuthProductScope,
     provider: AuthProviderId,
@@ -890,13 +887,13 @@ async fn select_source_credential_account(
             {
                 return account;
             }
-            match scan_local_dev_db_for_source_account(source, &provider).await {
+            match scan_standalone_db_for_source_account(source, &provider).await {
                 Ok(Some(account)) => {
                     eprintln!(
                         "[RebornQaTrace] product-auth record source did not select provider {} \
                          ({selection_error}); using matching local-dev account record from {}",
                         provider.as_str(),
-                        source.local_dev_root.display()
+                        source.standalone_root.display()
                     );
                     return account;
                 }
@@ -907,7 +904,7 @@ async fn select_source_credential_account(
                          accounts for provider {:?} in {} after selection failed: \
                          {selection_error}; scan error: {error}",
                         provider.as_str(),
-                        source.local_dev_root.display()
+                        source.standalone_root.display()
                     );
                 }
             }
@@ -916,7 +913,7 @@ async fn select_source_credential_account(
                  Reborn product-auth account for provider {:?} in source root {} \
                  tenant={} user={} agent={}: {selection_error}. Visible accounts: {}",
                 provider.as_str(),
-                source.local_dev_root.display(),
+                source.standalone_root.display(),
                 source.tenant,
                 source.user,
                 source.agent,
@@ -945,11 +942,11 @@ fn select_unique_visible_source_account(
     }
 }
 
-async fn scan_local_dev_db_for_source_account(
+async fn scan_standalone_db_for_source_account(
     source: &RebornQaCredentialSource,
     provider: &AuthProviderId,
 ) -> Result<Option<CredentialAccount>, String> {
-    let db_path = source.local_dev_root.join("reborn-local-dev.db");
+    let db_path = source.standalone_root.join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1020,7 +1017,7 @@ async fn resolve_source_secret_scope(
     handle: &SecretHandle,
     kind: &str,
 ) -> ResourceScope {
-    match scan_local_dev_db_for_secret_scope(source, handle).await {
+    match scan_standalone_db_for_secret_scope(source, handle).await {
         Ok(Some(scope)) => return scope,
         Ok(None) => {}
         Err(error) => {
@@ -1042,11 +1039,11 @@ async fn resolve_source_secret_scope(
     account.scope.resource.without_thread_and_mission()
 }
 
-async fn scan_local_dev_db_for_secret_scope(
+async fn scan_standalone_db_for_secret_scope(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<ResourceScope>, String> {
-    let db_path = source.local_dev_root.join("reborn-local-dev.db");
+    let db_path = source.standalone_root.join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1106,20 +1103,20 @@ async fn scan_local_dev_db_for_secret_scope(
     })
 }
 
-async fn read_local_dev_db_secret_material(
+async fn read_standalone_db_secret_material(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<ironclaw_secrets::SecretMaterial, String> {
-    let record = scan_local_dev_db_for_secret_material_record(source, handle)
+    let record = scan_standalone_db_for_secret_material_record(source, handle)
         .await?
         .ok_or_else(|| {
             format!(
                 "no matching encrypted local-dev secret metadata for handle {} in {}",
                 handle.as_str(),
-                source.local_dev_root.display()
+                source.standalone_root.display()
             )
         })?;
-    let key = read_local_dev_secret_master_key(source)?;
+    let key = read_standalone_secret_master_key(source)?;
     let crypto = ironclaw_secrets::SecretsCrypto::new(SecretString::from(key))
         .map_err(|error| format!("local-dev secrets master key is invalid: {error}"))?;
     let aad = ironclaw_secrets::filesystem_secret_aad(&record.scope, &record.handle);
@@ -1136,11 +1133,11 @@ async fn read_local_dev_db_secret_material(
     ))
 }
 
-async fn scan_local_dev_db_for_secret_material_record(
+async fn scan_standalone_db_for_secret_material_record(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<StoredSecretMaterialRecord>, String> {
-    let db_path = source.local_dev_root.join("reborn-local-dev.db");
+    let db_path = source.standalone_root.join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1200,10 +1197,10 @@ async fn scan_local_dev_db_for_secret_material_record(
     })
 }
 
-fn read_local_dev_secret_master_key(source: &RebornQaCredentialSource) -> Result<String, String> {
+fn read_standalone_secret_master_key(source: &RebornQaCredentialSource) -> Result<String, String> {
     let key_path = source
-        .local_dev_root
-        .join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+        .standalone_root
+        .join(STANDALONE_SECRETS_MASTER_KEY_PATH);
     let key = match std::fs::read_to_string(&key_path) {
         Ok(existing) => existing.trim().to_string(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1288,7 +1285,7 @@ fn env_or_config_identity(name: &str, config_value: Option<&str>, default: &str)
 
 async fn consume_source_secret(
     source: &RebornQaCredentialSource,
-    store: &dyn ironclaw_secrets::SecretStore,
+    store: &dyn ironclaw_secrets::SecretStorePort,
     scope: &ResourceScope,
     handle: &SecretHandle,
     kind: &str,
@@ -1304,7 +1301,7 @@ async fn consume_source_secret(
                 handle.as_str(),
                 account.id
             );
-            return read_local_dev_db_secret_material(source, handle)
+            return read_standalone_db_secret_material(source, handle)
                 .await
                 .unwrap_or_else(|fallback_error| {
                     panic!(
@@ -1325,7 +1322,7 @@ async fn consume_source_secret(
                 handle.as_str(),
                 account.id
             );
-            read_local_dev_db_secret_material(source, handle)
+            read_standalone_db_secret_material(source, handle)
                 .await
                 .unwrap_or_else(|fallback_error| {
                     panic!(
@@ -1454,7 +1451,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
     // and reports the pause, instead of parking in the non-terminal
     // `BlockedAuth` state until `RunTimeout`. Resolving the gate to record the
     // post-auth turns is a deliberate follow-up that goes through the WebUI
-    // facade with a seeded credential — not wired here.
+    // service with a seeded credential — not wired here.
     let conversation = runtime
         .new_conversation()
         .await
@@ -1593,7 +1590,7 @@ fn assert_recorded_fixture_matches_expected_result(
         }
         "github_notifications" => {
             // No credential is seeded, so the agent should onboard the github
-            // extension (install + activate) and reach the auth gate rather than
+            // extension through the single install action and reach the auth gate rather than
             // silently give up. The onboarding tool choices are the guardrail;
             // the outcome may be an auth gate or an onboarding reply.
             assert_recorded_tool_call(
@@ -1601,13 +1598,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["github"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["github"],
             );
         }
@@ -1618,13 +1608,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["gmail"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["gmail"],
             );
         }
@@ -1896,7 +1879,9 @@ fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
     };
     use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelRequest,
@@ -1983,17 +1968,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_db_secret_material_reader_decrypts_record() {
+    async fn standalone_db_secret_material_reader_decrypts_record() {
         let dir = tempfile::tempdir().unwrap();
         let source = RebornQaCredentialSource {
-            local_dev_root: dir.path().to_path_buf(),
+            standalone_root: dir.path().to_path_buf(),
             tenant: "reborn-cli".to_string(),
             user: "reborn-cli".to_string(),
             agent: "reborn-cli-agent".to_string(),
         };
         let master_key = ironclaw_secrets::keychain::generate_master_key_hex();
         std::fs::write(
-            dir.path().join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+            dir.path().join(STANDALONE_SECRETS_MASTER_KEY_PATH),
             &master_key,
         )
         .unwrap();
@@ -2033,7 +2018,7 @@ mod tests {
         .await
         .unwrap();
 
-        let material = read_local_dev_db_secret_material(
+        let material = read_standalone_db_secret_material(
             &source,
             &SecretHandle::new("google-oauth-access-test").unwrap(),
         )
@@ -2125,3 +2110,4 @@ mod tests {
         }
     }
 }
+// arch-exempt: large_file, parity trace support remains centralized, plan #6175

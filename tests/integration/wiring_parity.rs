@@ -1,7 +1,7 @@
 //! W5-WIRING-PARITY (issue #5637): the harness's `DefaultPlannedRuntimeParts`
 //! construction (`support/group.rs`'s `into_group`) stays field-Some/None-
 //! identical to production's local-dev construction
-//! (`ironclaw_reborn_composition::runtime::build_reborn_runtime`), modulo a
+//! (`ironclaw_composition::runtime::build_reborn_runtime`), modulo a
 //! named allowlist of deliberate test-double substitutions — so a new
 //! port/field lands loud instead of silently drifting. Zero production-crate
 //! edits: the mechanism is entirely test-side.
@@ -17,9 +17,10 @@
 //! `harness/profiles/*.rs` domain's `capability_ids` — read from that
 //! domain's REAL `ToolsProfile`/harness constructor, never a hand-copied
 //! table — is a subset of production's real capability surface
-//! (`builtin_first_party_package()` + the github/bundled-extension
-//! manifest-derived id sets), modulo a skip-list of deliberately synthetic
-//! local-dev-only ids. See `production_capability_surface()`'s doc for one
+//! (`builtin_first_party_package()` + `native_memory_first_party_package()` +
+//! the github/bundled-extension manifest-derived id sets), modulo a skip-list
+//! of deliberately synthetic local-dev-only ids. See
+//! `production_capability_surface()`'s doc for one
 //! known, deliberately-excluded gap (the extension-lifecycle ids) that is
 //! visibility-blocked rather than papered over.
 
@@ -32,7 +33,7 @@ mod support;
 
 use std::collections::HashSet;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::HarnessResult;
@@ -43,8 +44,8 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
 // ---------------------------------------------------------------------------
 
-/// Hand-derived from `crates/ironclaw_reborn_composition/src/runtime.rs`
-/// lines 3365-3459 (`build_reborn_runtime`, `LocalDev`/`LocalDevYolo`
+/// Hand-derived from `crates/app/ironclaw_composition/src/runtime.rs`
+/// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
 /// against this range 2026-07-04.) The smoke build below at least proves the
@@ -59,13 +60,18 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false, // :3406 hardcoded None
-        cancellation_factory: false, // :3407 hardcoded None
-        skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
-        attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        model_route_resolver: false,        // :3406 hardcoded None
+        cancellation_factory: false,        // :3407 hardcoded None
+        skill_context_source: true,         // :2917-2929 standalone_filesystem_skill_context_source
+        attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        prompt_diagnostic_sink: true, // process-local bounded inspector store
+        reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
-        input_queue: false,      // hardcoded None
-        model_policy_guard: false, // hardcoded None
+        input_queue: true, // steering/follow-up host input queue — always wired (InMemory or Filesystem)
+        input_queue_reconcile: true, // terminal reclamation surface of the same queue — wired alongside it
+        memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
+        after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
+        model_policy_guard: false,   // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
         // scripted `TraceLlm` path, and any test build), `llm_cost_table` is
@@ -96,7 +102,7 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "skill_context_source",
         "harness: None outside skill_activation_tools() groups (recorder.rs:56-63); \
-         production: always Some via local_dev_filesystem_skill_context_source (runtime.rs:2917-2929)",
+         production: always Some via standalone_filesystem_skill_context_source (runtime.rs:2917-2929)",
     ),
     (
         "attachment_read_port",
@@ -114,6 +120,18 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
         "turn_event_sink",
         "harness: None unless .with_turn_event_sink() was called (group.rs); \
          production: always Some, no config gate (runtime.rs:3453)",
+    ),
+    (
+        "memory_context_service",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3481-3494)",
+    ),
+    (
+        "after_turn_memory_writer",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3500-3509)",
     ),
     (
         "communication_context_provider",
@@ -136,8 +154,16 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "prompt_diagnostic_sink" => shape.prompt_diagnostic_sink = from.prompt_diagnostic_sink,
+        "reply_attachment_intent_port" => {
+            shape.reply_attachment_intent_port = from.reply_attachment_intent_port
+        }
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
+        "memory_context_service" => shape.memory_context_service = from.memory_context_service,
+        "after_turn_memory_writer" => {
+            shape.after_turn_memory_writer = from.after_turn_memory_writer
+        }
         "model_policy_guard" => shape.model_policy_guard = from.model_policy_guard,
         "model_budget_accountant" => shape.model_budget_accountant = from.model_budget_accountant,
         "safety_context" => shape.safety_context = from.safety_context,
@@ -204,24 +230,24 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 }
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
-/// referenced `LocalDev` literal still exists and the profile still builds.
-/// Mirrors `crates/ironclaw_reborn_composition/tests/runtime.rs:132-146`. The
+/// referenced `Standalone` literal still exists and the profile still builds.
+/// Mirrors `crates/app/ironclaw_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
 /// gap noted in the module doc).
 #[tokio::test]
-async fn local_dev_profile_still_builds() {
+async fn standalone_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
-    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+    let policy = ironclaw_composition::standalone_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::RebornBuildInput::local_dev(
+    let input = ironclaw_composition::local_filesystem_build_input(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )
     .with_runtime_policy(policy);
-    let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-        ironclaw_reborn_composition::RebornRuntimeInput::from_services(input),
+    let runtime = ironclaw_composition::build_reborn_runtime(
+        ironclaw_composition::RebornRuntimeInput::from_build_input(input),
     )
     .await
     .expect(
@@ -250,20 +276,20 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     (
         "project",
         "PROJECT_CREATE_CAPABILITY_ID (harness/profiles/project.rs) is a local-dev synthetic \
-         capability (E-PROJ, ironclaw_reborn_composition::test_support), not part of \
+         capability (E-PROJ, ironclaw_composition::test_support), not part of \
          builtin_first_party_package()",
     ),
     (
         "outbound",
         "OUTBOUND_DELIVERY_TARGETS_LIST/TARGET_SET_CAPABILITY_ID (harness/profiles/outbound.rs) \
          are local-dev synthetic capabilities (C-SYNTH outbound, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package()",
+         ironclaw_composition::test_support), not part of builtin_first_party_package()",
     ),
     (
         "skill",
         "skill_activation_tools_profile()'s SKILL_ACTIVATE_CAPABILITY_ID \
          (harness/profiles/skill.rs) is a local-dev synthetic capability (E-SKILL, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package(); \
+         ironclaw_composition::test_support), not part of builtin_first_party_package(); \
          skill_management_tools_profile()'s ids in the same file ARE checked below",
     ),
     (
@@ -275,30 +301,31 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
 ];
 
-/// The production capability surface: `builtin_first_party_package()`'s
-/// declared capabilities, unioned with two independently production-derived
-/// sources — the github extension's real manifest-derived ids
+/// The production capability surface: the always-on first-party packages
+/// (`builtin_first_party_package()` and the sibling
+/// `native_memory_first_party_package()`), unioned with two independently
+/// production-derived sources — the github extension's real manifest-derived ids
 /// (`github_support::capability_ids()`) and every OTHER bundled extension's
 /// real manifest-derived ids
 /// (`extension_surface::bundled_extension_manifest_capability_ids()`) — both
 /// parse the actual `manifest.toml` assets under
-/// `crates/ironclaw_first_party_extensions/assets/`, so they are themselves
+/// `crates/extensions/packages/`, so they are themselves
 /// production truth, not a second test-only source.
 ///
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`
-/// (the four `builtin.extension_search`/`_install`/`_activate`/`_remove` ids).
+/// (the three `builtin.extension_search`/`_install`/`_remove` ids).
 /// Their real values are defined in a production crate
-/// (`ironclaw_reborn_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
+/// (`ironclaw_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
 /// but as a `pub(crate)` constant with no public accessor — visibility-blocked
 /// from this test crate short of a `crates/` change, which is out of scope
 /// here. Unioning the test-support copy of this list back in would recreate
 /// exactly the tautology this restructure removes (RHS built from the same
 /// hand-transcribed list LHS grants from). STOP/report, not paper over: see
 /// `profile_capability_ids_by_domain()`'s "extension" row, which excludes
-/// these 4 ids from the check it runs for the same reason, and the PR that
+/// these 3 ids from the check it runs for the same reason, and the PR that
 /// introduced this restructure (W5-WIRING-PARITY finding 1) for the tracked
 /// follow-up (export the list, or add a public accessor, from
-/// `ironclaw_reborn_composition`).
+/// `ironclaw_composition`).
 fn production_capability_surface() -> HashSet<String> {
     let mut surface: HashSet<String> = ironclaw_host_runtime::builtin_first_party_package()
         .expect("builtin first-party package parses")
@@ -307,6 +334,14 @@ fn production_capability_surface() -> HashSet<String> {
         .iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect();
+    surface.extend(
+        ironclaw_host_runtime::native_memory_first_party_package()
+            .expect("native memory first-party package parses")
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str().to_string()),
+    );
     surface.extend(
         reborn_support::github::capability_ids()
             .expect("github extension manifest parses")
@@ -369,14 +404,13 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
                 .collect(),
         ),
         // extension_lifecycle_tools_profile() (harness/profiles/extension.rs)
-        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS (4 ids) plus
-        // BUNDLED_EXTENSION_CAPABILITY_IDS. The 4 lifecycle ids are filtered
-        // out BY NAME (order-independent): their real production values are
-        // visibility-blocked (see `production_capability_surface()`'s doc) —
-        // checking them against a surface that (correctly) no longer contains
-        // them would fail for a reason unrelated to real drift. The remaining
-        // ~130 bundled-extension ids ARE checked, against the manifest-derived
-        // (not hand-transcribed) surface.
+        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS plus the real GitHub
+        // package ids and the other manifest-derived bundled extension ids.
+        // The lifecycle ids are filtered out BY NAME (order-independent):
+        // their real production values are visibility-blocked (see
+        // `production_capability_surface()`'s doc), so checking them against a
+        // surface that correctly omits them would report unrelated drift.
+        // Every remaining manifest-derived capability id is checked.
         ("extension", {
             let capability_ids =
                 profiles::extension::extension_lifecycle_tools_profile()?.capability_ids;

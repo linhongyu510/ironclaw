@@ -12,16 +12,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
-use ironclaw_turns::{
-    LoopMessageRef, TurnStatus,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::{LoopMessageRef, TurnStatus};
 use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use reborn_support::harness::RecordingTestCapabilityPort;

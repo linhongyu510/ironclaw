@@ -2,13 +2,9 @@
 
 **Status:** Draft v0 contract
 **Date:** 2026-04-24
-**Target crate:** `crates/ironclaw_host_api`
-**Source architecture docs:**
-
-- `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
-- `docs/reborn/2026-04-24-os-like-architecture-design.md`
-- `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
-- `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+**Target crate:** `crates/contracts/ironclaw_host_api`
+**Source of truth:** this contract, `crates/contracts/ironclaw_host_api/CLAUDE.md`, and
+the architecture tests in `crates/app/ironclaw_architecture_tests`.
 
 ---
 
@@ -28,11 +24,23 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - host-owned HTTP ingress descriptors
 - audit/event envelopes
 
-The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
+Concrete listener behavior and framework-specific router carriers are outside
+this contract crate. `ironclaw_host_ingress` defines the Axum route-mount
+carriers consumed by host assembly at the HTTP boundary:
+`PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
+`crates/product/ironclaw_host_ingress/src/lib.rs`.
+
+*(Historical build order:)* the first implementation PR created this crate before `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extension_registry`, `ironclaw_wasm`, or the dispatch layer (originally the separate `ironclaw_dispatcher` crate, since merged into `ironclaw_capabilities`' `dispatch` module — see the note in `dispatcher.md`).
 
 ---
 
 ## 2. Dependency rules
+
+`ironclaw_host_api::capability_surface::CapabilitySurfacePolicy` is the single
+neutral vocabulary for a model-visible capability ceiling. Its capability-id
+scope supports allow-only, intersection, and deny subtraction in one resolved
+value. It grants no authority: authorization, approvals, obligations, and
+dispatch-time checks remain separate host stages.
 
 ### May depend on
 
@@ -46,13 +54,13 @@ The first implementation PR should create this crate before implementing `ironcl
 
 ### Must not depend on
 
-- `ironclaw_dispatcher`
+- `ironclaw_capabilities` (the dispatch layer — formerly the separate `ironclaw_dispatcher` crate)
 - `ironclaw_filesystem`
 - `ironclaw_resources`
-- `ironclaw_extensions`
+- `ironclaw_extension_registry`
 - `ironclaw_wasm`
 - `ironclaw_mcp`
-- `ironclaw_scripts`
+- `ironclaw_sandbox`
 - `ironclaw_auth`
 - `ironclaw_network`
 - current `src/tools/*`
@@ -69,7 +77,7 @@ ironclaw_host_api -> no system-service or runtime crates
 ## 3. Proposed module layout
 
 ```text
-crates/ironclaw_host_api/src/
+crates/contracts/ironclaw_host_api/src/
   lib.rs
   ids.rs
   path.rs
@@ -123,6 +131,44 @@ pub type Timestamp = chrono::DateTime<chrono::Utc>;
 ```
 
 If the implementation prefers `time::OffsetDateTime`, choose it once in PR 1 and use it everywhere in `ironclaw_host_api`.
+
+### 4.1 Model-visible failure diagnostics
+
+`ModelFailureDiagnostic::Diagnostic` is the narrow exception to the
+single-line `SafeSummary` contract. It carries a producer-scrubbed failure cause
+directly to the model. There is no diagnostic-reference store or deferred
+lookup path; every new recoverable-failure producer must supply the bounded
+inline diagnostic. Both the host-api verdict and the loop's reconstructed
+`CapabilityFailure` require that diagnostic structurally. Legacy payloads that
+omit it deserialize to the explicit unavailable-detail sentence and write the
+field on their next serialization.
+
+Owning regression coverage:
+
+- `crates/contracts/ironclaw_host_api/src/resolution.rs` test
+  `resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic`
+  pins the structurally required inline diagnostic and the legacy host-api
+  verdict fallback. Run:
+
+  ```bash
+  cargo test -p ironclaw_host_api --lib resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic -- --exact
+  ```
+
+- `crates/contracts/ironclaw_loop_contracts/src/host/capability.rs` test
+  `host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
+  pins the reconstructed loop failure fallback and next-write upgrade. Run:
+
+  ```bash
+  cargo test -p ironclaw_loop_contracts --lib host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback -- --exact
+  ```
+
+The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed
+control characters, and known credential-token shapes, and revalidates on
+deserialize. It intentionally allows paths, URLs, payload delimiters, and
+credential vocabulary such as “password field” because those can be necessary
+recovery context. Producers remain responsible for applying the canonical
+secret-value scrubber and injection fence before construction. Public summaries,
+events, logs, and projections continue to use their stricter redacted contracts.
 
 ---
 
@@ -229,6 +275,7 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    Sandbox,
     FirstParty,
     System,
 }
@@ -248,6 +295,7 @@ Rules:
 - `RuntimeKind::FirstParty` and `RuntimeKind::System` are concrete host-lane markers for host-policy-selected services in the broader `Host | WASM | Script Runner` model.
 - `RuntimeKind::Mcp` is a capability adapter lane; local stdio MCP servers may still be process/sandbox-backed internally.
 - `RuntimeKind::Script` is the native CLI/script lane. Docker/container is the V1 backend selected by policy, not a distinct public host API runtime kind.
+- `RuntimeKind::Sandbox` is the sandboxed shell/process lane: a persistent, per-tenant OS-process sandbox. One invocation makes many outbound calls, so it shares the multi-call credential-reuse set with `Mcp`/`Wasm`.
 - `TrustClass` is an authority ceiling, not a permission grant and not a kernel bypass.
 - Shipped first-party code and bundled reference loops still need explicit grants, scoped mounts, resource reservations, leases, and obligation handling for privileged effects.
 - User-installed packages cannot self-declare `TrustClass::FirstParty` or `TrustClass::System`; those ceilings are assigned only by host policy, signed/bundled package metadata, or admin configuration.
@@ -562,7 +610,7 @@ pub struct RuntimeCredentialRequirement {
 
 pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
-    ProductAuthAccount { provider: RuntimeCredentialAccountProviderId },
+    ProductAuthAccount { provider: VendorId, setup: RuntimeCredentialAccountSetup },
 }
 ```
 
@@ -691,7 +739,7 @@ pub struct SandboxQuota {
 }
 ```
 
-`ironclaw_host_api` defines these shapes. `ironclaw_resources`, `ironclaw_scripts`, `ironclaw_wasm`, and sandbox backends enforce them.
+`ironclaw_host_api` defines these shapes. `ironclaw_resources`, `ironclaw_sandbox`, `ironclaw_wasm`, and sandbox backends enforce them.
 
 ---
 
@@ -700,33 +748,42 @@ pub struct SandboxQuota {
 `ironclaw_host_api` owns the neutral already-authorized dispatch port so caller-facing workflow crates can avoid depending on the concrete dispatcher implementation:
 
 ```rust
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    pub estimate: ResourceEstimate,
-    pub mounts: Option<MountView>,
-    pub resource_reservation: Option<ResourceReservation>,
-    pub input: serde_json::Value,
+pub struct Authorized {
+    /* private: sealed invocation + RuntimeLane + mounts + reservation + deadline */
 }
 pub struct CapabilityDispatchResult;
 pub struct CapabilityDisplayOutputPreview;
-pub trait CapabilityDispatcher;
+pub trait CapabilityDispatcher {
+    async fn dispatch_json(
+        &self,
+        authorized: Authorized,
+    ) -> Result<CapabilityDispatchResult, DispatchError>;
+}
 pub enum DispatchError;
 pub enum RuntimeDispatchErrorKind;
 ```
 
+Implementation evidence: `crates/contracts/ironclaw_host_api/src/authorized.rs`
+defines `Authorized`, `ProcessAuthorizedContinuation`, and the exhaustive
+`ProcessAuthorizedContinuation::from_authorized` conversion; `crates/contracts/ironclaw_host_api/src/dispatch.rs`
+defines `CapabilityDispatcher::dispatch_json(Authorized)`; `crates/kernel/ironclaw_capabilities/src/trust.rs`
+writes process continuations during authorization, and
+`crates/kernel/ironclaw_host_runtime/src/services/process_executor.rs` re-mints through
+the process-record-backed port.
+
 Rules:
 
-- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
-- `authenticated_actor_user_id` is forwarded unchanged from the authorized execution context. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
+- `Authorized` is sealed by the capability kernel only; grant checks, approvals, trust, obligations, lane selection, mounts, resource reservations, and witness deadline are established before this boundary.
+- `Actor::Sealed(user_id)` on the authorized invocation is forwarded unchanged as the authenticated actor. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
+- Process re-dispatch uses a durable `ProcessAuthorizedContinuation` and a kernel-only, process-record-backed remint port to re-mint an `Authorized` witness at execution; missing continuations fail closed as `MissingProcessAuthorization`. The continuation is process-lifetime authority, not a second policy check, and reminting must validate the persisted process record before sealing.
+- A re-minted witness carries the original process reservation when one exists. If that reservation has been released/revoked before or during execution, runtime settlement fails closed with a resource dispatch error; adapters must not silently reserve replacement capacity.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, optional display-preview metadata, usage, and resource receipt.
 - `CapabilityDisplayOutputPreview` is a display-only side channel for renderer-ready output such as unified diffs. It must not change model-visible capability output, grant authority, or carry backend-private paths/secrets.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.
 - Runtime output contract failures such as `OutputDecode` and `InvalidResult` must not be conflated with malformed caller input.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.
-- `ironclaw_dispatcher` implements the port; it does not own the port vocabulary.
+- `ironclaw_capabilities`' `dispatch` module implements the port (formerly the separate `ironclaw_dispatcher` crate); it does not own the port vocabulary.
 
 ---
 
@@ -1138,11 +1195,11 @@ Each `IngressRouteDescriptor` must carry a fully resolved `IngressPolicy`:
 - CORS and WebSocket Origin policy;
 - streaming mode;
 - audit/trace class;
-- allowed host-mediated effect path (`ProductWorkflow`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
+- allowed host-mediated effect path (`ProductSurface`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
 
 Actual enforcement lives in host composition. `ironclaw_host_api` must not import
 Axum, own route mounting, implement bearer/session/OIDC checks, apply policy
-engines, dispatch product workflow, or execute runtime effects.
+engines, dispatch product actions, or execute runtime effects.
 
 ---
 
@@ -1172,7 +1229,7 @@ If an implementation detail requires one of those, stop and move it to the ownin
 
 The host API contract is ready when:
 
-- `crates/ironclaw_host_api` builds as a standalone workspace crate
+- `crates/contracts/ironclaw_host_api` builds as a standalone workspace crate
 - no runtime/system-service crate dependency is introduced
 - public types in this document exist or have a documented v0 substitute
 - validation constructors exist for authority-bearing strings

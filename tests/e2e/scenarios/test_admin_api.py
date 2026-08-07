@@ -1,7 +1,7 @@
 """Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
-`ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone
+`ironclaw_product_contracts::admin_users::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring: the operator
 env-bearer authenticator, and the signed-session-store token minter that must
@@ -18,7 +18,11 @@ covered at the crate tier; here every lifecycle/delete user stays a `member`,
 which can never strand the tenant's admins.
 """
 
+import asyncio
+import json
+import re
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -134,6 +138,132 @@ async def test_list_users_contains_new_user(admin_client, test_user):
     assert test_user["id"] in ids
 
 
+async def test_admin_users_ui_paginates_retries_and_deduplicates(
+    reborn_v2_page, reborn_v2_server
+):
+    """The served Admin users page preserves cursor pages and retries safely."""
+    requested_cursors = []
+    pagination_attempts = 0
+    release_final_page = asyncio.Event()
+
+    def user_record(user_id, display_name):
+        return {
+            "user_id": user_id,
+            "display_name": display_name,
+            "email": f"{user_id}@example.com",
+            "role": "member",
+            "status": "active",
+            "job_count": 0,
+            "total_cost": 0,
+        }
+
+    async def handle_users(route):
+        nonlocal pagination_attempts
+        query = parse_qs(urlparse(route.request.url).query)
+        cursor = query.get("cursor", [None])[0]
+        requested_cursors.append(cursor)
+
+        if cursor is None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "users": [
+                            user_record("first-user", "First User"),
+                            user_record("shared-user", "Shared User"),
+                        ],
+                        "next_cursor": "cursor-1",
+                    }
+                ),
+            )
+            return
+
+        assert cursor == "cursor-1"
+        pagination_attempts += 1
+        # React Query retries a failed query once. Fail both automatic attempts
+        # so the page reaches its explicit retry state.
+        if pagination_attempts <= 2:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "error": "service_unavailable",
+                        "kind": "service_unavailable",
+                        "retryable": True,
+                    }
+                ),
+            )
+            return
+
+        await release_final_page.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "users": [
+                        user_record("shared-user", "Shared User"),
+                        user_record("second-user", "Second User"),
+                    ],
+                    "next_cursor": None,
+                }
+            ),
+        )
+
+    page = reborn_v2_page
+    await page.route(f"**{ADMIN_BASE}/users*", handle_users)
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    load_more = page.locator(SEL_V2["admin_users_load_more"])
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_have_count(
+        0
+    )
+    await expect(load_more).to_be_visible()
+
+    await load_more.click()
+    load_more_error = page.locator(SEL_V2["admin_users_load_more_error"])
+    await expect(load_more_error).to_be_visible(timeout=15000)
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible()
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    assert pagination_attempts == 2
+
+    async with page.expect_request(
+        lambda request: "cursor=cursor-1" in request.url
+    ):
+        await load_more.click()
+    try:
+        await expect(load_more).to_be_disabled()
+        await expect(load_more).to_contain_text("Loading...")
+        # A native click on the disabled control must not start a duplicate page.
+        await load_more.evaluate("(element) => element.click()")
+        await page.wait_for_timeout(100)
+        assert pagination_attempts == 3
+    finally:
+        release_final_page.set()
+
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(load_more_error).to_have_count(0)
+    await expect(load_more).to_have_count(0)
+    assert requested_cursors == [None, "cursor-1", "cursor-1", "cursor-1"]
+
+
 async def test_get_user_detail(admin_client, test_user):
     r = await admin_client.get(f"{ADMIN_BASE}/users/{test_user['id']}")
     assert r.status_code == 200, r.text
@@ -222,6 +352,64 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
     )
 
 
+async def test_admin_confirm_dialogs_restore_focus_after_escape_and_backdrop_cancel(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """Admin confirmations share browser keyboard, backdrop, and focus behavior."""
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    user_link = page.get_by_role(
+        "button", name=test_user["display_name"], exact=True
+    )
+    user_row = user_link.locator(
+        "xpath=ancestor::div[contains(@class, 'justify-between')][1]"
+    )
+    suspend_trigger = user_row.get_by_role(
+        "button", name=SEL_V2["admin_suspend_button_name"], exact=True
+    )
+    await suspend_trigger.click()
+
+    suspend_dialog = page.get_by_role(
+        "dialog", name="Suspend user", exact=True
+    )
+    await expect(suspend_dialog).to_be_visible()
+    await expect(suspend_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        suspend_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await page.keyboard.press("Escape")
+    await expect(suspend_dialog).to_have_count(0)
+    await expect(suspend_trigger).to_be_focused()
+
+    await user_link.click()
+    await expect(
+        page.get_by_role(
+            "heading", name=test_user["display_name"], exact=True
+        )
+    ).to_be_visible(timeout=15000)
+    delete_trigger = page.locator(SEL_V2["admin_user_detail_delete"])
+    await delete_trigger.click()
+
+    delete_dialog = page.get_by_role("dialog", name="Delete user", exact=True)
+    await expect(delete_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        delete_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await delete_dialog.locator(
+        ":scope > div[aria-hidden='true']"
+    ).click(position={"x": 2, "y": 2})
+    await expect(delete_dialog).to_have_count(0)
+    await expect(delete_trigger).to_be_focused()
+
+    retained = await admin_client.get(
+        f"{ADMIN_BASE}/users/{test_user['id']}"
+    )
+    assert retained.status_code == 200, retained.text
+
+
 async def test_admin_token_visibility_matches_user_creation_lifecycle(
     admin_client, reborn_v2_page, reborn_v2_server, test_user
 ):
@@ -295,6 +483,174 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
                 f"{ADMIN_BASE}/users/{created_user_id}"
             )
             assert cleanup.status_code == 200, cleanup.text
+
+
+async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps_secrets_write_only(
+    admin_client, reborn_v2_page, reborn_v2_server
+):
+    """Fresh deployments expose manifest configuration without installing extensions.
+
+    This is a served-browser regression for the zero-install admin route: the
+    real ``ironclaw serve`` router and SPA must render deployment-owned Slack,
+    Telegram, and Google configuration before any user installs those packages.
+    Saving a write-only value must not turn the admin surface into an extension
+    lifecycle surface or echo the secret after the page reloads.
+    """
+    installed = await admin_client.get("/api/webchat/v2/extensions")
+    assert installed.status_code == 200, installed.text
+    assert installed.json()["extensions"] == [], installed.text
+
+    page = reborn_v2_page
+    await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+    await page.get_by_role("link", name="Admin", exact=True).click()
+    await page.get_by_role("link", name="Configuration", exact=True).click()
+
+    await expect(
+        page.get_by_role("heading", name="Extension configuration", exact=True)
+    ).to_be_visible(timeout=15000)
+    await expect(
+        page.get_by_text(
+            "Saving values does not install, connect, activate, or remove an extension.",
+            exact=False,
+        )
+    ).to_be_visible()
+
+    group_names = [
+        "Slack deployment configuration",
+        "Telegram deployment configuration",
+        "Google OAuth client credentials",
+    ]
+    for group_name in group_names:
+        await expect(
+            page.get_by_role("heading", name=group_name, exact=True)
+        ).to_be_visible()
+
+    groups = page.get_by_test_id("admin-configuration-group")
+    assert await groups.count() == len(group_names)
+    for index in range(await groups.count()):
+        assert "· installed" not in await groups.nth(index).inner_text()
+
+    google_group = groups.filter(
+        has=page.get_by_role(
+            "heading", name="Google OAuth client credentials", exact=True
+        )
+    )
+    await expect(google_group).to_have_count(1)
+
+    client_id = f"e2e-google-client-{uuid.uuid4().hex}"
+    client_secret = f"e2e-google-secret-{uuid.uuid4().hex}"
+    client_id_input = google_group.get_by_label(
+        re.compile(r"^Google OAuth client ID")
+    )
+    client_secret_input = google_group.get_by_label(
+        re.compile(r"^Google OAuth client secret")
+    )
+    assert await client_secret_input.get_attribute("type") == "password"
+    await client_id_input.fill(client_id)
+    await client_secret_input.fill(client_secret)
+
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith(
+            "/api/webchat/v2/operator/extension-configuration/vendor.google"
+        )
+    ) as save_info:
+        await google_group.get_by_role(
+            "button", name="Save configuration", exact=True
+        ).click()
+    save_response = await save_info.value
+    assert save_response.status == 200
+    assert client_secret not in await save_response.text()
+    await expect(
+        google_group.get_by_text("Configuration saved.", exact=True)
+    ).to_be_visible(timeout=15000)
+    await expect(client_secret_input).to_have_value("")
+
+    async with page.expect_response(
+        lambda response: response.request.method == "GET"
+        and response.url.endswith(
+            "/api/webchat/v2/operator/extension-configuration"
+        )
+    ) as reload_info:
+        await page.reload()
+    reload_response = await reload_info.value
+    assert reload_response.status == 200
+    assert client_secret not in await reload_response.text()
+
+    await expect(
+        page.get_by_role("heading", name="Extension configuration", exact=True)
+    ).to_be_visible(timeout=15000)
+    google_group = page.get_by_test_id("admin-configuration-group").filter(
+        has=page.get_by_role(
+            "heading", name="Google OAuth client credentials", exact=True
+        )
+    )
+    await expect(google_group.get_by_text("Configured", exact=True)).to_be_visible()
+    await expect(
+        google_group.get_by_label(re.compile(r"^Google OAuth client ID"))
+    ).to_have_value(client_id)
+    await expect(
+        google_group.get_by_label(re.compile(r"^Google OAuth client secret"))
+    ).to_have_value("")
+    await expect(
+        google_group.get_by_text(
+            "Configured. Leave blank to keep the stored value.", exact=True
+        )
+    ).to_be_visible()
+    assert client_secret not in await page.locator("body").inner_text()
+    await expect(
+        page.get_by_role("button", name=re.compile(r"^Install", re.IGNORECASE))
+    ).to_have_count(0)
+
+
+async def test_admin_configuration_repeated_paste_keeps_form_mounted(
+    reborn_v2_page, reborn_v2_server
+):
+    """Rapid pastes must not retain a React event past its handler lifetime.
+
+    This stays separate from the save/reload configuration test because it needs
+    clipboard permission, three real paste events, and page-error capture while
+    intentionally avoiding persistence; combining those concerns would obscure
+    whether a failure came from event lifetime or save/reload behavior.
+    """
+    page = reborn_v2_page
+    await page.context.grant_permissions(
+        ["clipboard-read", "clipboard-write"], origin=reborn_v2_server
+    )
+    page_errors = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+
+    await page.goto(
+        f"{reborn_v2_server}/admin/configuration?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    slack_group = page.get_by_test_id(
+        SEL_V2["admin_configuration_group_test_id"]
+    ).filter(
+        has=page.get_by_role(
+            "heading",
+            name=SEL_V2["admin_slack_configuration_heading_name"],
+            exact=True,
+        )
+    )
+    bot_token_input = slack_group.get_by_label(
+        re.compile(SEL_V2["admin_bot_token_label_pattern"])
+    )
+    await expect(bot_token_input).to_be_visible(timeout=15000)
+
+    pasted = "xoxb-regression-paste"
+    await page.evaluate("value => navigator.clipboard.writeText(value)", pasted)
+    for _ in range(3):
+        await bot_token_input.press("ControlOrMeta+V")
+
+    await expect(
+        page.get_by_role(
+            "heading",
+            name=SEL_V2["admin_extension_configuration_heading_name"],
+            exact=True,
+        )
+    ).to_be_visible()
+    await expect(bot_token_input).to_have_value(pasted * 3)
+    assert page_errors == []
 
 
 async def test_update_user_profile(admin_client, test_user):
@@ -497,7 +853,7 @@ async def test_delete_user_and_verify_gone(admin_client):
 
 
 async def test_admin_routes_require_auth(reborn_v2_server):
-    """No bearer -> the admin surface rejects before any facade work."""
+    """No bearer -> the admin surface rejects before any service work."""
     async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as anon:
         r = await anon.get(f"{ADMIN_BASE}/users")
     assert r.status_code == 401

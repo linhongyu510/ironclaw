@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/ironclaw_host_api`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/contracts/ironclaw_host_api`
 
 ---
 
@@ -130,13 +130,13 @@ Recommended meaning:
 | `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
 | `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
 | `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
-| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
-| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/run-state` | read-only compatibility input for invocation lifecycle migration into `/processes` |
+| `/approvals` | approval-request lifecycle records owned by `ironclaw_approvals` |
 | `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
 | `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
 | `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
 | `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
-| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` under the scoped filesystem contract |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
 Extension-visible workspace-style names should be scoped aliases such as:
@@ -209,6 +209,13 @@ Rules:
 8. Symlinks may be read or traversed only if final canonical target remains inside the backend root.
 9. Symlink writes that would create or follow an escape outside the root are denied.
 10. Returned errors must identify virtual/scoped paths, not raw host paths.
+
+**Leaf-scoped local mounts (`mount_local_per_leaf`).** Multiple callers can share one `host_root` while each is confined to its own first-path-segment leaf (`host_root/<leaf>`), for the persistent per-user sandbox container model where one shared workspace directory hosts every user's leaf:
+
+- a request for the bare mount root (no leaf segment) is denied, not silently rooted at `host_root`
+- a leaf that does not yet exist on disk is bootstrapped on first write — the containment check accepts `host_root` itself as the nearest *existing* ancestor for a brand-new leaf, rather than rejecting it as an escape
+- containment is enforced per leaf, not just per `host_root`: a symlink inside `leaf-a` that resolves to a path physically under `host_root` but outside `leaf-a` (e.g. into `leaf-b`) is rejected on both the read and write paths, even though a plain `mount_local` (host_root-only) containment check would let it resolve
+- a *dangling* final symlink (the directory entry exists but its target does not) is rejected on the write path rather than treated as a brand-new file: existence is checked via `lstat` semantics (which see the symlink itself), not by following it, so a pre-planted dangling symlink cannot redirect a write outside its leaf
 
 ---
 
@@ -335,6 +342,14 @@ Memory/test backends as needed
 
 The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are database-backed `RootFilesystem` implementations for generic file-shaped content, not a mandate that every durable service becomes files.
 
+Production libSQL adapters for one database share one
+`ironclaw_libsql_runtime::LibSqlRuntime`. The runtime has a bounded concurrent
+reader pool and exactly one writer connection. Filesystem writes hold that
+writer lease through the complete immediate transaction, including
+precondition reads, commit, or rollback. Standalone constructors may create a
+private runtime, but production composition must pass the same runtime to every
+adapter that targets the database. PostgreSQL retains its concurrent pool.
+
 Catalog metadata distinguishes file-shaped content from structured records and derived indexes:
 
 ```rust
@@ -381,6 +396,56 @@ Memory-specific backend adapters are owned outside this crate. The first Reborn 
 
 ---
 
+## 12a. Ordered-index declaration and resolution
+
+Ordered (`Exact` / `Prefix`) indexes are declared on a path prefix and queried
+on a path. The two need not be the same path.
+
+**Resolution walks ancestors, most specific first.** A query at `/a/b/c` for
+index `N` resolves the declaration of `N` at `/a/b/c`, else `/a/b`, else `/a`,
+else `/`. This is the "declare high, query low" contract the FTS path already
+followed; a caller may declare once at a mount root and query any descendant.
+A spec declared at the sentinel prefix `/shared` takes precedence over every
+path-derived candidate (SQL backends only — the in-memory backend does not
+implement the sentinel).
+
+**Nested same-name declarations resolve most-specific-wins.** Where several
+ancestors declare the same index name, the deepest one wins on both the read
+and the write side. Declaring one name at overlapping prefixes with *different*
+key layouts is therefore not supported: projection rows are identified by
+`(index_name, path)`, so the two declarations share a row and the broader
+query reads the narrower declaration's values. Same name at *disjoint*
+prefixes is fully independent and supported.
+
+**Queries are scoped to their own subtree.** A spec resolved from an ancestor
+covers a wider subtree than the caller asked for, so every backend re-applies
+subtree containment to the matched rows. A query never returns rows outside
+the path it was issued on.
+
+**Declaration never backfills.** Projection is write-maintained: rows already
+present when a spec is declared are not projected. Populating them is explicit
+migration work.
+
+**Full-text queries are plain user text.** `Filter::Fts` never accepts native
+backend query syntax. Punctuation separates terms, common English function
+words do not become required matches, and reserved words such as `AND`, `OR`,
+and `NOT` are not operators. The dropped function words mirror PostgreSQL's
+fixed `english` stop list, so the in-memory, libSQL, and PostgreSQL backends
+agree on which words become required terms; stemming is backend-specific
+(PostgreSQL stems via its `english` configuration, FTS5 matches literal
+terms). Backends translate those shared semantics into their native query
+language. A query with no searchable terms is a successful empty result, not
+a backend or input failure.
+
+**Projection machinery is static and versioned.** Each SQL backend installs one
+generation of projection triggers for the whole database (currently `v3`), not
+one per declaration; declaring an index writes a catalog row. Installing a
+generation sweeps older generations, including the pre-`v3` per-declaration
+triggers. The sweep is one-way: an older binary re-installs its own generation
+on next declaration, but rows written while the newer generation was active are
+not re-projected — a downgrade should be followed by the explicit migration for
+any scope written in between.
+
 ## 13. Error contract
 
 Use a filesystem-specific service error that can wrap `HostApiError` but does not expose raw host internals.
@@ -395,6 +460,7 @@ pub enum FilesystemError {
     PathOutsideMount { path: VirtualPath },
     SymlinkEscape { path: VirtualPath },
     MountConflict { path: VirtualPath },
+    BackendBusy { path: VirtualPath, operation: FilesystemOperation },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
     NotFound { path: VirtualPath, operation: FilesystemOperation },
     VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
@@ -403,6 +469,13 @@ pub enum FilesystemError {
 ```
 
 Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
+
+`BackendBusy` is the backend-neutral, replay-safe contention outcome. An
+adapter may return it only when the complete operation is atomic and no partial
+side effect committed. Generic consumers may retry the whole operation; they
+must not decode SQLite or PostgreSQL driver errors themselves. libSQL maps
+SQLite `BUSY`/`LOCKED`; PostgreSQL maps serialization failure, deadlock-victim,
+and lock-not-available SQLSTATEs without changing its concurrency policy.
 
 ---
 
@@ -498,6 +571,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- `mount_local_per_leaf` denies a bare mount-root request, bootstraps a brand-new leaf on first write, rejects a same-`host_root` cross-leaf symlink escape on both read and write, and rejects a dangling final symlink on write
 - `CompositeRootFilesystem` routes operations by longest virtual mount prefix
 - `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
 - exact duplicate composite mount roots fail closed

@@ -19,6 +19,9 @@ FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8
 COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 
+WORKDIR /app
+COPY .cargo/config.toml .cargo/config.toml
+
 RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
@@ -28,8 +31,6 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && corepack enable pnpm \
     && cargo install --locked cargo-chef@0.1.77
 
-WORKDIR /app
-
 FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
@@ -37,8 +38,6 @@ COPY crates/ crates/
 COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY skills/ skills/
 COPY tests/ tests/
-COPY wit/ wit/
-COPY providers.json providers.json
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
@@ -51,19 +50,14 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
-WORKDIR /app/crates/ironclaw_webui/frontend
+COPY crates/product/ironclaw_webui/frontend/ crates/product/ironclaw_webui/frontend/
+WORKDIR /app/crates/product/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw \
     --recipe-path recipe.json
-RUN cargo chef cook \
-    --profile dist \
-    --package ironclaw_reborn_migration \
-    --recipe-path recipe.json
-
 FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
@@ -72,13 +66,11 @@ COPY tools/ironclaw_stress/ tools/ironclaw_stress/
 COPY migrations/ migrations/
 COPY skills/ skills/
 COPY tests/ tests/
-COPY wit/ wit/
-COPY providers.json providers.json
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
 
-WORKDIR /app/crates/ironclaw_webui/frontend
+WORKDIR /app/crates/product/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
 
@@ -86,11 +78,6 @@ RUN cargo build \
     --profile dist \
     --package ironclaw \
     --bin ironclaw
-
-RUN cargo build \
-    --profile dist \
-    --package ironclaw_reborn_migration \
-    --bin ironclaw-reborn-extension-ownership-migration
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
@@ -102,7 +89,6 @@ RUN apt-get -o Acquire::Retries=3 update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
-COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml

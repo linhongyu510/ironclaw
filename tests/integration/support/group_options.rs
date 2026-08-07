@@ -1,6 +1,7 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
-//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
+//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
+//! `with_narrowed_capability_surface_policy_for_bridged_test`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
@@ -15,10 +16,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
+use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
+use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
+use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
 use super::super::builder::StorageMode;
 use super::RebornIntegrationGroupBuilder;
@@ -40,6 +42,20 @@ impl RebornIntegrationGroupBuilder {
     /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
     pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// E-MEMORY: bind `provider` as the group's memory provider with the
+    /// lifecycle set its manifest declares. The group's ONE planned runtime
+    /// derives its memory consumers through the production
+    /// `memory_lifecycle_consumers` helper, so an undeclared hook is never
+    /// queried, recorded to, or profile-read from.
+    pub fn with_bound_memory_provider(
+        mut self,
+        provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
+        lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
+    ) -> Self {
+        self.bound_memory = Some((provider, lifecycle));
         self
     }
 
@@ -71,10 +87,9 @@ impl RebornIntegrationGroupBuilder {
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
-    /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
-    /// (resolves via `from_env()`, matching today's behavior).
+    /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -89,7 +104,40 @@ impl RebornIntegrationGroupBuilder {
     /// actually makes the control's assertion mode-specific rather than
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
+        self
+    }
+
+    /// #5647 RED-pin seam: override the Bridged-mode `CapabilitySurfacePolicy`
+    /// (default uses `CapabilitySurfacePolicy::allow_all()`) so a test can
+    /// reproduce a narrowed profile atop bridged deferral; requires
+    /// `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
+    /// Mirrors the production resolve-once wiring in
+    /// `crates/loop/ironclaw_turn_runner/src/runtime.rs`:
+    /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
+    /// resolved policy between `ToolDisclosureCapabilityDecorator` and the
+    /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
+    /// in `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` calls
+    /// `build_text_only_host_with_capabilities`. The explicit
+    /// `build_text_only_host_with_profiled_capabilities` form is for test
+    /// construction.
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
+        self,
+        ids: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
+            ids,
+        ))
+    }
+
+    /// Override every dimension of the Bridged-mode capability surface policy.
+    /// This is the full-policy counterpart to the capability-id-only helper
+    /// above and exercises the same production resolve-once wiring.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.narrowed_bridged_policy = Some(policy);
         self
     }
 
@@ -129,8 +177,17 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Shorten the group's turn-state store lease TTL (default 90s,
-    /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
+    /// Wire a raw trajectory observer into the group's ONE production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
+    /// Shorten the group's process lease TTL (default 90s) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
     /// `None` (default) leaves today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
@@ -148,10 +205,32 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Override the canonical default-family iteration limit for a focused
+    /// whole-turn recovery scenario. Production defaults remain unchanged.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject final assistant transcript writes at the runtime port while
+    /// leaving the real filesystem service in place for inbound messages and
+    /// read-back assertions.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript writes after the capability has completed,
+    /// while retaining the real capability path and thread read-back service.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's
-    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via

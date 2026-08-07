@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
+**Depends on:** `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
 **Reference loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---
@@ -169,7 +169,24 @@ Those blocked states are host-managed transitions driven by approval or auth ser
   active loop contract surface as `invalid_output`, not `unavailable`. The
   agent loop owns recovery: it retries the model call with a model-visible
   repair hint in the prompt bundle, and exhausted retries fail the run as
-  `invalid_model_output`.
+  `invalid_model_output`. Provider `Json`, `InvalidResponse`, and
+  `EmptyResponse` failures normalize at this boundary. A stream that ended
+  before its provider terminal frame is instead `StreamInterrupted` and may
+  use availability recovery; opaque `Http` or `Io` errors may do so only when
+  their concrete status or error kind carries transient connection evidence.
+- Recoverable `context_overflow`, `content_filtered`, and `invalid_output`
+  failures may receive one additional observation-assisted model attempt after
+  their ordinary retry budget. The observation is loop-owned, typed, and
+  host-authored: provider summaries, diagnostics, and blocked content never
+  enter the retry prompt. Content-filter recovery asks for a policy-compliant
+  alternative without reproducing blocked content.
+- The first `no_progress_detected` or `iteration_limit` terminal condition is
+  converted into a normal model iteration with the current capability surface
+  and a typed, host-authored warning. The warning contains only bounded facts
+  (the terminal class, configured limit, repeated-call count, or typed failure
+  kind), never raw provider or capability diagnostics. If the same terminal
+  class recurs, the run takes its ordinary typed failure path instead of
+  granting another warning iteration.
 - `BlockedApproval` / `BlockedAuth` is host control-plane state
 
 These must not be collapsed into a single vague text outcome.
@@ -190,7 +207,52 @@ Recommended durable distinction:
 - approval/auth blocking milestones
 - child-thread/job creation milestones
 
-This keeps projections, debugging, and compaction grounded in typed state rather than inferences from transcript prose alone.
+Model-error retry accounting and pending prompt controls are also checkpointed
+loop state. A `BeforeModel` retry-transition checkpoint records the consumed
+attempt budget, any pending typed observation, and any invalid-output repair
+directive. Prompt construction does not clear those controls; the executor
+clears them only after the model boundary returns a non-gate result. A
+pre-dispatch budget gate therefore leaves them pending for the approved retry.
+A worker restart can replay a pending control at least once, but cannot silently
+lose it or grant a fresh recovery budget. Unsupported observation schema
+versions fail prompt construction before a model call.
+
+Pre-termination warning accounting follows the same checkpoint discipline. The
+attempted terminal class and pending typed warning are written to the
+`BeforeModel` checkpoint, remain pending through prompt construction, and clear
+only after the model returns a response. At that point an active warning marker
+survives capability gates and resume checkpoints until the warning turn's
+capability results are evaluated. If a no-progress warning response again
+produces only `NoChange` results, the loop fails immediately instead of
+rebuilding the ordinary detection window; a `MadeProgress` result continues
+normally. Restarts can therefore replay a pending warning but cannot reset its
+one-shot budget or grant extra no-progress turns. Legacy checkpoints deserialize
+an empty warning state, and unsupported warning schema versions fail before the
+model boundary.
+
+Host-managed compaction is a typed retention boundary. It validates the caller
+scope, cut point, stable message kinds, byte/token limits, cancellation, and
+summary-replacement range before inference or persistence. Raw content remains
+subject to fail-closed prompt-injection scanning. Every leak match action
+(`Block`, `Redact`, or `Warn`) is deterministically replaced in place so safe
+surrounding context can continue through compaction; transformed input and
+output are rescanned before inference or persistence. Invalid match ranges,
+matches that cross message-body or serialized structural boundaries, injection
+introduced by transformation, or any residual leak match fail closed.
+Private-key patterns cover the complete bounded block (or, within one message,
+the bounded remainder when the matching end sentinel is missing or mislabeled),
+never only the begin sentinel.
+
+Successful persistence returns an additive `redacted_leak_count`. The field is
+defaulted and omitted at zero so legacy checkpoint and wire shapes remain
+compatible. A nonzero count emits one typed, safe
+`CompactionLeakDetected` progress/milestone per successful compaction response;
+the payload contains only the task id, fixed safe reason, and aggregate count,
+never match names, ranges, previews, or values. Progress publication remains a
+best-effort operator surface rather than a durable exactly-once event log.
+
+This keeps projections, debugging, and compaction grounded in typed state
+rather than inferences from transcript prose alone.
 
 ---
 

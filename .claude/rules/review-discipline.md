@@ -60,7 +60,7 @@ regression-check exemption rather than silently omitting coverage.
 Run the narrowest crate tests and clippy first. Add:
 
 ```bash
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
 scripts/pre-commit-safety.sh
 ```
@@ -82,7 +82,7 @@ cargo clippy --all --tests --examples --all-features -- -D warnings             
 
 Run the Reborn integration or E2E harness when the change crosses turns,
 capabilities, authorization, approvals, persistence, runtime lanes, networking,
-secrets, product workflow, or user-visible transport.
+secrets, product orchestration, or user-visible transport.
 
 ## Scope discipline
 

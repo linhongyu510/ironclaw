@@ -90,15 +90,12 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("capability dispatched through the real executor");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_search_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_search_exa")
         .await
         .expect("outbound MCP tools/call carried the exa search tool name");
     harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "rust async runtimes",
         )
         .await
@@ -109,6 +106,66 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
         )
         .await
         .expect("scripted MCP search result surfaced back to the model");
+}
+
+/// An empty Exa search is a successful provider outcome, not a transport
+/// failure. The contract observes all three wire requests and the structured
+/// empty result returned through the production executor.
+#[tokio::test]
+async fn web_search_empty_result_dispatches_through_scripted_exa_mcp() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(""),
+        ])
+        .script([
+            RebornScriptedReply::tool_call(
+                "web-access.search",
+                json!({"query": "provider-empty-search-sentinel"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("search for the provider-empty-search-sentinel")
+        .await
+        .expect("empty search turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.search")
+        .await
+        .expect("capability dispatched through the real executor");
+    harness
+        .assert_egress_count(3)
+        .await
+        .expect("initialize, initialized, and tools/call were observed");
+    harness
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_search_exa")
+        .await
+        .expect("observed request names the provider operation");
+    harness
+        .assert_egress_body_contains_any(
+            ironclaw_extension_support::EXA_MCP_HOST,
+            "provider-empty-search-sentinel",
+        )
+        .await
+        .expect("observed request carries the exact query");
+
+    let output = harness
+        .tool_result_output("web-access.search")
+        .await
+        .expect("empty provider result was recorded");
+    assert_eq!(output["provider_used"], "exa_mcp");
+    assert_eq!(
+        output["queries"][0]["query"],
+        "provider-empty-search-sentinel"
+    );
+    assert_eq!(output["queries"][0]["answer"], "");
+    assert_eq!(output["queries"][0]["results"], json!([]));
 }
 
 /// `web-access.get_content` dispatches through the real `WebAccessExecutor`
@@ -145,15 +202,12 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .await
         .expect("capability dispatched through the real executor");
     harness
-        .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
-            "web_fetch_exa",
-        )
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_fetch_exa")
         .await
         .expect("outbound MCP tools/call carried the exa fetch tool name");
     harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "https://example.com",
         )
         .await
@@ -162,6 +216,58 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .assert_tool_result_contains("This domain is for illustrative examples in documents.")
         .await
         .expect("scripted MCP fetch result surfaced back to the model");
+}
+
+/// A fetched document with no body remains a successful, observed provider
+/// response and preserves the requested destination with empty content.
+#[tokio::test]
+async fn get_content_empty_result_dispatches_through_scripted_exa_mcp() {
+    let url = "https://empty.example/provider-contract";
+    let harness = RebornIntegrationHarness::test_default()
+        .with_web_access_tools([
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(&format!("# Empty Provider Document\nURL: {url}\n")),
+        ])
+        .script([
+            RebornScriptedReply::tool_call("web-access.get_content", json!({"url": url})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("fetch the empty provider contract document")
+        .await
+        .expect("empty content turn completes");
+
+    harness
+        .assert_tool_invoked("web-access.get_content")
+        .await
+        .expect("capability dispatched through the real executor");
+    harness
+        .assert_egress_count(3)
+        .await
+        .expect("initialize, initialized, and tools/call were observed");
+    harness
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, "web_fetch_exa")
+        .await
+        .expect("observed request names the provider operation");
+    harness
+        .assert_egress_body_contains_any(ironclaw_extension_support::EXA_MCP_HOST, url)
+        .await
+        .expect("observed request carries the exact destination");
+
+    let output = harness
+        .tool_result_output("web-access.get_content")
+        .await
+        .expect("empty provider content was recorded");
+    assert_eq!(output["provider_used"], "exa_mcp");
+    assert_eq!(output["title"], "Empty Provider Document");
+    assert_eq!(output["url"], url);
+    assert_eq!(output["content"], "");
+    assert_eq!(output["contents"][0]["content"], "");
 }
 
 /// Format-matrix regression (C-WIREFMT): the Exa MCP server answers
@@ -287,7 +393,7 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
 
     let result = harness
         .assert_egress_body_contains_any(
-            ironclaw_first_party_extensions::EXA_MCP_HOST,
+            ironclaw_extension_support::EXA_MCP_HOST,
             "a substring that never appears in any scripted leg",
         )
         .await;
@@ -345,8 +451,9 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
 }
 
 /// Error path: a scripted Exa fetch-error response surfaces as a model-visible
-/// `Failed`/`operation_failed` tool error, and the run still reaches
-/// `Completed` with a final reply rather than terminal `driver_unavailable`.
+/// `Failed`/`operation_failed` tool error. The next real model request sees the
+/// failure, changes strategy to a search, observes that successful result, and
+/// only then finalizes the run rather than terminalizing it.
 #[tokio::test]
 async fn get_content_fetch_error_surfaces_recoverable_failed() {
     let harness = RebornIntegrationHarness::test_default()
@@ -354,13 +461,19 @@ async fn get_content_fetch_error_surfaces_recoverable_failed() {
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
             mcp_tool_call_result_body("Error fetching https://example.com: 404 not found"),
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Example Domain\nURL: https://example.com\nText: fallback search succeeded",
+            ),
         ])
         .script([
             RebornScriptedReply::tool_call(
                 "web-access.get_content",
                 json!({"url": "https://example.com"}),
             ),
-            RebornScriptedReply::text("done"),
+            RebornScriptedReply::tool_call("web-access.search", json!({"query": "Example Domain"})),
+            RebornScriptedReply::text("Recovered with the fallback search result."),
         ])
         .build()
         .await
@@ -375,8 +488,34 @@ async fn get_content_fetch_error_surfaces_recoverable_failed() {
         .assert_tool_error(ToolErrorClass::Failed, "operation_failed")
         .await
         .expect("Exa fetch-error content surfaced as a model-visible Failed tool error");
+    let model_requests = harness.scripted_llm.captured_requests();
+    assert_eq!(
+        model_requests.len(),
+        3,
+        "failure, corrected action, and final reply each require a model turn"
+    );
+    let recovery_request =
+        serde_json::to_string(&model_requests[1]).expect("recovery model request serializes");
+    for expected in [
+        "operation_failed",
+        "respect_failure_constraint",
+        "same_call_retry",
+    ] {
+        assert!(
+            recovery_request.contains(expected),
+            "the immediate recovery request must contain {expected:?}: {recovery_request}"
+        );
+    }
     harness
-        .assert_reply_contains("done")
+        .assert_tool_invoked("web-access.search")
+        .await
+        .expect("the model changed strategy after observing the failure");
+    harness
+        .assert_tool_result_contains("fallback search succeeded")
+        .await
+        .expect("the corrected fallback action succeeded");
+    harness
+        .assert_reply_contains("Recovered with the fallback search result.")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }

@@ -4,9 +4,8 @@
 //!
 //! Path: scripted `github.*` call -> `FixedRuntimeCredentialAccountResolver`
 //! returns `AuthRequired` -> `BlockedAuth` (`gate:auth-` ref) -> deny+resume ->
-//! the deny short-circuit in `executor/capabilities.rs`
-//! (`state.pending_auth_resume` check) surfaces gate-declined instead of
-//! re-dispatching. Only the model is faked.
+//! the typed denied auth-resume crosses the capability port and terminalizes
+//! the parked invocation without re-dispatching. Only the model is faked.
 //!
 //! DEFERRED here, COVERED by `tests/reborn_group_journeys/` (C-JOURNEY) via
 //! `RebornIntegrationGroup::live_auth_and_approval()`: the "submit credentials
@@ -26,7 +25,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::{GateRef, TurnStatus};
+use ironclaw_host_api::turn::{TurnGateRef, TurnStatus};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -82,10 +81,7 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
              re-dispatch)",
         );
 
-    // `short_circuit_denied_resume` (capabilities.rs ~1149) persists a raw
-    // planner summary bypassing the "capability denied with " prefix, so
-    // `assert_tool_error(Denied, ..)` can't express this; use the raw-summary
-    // assertion instead.
+    // The terminal capability outcome preserves the stable denial summary.
     harness
         .assert_tool_error_summary_contains("auth gate denied by user")
         .await
@@ -144,13 +140,12 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github")
-            .expect("valid provider id"),
+        ironclaw_host_api::ids::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(
         requirement.setup,
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         "expected the ManualToken setup GithubHarnessAuthorizer declares -- a \
          wrong setup kind would route the WebUI to the wrong re-auth UI"
     );
@@ -249,7 +244,7 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
 }
 
 /// Regression guard, flip side of the stale-replay test above: an
-/// invalid/unknown `GateRef` against a still-open run must also fail cleanly,
+/// invalid/unknown `TurnGateRef` against a still-open run must also fail cleanly,
 /// not resume under a synthesized ref.
 #[tokio::test]
 async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
@@ -268,7 +263,8 @@ async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
         .await
         .expect("run blocks on an auth gate");
 
-    let wrong_prefix_ref = GateRef::new("gate:approval-not-an-auth-gate").expect("valid gate ref");
+    let wrong_prefix_ref =
+        TurnGateRef::new("gate:approval-not-an-auth-gate").expect("valid gate ref");
     let result = harness
         .deny_auth_gate(run_id, &wrong_prefix_ref)
         .await

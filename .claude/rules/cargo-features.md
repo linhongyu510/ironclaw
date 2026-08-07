@@ -52,7 +52,7 @@ when introduced:
 - **`pr3180-ready`, `pr7-ready`** — speculative gates for landings that
   never came, with zero `#[cfg]` sites, sitting in the manifest for two
   months.
-- **`libsql`/`postgres` on `ironclaw_resources`, `ironclaw_run_state`,
+- **`libsql`/`postgres` on `ironclaw_resources`, the retired run-state crate,
   `ironclaw_outbound`** — declared, forwarded to by three crates, never
   read; they pulled `libsql`, `deadpool-postgres`, and `tokio-postgres`
   into builds that used none of them.
@@ -86,14 +86,14 @@ when introduced:
   with the feature and a `-D warnings` error without it. PR CI runs only
   the slim `all-features` lane, so this class breaks `main` after a green
   PR. Run all three legs locally when you add, move, or remove a gate —
-  see `.claude/rules/review-discipline.md` ("Required checks").
+  see `.claude/rules/testing.md` ("Validation").
 - **Deleting a feature is not just deleting `#[cfg]` lines.** Also
   handle: `#[cfg(not(...))]` items (delete them — they are dead
   alternates), optional dependencies that become mandatory, forwards in
   every dependent manifest, `required-features` on `[[test]]` /
   `[[bin]]` targets, `.github/workflows/`, `Dockerfile*`,
   `scripts/ci/package-feature-flags.sh` and its self-test, and
-  `docs/plans/composition-pubuse.snapshot` when the public facade
+  `docs/internal/plans/composition-pubuse.snapshot` when the public facade
   changes.
 - **Persisted strings are not feature references.**
   `SLACK_OUTBOUND_PROVIDER_KEY_PREFIX = "slack-v2-host-beta"` is a

@@ -12,7 +12,12 @@ import os
 import re
 import time
 import uuid
+
 from aiohttp import web
+from mock_llm_trace import (
+    next_llm_trace_response,
+    register_llm_trace_routes,
+)
 
 DENIAL_PATTERN = re.compile(
     r"user denied action|user denied tool|denied:\s*",
@@ -39,8 +44,8 @@ CANNED_RESPONSES = [
     # already-run writes).
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
-        "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
-        "Both are ready to download.",
+        "Done — I saved [report.csv](/workspace/report.csv) and "
+        "[report.pdf](sandbox:/workspace/report.pdf). Both are ready to download.",
     ),
     (
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
@@ -114,6 +119,7 @@ CANNED_RESPONSES = [
 DEFAULT_RESPONSE = "I understand your request."
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 EMULATE_SLACK_BEARER = "emulate-slack-token"
+
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
@@ -278,6 +284,13 @@ TOOL_CALL_PATTERNS = [
             "path": f"/workspace/reborn-approval-{m.group('label')}.txt",
             "content": f"approved {m.group('label')}\n",
         },
+    ),
+    # Reborn WebUI v2 auth-gate smoke (#4633): installation parks on GitHub's
+    # required manual-token credential, then resumes through product auth.
+    (
+        re.compile(r"reborn install github for auth gate", re.IGNORECASE),
+        "builtin__extension_install",
+        lambda _: {"extension_id": "github"},
     ),
     (
         re.compile(
@@ -1479,6 +1492,33 @@ def _advertised_tool_names(tools: object) -> set[str]:
     return names
 
 
+def _available_tool_names(tools: object) -> set[str]:
+    """Include deferred tools named by the runtime's tool-search catalog."""
+    names = _advertised_tool_names(tools)
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        description = function.get("description")
+        if not isinstance(name, str) or not name.endswith("tool_search"):
+            continue
+        if not isinstance(description, str):
+            continue
+        for line in description.splitlines():
+            candidate = line.removeprefix("- ") if line.startswith("- ") else ""
+            if candidate and all(
+                character.isalnum() or character in "_.-" for character in candidate
+            ):
+                names.add(candidate)
+                names.add(candidate.replace(".", "__"))
+    return names
+
+
 def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
@@ -1606,8 +1646,12 @@ def _extract_tool_name(msg: dict) -> str:
     return "unknown"
 
 
-def _find_tool_results(messages: list[dict]) -> list[dict]:
-    """Collect every fresh tool result that follows the most recent user turn.
+def _find_tool_results(
+    messages: list[dict],
+    *,
+    after_latest_user: bool = True,
+) -> list[dict]:
+    """Collect tool results, optionally limited to the most recent user turn.
 
     A single assistant turn can dispatch *several* tool calls (the v2 engine
     fans them out in parallel and CodeAct can call multiple Python helpers
@@ -1616,10 +1660,11 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
     acknowledge each result instead of dropping all but the first.
     """
     last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "user":
-            last_user_idx = i
-            break
+    if after_latest_user:
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
 
     tool_call_names: dict[str, str] = {}
     results: list[dict] = []
@@ -1642,6 +1687,7 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
                 name = tool_call_names.get(message.get("tool_call_id", ""), name)
             results.append({
                 "name": name,
+                "tool_call_id": message.get("tool_call_id"),
                 "content": message.get("content", ""),
             })
     return results
@@ -2516,8 +2562,29 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     tools = body.get("tools")
     has_tools = bool(tools)
-    available_tool_names = _advertised_tool_names(tools)
+    available_tool_names = _available_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    trace_response = next_llm_trace_response(
+        request.app["llm_trace_state"], messages, available_tool_names
+    )
+    if trace_response is not None:
+        if trace_response["type"] == "tool_calls":
+            calls = [
+                {
+                    "id": tool_call.get("id"),
+                    "tool_name": tool_call["name"],
+                    "arguments": tool_call["arguments"],
+                }
+                for tool_call in trace_response["tool_calls"]
+            ]
+            if not stream:
+                return _tool_call_response(cid, calls)
+            return await _stream_tool_call(request, cid, calls)
+        text = trace_response["content"]
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
 
     fault_action = _next_llm_fault_action(messages)
     if fault_action:
@@ -2728,7 +2795,7 @@ def _tool_call_response(cid: str, calls: list[dict] | dict) -> web.Response:
         calls = [calls]
     tool_calls = [
         {
-            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
             "type": "function",
             "function": {
                 "name": tc["tool_name"],
@@ -2808,7 +2875,7 @@ async def _stream_tool_call(
     await resp.prepare(request)
     base = _make_base(cid)
     for idx, tc in enumerate(calls):
-        call_id = f"call_{uuid.uuid4().hex[:8]}"
+        call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
         # Header chunk: declare a new tool call slot at this index. Only
         # the very first chunk in the stream needs the assistant role.
         delta: dict = {
@@ -3031,6 +3098,70 @@ async def oauth_refresh(request: web.Request) -> web.Response:
 
 async def oauth_state_handler(request: web.Request) -> web.Response:
     return web.json_response(request.app["oauth_state"])
+
+
+async def google_oauth_token(request: web.Request) -> web.Response:
+    """Minimal Google token endpoint for standalone Reborn OAuth tests."""
+    data = await request.post()
+    if data.get("grant_type") != "authorization_code":
+        return web.json_response({"error": "unsupported_grant_type"}, status=400)
+    # Full-path QA uses one pre-consented reusable Google identity. Google may
+    # report the account's cumulative grants during a narrower scope-upgrade
+    # flow, so the extension-specific codes expose that deterministic union.
+    all_reborn_google_scopes = " ".join(
+        (
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/documents.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/presentations",
+            "https://www.googleapis.com/auth/presentations.readonly",
+        )
+    )
+    scopes_by_code = {
+        "mock_auth_code": (
+            "https://www.googleapis.com/auth/drive.readonly "
+            "https://www.googleapis.com/auth/drive"
+        ),
+        "mock_auth_code_gmail": all_reborn_google_scopes,
+        "mock_auth_code_google_calendar": all_reborn_google_scopes,
+        "mock_auth_code_google_drive": all_reborn_google_scopes,
+        "mock_auth_code_google_docs": all_reborn_google_scopes,
+        "mock_auth_code_google_sheets": all_reborn_google_scopes,
+        "mock_auth_code_google_slides": all_reborn_google_scopes,
+    }
+    code = data.get("code")
+    scope = scopes_by_code.get(code)
+    if scope is None:
+        return web.json_response({"error": "invalid_grant"}, status=400)
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+    if live_access:
+        response = {
+            "access_token": live_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": scope,
+        }
+        if live_refresh:
+            response["refresh_token"] = live_refresh
+        return web.json_response(response)
+    return web.json_response(
+        {
+            "access_token": "mock-token-mock_auth_code",
+            "refresh_token": "mock-refreshed-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": scope,
+        }
+    )
 
 
 async def oauth_reset(request: web.Request) -> web.Response:
@@ -3322,6 +3453,7 @@ def main():
     app["oauth_state"] = _new_oauth_state()
     app["mcp_state"] = _new_mcp_state()
     app["gmail_state"] = _new_gmail_state()
+    register_llm_trace_routes(app)
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -3329,6 +3461,7 @@ def main():
     app.router.add_get("/models", models)
     app.router.add_post("/oauth/exchange", oauth_exchange)
     app.router.add_post("/oauth/refresh", oauth_refresh)
+    app.router.add_post("/token", google_oauth_token)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
     app.router.add_get("/__mock/mcp/state", mcp_state_handler)

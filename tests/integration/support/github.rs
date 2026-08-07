@@ -1,11 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    SecretHandle, VirtualPath,
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
 };
-use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    host_port::default_host_port_catalog,
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    path::VirtualPath,
+};
 
 type GithubSupportResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -53,22 +58,25 @@ pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
 
 /// The parsed github `ExtensionPackage` alone (no registry wrapper); C-JOURNEY
 /// feeds it into `publish_bundled_extension_for_test` for github.* dispatch
-/// without a scripted install/activate handshake.
+/// without a scripted install/setup handshake.
 pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
+    // Parse through the single record entry point (the bundled assets are
+    // manifest v3 documents since the first-party rewrite).
+    let root = VirtualPath::new("/system/extensions/github")?;
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
+        None,
         &default_host_api_contract_registry()?,
+        Some(root.clone()),
     )?;
-    Ok(ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github")?,
-    )?)
+    let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
+    Ok(ExtensionPackage::from_manifest(manifest, root)?)
 }
 
 pub fn asset_root() -> PathBuf {
-    repo_root().join("crates/ironclaw_first_party_extensions/assets/github")
+    repo_root().join("crates/extensions/packages/github")
 }
 
 fn repo_root() -> &'static Path {

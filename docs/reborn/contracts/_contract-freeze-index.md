@@ -94,8 +94,6 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`conversation-binding.md`](conversation-binding.md)
 - [`triggers.md`](triggers.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
-- [`product-adapters.md`](product-adapters.md) (issue #3269 first-slice)
-- [`telegram-v2.md`](telegram-v2.md) (Telegram channel host, single `telegram` extension; supersedes the issue #3285 first-slice tracer)
 - [`communication-delivery-resolution.md`](communication-delivery-resolution.md)
 - [`trust-boundary-hardening.md`](trust-boundary-hardening.md)
 
@@ -106,7 +104,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 The implementation-alignment map is:
 
 ```text
-docs/reborn/2026-04-25-current-architecture-map.md
+docs/reborn/README.md and the owning crate contracts
 ```
 
 Reviewers should use it alongside this packet to separate:
@@ -197,9 +195,9 @@ Can run in parallel after their direct Level 0 contract dependencies are accepte
 | AgentId propagation | `host-api.md`, `storage-placement.md` | `ironclaw_host_api`, all scope stores | global scope model |
 | Typed secret repository | `secrets.md` | `ironclaw_secrets` | storage/source-of-truth rules |
 | Network provider client boundary | `network.md` | `ironclaw_network`, provider crates | network boundary contract |
-| Durable event log/cursors | `events-projections.md` | `ironclaw_events`, web gateway later | cursor envelope and redaction rules |
+| Durable event log/cursors | `events-projections.md` | `ironclaw_event_log`, web gateway later | cursor envelope and redaction rules |
 | Resource reservation expansion | `resources.md` | `ironclaw_resources`, capabilities/processes/network | resource scope and lifecycle ownership |
-| Extension lifecycle state machine | `extensions.md` | `ironclaw_extensions` | lifecycle states/transitions |
+| Extension lifecycle state machine | `extensions.md` | `ironclaw_extension_registry` | lifecycle states/transitions |
 | Trust-class policy engine | `kernel-boundary.md`, `host-api.md`, `extensions.md` | host policy/composition + extension registry | trust assignment, upgrade, revocation, grant ceilings |
 
 `Durable event log/cursors` is a substrate dependency, not merely a web feature. It gives parallel implementation agents a typed, replayable surface for caller-level tests and cross-component debugging. SSE/WebSocket transport can remain downstream product integration over this substrate.

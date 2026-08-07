@@ -13,11 +13,11 @@ Ask first: **is this tool host-owned, sandboxed extension code, a process wrappe
 | v1 source | Examples | Reborn target |
 | --- | --- | --- |
 | Host-owned built-in tool | `echo`, `time`, `json`, coding/file tools, memory, secrets, jobs, settings | Host-bundled `RuntimeKind::FirstParty` extension with registered first-party handlers |
-| WASM API tool | `tools-src/web-search`, Gmail, Google Drive/Sheets/Docs/Slides, GitHub, Slack user tools | Installed or bundled `RuntimeKind::Wasm` extension using `wit/tool.wit` |
+| WASM API tool | Web search, Gmail, Google Drive/Sheets/Docs/Slides, GitHub, Slack user tools | Installed or bundled `RuntimeKind::Wasm` extension using `crates/lanes/ironclaw_wasm/wit/tool.wit` |
 | Script or CLI wrapper | project-local helper, formatter/test runner, native CLI integration | `RuntimeKind::Script` extension with manifest-owned runner/command metadata |
 | MCP integration | existing MCP server, stdio/http/sse adapter | `RuntimeKind::Mcp` extension |
 | Simple REST integration | single HTTP API call with host-owned credential injection | Use WASM today; future candidate for `DeclarativeHttp` when that runtime lands |
-| Webhook/inbound protocol tool | GitHub webhook receiver, Slack event callback, Telegram update processor | Usually not a tool; use ProductAdapter/channel porting guidance if it creates product/user inbound turns |
+| Webhook/inbound protocol tool | GitHub webhook receiver, Slack event callback, Telegram update processor | Usually not a tool; use ChannelAdapter/channel porting guidance if it creates product/user inbound turns |
 
 Rule of thumb:
 
@@ -136,14 +136,14 @@ The handler is host-owned code keyed by `CapabilityId`. Bundled TOML declares th
 
 ## Path B: port a WASM API tool
 
-Use this path for most existing `tools-src/*` integrations.
+Use this path for retired legacy WASM API tool integrations and new sandboxed API integrations.
 
 ### Target shape
 
 ```text
-tools-src/<tool>/
-  -> wasm32-wasip2 component implementing wit/tool.wit
-  -> Reborn extension manifest v2
+<tool-extension>/
+  -> wasm32-wasip2 component implementing crates/lanes/ironclaw_wasm/wit/tool.wit
+  -> Reborn extension manifest
   -> /system/extensions/<extension-id>/wasm/<module>.wasm
   -> RuntimeKind::Wasm
   -> host-mediated WASM imports
@@ -188,7 +188,7 @@ Host runtime owns:
 | --- | --- |
 | `description` | `[extension].description` if available, plus capability `description` |
 | `version` | `[extension].version` |
-| `wit_version` | build/compat note; component must match host `wit/tool.wit` |
+| `wit_version` | build/compat note; component must match host `crates/lanes/ironclaw_wasm/wit/tool.wit` |
 effects should include "network"; the porting report should list allowed targets for grants/host ports
 | `http.credentials` | `effects += ["use_secret"]`; porting report should list secret handles and injection locations |
 | `http.rate_limit` / timeouts / max body sizes | resource profile and runtime/host-port policy inputs where supported |
@@ -196,12 +196,12 @@ effects should include "network"; the porting report should list allowed targets
 | `workspace.allowed_prefixes` | `effects += ["read_filesystem"]`; map to scoped mounts/host ports |
 | `tool_invoke.aliases` | avoid for first port; nested invocation must remain host-mediated and explicitly wired |
 | `auth` / `setup` | onboarding metadata; keep as porting report until manifest v2 auth/install shape is finalized |
-| `webhook` | usually ProductAdapter/channel path, not WASM tool invocation path |
+| `webhook` | usually ChannelAdapter/channel path, not WASM tool invocation path |
 
 ### WASM checklist
 
 - [ ] Build component with `wasm32-wasip2`.
-- [ ] Keep tool code on `wit/tool.wit`; do not reintroduce pointer/length JSON ABI.
+- [ ] Keep tool code on `crates/lanes/ironclaw_wasm/wit/tool.wit`; do not reintroduce pointer/length JSON ABI.
 - [ ] Add manifest v2 with schema refs and `visibility`.
 - [ ] Move exported JSON schema into `schemas/*.input.v1.json` and add output schema.
 - [ ] Add short prompt doc for model-visible operations.
@@ -320,7 +320,7 @@ Do not add a bespoke host HTTP client for one provider. HTTP must go through Reb
 
 A v1 tool sidecar may declare `webhook`, but webhooks often mean inbound product events rather than model-invoked tools.
 
-Use ProductAdapter/channel porting guidance when the webhook:
+Use ChannelAdapter/channel porting guidance when the webhook:
 
 - receives external actor messages/events;
 - must verify protocol auth before parsing;
@@ -393,7 +393,7 @@ For ported WASM tools:
 
 This guide is useful for planning and initial ports, but several production paths still depend on follow-up work:
 
-- Extension Manifest v2 hard cutover in `ironclaw_extensions`.
+- Extension Manifest v2 hard cutover in `ironclaw_extension_registry`.
 - `ManifestSource`-aware validation for installed vs host-bundled manifests.
 - Host-port vocabulary and scoped `HostPortView` handoff through `CapabilityHost`.
 - Hot Capability Surface construction from `visibility`, `prompt_doc_ref`, profiles, trust, grants, and surface policy.
@@ -408,7 +408,7 @@ This guide is useful for planning and initial ports, but several production path
 ## References
 
 - Issue: <https://github.com/nearai/ironclaw/issues/3537>
-- `wit/tool.wit`
+- `crates/lanes/ironclaw_wasm/wit/tool.wit`
 - `docs/reborn/contracts/extensions.md`
 - `docs/reborn/contracts/host-runtime.md`
 - `docs/reborn/contracts/host-api.md`
@@ -420,4 +420,4 @@ This guide is useful for planning and initial ports, but several production path
 - `docs/reborn/contracts/network.md`
 - `src/tools/README.md`
 - `src/tools/wasm/capabilities_schema.rs`
-- `tools-src/web-search/` as the first recommended golden WASM tool port
+- `crates/extensions/packages/` for current packaged first-party extension examples

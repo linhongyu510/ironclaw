@@ -2,18 +2,22 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/ironclaw_host_api`, `crates/ironclaw_filesystem`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/contracts/ironclaw_host_api`, `crates/substrates/ironclaw_filesystem`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
-It also owns generic extension installation state: manifests, installations,
-activation state, health snapshots, and opaque credential bindings. Domain
-crates such as `ironclaw_product_adapter_registry` project their own host API
-sections from that generic state rather than owning a second installation
-store.
+`ironclaw_extension_registry` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
+It also owns package manifests and caller-membership installation records.
+Caller membership is the only installation-lifecycle authority; runtime
+publication and administrator configuration are separate host concerns. Host
+API sections are projected from that generic state rather than by a second
+installation store: the built-in contracts live in
+`ironclaw_extension_registry::host_api` (`capability_provider`, `product_adapter`), and
+each one's declared section *schema* is the neutral vocabulary crate's
+(`ironclaw_extension_contracts::product_adapter_section` for
+`[product_adapter.*]`).
 
 It answers:
 
@@ -29,7 +33,7 @@ It does **not** execute capabilities.
 Execution belongs to:
 
 - `ironclaw_wasm` for WASM modules
-- `ironclaw_scripts` for Docker-backed native CLI/script capabilities
+- `ironclaw_sandbox` for Docker-backed native CLI/script capabilities
 - `ironclaw_mcp` for MCP adapter calls
 - host-policy-selected service crates for first-party/system work
 
@@ -38,7 +42,7 @@ Execution belongs to:
 ## 2. Core invariant
 
 ```text
-ironclaw_extensions knows what can run.
+ironclaw_extension_registry knows what can run.
 runtime crates know how to run it.
 ```
 
@@ -53,6 +57,116 @@ V1 installed extensions live under:
 ```text
 /system/extensions/<extension_id>/
 ```
+
+Generic runtime and caller-membership state uses normalized, typed filesystem
+record rows under:
+
+```text
+/system/extensions/.installations/v2/
+  installations/<hashed_installation_id>.json
+  memberships/<hashed_installation_id>/<hashed_user_id>.json
+  credential-bindings/<hashed_installation_id>/<hashed_credential_handle>.json
+```
+
+Each row has an explicit record kind, `extension_state.v2` schema version,
+typed body, and exact lookup indexes. The installation record is both the
+stable package-instance identity and the deployment's **install pin**: it
+embeds the validated, hash-carrying manifest wire for the installed
+definition. That embedded definition is not an availability or policy
+declaration — what *can* be installed lives in the available-extension
+catalog — and a definition never exists outside an installation record. User
+membership and credential bindings are independently mutable records.
+Extension failure state is not stored here: the host's activation record owns
+it, so this store has no second, divergent answer to "is this extension
+broken". Lifecycle state is derived, not stored: a record with `removed_at`
+set is a tombstone, a record with a `lease` is mid-mutation, and a record
+with neither is live. A tombstone additionally carries
+`removal_cleanup_pending` until `delete_manifest` marks the removal
+converged; while pending, the embedded definition stays authoritative for
+manifest readers so an interrupted removal cleanup retries without the
+catalog and fresh imports stay blocked (`persist_removal_tombstone` seeds
+the same state for orphan cleanups that never had an installation row).
+Removing a user or the final installation sets `removed_at` rather than
+erasing rows. Package bytes and assets remain under
+`/system/extensions/<extension_id>/` and are never embedded in lifecycle
+records.
+
+All authoritative read-modify-write transitions use the shared bounded
+filesystem CAS helper. A fresh installation writes child rows before
+committing the installation record (definition included) in one CAS, so an
+interrupted write cannot expose a partial aggregate and a free-floating
+definition row cannot exist. Updates to a live aggregate first take the
+record's `lease`, which keeps it out of typed installation reads while
+children change (the embedded definition stays readable), and commit the
+record lease-free last. A failed update restores the prior aggregate;
+startup uses the compatibility snapshot to roll back an interrupted lease.
+Aggregate `ExtensionInstallation` values are reconstructed at the typed
+store boundary for existing callers, with `manifest_ref` derived from the
+embedded definition so an installation can never disagree with its pin.
+
+Every aggregate write sweeps child rows omitted from its member and binding
+sets, including creation and reactivation, which hold no lease. Under the
+single-writer-per-root contract an omitted-but-active row can only be debris
+from an earlier failed write — an interrupted install's membership row, a
+crashed update's leftovers — and merging it in would grant membership to a
+user whose install never succeeded. A mutation's outcome is
+decided by the v2 records alone: once they commit, a failed
+compatibility-projection write does not fail the operation; startup repair
+converges the projection.
+
+Membership removal uses the same lease as a cross-process gate, with the
+leaving member recorded as the holder so only that caller's retry re-enters
+it. A non-final leave updates only the caller row and releases the lease; a
+final leave keeps it held until shared runtime teardown and soft removal
+complete. Concurrent joins fail transiently while the lease is held.
+Removal retries are idempotent, and the record gains `removed_at` only after
+its child tombstones are durable; the tombstone retains the embedded
+definition so reinstall revives the same identities. These transitions are
+pinned by
+`cargo test -p ironclaw_extension_registry --test installations_contract`
+(normalized layout, membership mutation, interruption, and backend
+contracts) and
+`cargo test --test reborn_integration_extension_user_lifecycle_isolation`
+(the production-composition restart journey).
+
+These are `VirtualPath` keys, not a promise of literal host directories.
+`RootFilesystem` may route them to disk, libSQL, PostgreSQL, or another
+compatible backend while retaining the same partitioning and typed store API.
+These records do not own administrator configuration.
+
+During the v2 transition, the previous aggregate paths remain compatibility
+views:
+
+```text
+/system/extensions/.installations/manifests/<hashed_extension_id>.json
+/system/extensions/.installations/installations/<hashed_installation_id>.json
+```
+
+Store startup imports each legacy manifest+installation pair only when no v2
+authority record exists; an orphaned legacy manifest with no installation is
+the legacy flow's durable cleanup tombstone and imports as a
+cleanup-pending tombstone record so the interrupted removal stays
+retryable. Startup then repairs both views from v2. The installation compatibility row is also the bounded
+rollback snapshot while a v2 record holds a lease; outside that transition
+it is never lifecycle authority. **One live writer per installation root**
+is the deployment contract: deploys quiesce the old writer before the new
+binary starts (old and new binaries especially must never overlap), and
+startup recovery assumes any lease it finds was orphaned by a dead writer.
+Concurrent same-root writers are out of contract — the composition already
+serializes extension lifecycle behind a single process's operation lock,
+and cross-process coordination (lease fencing, epochs) is deliberately not
+built until a multi-writer topology actually exists. Startup still skips
+rather than fails on a lease that reappears between recovery passes. Once a v2 writer has run, rollback requires a data
+backup or a binary that understands v2; starting an aggregate-only writer
+would create divergent state.
+
+Manifest-declared administrator configuration is stored once per tenant under
+the tenant-rewriting admin-configuration scoped mount, at the logical record
+prefix `/extension-admin-configuration/groups`. Its stable key is the
+`[admin_configuration].group_id`, so multiple manifests may consume one
+identical group. Secrets are referenced by opaque handles and only presence is
+projected. Admin configuration is deployment state: saving it does not add any
+user to an extension's membership set.
 
 Recommended package layout:
 
@@ -72,7 +186,7 @@ Recommended package layout:
 Rules:
 
 - `<extension_id>` must match the manifest `id`.
-- extension IDs use `ironclaw_host_api::ExtensionId` validation.
+- extension IDs use `ironclaw_host_api::ids::ExtensionId` validation.
 - manifest-local paths are relative package asset paths.
 - manifest-local paths must not be absolute, scoped aliases, URLs, raw host paths, contain `..`, contain backslashes, or contain control characters.
 - resolved assets become `VirtualPath`s under `/system/extensions/<extension_id>/...`.
@@ -86,13 +200,80 @@ Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
 The older top-level `parameters_schema` manifest shape is no longer parsed on
 production discovery paths.
 
-Installed third-party manifests (`InstalledLocal` / `RegistryInstalled`) declare
-model-visible tools through `[[host_api]] id = "ironclaw.capability_provider/v1"`.
-Legacy top-level `[[capabilities]]` declarations are accepted only for
-`ManifestSource::HostBundled` packages such as host-owned built-ins and explicit
-compatibility fixtures.
+Every manifest — host-bundled exactly as installed — declares its sections
+through `[[host_api]]` contracts; tools live under
+`[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
+`[[capabilities]]` is rejected for every manifest source.
 
-Legacy host-bundled WASM manifest:
+V3 manifests may additionally declare one deployment-owned form:
+
+```toml
+[admin_configuration]
+group_id = "vendor.example"
+display_name = "Example deployment credentials"
+description = "Credentials shared by Example extensions in this tenant."
+fields = [
+  { handle = "example_client_id", label = "Client ID", secret = false, required = true },
+  { handle = "example_client_secret", label = "Client secret", secret = true, required = true },
+]
+```
+
+This is the sole schema for operator-supplied extension configuration. It is
+not nested below `[channel]`, is not copied into an installation record, and
+may support channel, OAuth, MCP, tool, or future surfaces. Equal group ids must
+carry equal descriptors.
+
+Proof-code channel manifests may grant provider-specific inbound command
+syntax declaratively:
+
+```toml
+[channel.connection]
+strategy = "web_generated_code"
+inbound_code_prefixes = ["/connect"]
+```
+
+`inbound_code_prefixes` contains at most eight unique, non-empty prefixes of at
+most 32 bytes each. Prefixes cannot contain whitespace or control characters,
+and are invalid for OAuth and administrator-managed strategies. The generic
+pairing parser always accepts a bare proof code and strips only a
+manifest-declared prefix followed by whitespace; it has no implicit provider
+commands.
+
+Product commands exposed through a channel are declared independently on the
+channel descriptor:
+
+```toml
+[channel]
+id = "messages"
+display_name = "Example messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+commands = ["status"]
+```
+
+Each entry is an exact product command token without a leading `/`. Missing
+`commands` and `commands = []` both expose no product commands. Aliases are
+independent declarations: `commands = ["status"]` does not enable
+`/progress`. The neutral channel descriptor bounds command count and token
+length and rejects malformed or duplicate entries. Generic channel assembly
+then validates every well-formed entry against the centralized product command
+registry; an unknown name prevents the channel graph from registering.
+
+This allowlist controls command exposure only. It does not grant operator,
+administrator, owner, membership, capability, or action authority. Pairing
+syntax from `inbound_code_prefixes` and gate-resolution syntax such as
+`approve`, `deny`, and `auth deny` are separate protocols and are not affected
+by `channel.commands`.
+
+The bundled Slack and Telegram manifests currently declare only `status`.
+Their generic host policy rejects all other slash commands before a product
+command handler runs, and user feedback names only the enabled inventory.
+Rollback to an older binary that strictly rejects unknown channel fields may
+require restoring a pre-upgrade resolved-manifest snapshot before reverting
+the binary.
+
+Host-bundled WASM manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -106,7 +287,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
@@ -116,7 +303,7 @@ input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 ```
 
-Legacy host-bundled script/CLI manifest:
+Host-bundled script/CLI manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -133,7 +320,13 @@ image = "python:3.12-slim"
 command = "pytest"
 args = ["tests/"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "project-tools.pytest"
 description = "Run pytest"
 effects = ["execute_code"]
@@ -143,7 +336,7 @@ input_schema_ref = "schemas/project-tools/pytest.input.v1.json"
 output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
 ```
 
-Legacy host-bundled MCP adapter manifest:
+Host-bundled MCP adapter manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -159,7 +352,13 @@ transport = "stdio"
 command = "github-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]
@@ -197,7 +396,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "telegram"
 name = "Telegram"
 version = "0.1.0"
-description = "Telegram product adapter and tools"
+description = "Telegram channel extension and tools"
 trust = "third_party"
 
 [runtime]
@@ -230,31 +429,80 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 
 Rules:
 
-- `ironclaw_extensions` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
+- `ironclaw_extension_registry` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
 - Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
 - Capability `tags` are optional, validated declarative metadata for composition-owned grouping and rollout policy. Tags do not grant authority or change execution semantics by themselves.
 - The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
+- Descriptions from registry packages whose signature, provenance, and artifact digests were verified carry that provenance into prompt assembly. They may bypass vocabulary/path/credential-shape false-positive checks, but never structural prompt limits or execution authorization. Unknown, local, and synthetic sources remain fully checked.
+- Registry package schema references resolve only to path-keyed artifacts whose bytes and hashes are covered by the signed catalog. The host must not replace a missing publisher schema with a permissive generic schema; missing, extra, invalid, or digest-mismatched schemas fail before lifecycle mutation.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
 - Every `[[host_api]]` must reference an existing explicit `section` path.
 - Operational sections must be referenced by `[[host_api]]`; inert metadata may live under `[metadata.*]` or `[x.*]`.
 - Manifest validation is atomic: any invalid host API contract invalidates the extension manifest.
-- Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extensions`.
+- Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extension_registry`.
 
-Migration rules:
+Cutover (complete):
 
-- Installed third-party extensions must move each model-visible top-level `[[capabilities]]` entry under `[[capability_provider.tools.capabilities]]` and reference it from `[[host_api]] id = "ironclaw.capability_provider/v1"`.
-- Host-bundled built-ins may keep top-level `[[capabilities]]` while first-party packaging remains synthetic/host-owned.
-- Do not mix `[[host_api]]` with top-level `[[capabilities]]` in one manifest.
-- Deprecated path scope is only legacy top-level capability declarations for installed third-party manifests; extension manifest v2 itself remains active.
+- Every manifest — host-bundled exactly as installed — declares at least one
+  `[[host_api]]` contract; there is no contract-free manifest form and no
+  contract-free parse or discovery entry point.
+- Top-level `[[capabilities]]` is rejected for every manifest source with an
+  actionable error. Capabilities are declared under
+  `[[capability_provider.tools.capabilities]]` and referenced from
+  `[[host_api]] id = "ironclaw.capability_provider/v1"`.
+- Host API contracts raise `HostApiSectionError`: this crate's own contracts
+  (capability provider) preserve typed `ManifestV2Error` variants; domain
+  crates report redacted reasons wrapped as `HostApiSectionRejected`.
+
+### Capability surfaces
+
+The extension is the top-level product object; a *capability surface* is one
+product-facing face the manifest declares. `CapabilitySurfaceKind`
+(`ironclaw_host_api`) enumerates the vocabulary: `tool`, `channel`, `auth`,
+plus reserved `trigger` and `file`. The host discovers and wires generic
+services from declared surfaces; it must not maintain a separate first-class
+channel registry beside the extension registry, and runtime kind (`wasm` /
+`mcp` / `first_party`) must never decide surface taxonomy.
+
+Rules:
+
+- Surfaces are **derived** vocabulary. The owning manifest declarations stay
+  the single source of truth; `ExtensionManifestV2::capability_surfaces()`
+  projects them on demand:
+  - each capability declaration projects one `tool` surface;
+  - each host API contract section projects the surface kinds its contract
+    declares via `HostApiManifestProjection::surfaces` (the
+    `ironclaw.product_adapter/v1` contract projects `channel` for
+    `external_channel` sections; host-native product surface kinds — `web`,
+    `cli`, `synchronous_api` — project nothing), origin-stamped with the
+    owning host API id and section path;
+  - `product_auth_account` runtime-credential sources project one `auth`
+    surface per distinct provider id. OAuth setups fold to the union of
+    declared scopes (sorted, deduplicated) and mask weaker manual-token
+    setups; a provider referenced only through retired setups surfaces as
+    retired rather than being dropped.
+- Host API contracts must not project `tool` or `auth` section surfaces —
+  those kinds have dedicated declaration paths above. Validation fails
+  closed.
+- `VendorId` is the credential
+  authority namespace, not the extension id: several extensions (gmail,
+  google-drive, ...) may share one provider (`google`).
+
+Tests: `crates/extensions/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
+(capability surface projection block) and
+`crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`
+(channel-surface projection through the real product-adapter contract). Run:
+`cargo test -p ironclaw_extension_registry --test manifest_v2_contract` and
+`cargo test -p ironclaw_extension_registry --test product_adapter_manifest_ingestion`.
 
 ---
 
 ## 5. Runtime declarations
 
-Manifest runtime kinds map to `ironclaw_host_api::RuntimeKind`:
+Manifest runtime kinds map to `ironclaw_host_api::runtime::RuntimeKind`:
 
 | Manifest `kind` | RuntimeKind | Meaning |
 |---|---|---|
@@ -298,8 +546,8 @@ Rules:
   (`header` or `query_param`), and optional `required` flag. The field is only
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
-- top-level legacy capabilities must provide `input_schema_ref` and
-  `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
+- every capability must provide `input_schema_ref` and `output_schema_ref`;
+  `prompt_doc_ref` is optional lazy help metadata.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.
@@ -417,12 +665,17 @@ Local contract tests should prove:
 - discovery reads manifests via `RootFilesystem` and `/system/extensions` virtual paths.
 - discovery rejects missing manifest.
 - discovery rejects manifest ID mismatch with directory name.
+- capability-surface projection: tool-only, channel-only, and tool+channel
+  manifests project exactly their declared surfaces; auth surfaces group by
+  provider with unioned OAuth scopes; extensions sharing one provider project
+  the same provider id (distinct from their extension ids); contracts
+  projecting `tool`/`auth` section surfaces fail closed.
 
 ---
 
 ## 12. Non-goals
 
-Do not add in `ironclaw_extensions` V1:
+Do not add in `ironclaw_extension_registry` V1:
 
 - WASM module loading
 - Docker/container execution
@@ -432,7 +685,7 @@ Do not add in `ironclaw_extensions` V1:
 - secret resolution
 - marketplace install flows
 - OAuth/authentication
-- product workflows
+- product-surface orchestration
 - agent loop behavior
 
 
@@ -457,3 +710,34 @@ failed/retry
 The extension registry/package source of truth is typed extension state with optional `/system/extensions/...` file projections. Extension config/state projections must validate through the typed repository and must not bypass lifecycle authorization.
 
 WASM, Script, and MCP are all first-class v2 runtime lanes; extension manifests and lifecycle state must be able to describe each lane without making dispatcher depend on concrete runtime crates.
+
+### Current product projection
+
+The dated freeze above records the original internal lifecycle scope. It does
+not define the current product-facing state machine or authorize public
+Activate/Deactivate operations. Current APIs expose one derived projection:
+
+```text
+caller is not a member                          -> uninstalled
+member has any non-ready typed readiness result -> setup_needed
+member has a complete typed readiness result    -> active
+```
+
+Install joins the authenticated caller to membership and immediately runs
+generic readiness reconciliation. Remove removes membership; it is the only
+user-facing way to disable an extension. Internal loading, discovery,
+provisioning, atomic publication, cleanup, and upgrade checkpoints may retain
+implementation names such as `activate` or `deactivate`, but they must never
+surface as additional states or required user actions.
+
+The host's complete typed readiness result includes every manifest-declared
+tenant and personal prerequisite plus bind, discovery, provisioning, conflict,
+and atomic-publication outcomes. A first publication that cannot complete has
+no callable surface. A refresh is different: once a catalog is active, a
+failed refresh reports its own error but retains the last successfully
+published callable surface and therefore the caller's `active` projection.
+Refreshing never pre-emptively demotes or unpublishes a working generation.
+
+Tenant `[admin_configuration]` and caller lifecycle are independent: an admin
+may configure a group before any user installs its consuming extensions, and
+each user's membership, OAuth grants, and channel pairings remain isolated.

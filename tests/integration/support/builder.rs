@@ -25,43 +25,55 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ironclaw_assistant::DefaultProductSurface;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
+use ironclaw_host_api::turn::{
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, UserId, VirtualPath,
+    capability_surface::CapabilitySurfacePolicy,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_llm::Role;
-use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
-use ironclaw_product_workflow::{
-    DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-};
-use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
-use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
+use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
+use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_threads::ThreadScope;
+use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore, GateRef,
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
 };
 
 use super::capability_backend::{
     CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
 };
 use super::doubles::ParkingCapabilityGate;
-use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
-use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
+use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
+use super::harness::{HarnessCapabilityRecorder, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
-use super::scripted_provider::ParkingModelGate;
+use super::scripted_provider::{
+    ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
+    RecoverableModelFailureScript,
+};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
@@ -73,6 +85,9 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+/// Coverage-instrumented real-runtime paths (notably bundled WASM startup) can
+/// take more than 30 seconds when several tests run concurrently in CI.
+const RUN_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Selects the durable storage backend mounted into the integration harness's
 /// `CompositeRootFilesystem`. Both modes ride **one** composite at the
@@ -91,6 +106,31 @@ pub enum StorageMode {
     /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
     /// Enables `assert_reply_persists_after_reopen`.
     LibSql,
+    /// Real PostgreSQL in a per-`build()` testcontainer: full SQL +
+    /// migrations. Requires a reachable Docker daemon — provisioning
+    /// failure FAILS the test (REL-3: a Postgres skip is a failure, not a
+    /// pass; locally run `colima start` / start Docker first).
+    Postgres,
+}
+
+/// How a reopen assertion gets a genuinely fresh storage connection, per
+/// [`StorageMode`]. Postgres keeps the container handle alive for the
+/// group's lifetime (dropping it kills the database).
+pub(crate) enum StorageReopen {
+    None,
+    LibSql {
+        db_path: PathBuf,
+    },
+    Postgres {
+        database_url: String,
+        // Boxed: the container handle dwarfs the other variants
+        // (clippy::large_enum_variant) and is only held for its Drop.
+        _container: Box<
+            testcontainers_modules::testcontainers::ContainerAsync<
+                testcontainers_modules::postgres::Postgres,
+            >,
+        >,
+    },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -116,21 +156,18 @@ pub struct RebornIntegrationHarnessBuilder {
     /// construction — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
-    /// E-GATEWAY: when set, the model call parks until released, enabling a
-    /// mid-turn cancel test. Threaded into the degenerate one-thread group.
-    park_gate: Option<ParkingModelGate>,
-    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
-    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
-    /// group. See [`RebornThreadBuilder::fail_model`].
-    fail_model: bool,
+    /// Mutually exclusive raw-provider behavior for this one-thread harness.
+    /// Each model-selecting builder method replaces the previous mode.
+    model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
-    /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
-    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
+    /// Tool disclosure mode for the underlying group's ONE planned runtime.
+    /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
-    /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
-    /// today's behavior byte-for-byte.
-    tool_disclosure: Option<ToolDisclosureMode>,
+    tool_disclosure: ToolDisclosureMode,
+    /// Test-only override for the Bridged-mode capability surface policy.
+    /// `None` preserves today's forced `CapabilitySurfacePolicy::allow_all()` behavior.
+    bridged_policy_override: Option<CapabilitySurfacePolicy>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -142,6 +179,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// threaded into the degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional run trajectory observer threaded into the
+    /// degenerate one-thread group's production capability-port factory.
+    trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
     /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
     /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
@@ -155,6 +195,13 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Threaded into
     /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     lease_recovery_interval: Option<Duration>,
+    /// Test-only canonical-loop iteration limit override.
+    planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    fail_append_tool_result_reference: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -216,11 +263,22 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into this harness's underlying group so
+    /// capability input/result callbacks fire through the production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Park this harness's model call until `gate` is released (E-GATEWAY seam),
     /// so a test can cancel the run mid-turn. See
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
-        self.park_gate = Some(gate);
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -228,7 +286,88 @@ impl RebornIntegrationHarnessBuilder {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
-        self.fail_model = true;
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
+    }
+
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping (E-GATEWAY seam, C-ERRORS).
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Fail the primary vendor route as unavailable and let the real loop
+    /// recovery and provider chain advance to scripted fallback index one.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
+        self
+    }
+
+    /// Report one provider content-filter finish reason, then resume scripted
+    /// playback through the real model gateway and recovery path.
+    pub fn content_filter_model_once(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::ContentFiltered,
+            1,
+        ));
+        self
+    }
+
+    /// Allow `successful_calls` interactive requests before reporting context
+    /// overflow `failures` times. This lets a test establish compactable thread
+    /// history before exercising recovery.
+    pub fn context_overflow_model_after(
+        mut self,
+        successful_calls: usize,
+        failures: usize,
+    ) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(
+            RecoverableModelFailureScript::new(RecoverableModelFailure::ContextOverflow, failures)
+                .after_successful_calls(successful_calls),
+        );
+        self
+    }
+
+    /// Return structurally invalid output `failures` times, then resume
+    /// scripted playback through the real model gateway and recovery path.
+    pub fn invalid_output_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::InvalidOutput,
+            failures,
+        ));
+        self
+    }
+
+    /// Return a typed provider decode/response error `failures` times through
+    /// the real vendor-provider seam.
+    pub fn provider_response_error_model_times(
+        mut self,
+        failure: RecoverableModelFailure,
+        failures: usize,
+    ) -> Self {
+        self.model_mode =
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(failure, failures));
+        self
+    }
+
+    /// Report output truncation `failures` times, then resume scripted
+    /// playback through the real provider gateway and recovery path.
+    pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::OutputTruncated,
+            failures,
+        ));
+        self
+    }
+
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.record_model_calls = true;
         self
     }
 
@@ -259,6 +398,41 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Set a non-zero iteration limit on the production-planned runtime used by
+    /// this harness so terminal recovery can be reached without a long script.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript persistence after a capability completes.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
+        self
+    }
+
+    /// Every capability dispatch returns a caller-shaped port error
+    /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the
+    /// run continues; only genuine host faults still end it.
+    pub fn with_recoverable_port_error_for_test(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::RecoverablePortErrorEcho;
+        self
+    }
+
+    /// Replace the default echo with a deterministic no-progress echo. This is
+    /// a test seam; the same canonical stop strategy and runtime wiring run.
+    pub fn with_no_progress_echo_for_test(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::NoProgressEcho;
+        self
+    }
+
     /// Install an in-memory `TurnEventSink` into the underlying group's planned
     /// runtime (C-TRACECAP). Read the recorded events back with
     /// [`RebornIntegrationHarness::recorded_turn_events`].
@@ -271,9 +445,8 @@ impl RebornIntegrationHarnessBuilder {
     /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
     /// tool list with the bridge meta tools in the `tools` argument shipped
-    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
-    /// `tool_describe`/`tool_call` are retained internally for describe-first
-    /// routing and never appear on the model-visible tool surface (see
+    /// to the model. Deferred surfaces advertise the complete
+    /// `tool_search`/`tool_describe`/`tool_call` protocol (see
     /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
     /// Deferral is ALSO threshold-gated (`select_active_set`,
     /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
@@ -284,7 +457,14 @@ impl RebornIntegrationHarnessBuilder {
     /// the `#[tokio::test]` concurrent-test race a raw env var would hit (see
     /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
+        self
+    }
+
+    /// Exercise the production enum default without making the general
+    /// integration harness depend on ambient process configuration.
+    pub fn with_tool_disclosure_production_default(mut self) -> Self {
+        self.tool_disclosure = ToolDisclosureMode::default();
         self
     }
 
@@ -295,7 +475,31 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
+        self
+    }
+
+    /// #5647 RED-pin seam: pass-through to
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_surface_policy_for_bridged_test`.
+    /// Only takes effect when paired with `.with_tool_disclosure_bridged()` —
+    /// see that method's docs for the fail-fast guard on misuse.
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
+        self,
+        ids: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
+            ids.into_iter()
+                .map(|id| CapabilityId::new(id).expect("test capability id must be valid")),
+        ))
+    }
+
+    /// Pass a complete policy through the same production resolve-once wiring
+    /// used by Bridged disclosure and the capability-surface filter.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.bridged_policy_override = Some(policy);
         self
     }
 
@@ -304,6 +508,15 @@ impl RebornIntegrationHarnessBuilder {
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Same built-in first-party tool runtime as
+    /// [`Self::with_builtin_http_tools`], but backed by the REAL
+    /// `StagedCapabilityIo` so trajectory result callbacks and durable
+    /// result-reference reads use the same IO path production composes.
+    pub fn with_durable_capability_io_builtin_http_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsDurableIo;
         self
     }
 
@@ -505,13 +718,15 @@ impl RebornIntegrationHarnessBuilder {
             group_builder = group_builder.with_turn_event_sink();
         }
         match self.tool_disclosure {
-            Some(ToolDisclosureMode::Bridged) => {
+            ToolDisclosureMode::Bridged => {
                 group_builder = group_builder.with_tool_disclosure_bridged();
             }
-            Some(ToolDisclosureMode::Off) => {
+            ToolDisclosureMode::Off => {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
-            None => {}
+        }
+        if let Some(policy) = self.bridged_policy_override {
+            group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
@@ -522,11 +737,23 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(factory) = self.hook_dispatcher_builder_factory {
             group_builder = group_builder.hook_dispatcher_builder_factory(factory);
         }
+        if let Some(observer) = self.trajectory_observer {
+            group_builder = group_builder.with_raw_trajectory_observer(observer);
+        }
         if let Some(ttl) = self.runner_lease_ttl {
             group_builder = group_builder.with_runner_lease_ttl_for_test(ttl);
         }
         if let Some(interval) = self.lease_recovery_interval {
             group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
+        }
+        if let Some(limit) = self.planned_default_iteration_limit {
+            group_builder = group_builder.with_iteration_limit_for_test(limit);
+        }
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
+        }
+        if self.fail_append_tool_result_reference {
+            group_builder = group_builder.fail_append_tool_result_reference_for_test();
         }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
@@ -534,8 +761,8 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
-            .park_model_opt(self.park_gate)
-            .fail_model_opt(self.fail_model)
+            .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -545,7 +772,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: DefaultProductWorkflow,
+    pub(crate) workflow: std::sync::Arc<DefaultProductSurface>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -562,7 +789,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_runtime: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -577,6 +804,12 @@ pub struct RebornIntegrationHarness {
     /// Retained even when parked (`park_model`, E-GATEWAY): `ParkingLlm` only
     /// wraps this SAME `TraceLlm`.
     pub(crate) scripted_llm: Arc<TraceLlm>,
+    /// Requests captured by the recoverable-failure provider wrapper before it
+    /// either injects a failure or delegates to `scripted_llm`.
+    pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
+    /// Primary/fallback route calls captured at the two scripted vendor seams.
+    pub(crate) fallback_provider_call_probe:
+        Option<super::scripted_provider::FallbackProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -630,16 +863,23 @@ impl RebornIntegrationHarness {
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
-            park_gate: None,
-            fail_model: false,
+            model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
-            tool_disclosure: None,
+            // General integration tests stay hermetic across production default
+            // changes. Disclosure-specific tests opt into Bridged explicitly.
+            tool_disclosure: ToolDisclosureMode::Off,
+            bridged_policy_override: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
+            planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
+            record_model_calls: false,
         }
     }
 
@@ -666,9 +906,9 @@ impl RebornIntegrationHarness {
 
     /// Number of loop milestones recorded for this harness right now (i.e.
     /// `[baseline_milestone_count..]` so far). Capture at the START of a turn
-    /// on a multi-turn harness and pass to `assert_compaction_failed_since` so
-    /// a prior turn's milestone can't satisfy the assertion — the
-    /// milestone analogue of `history_len`.
+    /// on a multi-turn harness and pass to a named compaction `*_since`
+    /// assertion so a prior turn's milestone can't satisfy it — the milestone
+    /// analogue of `history_len`.
     pub async fn milestone_len(&self) -> HarnessResult<usize> {
         Ok(self.loop_milestones().len())
     }
@@ -704,7 +944,7 @@ impl RebornIntegrationHarness {
     /// to complete (C-ATTACH). Lands `bytes` through the harness's real
     /// `InboundAttachmentLander` (production `ProjectScopedAttachmentLander` over
     /// the local-dev workspace filesystem — wired only by `.attachment_tools()`
-    /// groups) via `DefaultProductWorkflow::submit_inbound_with_attachments`, the
+    /// groups) via `DefaultProductSurface::submit_inbound_with_attachments`, the
     /// same production entry point a synchronous host surface (e.g. the
     /// OpenAI-compatible API) uses for inline image bytes. Errors clearly if the
     /// harness has no lander wired.
@@ -722,7 +962,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_attachments::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -759,14 +999,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow
@@ -783,7 +1023,10 @@ impl RebornIntegrationHarness {
     fn build_user_envelope(
         &self,
         text: &str,
-    ) -> HarnessResult<(String, ironclaw_product_adapters::ProductInboundEnvelope)> {
+    ) -> HarnessResult<(
+        String,
+        ironclaw_product_contracts::inbound::ProductInboundEnvelope,
+    )> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -820,18 +1063,94 @@ impl RebornIntegrationHarness {
             text,
             ProductTriggerReason::DirectChat,
         )?;
-        Ok(self.workflow.accept_inbound(envelope).await?)
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
+    /// The REAL per-thread `DefaultProductSurface` (durable idempotency
+    /// ledger → conversation binding → turn submission). The generic channel
+    /// inbound sink submits through this exact instance.
+    pub(crate) fn product_surface_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
+        std::sync::Arc::clone(&self.workflow)
+    }
+
+    /// A fresh binding-service instance over the GROUP-shared product
+    /// harness storage — the SAME durable binding ledger the workflow above
+    /// resolves through at admission. Delivery proofs hand this to the
+    /// generic run-delivery components so observer-side binding reads see
+    /// admission-time writes.
+    pub(crate) fn binding_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ProductBindingResolver>> {
+        Ok(Arc::new(self._shared.product_harness.binding_service()?))
+    }
+
+    /// A thread-service instance over the group-shared threads storage
+    /// (requests carry their own `ThreadScope`, so this serves any binding's
+    /// thread, not just this harness thread's).
+    pub(crate) fn thread_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        Ok(Arc::new(self.thread_harness.service_instance()?))
+    }
+
+    /// The group-shared turn coordinator every thread's runs execute on.
+    pub(crate) fn turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// The group-shared turn-state store paired with
+    /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
+    /// inspect or resume the caller's real runs use this pair instead of the
+    /// capability harness's disjoint bootstrap store.
+    pub(crate) fn agent_turn_runtime_for_test(&self) -> Arc<dyn AgentTurnRuntimePort> {
+        Arc::clone(&self._shared.turn_runtime) as Arc<dyn AgentTurnRuntimePort>
+    }
+
+    pub(crate) fn process_gates_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>
+    {
+        self._shared.process_system.gates()
+    }
+
+    pub(crate) fn turn_event_projection_for_test(
+        &self,
+    ) -> Arc<dyn ironclaw_turns::TurnEventProjectionSource> {
+        Arc::new(ironclaw_turns::TurnEventProjectionFromProcessJournal::new(
+            self._shared.process_system.journal(),
+        ))
+    }
+
+    /// Exact governor used by this thread's production-composed capability
+    /// path. Intended for invariant sabotage/read-back only.
+    pub(crate) fn capability_resource_governor_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.capability_recorder.resource_governor()
+    }
+
+    /// Register a scripted model gateway for a scope OTHER than this
+    /// harness thread's own (which is registered at build time): delivery
+    /// proofs pre-resolve the vendor conversation's binding and register its
+    /// scope here so the admitted run reaches a scripted model instead of
+    /// the routing-miss sentinel. Panics on duplicate registration.
+    pub(crate) fn register_scope_gateway_for_test(
+        &self,
+        scope: TurnScope,
+        gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+    ) {
+        self._shared.scope_gateway.register(scope, gateway);
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
-    /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
+    /// the run id and the raised `TurnGateRef`. The named C1 fixture: a scripted
     /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
     /// blocks here; the test then calls `approve_gate`/`deny_gate` and
     /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedApproval)
@@ -846,14 +1165,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an **auth** gate, returning
-    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// the run id and the raised `TurnGateRef`. Mirror of `submit_turn_until_blocked`
     /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
     /// capability whose credential account resolves to `AuthRequired` blocks here
     /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
     pub async fn submit_turn_until_auth_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedAuth)
@@ -875,8 +1194,8 @@ impl RebornIntegrationHarness {
     /// payload outright.
     pub async fn submit_approval_resolution(
         &self,
-        gate_ref: &GateRef,
-        decision: ironclaw_product_adapters::ApprovalDecision,
+        gate_ref: &TurnGateRef,
+        decision: ironclaw_product_contracts::inbound::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_approval_resolution_envelope(
@@ -895,8 +1214,8 @@ impl RebornIntegrationHarness {
     /// `deny_auth_gate`'s direct coordinator resume.
     pub async fn submit_auth_resolution(
         &self,
-        gate_ref: &GateRef,
-        result: ironclaw_product_adapters::AuthResolutionResult,
+        gate_ref: &TurnGateRef,
+        result: ironclaw_product_contracts::inbound::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_auth_resolution_envelope(
@@ -926,7 +1245,33 @@ impl RebornIntegrationHarness {
     /// re-instantiates the service over the same in-process handle — asserts
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
-        if let Some(db_path) = &self._shared.libsql_db_path {
+        if let StorageReopen::Postgres { database_url, .. } = &self._shared.storage_reopen {
+            // A genuinely fresh pool + composite over the same database —
+            // independent of the live `Arc` (migrations are idempotent and
+            // dedup per schema key).
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
+            let mut fresh_composite = CompositeRootFilesystem::new();
+            ironclaw_composition::test_support::mount_database_roots_for_test(
+                &mut fresh_composite,
+                filesystem,
+            )?;
+            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+                self.thread_harness.scope.clone(),
+                Arc::new(fresh_composite),
+                Arc::clone(&self._shared.turn_root),
+            )?;
+            return fresh_harness
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into);
+        }
+        if let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen {
             // Open a fresh composite — independent of the live one.
             // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
             // under the M1 mutation (LibSql → InMemory) the file does not exist and
@@ -961,31 +1306,30 @@ impl RebornIntegrationHarness {
     pub async fn assert_gate_survives_reopen(
         &self,
         run_id: TurnRunId,
-        expected_gate_ref: &GateRef,
+        expected_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
-        let db_path = self
-            ._shared
-            .libsql_db_path
-            .as_ref()
-            .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
+        let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
+            return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
+        };
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            // The live store exposes its hot snapshot before a critical append's
-            // caller receives the durable ack. Rebuild this fresh row-store view
-            // on every attempt so an early Running read is not cached indefinitely.
-            let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
-                Arc::clone(&fresh_composite),
-                &self._shared.canonical_binding,
-            )?);
-            let state = fresh_turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+            let fresh_process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+                scoped_processes_fs_composite(
+                    Arc::clone(&fresh_composite),
+                    &self._shared.canonical_binding,
+                )?,
+            ));
+            let fresh_processes =
+                ironclaw_turn_runner::runtime::ProcessRuntimeSystem::from_process_journal_store(
+                    fresh_process_store,
+                );
+            let state = fresh_processes
+                .agent_turn_runtime()
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
-                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                return match state.gate_ref.as_ref().map(TurnGateRef::as_str) {
                     Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
                     other => Err(format!(
                         "gate ref after reopen was {other:?}, expected {:?}",
@@ -1013,7 +1357,7 @@ impl RebornIntegrationHarness {
     }
 
     /// E-DURABLE: assert an installed extension survives an independent reopen
-    /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
+    /// of the capability composite. Opens a FRESH `ExtensionInstallationStorePort`
     /// at the capability harness's on-disk `storage_root` (a handle independent
     /// of the live `Arc`) and asserts `extension_id` is present — proving the
     /// install persisted to disk, not just to in-memory state. Parallels
@@ -1049,6 +1393,40 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
     }
 
+    /// How many times `capability_id` was dispatched through the real
+    /// capability path since this thread's baseline.
+    ///
+    /// The assertion below answers "was it exactly N"; a generated sequence
+    /// needs the number itself, because the bound it checks ("at most once,
+    /// and zero unless something approved") depends on the sequence rather
+    /// than being a fixed expectation.
+    pub async fn tool_invocation_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        Ok(delta
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count())
+    }
+
+    /// Assert the named capability was invoked exactly `expected` times through
+    /// the real capability path. Uses the same per-thread delta as
+    /// [`Self::assert_tool_invoked`].
+    pub async fn assert_tool_invocation_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let actual = self.tool_invocation_count(capability_id).await?;
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected capability {capability_id:?} to be invoked {expected} time(s), saw {actual}"
+        )
+        .into())
+    }
+
     /// Assert the named capability was NOT invoked through the real
     /// capability path (proves a visibility/gating filter held). Same
     /// delta-scoping as `assert_tool_invoked` (R2), but the diagnostic
@@ -1070,6 +1448,44 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
     }
 
+    /// Assert every capability invoked by this harness belongs to the explicit
+    /// allowlist. This provider-neutral negative assertion is useful when a
+    /// product workflow must stay on host-owned operations and must not fall
+    /// back to any integration/provider tool whose concrete id is deliberately
+    /// not part of the contract.
+    pub async fn assert_only_tools_invoked(&self, allowed: &[&str]) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        let unexpected: Vec<&str> = delta
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .filter(|capability_id| !allowed.contains(capability_id))
+            .collect();
+        if unexpected.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "capabilities outside the host-owned allowlist were invoked; allowed={allowed:?}, unexpected={unexpected:?}"
+        )
+        .into())
+    }
+
+    /// How many recorded RESULTS `capability_id` produced.
+    ///
+    /// Distinct from `tool_invocation_count`, and the distinction matters for
+    /// effect counting: a gated attempt is recorded as an invocation but
+    /// produces no result, so a single approve-then-resume shows two
+    /// invocations and one result. "Was the effect performed" is the result
+    /// count; the invocation count would report a duplicate that never
+    /// happened.
+    pub async fn capability_result_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        Ok(self
+            .captured_capability_results()
+            .iter()
+            .filter(|result| result.capability_id.as_str() == capability_id)
+            .count())
+    }
+
     /// S2 seam: assert the named capability produced EXACTLY `expected`
     /// recorded RESULTS (`captured_capability_results`) — the proof that a
     /// gate resume dispatched the gated capability's real execution once,
@@ -1083,11 +1499,7 @@ impl RebornIntegrationHarness {
         capability_id: &str,
         expected: usize,
     ) -> HarnessResult<()> {
-        let results = self.captured_capability_results();
-        let actual = results
-            .iter()
-            .filter(|result| result.capability_id.as_str() == capability_id)
-            .count();
+        let actual = self.capability_result_count(capability_id).await?;
         if actual == expected {
             return Ok(());
         }
@@ -1136,6 +1548,33 @@ impl RebornIntegrationHarness {
     /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
     /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
     /// not a group-shared recorder, so it only ever holds this thread's requests.
+    /// Every tool NAME offered to the model across the captured requests
+    /// (model-facing wire names, e.g. `ironclaw__memory__search`),
+    /// deduplicated. Same per-thread `scripted_llm` source (and the same
+    /// no-baseline rationale) as `captured_system_prompts`.
+    pub(super) fn captured_model_tool_names(&self) -> std::collections::BTreeSet<String> {
+        self.scripted_llm
+            .captured_tool_definitions()
+            .into_iter()
+            .flatten()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
+    /// Every User-role message across the captured model requests, in call
+    /// order. Same per-thread `scripted_llm` source (and the same no-baseline
+    /// rationale) as `captured_system_prompts`. Read by
+    /// `assert_model_saw_user_message` in `assertions.rs`.
+    pub(super) fn captured_model_user_messages(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::User))
+            .map(|message| message.content)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
@@ -1168,7 +1607,7 @@ impl RebornIntegrationHarness {
     /// earlier sibling thread's events.
     pub(super) fn recorded_security_audit_events(
         &self,
-    ) -> Vec<ironclaw_events::SecurityAuditEvent> {
+    ) -> Vec<ironclaw_event_log::SecurityAuditEvent> {
         let all = self._shared.security_audit_sink.events();
         all[self.baseline_security_audit_count.min(all.len())..].to_vec()
     }
@@ -1199,6 +1638,13 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
         let mut all = self.capability_recorder.network_http_requests();
         all.split_off(self.baseline_network_count)
+    }
+
+    /// Test-visible twin of [`Self::captured_network_requests`] for suites
+    /// asserting raw recorded wire requests (vendor host + injected
+    /// credential), baseline-sliced per thread like every other seam.
+    pub(crate) fn captured_network_requests_for_test(&self) -> Vec<NetworkHttpRequest> {
+        self.captured_network_requests()
     }
 
     /// S1 seam: every request that reached the real-egress-pipeline's
@@ -1322,14 +1768,11 @@ impl RebornIntegrationHarness {
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
         timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + RUN_STATE_SETTLE_TIMEOUT;
         loop {
             let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
+                .turn_runtime
+                .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if let ControlFlow::Break(outcome) = decide(&state) {
                 return outcome;
@@ -1376,6 +1819,19 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Read the run's current state once, without waiting for a condition.
+    ///
+    /// The waiting variants above answer "did it get here eventually", which
+    /// cannot express "it never passed through there". Generated sequence
+    /// tests assert after every transition, so they need the instantaneous
+    /// value rather than a settled one.
+    pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
+        Ok(self
+            .turn_runtime
+            .get_run_state(&self.turn_scope, run_id)
+            .await?)
+    }
+
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does
     /// NOT fail fast on an unexpected terminal — caller branches on the result.
     pub async fn wait_for_terminal(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
@@ -1404,9 +1860,13 @@ impl RebornIntegrationHarness {
     /// stale or wrong (non-approval) gate ref fails the resume with
     /// `TurnError::InvalidTransition` instead of silently resuming whatever
     /// gate class happens to be blocked.
-    pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn approve_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(gate_ref)
+            .approve_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1426,11 +1886,11 @@ impl RebornIntegrationHarness {
     pub async fn approve_gate_with_stale_resume_ref(
         &self,
         run_id: TurnRunId,
-        real_gate_ref: &GateRef,
-        stale_gate_ref: &GateRef,
+        real_gate_ref: &TurnGateRef,
+        stale_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(real_gate_ref)
+            .approve_standalone_gate(real_gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1448,7 +1908,11 @@ impl RebornIntegrationHarness {
     /// stale-ref resume: the record is already `Approved`, so re-calling
     /// `approve_gate` would hit a double-resolve `NotPending` error instead of
     /// completing the still-blocked run.
-    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn resume_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.resume_run(
             run_id,
             gate_ref.clone(),
@@ -1465,9 +1929,9 @@ impl RebornIntegrationHarness {
     ///
     /// See [`approve_gate`](Self::approve_gate) for why this resumes with
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
-    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         self.capability_recorder
-            .deny_local_dev_gate(gate_ref)
+            .deny_standalone_gate(gate_ref)
             .await?;
         self.resume_run(
             run_id,
@@ -1489,7 +1953,11 @@ impl RebornIntegrationHarness {
     /// (server-enforced: `resume_turn_once` requires `status == BlockedAuth`),
     /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
     /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
-    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
@@ -1517,14 +1985,16 @@ impl RebornIntegrationHarness {
     pub async fn resolve_auth_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a github credential account".into(),
                 );
@@ -1547,27 +2017,68 @@ impl RebornIntegrationHarness {
 
     /// Seed a Configured credential account WITH real secret material for
     /// `provider` through the production manual-token flow, scoped so this
-    /// group's CAPABILITY dispatch finds it: account selection matches all of
-    /// `(tenant, user, agent, project)`, and the user must be the capability
-    /// harness's dispatch user — which, on groups that do not align it to the
-    /// binding subject, differs from this thread's binding actor.
+    /// thread's CAPABILITY dispatch finds it: account selection matches all of
+    /// `(tenant, user, agent, project)`, and the user must be the one
+    /// dispatch-time execution-context resolution actually stamps on the run.
+    ///
+    /// That user is NOT the capability harness's fixed constructor user: the
+    /// production capability surface (`visible_capability_request` /
+    /// `resource_scope_for_run` in
+    /// `crates/app/ironclaw_composition/src/runtime/capability_host.rs`) resolves
+    /// the execution user per run as `thread owner → run actor → fixed
+    /// fallback`, and every harness thread run carries an actor — so the fixed
+    /// fallback never applies here. Seeding under the harness's fixed
+    /// constructor user (the old behavior) left every credentialed extension
+    /// activation `BlockedAuth` in groups that do not align the harness user
+    /// to the binding subject, because the activation credential gate looked
+    /// up the run's resolved user while the seed rows sat under the
+    /// constructor user.
     pub async fn seed_capability_credential_account(
         &self,
         provider: &str,
         label: &str,
         provider_scopes: &[&str],
     ) -> HarnessResult<()> {
+        self.seed_capability_credential_account_with_token(
+            provider,
+            label,
+            provider_scopes,
+            &format!("itest-{provider}-token"),
+        )
+        .await
+    }
+
+    /// [`Self::seed_capability_credential_account`] with caller-chosen token
+    /// material, so a later credential can be told apart from this one on the
+    /// wire. See `seed_credential_account_with_token` for why identical
+    /// material would make a re-auth assertion unable to fail.
+    pub async fn seed_capability_credential_account_with_token(
+        &self,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+        token: &str,
+    ) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a credential account".into(),
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor); the
+        // harness fixed-user fallback is unreachable for thread-driven runs.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         harness
-            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .seed_credential_account_with_token(&scope, provider, label, provider_scopes, token)
             .await
     }
 
@@ -1579,13 +2090,23 @@ impl RebornIntegrationHarness {
     pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to revoke credential accounts".into(),
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor), the
+        // same derivation `seed_capability_credential_account` uses — the
+        // revoke must land on the accounts that seeding created.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         let revoked = harness
             .revoke_credential_accounts_for_provider(&scope, provider)
             .await?;
@@ -1600,9 +2121,9 @@ impl RebornIntegrationHarness {
 
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
-    /// selection matches. Which user is correct depends on the caller: the
-    /// binding actor for user-aligned groups, the capability dispatch user
-    /// otherwise.
+    /// selection matches. Pass the run's resolved execution user (thread
+    /// owner → binding actor), the same resolution production capability
+    /// dispatch applies — see `seed_capability_credential_account`.
     fn run_resource_scope_for_user(&self, user_id: UserId) -> ResourceScope {
         ResourceScope {
             tenant_id: self.turn_scope.tenant_id.clone(),
@@ -1616,7 +2137,7 @@ impl RebornIntegrationHarness {
     }
 
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
-    /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
+    /// capability scope via the real CAS-persisted `AutoApproveSettingStorePort` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
     /// completes without a gate, and the flip persists across threads in the
     /// group because the store is shared).
@@ -1652,7 +2173,7 @@ impl RebornIntegrationHarness {
     async fn resume_run(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -1674,7 +2195,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -1743,7 +2264,7 @@ impl RebornIntegrationHarness {
 /// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
 /// each builds its own higher-level store (thread service, turn-state store)
 /// over the fresh composite this returns.
-async fn reopen_fresh_libsql_composite(
+pub(crate) async fn reopen_fresh_libsql_composite(
     db_path: &Path,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
     let db = Arc::new(
@@ -1752,14 +2273,17 @@ async fn reopen_fresh_libsql_composite(
             .await
             .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(
+        LibSqlRootFilesystem::new(db)
+            .map_err(|e| format!("failed to build libsql runtime for reopen: {e}"))?,
+    );
     // Migrations are idempotent — the schema already exists from `build()`.
     fresh_fs
         .run_migrations()
         .await
         .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )?;
@@ -1776,47 +2300,131 @@ async fn reopen_fresh_libsql_composite(
 pub(crate) async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,
-) -> HarnessResult<(Arc<CompositeRootFilesystem>, Option<PathBuf>)> {
+) -> HarnessResult<(Arc<CompositeRootFilesystem>, StorageReopen)> {
     let mut composite = CompositeRootFilesystem::new();
-    let db_path = match mode {
+    let reopen = match mode {
         StorageMode::InMemory => {
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
-            None
+            StorageReopen::None
         }
         StorageMode::LibSql => {
-            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::build_default_database_roots_for_test(
                 dir,
                 &mut composite,
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
-            Some(dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME))
+            StorageReopen::LibSql {
+                db_path: dir.join(ironclaw_composition::test_support::STANDALONE_DB_FILENAME),
+            }
+        }
+        StorageMode::Postgres => {
+            let (container, database_url) = start_postgres_testcontainer().await?;
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(&database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres migrations failed: {error}"))?;
+            ironclaw_composition::test_support::mount_database_roots_for_test(
+                &mut composite,
+                filesystem,
+            )?;
+            StorageReopen::Postgres {
+                database_url,
+                _container: Box::new(container),
+            }
         }
     };
-    Ok((Arc::new(composite), db_path))
+    Ok((Arc::new(composite), reopen))
 }
 
-/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
-/// `binding` inside the production composite.
+/// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
+/// a test failure (REL-3): in CI it panics with the docker context; locally
+/// the message names the fix.
+pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+    let unavailable = |error: String| -> String {
+        if std::env::var("CI").is_ok() {
+            panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
+        }
+        format!(
+            "StorageMode::Postgres requires a reachable Docker daemon \
+             (locally: `colima start` or start Docker Desktop; a Postgres \
+             skip is a failure per REL-3): {error}"
+        )
+    };
+    let container = image
+        .start()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let host = container
+        .get_host()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    Ok((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
+pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .map_err(|error| format!("testcontainer database URL must parse: {error}"))?;
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .map_err(|error| format!("Postgres pool must build: {error}").into())
+}
+
+/// Build a `ScopedFilesystem` that maps `/processes` and the compatibility
+/// `/turns` alias to the row-native process path for `binding` inside the
+/// composite.
 ///
 /// Uses the production path prefix `""` (no `/engine` prefix) so turn state
 /// lands under `/tenants/...` inside the composite, where the database backend
 /// is mounted. The 4-arm match lives in `filesystem::turns_scope_path`; the
 /// binary-E2E tier reuses it via `scoped_turns_fs` in `harness.rs` with the
 /// `/engine` prefix.
-pub(crate) fn scoped_turns_fs_composite(
+pub(crate) fn scoped_processes_fs_composite(
     composite: Arc<CompositeRootFilesystem>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
     let target = super::filesystem::turns_scope_path("", binding);
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").expect("valid turns alias"),
-        VirtualPath::new(target).expect("valid turns target"),
-        MountPermissions::read_write_list_delete(),
-    )])?;
+    let target = VirtualPath::new(target).expect("valid process target");
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("valid processes alias"),
+            target.clone(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("valid turns alias"),
+            target,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])?;
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         composite, mounts,
     )))
@@ -1862,10 +2470,9 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
             // No integration test should inherit the ambient tool-disclosure
-            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
-            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
-            // never ambient (see `tool_disclosure.rs`'s negative control).
-            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            // knob. Builders pin Off and disclosure tests opt into Bridged;
+            // scrubbing is defense in depth for the retained env fallback.
+            std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }
@@ -1873,7 +2480,7 @@ pub(crate) fn apply_hermetic_env() {
 /// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
 /// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
-    envelope: &ironclaw_product_adapters::ProductInboundEnvelope,
+    envelope: &ironclaw_product_contracts::inbound::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {
     ResolveBindingRequest {
         adapter_id: envelope.adapter_id().clone(),
@@ -1899,7 +2506,36 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_model_mode_selection_wins() {
+        let failing = RebornIntegrationHarness::test_default()
+            .park_model(ParkingModelGate::new())
+            .fail_model();
+        assert!(matches!(
+            failing.model_mode,
+            ThreadModelMode::Failing(ErrLlmKind::ContextLength)
+        ));
+
+        let recoverable = RebornIntegrationHarness::test_default()
+            .fail_model_auth()
+            .content_filter_model_once();
+        assert!(matches!(
+            recoverable.model_mode,
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript {
+                failure: RecoverableModelFailure::ContentFiltered,
+                failures: 1,
+                ..
+            })
+        ));
+    }
+}
+
 // The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)
 // and per-thread harness assembly (`RebornThreadBuilder::build`) live in
 // `group.rs` (imported above) — that module owns `GroupSharedStorage` and the
 // capability mode types.
+// arch-exempt: large_file, integration builder remains centralized during fixture migration, plan #6175

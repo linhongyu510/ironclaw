@@ -8,13 +8,13 @@
 //!
 //! Real path: scripted tool call → first-party runtime → `PermissionMode::Ask`
 //! with auto-approve OFF → `TurnStatus::BlockedApproval` → real
-//! `ApprovalInteractionService::resolve` (via `DefaultProductWorkflow::submit_inbound`)
+//! `ApprovalInteractionService::resolve` (via `DefaultProductSurface::submit_inbound`)
 //! → `coordinator.resume_turn` → the gated capability re-dispatches (approve)
 //! or the run finalizes an authorization failure (deny).
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_product_adapters::{ApprovalDecision, ProductInboundAck};
+use ironclaw_product_contracts::inbound::{ApprovalDecision, ProductInboundAck};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 

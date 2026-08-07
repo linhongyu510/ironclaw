@@ -8,7 +8,7 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `platform/router.rs` (header layers), with auth-error text in
   `platform/auth.rs`.
 - **v2** applies headers via outer `SetResponseHeaderLayer`s in
-  `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`; errors are
+  `crates/app/ironclaw_composition/src/webui/webui_serve.rs`; errors are
   sanitized at the `WebuiAuthenticator` boundary (auth), the
   `WebUiV2HttpError` type (`ironclaw_webui/src/error.rs`), and the
   axum `Json` extractor (validation).
@@ -28,13 +28,13 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 | 5 | Headers on error responses | layers applied router-wide | `SetResponseHeaderLayer` is outermost, so 401/413/429 carry the same headers | **Keep** — locked by `static_security_headers_present_on_error_response` |
 | 6 | Sanitized auth failure | generic `"Invalid or missing auth token"` 401; detail logged not echoed (`auth.rs:1127-1133`) | all auth failures collapse to a generic 401; reason never leaked (`WebuiAuthenticator` contract; `webui_serve.rs:107-125`) | **Keep** |
 | 7 | Sanitized validation error | axum extractor rejection → 4xx | `Json<T>` extractor → 400 on malformed body, before the facade. The body is axum's **standard `JsonRejection`** text (e.g. `Failed to parse the request body as JSON: …line N column M`) — it carries no filesystem paths, Rust type names, tracebacks, or secrets, but it is **not** a fully opaque string (it includes serde's structural parse position, which is not sensitive) | **Keep** — locked by `malformed_request_body_returns_sanitized_client_error` (asserts no path / type-name / traceback / token leak) |
-| 8 | Sanitized OAuth error | v1 OAuth error handling | callback failures redirect to `?login_error=<opaque enum>`; provider/JWT/SessionStore detail logged not echoed (`auth/routes.rs`) | **Keep** — locked by `google_oauth_routes.rs` error-redirect tests |
+| 8 | Sanitized OAuth error | v1 OAuth error handling | callback failures redirect to `?login_error=<opaque enum>`; provider/JWT/signed-session detail logged not echoed (`auth/routes.rs`) | **Keep** — locked by `google_oauth_routes.rs` error-redirect tests |
 | 9 | Panic boundary | `CatchPanicLayer` truncates payload (`platform/router.rs:566-592`) | `CatchPanicLayer::custom(panic_handler)` logs truncated detail (`tracing::error!`, not echoed), returns a generic `500 Internal Server Error`; sits inside the header layer so the 500 still carries the static security headers (`webui_serve.rs:706,926-953`) | **Keep** — locked by `panic_boundary_returns_sanitized_500` (a panicking handler with a sensitive message → 500 whose body is exactly `Internal Server Error`, leaking no path / SQL / token / `::`) |
 
 ## Test coverage
 
 **This PR** —
-`crates/ironclaw_webui/tests/headers_errors_contract.rs`:
+`crates/product/ironclaw_webui/tests/headers_errors_contract.rs`:
 
 - `static_security_headers_present_on_error_response` — an
   unauthenticated 401 still carries `nosniff`, `DENY`, CSP, and
@@ -59,7 +59,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 
 **Already locked (cross-referenced, not duplicated)** —
 
-- `ironclaw_reborn_composition/tests/webui_v2_serve.rs::v2_response_carries_static_security_headers`
+- `ironclaw_composition/tests/webui_v2_serve.rs::v2_response_carries_static_security_headers`
   — header presence on a 200 (rows 1, 2, 3a).
 - `ironclaw_webui/src/static_assets/router.rs::tests`:
   `standalone_spa_shell_carries_matching_csp_nonce` (the document nonce
