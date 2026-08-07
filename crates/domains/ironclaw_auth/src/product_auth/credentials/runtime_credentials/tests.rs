@@ -1848,3 +1848,65 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
             .starts_with("oauth-refreshed-access")
     );
 }
+
+/// The in-memory source must enforce project isolation exactly like the durable
+/// one.
+///
+/// The filesystem store narrows by reading only the caller's project root and
+/// the user-level root; the in-memory store has no roots and filters solely
+/// through `CredentialAccountOwnerScope::matches`. When project dropped out of
+/// that predicate the fake stopped isolating projects entirely, which is worse
+/// than a missing test: a fake that is more permissive than production lets
+/// callers depend on an isolation that only production enforces.
+#[tokio::test]
+async fn in_memory_source_isolates_projects_like_the_durable_store() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+
+    let mut project_a =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    project_a.project_id = Some(ironclaw_host_api::ids::ProjectId::new("project-a").unwrap());
+    let created = ConfiguredAccount::new(
+        AuthProductScope::new(project_a.clone(), AuthSurface::Api),
+        "google",
+    )
+    .create(&accounts)
+    .await;
+
+    // A caller in another project must not see it.
+    let mut project_b = project_a.clone();
+    project_b.project_id = Some(ironclaw_host_api::ids::ProjectId::new("project-b").unwrap());
+    project_b.invocation_id = InvocationId::new();
+    let seen_by_b = accounts
+        .accounts_for_owner(&AuthProductScope::new(project_b, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        !seen_by_b.iter().any(|account| account.id == created.id),
+        "project B must not see project A's credential through the in-memory source"
+    );
+
+    // Nor may a user-level caller inherit upward out of a project.
+    let mut user_level = project_a.clone();
+    user_level.project_id = None;
+    user_level.invocation_id = InvocationId::new();
+    let seen_by_user = accounts
+        .accounts_for_owner(&AuthProductScope::new(user_level, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        !seen_by_user.iter().any(|account| account.id == created.id),
+        "a project sub-credential must not leak to user-level callers"
+    );
+
+    // The owning project still resolves it.
+    let mut same_project = project_a;
+    same_project.invocation_id = InvocationId::new();
+    let seen_by_a = accounts
+        .accounts_for_owner(&AuthProductScope::new(same_project, AuthSurface::Api))
+        .await
+        .unwrap();
+    assert!(
+        seen_by_a.iter().any(|account| account.id == created.id),
+        "the owning project must still resolve its own credential"
+    );
+}

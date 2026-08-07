@@ -565,21 +565,30 @@ impl CredentialAccountOwnerScope {
     /// the extensions registry and the runtime, which reported it as
     /// "needs setup" forever while the tokens sat valid on disk.
     ///
-    /// Project scope is **not** compared here, deliberately. A credential's
-    /// address is its storage root — user-level, or a project root beneath it —
-    /// and the reader chooses which roots to consult (its project, then the
-    /// user-level default it inherits from). Judging project a second time from
-    /// the record would double-count it, and would break the case this rule
-    /// exists for: the record's own `scope` is *provenance*, not identity. It
-    /// records where the account was minted, and — load-bearing — is what
-    /// locates its secret material (`secret_store.metadata(&account.scope.resource, …)`).
-    /// Rewriting it to match the reader would orphan the tokens.
+    /// Project **inherits downward, never upward**: a project-scoped caller
+    /// sees its own project's credentials plus the user-level ones it inherits,
+    /// so creating a project cannot silently disconnect every integration. A
+    /// user-level caller sees only user-level credentials, so a project's
+    /// sub-credential never leaks out of that project.
     ///
-    /// So: path decides identity, record scope stays provenance, and this
-    /// compares only the boundary that is genuinely a security boundary.
+    /// The project comparison lives *here*, in the shared predicate, and not
+    /// only in the durable store's root chain. The filesystem store narrows by
+    /// reading just the relevant roots, but the in-memory store has no roots and
+    /// filters solely through this predicate — so leaving project out made the
+    /// fake strictly more permissive than production, letting a project-scoped
+    /// caller see every other project's credentials. A fake that fails open is
+    /// the one thing this crate's guardrails say it must never be. Comparing it
+    /// here makes both implementations enforce one rule, and leaves the durable
+    /// root chain as narrowing rather than as the only check.
+    ///
+    /// Comparing the record's project is sound because migration aligns
+    /// provenance with placement: a record living in project P's root carries
+    /// provenance project P, and a user-level record carries none.
     pub fn matches(&self, account: &CredentialAccount) -> bool {
         let resource = &account.scope.resource;
-        resource.tenant_id == self.tenant_id && resource.user_id == self.user_id
+        resource.tenant_id == self.tenant_id
+            && resource.user_id == self.user_id
+            && (resource.project_id == self.project_id || resource.project_id.is_none())
     }
 }
 
