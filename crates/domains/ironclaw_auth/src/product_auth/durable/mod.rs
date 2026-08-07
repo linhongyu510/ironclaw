@@ -27,7 +27,9 @@ use ironclaw_host_api::path::VirtualPath;
 
 use self::domain::validate_new_credential_account;
 use self::paths::{
-    account_path, account_root, flow_path, flow_root, fs_error, join_scoped, surface_sessions_root,
+    account_migration_marker_path, account_path, account_root, flow_path, flow_root, fs_error,
+    join_scoped, legacy_account_root, legacy_agents_root, legacy_projects_root,
+    surface_sessions_root,
 };
 
 mod accounts;
@@ -41,7 +43,17 @@ mod provider;
 mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
+/// Bound on legacy agent/project directories walked during migration.
+const MAX_LEGACY_OWNER_DIRS_PER_LEVEL: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+
+/// Durable evidence that an owner's accounts have been copied out of the
+/// pre-migration roots. Durable rather than process-local so the legacy scan
+/// runs once per owner across restarts instead of once per process.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AccountMigrationMarker {
+    migrated: usize,
+}
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
     !crate::is_terminal_status(flow.status)
@@ -529,19 +541,145 @@ where
         Ok(accounts)
     }
 
-    async fn account_scopes_for_owner(
+    fn owner_resource(owner: &CredentialAccountOwnerScope) -> ResourceScope {
+        ResourceScope {
+            tenant_id: owner.tenant_id.clone(),
+            user_id: owner.user_id.clone(),
+            // Not part of a credential's address — see
+            // `CredentialAccountOwnerScope::matches`.
+            agent_id: None,
+            project_id: owner.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        }
+    }
+
+    /// The canonical roots a credential lookup reads, nearest scope first.
+    ///
+    /// At most two: the caller's project (when it has one) and the user-level
+    /// default it inherits from. This replaced a blind fan-out over all seven
+    /// `AuthSurface` variants times every session directory — a scan that
+    /// existed only because the write side chose a partition the read side
+    /// could not predict.
+    fn account_scopes_for_owner(
+        owner: &CredentialAccountOwnerScope,
+    ) -> Vec<crate::AuthProductScope> {
+        let resource = Self::owner_resource(owner);
+        let mut scopes = vec![crate::AuthProductScope::new(
+            resource.clone(),
+            AuthSurface::Api,
+        )];
+        if resource.project_id.is_some() {
+            let mut inherited = resource;
+            inherited.project_id = None;
+            scopes.push(crate::AuthProductScope::new(inherited, AuthSurface::Api));
+        }
+        scopes
+    }
+
+    /// Every pre-migration root an account could be sitting in: agent x project
+    /// x surface x session. Read-only, and used only by the one-shot migration
+    /// — this is the old steady-state read path, kept as the upgrade path.
+    /// Directory names under `root`, or empty when the directory is absent.
+    async fn legacy_child_names(
+        &self,
+        resource: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<String>, AuthProductError> {
+        let entries = match self
+            .filesystem
+            .list_dir_bounded(
+                resource,
+                root,
+                MAX_LEGACY_OWNER_DIRS_PER_LEVEL.saturating_add(1),
+            )
+            .await
+        {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(fs_error(error)),
+        };
+        if entries.len() > MAX_LEGACY_OWNER_DIRS_PER_LEVEL {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        let mut names = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Every `(agent, project)` prefix the legacy layout could have written
+    /// under for this user, discovered from disk.
+    ///
+    /// The reader's own agent is not enough: the whole point of the change is
+    /// that a credential minted while agent A was running must be found by
+    /// agent B, so the migration enumerates the agent directories instead of
+    /// assuming one. Both are scoped inside this user's mount, so this walks
+    /// one user's records, never another's.
+    async fn legacy_owner_resources(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+    ) -> Result<Vec<ResourceScope>, AuthProductError> {
+        let base = Self::owner_resource(owner);
+        let mut agents: Vec<Option<String>> = vec![None];
+        agents.extend(
+            self.legacy_child_names(&base, &legacy_agents_root()?)
+                .await?
+                .into_iter()
+                .map(Some),
+        );
+
+        let mut resources = Vec::new();
+        for agent in agents {
+            let mut projects: Vec<Option<String>> = vec![None];
+            projects.extend(
+                self.legacy_child_names(&base, &legacy_projects_root(agent.as_deref())?)
+                    .await?
+                    .into_iter()
+                    .map(Some),
+            );
+            for project in projects {
+                let mut resource = base.clone();
+                resource.agent_id = match &agent {
+                    Some(agent) => Some(
+                        ironclaw_host_api::ids::AgentId::new(agent.clone())
+                            .map_err(|_| AuthProductError::BackendUnavailable)?,
+                    ),
+                    None => None,
+                };
+                resource.project_id = match &project {
+                    Some(project) => Some(
+                        ironclaw_host_api::ids::ProjectId::new(project.clone())
+                            .map_err(|_| AuthProductError::BackendUnavailable)?,
+                    ),
+                    None => None,
+                };
+                resources.push(resource);
+            }
+        }
+        Ok(resources)
+    }
+
+    async fn legacy_account_scopes_for_owner(
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
-        let resource = ResourceScope {
-            tenant_id: owner.tenant_id.clone(),
-            user_id: owner.user_id.clone(),
-            agent_id: owner.agent_id.clone(),
-            project_id: owner.project_id.clone(),
-            mission_id: owner.mission_id.clone(),
-            thread_id: owner.thread_id.clone(),
-            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-        };
+        let mut scopes = Vec::new();
+        for resource in self.legacy_owner_resources(owner).await? {
+            scopes.extend(self.legacy_account_scopes_under(owner, resource).await?);
+        }
+        Ok(scopes)
+    }
+
+    async fn legacy_account_scopes_under(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        resource: ResourceScope,
+    ) -> Result<Vec<crate::AuthProductScope>, AuthProductError> {
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
             scopes.push(crate::AuthProductScope::new(resource.clone(), surface));
@@ -586,12 +724,117 @@ where
         Ok(scopes)
     }
 
+    /// Copy every account out of the pre-migration roots into the canonical
+    /// one, exactly once per owner.
+    ///
+    /// Copy-forward, never delete: an interrupted run loses nothing and re-runs
+    /// cleanly, and the legacy records stay readable if this needs to be rolled
+    /// back. They become inert — nothing writes to those roots again — and are
+    /// collected separately rather than removed on a read path.
+    ///
+    /// Everything lands at the **user level**, including records that were
+    /// under `/agents/{a}/projects/{p}/`. Inheritance runs project -> user, so
+    /// the user-level root is the one place every caller can reach; migrating a
+    /// record into a project root instead would hide it from user-level
+    /// callers. Project-scoped *writes* are a later opt-in.
+    async fn migrate_legacy_accounts(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+    ) -> Result<(), AuthProductError> {
+        let canonical_resource = Self::owner_resource(owner);
+        let marker = account_migration_marker_path(&canonical_resource)?;
+        if self
+            .filesystem
+            .get(&canonical_resource, &marker)
+            .await
+            .map_err(fs_error)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let mut migrated = 0usize;
+        for legacy_scope in self.legacy_account_scopes_for_owner(owner).await? {
+            let legacy_root = legacy_account_root(&legacy_scope)?;
+            let entries = match self
+                .filesystem
+                .list_dir_bounded(
+                    &legacy_scope.resource,
+                    &legacy_root,
+                    MAX_OWNER_RECORDS_PER_ROOT.saturating_add(1),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            if entries.len() > MAX_OWNER_RECORDS_PER_ROOT {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            for entry in entries {
+                if !entry.name.ends_with(".json") {
+                    continue;
+                }
+                let legacy_path = join_scoped(&legacy_root, &entry.name)?;
+                let Some(account) = self
+                    .read_account_record_for_scan(&legacy_scope.resource, &legacy_path)
+                    .await?
+                else {
+                    continue;
+                };
+                // The record is copied VERBATIM. Its `scope` is provenance, not
+                // identity: it is what locates the account's secret material
+                // (`secret_store.metadata(&account.scope.resource, ..)`), which
+                // still lives under the agent/project prefix it was written
+                // with. Rewriting the scope to match the new path would move
+                // the record and orphan its tokens. Identity now comes from
+                // which root the record sits in, so provenance can stay
+                // untouched and the credential keeps working.
+                let canonical_scope =
+                    crate::AuthProductScope::new(canonical_resource.clone(), AuthSurface::Api);
+                let canonical_path = account_path(&canonical_scope, account.id)?;
+                // Create-if-absent: a record already migrated (or written fresh
+                // at the canonical path) always wins over the legacy copy.
+                match self
+                    .write_record(
+                        &canonical_resource,
+                        &canonical_path,
+                        &account,
+                        CasExpectation::Absent,
+                    )
+                    .await
+                {
+                    Ok(_) => migrated = migrated.saturating_add(1),
+                    Err(AuthProductError::BackendConflict) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        if migrated > 0 {
+            tracing::info!(
+                migrated,
+                "migrated credential accounts to the canonical owner path"
+            );
+        }
+        self.write_record(
+            &canonical_resource,
+            &marker,
+            &AccountMigrationMarker { migrated },
+            CasExpectation::Any,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn account_records_for_owner(
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        self.migrate_legacy_accounts(owner).await?;
         let mut accounts = Vec::new();
-        for scope in self.account_scopes_for_owner(owner).await? {
+        for scope in Self::account_scopes_for_owner(owner) {
             accounts.extend(
                 self.account_records_under_scope_root_with_limit(
                     &scope,
@@ -612,9 +855,10 @@ where
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError> {
         let owner = CredentialAccountOwnerScope::from_scope(&request.scope);
+        self.migrate_legacy_accounts(&owner).await?;
         let mut saw_configured = false;
         let mut selected = None;
-        for scope in self.account_scopes_for_owner(&owner).await? {
+        for scope in Self::account_scopes_for_owner(&owner) {
             for account in self
                 .account_records_under_scope_root_with_limit(
                     &scope,

@@ -373,37 +373,46 @@ async fn runtime_selection_still_enforces_provider_scope_gate() {
     assert_eq!(error, AuthProductError::CredentialMissing);
 }
 
+/// A reconnect binds the owner's credential whatever surface or session it was
+/// minted on.
+///
+/// This replaces `binding_does_not_cross_session_boundary` and
+/// `binding_does_not_cross_surface_boundary`, which asserted the opposite. Both
+/// justified themselves by accounts being path-segmented on those axes — "the
+/// callback could never write it back". Accounts now live at one address per
+/// credential owner, so the write-back hazard is gone and the old rule only
+/// blocked real reconnects: a credential minted by the chat auth gate
+/// (`Callback`, session-bound) could never be re-bound from the extensions page
+/// (`Web`, no session), leaving a valid credential stuck at "needs setup".
 #[tokio::test]
-async fn binding_does_not_cross_session_boundary() {
-    // session_id is path-segmenting for the bind/update WRITE path: an account
-    // stored under one session must not be bound by a flow targeting a
-    // different (or no) session, or the callback — which updates the account at
-    // the flow scope's session path — could never write it. `accounts_for_owner`
-    // wildcards session when the flow session is `None`, so the bind selection
-    // must re-impose exact session equality.
+async fn binding_crosses_surface_and_session_for_the_same_owner() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let session_scope =
-        owner_auth_scope("alice").with_session_id(crate::AuthSessionId::new("sess-a").unwrap());
-    ConfiguredAccount::new(session_scope, "google")
+    // Minted the way the blocked-turn OAuth gate mints one.
+    let gate_scope = AuthProductScope::new(
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap(),
+        AuthSurface::Callback,
+    )
+    .with_session_id(crate::AuthSessionId::new("sess-a").unwrap());
+    let created = ConfiguredAccount::new(gate_scope, "google")
         .create(&accounts)
         .await;
     let selector = selector_for(accounts);
 
-    // A reconnect carrying NO session must not bind the session-scoped account.
-    let no_session = owner_auth_scope("alice");
-    let error = selector
+    // Reconnected later from a different surface, carrying no session at all.
+    let reconnect = owner_auth_scope("alice");
+    let bound = selector
         .select_configured_account_for_binding(
             CredentialAccountSelectionRequest::new(
-                no_session.clone(),
+                reconnect.clone(),
                 AuthProviderId::new("google").unwrap(),
             )
             .for_extension(ExtensionId::new("google-calendar").unwrap()),
-            no_session,
+            reconnect,
         )
         .await
-        .unwrap_err();
+        .expect("a reconnect must bind the owner's existing credential");
 
-    assert_eq!(error, AuthProductError::CredentialMissing);
+    assert_eq!(bound.id, created.id);
 }
 
 #[tokio::test]
@@ -431,42 +440,6 @@ async fn binding_matches_account_within_same_session() {
         .expect("same-session reconnect must bind the existing account");
 
     assert_eq!(bound.id, created.id);
-}
-
-#[tokio::test]
-async fn binding_does_not_cross_surface_boundary() {
-    // surface is path-segmenting for the bind/update WRITE path exactly like
-    // session: durable account records live under a per-surface path, and the
-    // callback updates the account at the flow scope's surface path.
-    // `accounts_for_owner` enumerates EVERY surface, so the bind selection must
-    // re-impose exact surface equality — otherwise it could select an account
-    // stored on another surface that the callback can never read (a spurious
-    // CredentialMissing that aborts the reconnect).
-    let accounts = Arc::new(InMemoryAuthProductServices::new());
-    let web_scope = AuthProductScope::new(
-        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap(),
-        AuthSurface::Web,
-    );
-    ConfiguredAccount::new(web_scope, "google")
-        .create(&accounts)
-        .await;
-    let selector = selector_for(accounts);
-
-    // A reconnect on the `Api` surface must not bind the `Web`-surface account.
-    let api_scope = owner_auth_scope("alice");
-    let error = selector
-        .select_configured_account_for_binding(
-            CredentialAccountSelectionRequest::new(
-                api_scope.clone(),
-                AuthProviderId::new("google").unwrap(),
-            )
-            .for_extension(ExtensionId::new("google-calendar").unwrap()),
-            api_scope,
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(error, AuthProductError::CredentialMissing);
 }
 
 #[tokio::test]
