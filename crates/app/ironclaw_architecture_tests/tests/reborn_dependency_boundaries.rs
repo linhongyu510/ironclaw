@@ -633,7 +633,9 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // typed ProductSurface service method and its contract test.
         // Configuration mutation, credential preservation, authorization, and
         // transport behavior remain in their owning non-contract crates.
-        ("ironclaw_product_contracts", 15_773),
+        // Raised 15_773 -> 15_775 by review follow-up: the reset method's doc
+        // now states that the snapshot is fetched via the caller's view query.
+        ("ironclaw_product_contracts", 15_775),
         ("ironclaw_prompt_envelope", 832),
     ];
 

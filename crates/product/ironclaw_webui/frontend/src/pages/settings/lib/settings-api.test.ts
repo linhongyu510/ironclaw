@@ -3,7 +3,7 @@ import { test, vi } from "vitest";
 
 import {
   settingsFromOperatorConfig,
-  resetLlmToDefaults,
+  resetLlmConfig,
   toolFromConfigEntry,
   updateToolPermission,
   upsertLlmProvider,
@@ -69,7 +69,7 @@ test("toolFromConfigEntry maps operator config tools for the tools tab", () => {
   );
 });
 
-test("resetLlmToDefaults uses the dedicated no-body reset endpoint", async () => {
+test("resetLlmConfig uses the dedicated no-body reset endpoint", async () => {
   let call;
   vi.stubGlobal("sessionStorage", {
     getItem: () => "",
@@ -88,7 +88,7 @@ test("resetLlmToDefaults uses the dedicated no-body reset endpoint", async () =>
   );
 
   try {
-    await resetLlmToDefaults();
+    await resetLlmConfig();
     assert.equal(call.path, "/api/webchat/v2/llm/reset");
     assert.equal(call.options.method, "POST");
     assert.equal(call.options.body, undefined);

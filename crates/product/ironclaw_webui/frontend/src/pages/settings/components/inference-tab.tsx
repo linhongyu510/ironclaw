@@ -30,19 +30,19 @@ export function InferenceTab({
     providers,
     hasActiveProvider,
     isResetting,
-    resetToDefaults,
+    resetConfig,
   } = useLlmProviders({ settings, gatewayStatus });
   const [resetDialogOpen, setResetDialogOpen] = React.useState(false);
   const [resetError, setResetError] = React.useState(null);
   const confirmReset = React.useCallback(async () => {
     setResetError(null);
     try {
-      await resetToDefaults();
+      await resetConfig();
       setResetDialogOpen(false);
     } catch (error) {
       setResetError(error.message);
     }
-  }, [resetToDefaults]);
+  }, [resetConfig]);
   if (isLoading) {
     return (<SettingsSkeleton />);
   }
@@ -119,7 +119,7 @@ export function InferenceTab({
         </div>
         {resetError ? (
           <p className="mt-3 text-sm text-[var(--v2-danger-text)]" role="status">
-            {resetError}
+            {t("error.loadFailed", { what: t("llm.resetToDefaults"), message: resetError })}
           </p>
         ) : null}
       </Card>

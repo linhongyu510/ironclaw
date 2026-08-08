@@ -10842,13 +10842,14 @@ struct SetupRecordingLlmConfigService {
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     delete_provider_calls: Mutex<Vec<String>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
-    reset_to_defaults_calls: Mutex<usize>,
+    reset_llm_config_calls: Mutex<usize>,
     test_connection_calls: Mutex<usize>,
     list_models_calls: Mutex<usize>,
     snapshot: Mutex<LlmConfigSnapshot>,
     next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+    next_reset_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
 }
 
@@ -10860,13 +10861,14 @@ impl Default for SetupRecordingLlmConfigService {
             upsert_provider_calls: Mutex::new(Vec::new()),
             delete_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
-            reset_to_defaults_calls: Mutex::new(0),
+            reset_llm_config_calls: Mutex::new(0),
             test_connection_calls: Mutex::new(0),
             list_models_calls: Mutex::new(0),
             snapshot: Mutex::new(Self::empty_snapshot()),
             next_snapshot_error: Mutex::new(None),
             next_upsert_error: Mutex::new(None),
             next_set_active_error: Mutex::new(None),
+            next_reset_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
         }
     }
@@ -10889,8 +10891,8 @@ impl SetupRecordingLlmConfigService {
         self.set_active_calls.lock().expect("lock").len()
     }
 
-    fn reset_to_defaults_count(&self) -> usize {
-        *self.reset_to_defaults_calls.lock().expect("lock")
+    fn reset_llm_config_count(&self) -> usize {
+        *self.reset_llm_config_calls.lock().expect("lock")
     }
 
     fn test_connection_count(&self) -> usize {
@@ -10931,6 +10933,10 @@ impl SetupRecordingLlmConfigService {
 
     fn fail_next_set_active(&self, error: LlmConfigServiceError) {
         *self.next_set_active_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_reset(&self, error: LlmConfigServiceError) {
+        *self.next_reset_error.lock().expect("lock") = Some(error);
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -11031,12 +11037,15 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         Ok(self.snapshot.lock().expect("lock").clone())
     }
 
-    async fn reset_to_defaults(
+    async fn reset_llm_config(
         &self,
         _caller: ProductSurfaceCaller,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        *self.reset_to_defaults_calls.lock().expect("lock") += 1;
-        Ok(self.snapshot.lock().expect("lock").clone())
+    ) -> Result<(), LlmConfigServiceError> {
+        if let Some(error) = self.next_reset_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        *self.reset_llm_config_calls.lock().expect("lock") += 1;
+        Ok(())
     }
 
     async fn test_connection(
@@ -13155,7 +13164,49 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
             model: Some("gpt-5-mini".to_string()),
         }]
     );
-    assert_eq!(llm_config.reset_to_defaults_count(), 1);
+    assert_eq!(llm_config.reset_llm_config_count(), 1);
+}
+
+#[tokio::test]
+async fn llm_config_reset_rejects_non_empty_input() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let error = services
+        .invoke(
+            caller(),
+            CapabilityId::new(LLM_CONFIG_RESET_CAPABILITY_ID).expect("capability id"),
+            json!({ "provider_id": "openai" }),
+            ActivityId::new(),
+        )
+        .await
+        .expect_err("reset must reject a non-empty payload");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.status_code, 400);
+    assert_eq!(error.field.as_deref(), Some("input"));
+    assert_eq!(llm_config.reset_llm_config_count(), 0);
+}
+
+#[tokio::test]
+async fn llm_config_reset_propagates_service_error() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.fail_next_reset(LlmConfigServiceError::Unavailable);
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let error = services
+        .invoke(
+            caller(),
+            CapabilityId::new(LLM_CONFIG_RESET_CAPABILITY_ID).expect("capability id"),
+            json!({}),
+            ActivityId::new(),
+        )
+        .await
+        .expect_err("reset service error must propagate");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert_eq!(llm_config.reset_llm_config_count(), 0);
 }
 
 #[tokio::test]

@@ -31,7 +31,7 @@ function findComponentNodes(root, component) {
   return found;
 }
 
-function componentProps(node, component) {
+function componentProps(node, component): Record<string, any> {
   const props = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
@@ -70,7 +70,7 @@ function renderInferenceModule() {
       providers: [{ id: "openai", default_model: "gpt-4.1" }],
       hasActiveProvider: true,
       isResetting: false,
-      resetToDefaults: async () => {},
+      resetConfig: async () => {},
     }),
     useT: () => (key) => key,
   };
@@ -82,6 +82,46 @@ function renderInferenceModule() {
     import.meta.url
   );
   return { context, exports };
+}
+
+// The shared harness stubs `useState` with a no-op setter, which is fine for
+// static prop assertions but cannot exercise state transitions. This variant
+// keeps real state across re-renders so the dialog open/close and error flows
+// can be driven: each render() call re-runs the component with the same
+// state slots (call order is stable) and the setters mutate them.
+function renderInferenceModuleWithState() {
+  const { context, exports } = renderInferenceModule();
+  const state = [];
+  let callIndex = 0;
+  context.React.useState = (initial) => {
+    const index = callIndex;
+    callIndex += 1;
+    if (state[index] === undefined) state[index] = initial;
+    return [state[index], (value) => { state[index] = value; }];
+  };
+  const render = (props) => {
+    callIndex = 0;
+    return exports.InferenceTab(props);
+  };
+  return { context, exports, render };
+}
+
+function componentPropsByName(root, componentName) {
+  return findComponentNodes(root, componentName).map((node) =>
+    componentProps(node, componentName)
+  );
+}
+
+function scalarStrings(root) {
+  const scalars = [];
+  visit(root, (node) => {
+    if (Array.isArray(node.values)) {
+      for (const value of node.values) {
+        if (typeof value === "string") scalars.push(value);
+      }
+    }
+  });
+  return scalars;
 }
 
 test("Inference tab omits unsupported operator-config fields", () => {
@@ -130,4 +170,76 @@ test("Inference tab resets model settings only after shared-dialog confirmation"
   assert.equal(dialog.title, "llm.confirmResetToDefaults");
   assert.equal(dialog.confirmLabel, "llm.resetToDefaults");
   assert.equal(typeof dialog.onConfirm, "function");
+});
+
+test("Inference tab surfaces reset failure and keeps the dialog open", async () => {
+  const { context, render } = renderInferenceModuleWithState();
+  context.useT = (() => (key, params) =>
+    key === "error.loadFailed" && params
+      ? `error.loadFailed: ${params.message}`
+      : key) as typeof context.useT;
+  context.useLlmProviders = () => ({
+    activeProviderId: "openai",
+    selectedModel: "gpt-4.1",
+    providers: [{ id: "openai", default_model: "gpt-4.1" }],
+    hasActiveProvider: true,
+    isResetting: false,
+    resetConfig: async () => { throw new Error("boom"); },
+  });
+  const props = {
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "",
+  };
+
+  const rendered = render(props);
+  const [button] = componentPropsByName(rendered, context.Button);
+  button.onClick();
+  const openDialog = componentPropsByName(render(props), context.ConfirmDialog)[0];
+  assert.equal(openDialog.open, true, "reset button must open the confirm dialog");
+  await openDialog.onConfirm();
+
+  const afterFailure = render(props);
+  assert.equal(
+    componentPropsByName(afterFailure, context.ConfirmDialog)[0].open,
+    true,
+    "a failed reset must keep the dialog open"
+  );
+  assert.ok(
+    scalarStrings(afterFailure).some((text) => text.includes("boom")),
+    "the reset failure must surface through the status region"
+  );
+});
+
+test("Inference tab closes the dialog after a successful reset", async () => {
+  const { context, render } = renderInferenceModuleWithState();
+  const props = {
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "",
+  };
+
+  const rendered = render(props);
+  const [button] = componentPropsByName(rendered, context.Button);
+  button.onClick();
+  const openDialog = componentPropsByName(render(props), context.ConfirmDialog)[0];
+  assert.equal(openDialog.open, true);
+  await openDialog.onConfirm();
+
+  const afterSuccess = render(props);
+  assert.equal(
+    componentPropsByName(afterSuccess, context.ConfirmDialog)[0].open,
+    false,
+    "a successful reset must close the confirm dialog"
+  );
+  assert.ok(
+    !scalarStrings(afterSuccess).some((text) => text.includes("Failed to load")),
+    "no error status may render after a successful reset"
+  );
 });

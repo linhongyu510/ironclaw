@@ -671,7 +671,7 @@ impl DefaultLlmSlotUpdateSession {
     }
 
     /// Remove the persisted `[llm.default]` selection while leaving every
-    /// other config section, including other LLM routes, unchanged.
+    /// other config section, including other LLM slots, unchanged.
     pub fn clear(mut self) -> Result<(), RebornConfigFileUpdateError> {
         let removed = self
             .doc
@@ -1720,6 +1720,49 @@ model = "claude-sonnet"
         clear_default_llm_slot(&path).expect("clearing an absent config slot is a no-op");
 
         assert!(!path.exists());
+    }
+
+    /// The one error path `clear` alone can reach after a successful removal
+    /// is the document write; make the config directory unwritable so the
+    /// write must fail loud instead of pretending the reset happened.
+    #[cfg(unix)]
+    #[test]
+    fn clear_default_llm_slot_reports_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm.default]
+provider_id = "openai"
+"#,
+        )
+        .expect("write config");
+        // The update lock lives next to the config file; pre-create it so the
+        // read-only directory blocks the document write itself, not lock
+        // acquisition.
+        fs::write(temp.path().join("config.toml.lock"), b"").expect("write lock file");
+
+        let parent = temp.path();
+        let original = fs::metadata(parent).expect("stat parent").permissions();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o555))
+            .expect("make config directory read-only");
+        // Root bypasses directory permissions; skip rather than assert on a
+        // write that cannot fail.
+        let probe = parent.join("probe");
+        if fs::write(&probe, b"x").is_ok() {
+            fs::remove_file(&probe).ok();
+            fs::set_permissions(parent, original).expect("restore permissions");
+            return;
+        }
+
+        let error = clear_default_llm_slot(&path)
+            .expect_err("read-only config directory must surface a write failure");
+        assert!(matches!(error, RebornConfigFileUpdateError::Write { .. }));
+
+        fs::set_permissions(parent, original).expect("restore permissions");
     }
 
     #[test]

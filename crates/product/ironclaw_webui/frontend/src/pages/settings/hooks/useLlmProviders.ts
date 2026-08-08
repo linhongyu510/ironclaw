@@ -4,7 +4,7 @@ import {
   deleteLlmProvider,
   fetchLlmProviders,
   listLlmProviderModels,
-  resetLlmToDefaults,
+  resetLlmConfig,
   setActiveLlm,
   testLlmProviderConnection,
   upsertLlmProvider,
@@ -131,8 +131,8 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     onSuccess: refresh,
   });
 
-  const resetToDefaultsMutation = useMutation({
-    mutationFn: resetLlmToDefaults,
+  const resetConfigMutation = useMutation({
+    mutationFn: resetLlmConfig,
     onSuccess: refresh,
   });
 
@@ -151,14 +151,14 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     saveCustomProvider: (payload) => saveProviderMutation.mutateAsync(payload),
     saveBuiltinProvider: (payload) => saveProviderMutation.mutateAsync(payload),
     deleteCustomProvider: (provider) => deleteCustomMutation.mutateAsync(provider),
-    resetToDefaults: () => resetToDefaultsMutation.mutateAsync(),
+    resetConfig: () => resetConfigMutation.mutateAsync(),
     testConnection: testLlmProviderConnection,
     listModels: listLlmProviderModels,
     isBusy:
       setActiveMutation.isPending ||
       saveProviderMutation.isPending ||
       deleteCustomMutation.isPending ||
-      resetToDefaultsMutation.isPending,
-    isResetting: resetToDefaultsMutation.isPending,
+      resetConfigMutation.isPending,
+    isResetting: resetConfigMutation.isPending,
   };
 }

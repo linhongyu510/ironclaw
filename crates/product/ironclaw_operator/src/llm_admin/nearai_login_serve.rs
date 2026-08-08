@@ -152,9 +152,9 @@ mod tests {
 
     #[async_trait]
     impl LlmReloadTrigger for RecordingReload {
-        async fn reload(&self) -> Result<(), String> {
+        async fn reload(&self) -> Result<bool, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(true)
         }
     }
 

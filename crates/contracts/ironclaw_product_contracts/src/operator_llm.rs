@@ -84,11 +84,13 @@ pub trait LlmConfigService: Send + Sync {
 
     /// Clear the operator-persisted active selection so boot-time LLM
     /// resolution supplies the default again. Provider definitions and stored
-    /// credentials are deliberately preserved.
-    async fn reset_to_defaults(
+    /// credentials are deliberately preserved. The fresh configuration
+    /// snapshot is fetched by the caller through the `snapshot` view, so the
+    /// mutation itself returns no value.
+    async fn reset_llm_config(
         &self,
         caller: ProductSurfaceCaller,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
+    ) -> Result<(), LlmConfigServiceError>;
 
     /// Probe a provider's credentials/endpoint without persisting anything.
     async fn test_connection(
@@ -646,11 +648,11 @@ mod tests {
             })
         }
 
-        async fn reset_to_defaults(
+        async fn reset_llm_config(
             &self,
             caller: ProductSurfaceCaller,
-        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-            self.snapshot(caller).await
+        ) -> Result<(), LlmConfigServiceError> {
+            self.snapshot(caller).await.map(|_| ())
         }
 
         async fn test_connection(

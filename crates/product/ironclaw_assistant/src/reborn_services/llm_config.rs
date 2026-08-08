@@ -113,7 +113,7 @@ where
             .as_ref()
             .ok_or_else(llm_config_unavailable)?;
         service
-            .reset_to_defaults(caller)
+            .reset_llm_config(caller)
             .await
             .map_err(ProductSurfaceError::from)?;
         Ok(())

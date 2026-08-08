@@ -85,12 +85,14 @@ impl RebornLlmReloadAdapter {
 
 #[async_trait]
 impl LlmReloadTrigger for RebornLlmReloadAdapter {
-    async fn reload(&self) -> Result<(), String> {
+    async fn reload(&self) -> Result<bool, String> {
         let config_file = RebornConfigFile::load(&self.boot.home().config_file_path())
             .map_err(|error| error.to_string())?;
         let Some(resolved) = self.resolve_effective_llm(config_file.as_ref()).await? else {
-            // No provider selected yet, so there is nothing to swap.
-            return Ok(());
+            // No provider selected (e.g. the persisted selection was cleared
+            // and no environment fallback resolves), so there is nothing to
+            // swap. The caller decides how to surface this.
+            return Ok(false);
         };
         let provider_id = resolved.provider_id().to_string();
         let mut config = resolved.into_config();
@@ -119,6 +121,6 @@ impl LlmReloadTrigger for RebornLlmReloadAdapter {
             succeeded = result.is_ok(),
             "LLM reload applied to the live provider"
         );
-        result
+        result.map(|()| true)
     }
 }

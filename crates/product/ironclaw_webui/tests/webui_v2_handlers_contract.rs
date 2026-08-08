@@ -6469,6 +6469,42 @@ async fn llm_provider_routes_require_operator_capability() {
     );
 }
 
+#[tokio::test]
+async fn reset_llm_config_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::NotFound,
+        kind: ProductSurfaceErrorKind::NotFound,
+        status_code: 404,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/reset")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["kind"], "not_found");
+    assert_eq!(body["retryable"], false);
+}
+
 fn url_encode(value: &str) -> String {
     // Minimal application/x-www-form-urlencoded helper: percent-encode every
     // byte that is not an unreserved character per RFC 3986. Avoids pulling

@@ -185,9 +185,12 @@ fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
 /// provider's inner backend; tests / unwired runtimes leave it absent.
 #[async_trait]
 pub trait LlmReloadTrigger: Send + Sync {
-    /// Re-resolve and hot-swap the active provider. The error string is for
-    /// logging only and must stay free of secrets / backend internals.
-    async fn reload(&self) -> Result<(), String>;
+    /// Re-resolve and hot-swap the active provider. Returns `true` when a
+    /// provider was swapped, `false` when nothing resolved to swap (e.g. the
+    /// persisted selection was cleared and no environment fallback exists).
+    /// The error string is for logging only and must stay free of secrets /
+    /// backend internals.
+    async fn reload(&self) -> Result<bool, String>;
 }
 
 /// Operator-wide LLM configuration service backing the webui2 settings surface.
@@ -260,11 +263,25 @@ impl RebornLlmConfigService {
             );
             return;
         };
-        if let Err(reason) = reload.reload().await {
-            tracing::warn!(
-                reason = %reason,
-                "LLM config persisted but live provider reload failed; change applies on restart"
-            );
+        match reload.reload().await {
+            Err(reason) => {
+                tracing::warn!(
+                    reason = %reason,
+                    "LLM config persisted but live provider reload failed; change applies on restart"
+                );
+            }
+            // A cleared selection (reset) with no environment fallback leaves
+            // the previously active provider serving: reload had nothing to
+            // swap. The on-disk state is authoritative, so warn that the
+            // change only takes effect on restart instead of silently
+            // diverging from the UI.
+            Ok(false) => {
+                tracing::warn!(
+                    "LLM selection cleared but no environment fallback resolves; the previously \
+                     active provider stays live until restart"
+                );
+            }
+            Ok(true) => {}
         }
     }
 
@@ -684,15 +701,15 @@ impl LlmConfigService for RebornLlmConfigService {
         self.snapshot(caller).await
     }
 
-    async fn reset_to_defaults(
+    async fn reset_llm_config(
         &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<(), LlmConfigServiceError> {
         self.clear_active_selection_async()
             .await
             .map_err(map_admin_error)?;
         self.refresh_running_provider().await;
-        self.snapshot(caller).await
+        Ok(())
     }
 
     async fn test_connection(
@@ -1050,7 +1067,7 @@ pub async fn apply_nearai_login(
     RebornProviderAdmin::new(boot.clone())
         .set_provider("nearai", None)
         .map_err(|error| format!("set nearai active: {error}"))?;
-    reload.reload().await
+    reload.reload().await.map(|_| ())
 }
 
 /// Parse a wire adapter name (e.g. `open_ai_completions`) into a protocol.
@@ -1360,6 +1377,7 @@ mod tests {
     use ironclaw_product_contracts::test_support::fakes::{
         FakeOperatorSecretValueStore, OperatorSecretValueOp,
     };
+    use tracing_test::traced_test;
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -2244,7 +2262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_to_defaults_clears_only_the_persisted_active_selection() {
+    async fn reset_llm_config_clears_only_the_persisted_active_selection() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
@@ -2256,7 +2274,7 @@ mod tests {
             .expect("persist custom provider, key, and active selection");
 
         service
-            .reset_to_defaults(caller())
+            .reset_llm_config(caller())
             .await
             .expect("reset persisted selection");
         assert!(
@@ -2281,24 +2299,84 @@ mod tests {
         );
 
         service
-            .reset_to_defaults(caller())
+            .reset_llm_config(caller())
             .await
             .expect("reset is idempotent when no slot is persisted");
     }
 
     #[tokio::test]
-    async fn reset_to_defaults_fails_closed_when_config_cannot_be_updated() {
+    async fn reset_llm_config_fails_closed_when_config_cannot_be_updated() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(reborn_home.join("config.toml")).expect("mkdir config path");
         let service = RebornLlmConfigService::new(boot_for_home(&reborn_home), key_store());
 
         let error = service
-            .reset_to_defaults(caller())
+            .reset_llm_config(caller())
             .await
             .expect_err("config update failure must not report a reset");
 
         assert!(matches!(error, LlmConfigServiceError::Unavailable));
+    }
+
+    struct NoSwapReload;
+
+    #[async_trait]
+    impl LlmReloadTrigger for NoSwapReload {
+        async fn reload(&self) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    struct SwapReload;
+
+    #[async_trait]
+    impl LlmReloadTrigger for SwapReload {
+        async fn reload(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    /// A reset with no environment fallback leaves the previously active
+    /// provider serving; the operator must be told the change needs a
+    /// restart instead of silently diverging from the snapshot the UI shows.
+    #[traced_test]
+    #[tokio::test]
+    async fn reset_llm_config_warns_when_reload_has_nothing_to_swap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let service = RebornLlmConfigService::new(boot_for_home(&reborn_home), key_store())
+            .with_reload_trigger(Arc::new(NoSwapReload));
+
+        service
+            .reset_llm_config(caller())
+            .await
+            .expect("reset succeeds even when the live provider cannot swap");
+
+        assert!(
+            logs_contain("no environment fallback resolves"),
+            "expected a restart-needed warning when reload has nothing to swap"
+        );
+    }
+
+    /// A normal swap must not raise the no-fallback warning.
+    #[traced_test]
+    #[tokio::test]
+    async fn reset_llm_config_does_not_warn_when_reload_swaps() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let service = RebornLlmConfigService::new(boot_for_home(&reborn_home), key_store())
+            .with_reload_trigger(Arc::new(SwapReload));
+
+        service
+            .reset_llm_config(caller())
+            .await
+            .expect("reset succeeds");
+
+        assert!(
+            !logs_contain("no environment fallback resolves"),
+            "a successful provider swap must not warn about a missing fallback"
+        );
     }
 
     // ✎ WS3: `upsert_builtin_nearai_with_production_secret_store_succeeds` (the

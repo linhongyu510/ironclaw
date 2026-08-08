@@ -3925,6 +3925,25 @@ async fn query_llm_config_snapshot(
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
+/// Shared tail of every LLM mutation handler: surface capability-failure
+/// verdicts as HTTP errors, then answer with the fresh config snapshot. The
+/// handlers keep only their argument parsing plus one call here.
+async fn llm_config_mutation_response(
+    state: &WebUiV2State,
+    caller: ProductSurfaceCaller,
+    resolution: Resolution,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
+    Ok(Json(response))
+}
+
 /// `POST /api/webchat/v2/llm/providers`
 pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
@@ -3939,15 +3958,7 @@ pub async fn upsert_llm_provider(
     let resolution = LLM_PROVIDER_UPSERT_CAPABILITY
         .invoke_on(&surface, body, activity_id)
         .await?;
-    capability_resolution_succeeded(
-        resolution,
-        "llm config",
-        true,
-        extension_lifecycle_forbidden,
-        extension_lifecycle_unavailable,
-    )?;
-    let response = query_llm_config_snapshot(state.services(), caller).await?;
-    Ok(Json(response))
+    llm_config_mutation_response(&state, caller, resolution).await
 }
 
 /// `POST /api/webchat/v2/llm/providers/{provider_id}/delete`
@@ -3965,15 +3976,7 @@ pub async fn delete_llm_provider(
         serde_json::json!({ "provider_id": provider_id }),
     )
     .await?;
-    capability_resolution_succeeded(
-        resolution,
-        "llm config",
-        true,
-        extension_lifecycle_forbidden,
-        extension_lifecycle_unavailable,
-    )?;
-    let response = query_llm_config_snapshot(state.services(), caller).await?;
-    Ok(Json(response))
+    llm_config_mutation_response(&state, caller, resolution).await
 }
 
 /// `POST /api/webchat/v2/llm/active`
@@ -3991,15 +3994,7 @@ pub async fn set_active_llm(
         body,
     )
     .await?;
-    capability_resolution_succeeded(
-        resolution,
-        "llm config",
-        true,
-        extension_lifecycle_forbidden,
-        extension_lifecycle_unavailable,
-    )?;
-    let response = query_llm_config_snapshot(state.services(), caller).await?;
-    Ok(Json(response))
+    llm_config_mutation_response(&state, caller, resolution).await
 }
 
 /// `POST /api/webchat/v2/llm/reset`
@@ -4016,15 +4011,7 @@ pub async fn reset_llm_config(
         serde_json::json!({}),
     )
     .await?;
-    capability_resolution_succeeded(
-        resolution,
-        "llm config",
-        true,
-        extension_lifecycle_forbidden,
-        extension_lifecycle_unavailable,
-    )?;
-    let response = query_llm_config_snapshot(state.services(), caller).await?;
-    Ok(Json(response))
+    llm_config_mutation_response(&state, caller, resolution).await
 }
 
 /// `POST /api/webchat/v2/llm/test-connection`

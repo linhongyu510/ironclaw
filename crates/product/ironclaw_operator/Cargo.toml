@@ -55,6 +55,7 @@ ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contract
 rust_decimal = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+tracing-test = "0.2"
 
 [lints]
 workspace = true
