@@ -19,6 +19,31 @@ const FILE_FIELDS: &str = "id,name,mimeType,description,size,createdTime,modifie
     webViewLink,parents,shared,starred,trashed,ownedByMe,driveId,\
     owners(emailAddress,displayName)";
 
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TestApiCall {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) body: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_API_RESPONSE: std::cell::RefCell<Option<Result<String, String>>> = const { std::cell::RefCell::new(None) };
+    static TEST_API_CALLS: std::cell::RefCell<Vec<TestApiCall>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn stub_api_response(response: Result<String, String>) {
+    TEST_API_RESPONSE.with(|slot| *slot.borrow_mut() = Some(response));
+    TEST_API_CALLS.with(|calls| calls.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_api_calls() -> Vec<TestApiCall> {
+    TEST_API_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+}
+
 /// Make a Drive API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
     let url = format!("{}/{}", DRIVE_API_BASE, path);
@@ -30,6 +55,18 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     };
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
+
+    #[cfg(test)]
+    if let Some(response) = TEST_API_RESPONSE.with(|slot| slot.borrow_mut().take()) {
+        TEST_API_CALLS.with(|calls| {
+            calls.borrow_mut().push(TestApiCall {
+                method: method.to_string(),
+                url,
+                body: body.map(str::to_string),
+            });
+        });
+        return response;
+    }
 
     host::log(
         host::LogLevel::Debug,
@@ -172,8 +209,11 @@ pub fn find_files_compact(
     drive_id: Option<&str>,
     page_token: Option<&str>,
 ) -> Result<CompactFilesResult, String> {
+    // Google Drive lists trashed files by default; an absent query must not
+    // silently widen the compact search surface to trash. Callers that want
+    // trashed results can still pass an explicit query.
     let result = list_files(
-        query,
+        query.or(Some("trashed = false")),
         page_size.clamp(1, 100),
         order_by.or(Some("modifiedTime desc")),
         corpora,
@@ -716,5 +756,45 @@ mod tests {
         let compact = serde_json::to_value(compact_file(file)).unwrap();
 
         assert!(compact.get("owner").is_none());
+    }
+
+    #[test]
+    fn query_less_compact_search_defaults_to_excluding_trash() {
+        stub_api_response(Ok(r#"{"files": []}"#.to_string()));
+
+        find_files_compact(None, 10, None, "user", None, None).unwrap();
+
+        let calls = take_test_api_calls();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.method, "GET");
+        assert!(
+            call.url.contains("q=trashed%20%3D%20false"),
+            "query-less compact search must default to trashed = false, got: {}",
+            call.url
+        );
+    }
+
+    #[test]
+    fn explicit_query_is_preserved_for_compact_search() {
+        stub_api_response(Ok(r#"{"files": []}"#.to_string()));
+
+        find_files_compact(
+            Some("name contains 'report'"),
+            10,
+            None,
+            "user",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let calls = take_test_api_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].url.contains("name%20contains%20%27report%27"),
+            "explicit query must be passed through unchanged, got: {}",
+            calls[0].url
+        );
     }
 }

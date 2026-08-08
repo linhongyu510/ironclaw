@@ -136,7 +136,19 @@ tested = [
   "web-access.search",
 ]
 
-live_only = []
+live_only = [
+  # Compact Google context capabilities (PR #5503 experiment): exercised by
+  # the live canary A/B benchmark arms only; no emulate/operation-case or
+  # recorded-trace evidence exists yet.
+  "gmail.fetch_message_summaries",
+  "google-calendar.agenda",
+  "google-calendar.daily_brief",
+  "google-calendar.meeting_prep",
+  "google-docs.read_excerpt",
+  "google-drive.find_files_compact",
+  "google-drive.recent_files",
+  "google-sheets.preview",
+]
 unsupported = []
 
 [[integration_evidence]]

@@ -316,13 +316,6 @@ scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.goog
 audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
-[[tools.credentials]]
-handle = "gmail_account"
-vendor = "google"
-scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"]
-audience = { scheme = "https", host = "gmail.googleapis.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
-
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.meeting_prep"

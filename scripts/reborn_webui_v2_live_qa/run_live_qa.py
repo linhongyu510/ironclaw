@@ -228,16 +228,21 @@ HN_KEYWORD_SEARCH_URL = (
 EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
-COMPACT_GOOGLE_CAPABILITY_IDS = {
-    "gmail.fetch_message_summaries",
-    "google-calendar.agenda",
-    "google-calendar.daily_brief",
-    "google-calendar.meeting_prep",
-    "google-docs.read_excerpt",
-    "google-drive.find_files_compact",
-    "google-drive.recent_files",
-    "google-sheets.preview",
-}
+# Single source of truth shared with the runtime bundle filter
+# (crates/app/ironclaw_cli/src/first_party/bundles.rs reads the same file via
+# include_str!), so the benchmark metric classifier and the runtime
+# enable/disable filter cannot drift apart.
+_COMPACT_GOOGLE_CAPABILITY_IDS_PATH = (
+    ROOT
+    / "crates/app/ironclaw_cli/src/first_party/compact_google_capability_ids.txt"
+)
+COMPACT_GOOGLE_CAPABILITY_IDS = frozenset(
+    line.strip()
+    for line in _COMPACT_GOOGLE_CAPABILITY_IDS_PATH.read_text(
+        encoding="utf-8"
+    ).splitlines()
+    if line.strip()
+)
 DISCOVERY_CAPABILITY_IDS = {
     "tool_search",
     "tool_describe",
@@ -2087,7 +2092,10 @@ async def _live_chat_case(
                 timeout=15000,
             )
         except Exception:
-            if capture_submission_identity and "submission_identity" in observed:
+            if (
+                (capture_submission_identity or capture_run_metrics)
+                and "submission_identity" in observed
+            ):
                 observed["submitted_user_bubble_not_observed"] = True
             elif not await _dismiss_visible_connect_action(page):
                 raise

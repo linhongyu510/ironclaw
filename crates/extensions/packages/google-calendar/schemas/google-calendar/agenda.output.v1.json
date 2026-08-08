@@ -14,42 +14,95 @@
     "calendars",
     "events",
     "eventCount",
-    "partialFailures"
+    "partialFailures",
+    "calendarDiscoveryTruncated"
   ],
   "properties": {
-    "kind": { "const": "ironclaw#calendarAgenda" },
-    "date": { "type": ["string", "null"] },
-    "window": { "type": ["string", "null"] },
-    "timeZone": { "type": ["string", "null"] },
-    "timeMin": { "type": ["string", "null"] },
-    "timeMax": { "type": ["string", "null"] },
+    "kind": {
+      "const": "ironclaw#calendarAgenda"
+    },
+    "date": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "window": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeZone": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeMin": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeMax": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "calendarIds": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "calendars": {
       "type": "array",
-      "items": { "$ref": "#/definitions/calendar" }
+      "items": {
+        "$ref": "#/definitions/calendar"
+      }
+    },
+    "calendarDiscoveryTruncated": {
+      "type": "boolean",
+      "description": "True when calendar discovery was truncated (more calendars than the compact preview keeps, or an incomplete discovery page)."
     },
     "events": {
       "type": "array",
-      "items": { "$ref": "#/definitions/event" }
+      "items": {
+        "$ref": "#/definitions/event"
+      }
     },
-    "eventCount": { "type": "integer", "minimum": 0 },
+    "eventCount": {
+      "type": "integer",
+      "minimum": 0
+    },
     "partialFailures": {
       "type": "array",
-      "items": { "$ref": "#/definitions/partialFailure" }
+      "items": {
+        "$ref": "#/definitions/partialFailure"
+      }
     }
   },
   "definitions": {
     "calendar": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "summary", "primary"],
+      "required": [
+        "id",
+        "summary",
+        "primary"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "summary": { "type": "string" },
-        "primary": { "type": "boolean" }
+        "id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "boolean"
+        }
       }
     },
     "event": {
@@ -69,42 +122,101 @@
         "attendees"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "calendarId": { "type": "string" },
-        "summary": { "type": "string" },
-        "start": { "type": ["string", "null"] },
-        "end": { "type": ["string", "null"] },
-        "location": { "type": "string" },
-        "htmlLink": { "type": "string" },
-        "hangoutLink": { "type": "string" },
-        "descriptionPreview": { "type": "string" },
-        "attendeeCount": { "type": "integer", "minimum": 0 },
+        "id": {
+          "type": "string"
+        },
+        "calendarId": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "start": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "type": "string"
+        },
+        "htmlLink": {
+          "type": "string"
+        },
+        "hangoutLink": {
+          "type": "string"
+        },
+        "descriptionPreview": {
+          "type": "string"
+        },
+        "attendeeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
         "attendees": {
           "type": "array",
-          "items": { "$ref": "#/definitions/attendee" }
+          "items": {
+            "$ref": "#/definitions/attendee"
+          }
         }
       }
     },
     "attendee": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["email", "displayName", "responseStatus", "organizer"],
+      "required": [
+        "email",
+        "displayName",
+        "responseStatus",
+        "organizer"
+      ],
       "properties": {
-        "email": { "type": "string" },
-        "displayName": { "type": "string" },
-        "responseStatus": { "type": "string" },
-        "organizer": { "type": "boolean" }
+        "email": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "responseStatus": {
+          "type": "string"
+        },
+        "organizer": {
+          "type": "boolean"
+        }
       }
     },
     "partialFailure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scope", "status", "reason"],
+      "required": [
+        "scope",
+        "status",
+        "reason"
+      ],
       "properties": {
-        "scope": { "type": "string" },
-        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
-        "reason": { "type": ["string", "null"] },
-        "source": { "type": "string" }
+        "scope": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
       }
     }
   }

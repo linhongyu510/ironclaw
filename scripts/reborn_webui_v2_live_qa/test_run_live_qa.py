@@ -67,6 +67,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         response_payloads: list[dict[str, object] | None],
         user_bubble_failures: int = 0,
         terminal_failure: run_live_qa.TerminalRunFailureObservation | None = None,
+        capture_submission_identity: bool = True,
+        capture_run_metrics: bool = False,
     ) -> tuple[run_live_qa.ProbeResult, dict[str, int]]:
         state = {
             "presses": 0,
@@ -190,6 +192,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 final_reply_reason="final_reply_observed",
             )
 
+        async def fake_capture_run_metrics(
+            _ctx: run_live_qa.LiveQaContext,
+            _submission_identity: dict[str, object],
+        ) -> dict[str, object]:
+            return {"tool_calls": [], "tool_call_count": 0}
+
         playwright_module = types.ModuleType("playwright")
         playwright_async_api = types.ModuleType("playwright.async_api")
         playwright_async_api.expect = lambda locator: FakeExpectation(locator)
@@ -204,6 +212,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(run_live_qa, "_with_page", new=fake_with_page),
             patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+            patch.object(
+                run_live_qa,
+                "_capture_run_metrics",
+                new=(
+                    fake_capture_run_metrics
+                    if capture_run_metrics
+                    else run_live_qa._capture_run_metrics
+                ),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._live_chat_case(
@@ -212,7 +229,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     prompt="Read Slack.",
                     marker=None,
                     required_text=[],
-                    capture_submission_identity=True,
+                    capture_submission_identity=capture_submission_identity,
+                    capture_run_metrics=capture_run_metrics,
                     enforce_marker=False,
                 )
             )
@@ -2663,6 +2681,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(state["presses"], 1)
         self.assertEqual(state["dismissals"], 0)
         self.assertEqual(result.details["submission_identity"]["run_id"], "run-first")
+
+    def test_run_metrics_capture_survives_missing_user_bubble_without_second_enter(self):
+        submitted = {
+            "outcome": "submitted",
+            "thread_id": "thread-first",
+            "accepted_message_ref": "msg:message-first",
+            "turn_id": "turn-first",
+            "run_id": "run-first",
+        }
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[submitted],
+            user_bubble_failures=1,
+            capture_submission_identity=False,
+            capture_run_metrics=True,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(state["presses"], 1)
+        self.assertEqual(state["dismissals"], 0)
+        self.assertTrue(result.details["submitted_user_bubble_not_observed"])
 
     def test_submitted_run_terminal_provider_error_wins_without_retry(self):
         submitted = {

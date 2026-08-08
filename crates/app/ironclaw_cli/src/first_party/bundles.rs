@@ -13,16 +13,21 @@ use ironclaw_host_api::ids::ExtensionId;
 pub(crate) const COMPACT_GOOGLE_CAPABILITIES_ENABLED_ENV: &str =
     "IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED";
 
-const COMPACT_GOOGLE_CAPABILITY_IDS: &[&str] = &[
-    "gmail.fetch_message_summaries",
-    "google-calendar.agenda",
-    "google-calendar.daily_brief",
-    "google-calendar.meeting_prep",
-    "google-docs.read_excerpt",
-    "google-drive.find_files_compact",
-    "google-drive.recent_files",
-    "google-sheets.preview",
-];
+/// The compact Google capability ids, one per line in
+/// `compact_google_capability_ids.txt` — the single source of truth shared
+/// with the live-qa benchmark classifier
+/// (`scripts/reborn_webui_v2_live_qa/run_live_qa.py`), so the runtime bundle
+/// filter and the benchmark metric classifier cannot drift apart.
+const COMPACT_GOOGLE_CAPABILITY_IDS_SOURCE: &str =
+    include_str!("compact_google_capability_ids.txt");
+
+fn compact_google_capability_ids() -> Vec<&'static str> {
+    COMPACT_GOOGLE_CAPABILITY_IDS_SOURCE
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
 
 /// The GSuite family's catalog search aliases, folded into the neutral bundle so
 /// composition search never special-cases a concrete id.
@@ -46,9 +51,7 @@ pub(crate) fn bundled_first_party_bundles() -> anyhow::Result<Vec<FirstPartyPack
     bundled_packages()
         .into_iter()
         .map(|bundle| {
-            let is_gsuite = ExtensionId::new(bundle.id)
-                .map(|id| is_gsuite_extension_id(&id))
-                .unwrap_or(false);
+            let is_gsuite = is_gsuite_extension_id(&ExtensionId::new(bundle.id)?);
             let manifest_toml = if is_gsuite {
                 google_manifest_for_compact_capabilities(
                     &bundle.manifest_toml,
@@ -126,10 +129,11 @@ fn google_manifest_for_compact_capabilities(
         .get_mut("tools")
         .and_then(toml::Value::as_array_mut)
     {
+        let compact_ids = compact_google_capability_ids();
         tools.retain(|tool| {
             tool.get("id")
                 .and_then(toml::Value::as_str)
-                .is_none_or(|id| !COMPACT_GOOGLE_CAPABILITY_IDS.contains(&id))
+                .is_none_or(|id| !compact_ids.contains(&id))
         });
     }
     Ok(toml::to_string(&manifest)?)

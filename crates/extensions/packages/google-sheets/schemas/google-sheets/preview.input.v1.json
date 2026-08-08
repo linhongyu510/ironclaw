@@ -19,7 +19,7 @@
     "range": {
       "type": ["string", "null"],
       "minLength": 1,
-      "description": "Optional A1 notation range. When omitted, reads from A1 using max_rows/max_columns."
+      "description": "Optional A1 notation range (single cell or start:end). When omitted, reads from A1 using max_rows/max_columns. Explicit ranges are clamped to max_rows/max_columns and unbounded forms (whole columns/rows) are rejected."
     },
     "max_rows": {
       "type": "integer",

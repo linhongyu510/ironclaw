@@ -395,6 +395,7 @@ async fn fetch_gmail_summaries(
         .await;
     responses.sort_by_key(|(index, _, _)| *index);
     let mut first_error = None;
+    let mut ready = Vec::new();
     for (_, id, response) in responses {
         let response = match response {
             Ok(response) => response,
@@ -403,7 +404,13 @@ async fn fetch_gmail_summaries(
                 continue;
             }
         };
+        // Account for every completed response before deciding the outcome:
+        // an auth-expired early return must not under-report bytes that
+        // sibling fan-out requests already spent on the wire.
         run.record_response_usage(&response);
+        ready.push((id, response));
+    }
+    for (id, response) in ready {
         if is_google_auth_expired_response(&response) {
             return Ok(auth_expired_marker());
         }
@@ -452,7 +459,8 @@ async fn fetch_agenda(
     include_link_source: bool,
 ) -> Result<Value, GsuiteDispatchError> {
     let (time_min, time_max, date_label) = agenda_bounds(input)?;
-    let (calendar_ids, calendars, calendar_failure) = resolve_calendar_ids(run, input).await?;
+    let (calendar_ids, calendars, calendar_failure, calendar_discovery_truncated) =
+        resolve_calendar_ids(run, input).await?;
     if let Some(response) = calendar_failure {
         if is_google_auth_expired_response(&response) {
             return Ok(auth_expired_marker());
@@ -468,6 +476,7 @@ async fn fetch_agenda(
             "timeMax": time_max,
             "calendarIds": [],
             "calendars": [],
+            "calendarDiscoveryTruncated": false,
             "events": [],
             "eventCount": 0,
             "partialFailures": [partial_failure("calendar_discovery", response.status, &body)],
@@ -497,6 +506,7 @@ async fn fetch_agenda(
         .await;
     responses.sort_by_key(|(index, _, _)| *index);
     let mut first_error = None;
+    let mut ready = Vec::new();
     for (_, calendar_id, response) in responses {
         let response = match response {
             Ok(response) => response,
@@ -505,7 +515,13 @@ async fn fetch_agenda(
                 continue;
             }
         };
+        // Account for every completed response before deciding the outcome:
+        // an auth-expired early return must not under-report bytes that
+        // sibling fan-out requests already spent on the wire.
         run.record_response_usage(&response);
+        ready.push((calendar_id, response));
+    }
+    for (calendar_id, response) in ready {
         if is_google_auth_expired_response(&response) {
             return Ok(auth_expired_marker());
         }
@@ -540,6 +556,7 @@ async fn fetch_agenda(
         "timeMax": time_max,
         "calendarIds": calendar_ids,
         "calendars": calendars,
+        "calendarDiscoveryTruncated": calendar_discovery_truncated,
         "events": events,
         "eventCount": events.len(),
         "partialFailures": partial_failures,
@@ -549,10 +566,18 @@ async fn fetch_agenda(
 async fn resolve_calendar_ids(
     run: &mut GoogleApiRun<'_, '_>,
     input: &CalendarAgendaInput,
-) -> Result<(Vec<String>, Vec<Value>, Option<RuntimeHttpEgressResponse>), GsuiteDispatchError> {
+) -> Result<
+    (
+        Vec<String>,
+        Vec<Value>,
+        Option<RuntimeHttpEgressResponse>,
+        bool,
+    ),
+    GsuiteDispatchError,
+> {
     if !input.include_all_calendars {
         if !input.calendar_ids.is_empty() {
-            return Ok((input.calendar_ids.clone(), Vec::new(), None));
+            return Ok((input.calendar_ids.clone(), Vec::new(), None, false));
         }
         return Ok((
             vec![
@@ -563,6 +588,7 @@ async fn resolve_calendar_ids(
             ],
             Vec::new(),
             None,
+            false,
         ));
     }
 
@@ -572,13 +598,18 @@ async fn resolve_calendar_ids(
         ))
         .await?;
     if is_google_auth_expired_response(&response) || response.status != 200 {
-        return Ok((Vec::new(), Vec::new(), Some(response)));
+        return Ok((Vec::new(), Vec::new(), Some(response), false));
     }
     let body = response_body_json(&response)
         .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
     let mut calendar_ids = Vec::new();
     let mut calendars = Vec::new();
     if let Some(items) = body.get("items").and_then(Value::as_array) {
+        // The agenda is a compact view: calendars beyond MAX_CALENDARS are
+        // dropped, and a nextPageToken means even the 250-item discovery page
+        // was incomplete. Report the truncation instead of letting the model
+        // read a partial agenda as complete.
+        let truncated = items.len() > MAX_CALENDARS || body.get("nextPageToken").is_some();
         for calendar in items.iter().take(MAX_CALENDARS) {
             let Some(id) = calendar.get("id").and_then(Value::as_str) else {
                 continue;
@@ -590,8 +621,9 @@ async fn resolve_calendar_ids(
                 "primary": calendar.get("primary").and_then(Value::as_bool).unwrap_or(false),
             }));
         }
+        return Ok((calendar_ids, calendars, None, truncated));
     }
-    Ok((calendar_ids, calendars, None))
+    Ok((calendar_ids, calendars, None, false))
 }
 
 fn gmail_summary_list_url(input: &GmailFetchMessageSummariesInput) -> String {
@@ -770,6 +802,10 @@ fn event_start_instant(event: &Value) -> Option<DateTime<Utc>> {
         })
 }
 
+static LINKED_RESOURCE_URL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"https://[^\s<>"']+"#).expect("static linked-resource URL pattern is valid")
+});
+
 fn linked_resources(event: &Value, limit: usize) -> Vec<Value> {
     let text = event
         .get("_linkedResourceText")
@@ -790,10 +826,8 @@ fn linked_resources(event: &Value, limit: usize) -> Vec<Value> {
             ]
             .join("\n")
         });
-    let Ok(re) = Regex::new(r#"https://[^\s<>"']+"#) else {
-        return Vec::new();
-    };
-    re.find_iter(&text)
+    LINKED_RESOURCE_URL_RE
+        .find_iter(&text)
         .take(limit)
         .map(|mat| {
             let url = mat.as_str();
@@ -957,7 +991,7 @@ fn parse_fixed_offset(value: Option<&str>) -> Result<FixedOffset, GsuiteDispatch
         tracing::debug!(?error, time_zone = value, "invalid time zone minute");
         input_error()
     })?;
-    if hours > 23 || minutes > 59 {
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
         return Err(input_error());
     }
     FixedOffset::east_opt(sign * ((hours * 60 + minutes) * 60)).ok_or_else(input_error)

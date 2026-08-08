@@ -785,6 +785,67 @@ mod tests {
         assert_eq!(query_char_offset("Intro CAFÉ notes", "café"), Some(6));
     }
 
+    fn sample_document(paragraphs: &[&str]) -> String {
+        let content = paragraphs
+            .iter()
+            .map(|paragraph| {
+                serde_json::json!({
+                    "paragraph": {
+                        "elements": [{"textRun": {"content": paragraph}}]
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "documentId": "doc-1",
+            "title": "Compact excerpt doc",
+            "body": {"content": content}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn read_excerpt_bounds_window_and_sets_truncation_flags() {
+        // 40 chars total: query at offset 4 (0-indexed char 4), max_chars 10
+        // -> window [4, 14), truncated both before and after.
+        let body = "AaaaQUERYzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        stub_api_response(Ok(sample_document(&[body])));
+        let result = read_excerpt("doc-1", None, 4, 10, false).unwrap();
+
+        assert_eq!(result.document_id, "doc-1");
+        assert_eq!(result.title, "Compact excerpt doc");
+        assert_eq!(result.start_char, 4);
+        assert_eq!(result.end_char, 14);
+        assert_eq!(result.excerpt, &body[4..14]);
+        assert!(result.truncated_before);
+        assert!(result.truncated_after);
+        assert_eq!(result.total_chars, body.chars().count());
+    }
+
+    #[test]
+    fn read_excerpt_query_takes_precedence_over_start_char() {
+        let body = "Intro here MATCH tail tail tail tail tail";
+        stub_api_response(Ok(sample_document(&[body])));
+        let result = read_excerpt("doc-1", Some("MATCH"), 0, 5, false).unwrap();
+
+        assert_eq!(result.start_char, 11);
+        assert_eq!(result.excerpt, &body[11..16]);
+        assert!(result.truncated_before);
+    }
+
+    #[test]
+    fn read_excerpt_clamps_max_chars_and_never_exceeds_the_document() {
+        let body = "short";
+        stub_api_response(Ok(sample_document(&[body])));
+        let result = read_excerpt("doc-1", None, 0, usize::MAX, false).unwrap();
+
+        assert_eq!(result.start_char, 0);
+        assert_eq!(result.end_char, 5);
+        assert_eq!(result.excerpt, body);
+        assert!(!result.truncated_before);
+        assert!(!result.truncated_after);
+    }
+
     #[test]
     fn required_body_content_rejects_missing_or_malformed_content() {
         for document in [

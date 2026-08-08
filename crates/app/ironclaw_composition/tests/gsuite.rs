@@ -521,22 +521,13 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     .iter()
                     .map(|scope| (*scope).to_string())
                     .collect::<Vec<_>>();
-                let mut runtime_credentials = vec![(
+                let runtime_credentials = vec![(
                     spec.credential_handle.to_string(),
                     ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
                     ceiling.clone(),
                     required_scopes.clone(),
                     spec.credential_host_pattern.to_string(),
                 )];
-                if capability.id == "google-calendar.daily_brief" {
-                    runtime_credentials.push((
-                        "gmail_account".to_string(),
-                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        ceiling.clone(),
-                        required_scopes.clone(),
-                        "gmail.googleapis.com".to_string(),
-                    ));
-                }
                 let output_schema_ref = matches!(
                     capability.id,
                     "gmail.fetch_message_summaries"
