@@ -170,6 +170,32 @@ fn assert_tool_succeeded(outcome: &ToolOutcome, label: &str) {
     );
 }
 
+/// Assert the tool completed with a recoverable failure whose model-visible
+/// diagnostic contains `needle`. The omp glob/grep engines (⚠️ TEMPORARY
+/// benchmark override, issue #7392) error with the pinned `Path not found`
+/// text when the caller's workspace root does not exist yet — the v1 tools
+/// returned empty results for the same input.
+fn assert_tool_failed_containing(outcome: &ToolOutcome, label: &str, needle: &str) {
+    let Resolution::Done(done) = &outcome.resolution else {
+        panic!("{label} should complete, got {:?}", outcome.resolution);
+    };
+    let ironclaw_host_api::resolution::ToolVerdict::RecoverableFailure { diagnostic, .. } =
+        &done.verdict
+    else {
+        panic!(
+            "{label} should fail recoverably, got {:?}",
+            done.verdict
+        );
+    };
+    let text = diagnostic
+        .model_visible_text()
+        .unwrap_or_else(|| panic!("{label} failure must carry free-text cause, got {diagnostic:?}"));
+    assert!(
+        text.contains(needle),
+        "{label} failure diagnostic must contain {needle:?}, got {text:?}"
+    );
+}
+
 async fn read_composed_path(services: &RebornRuntimeStores, path: &str) -> Option<String> {
     let filesystem = services
         .local_runtime_for_test()
@@ -369,15 +395,16 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
         "newcomer",
         "builtin_glob",
         ironclaw_host_runtime::GLOB_CAPABILITY_ID,
-        serde_json::json!({ "pattern": "**/*" }),
+        // ⚠️ TEMPORARY benchmark override (issue #7392): `builtin.glob` now
+        // dispatches to the omp glob engine, whose pinned schema takes `path`
+        // (glob/file/dir to search) — there is no `pattern` field.
+        serde_json::json!({ "path": "**/*" }),
     )
     .await;
-    assert_tool_succeeded(&globbed, "glob on a fresh caller's workspace");
-    let globbed_output = globbed.output.expect("glob returns output"); // safety: test-only assertion in #[cfg(test)] module.
-    assert_eq!(
-        globbed_output["files"].as_array().map(Vec::len),
-        Some(0),
-        "a fresh caller's glob matches nothing, got {globbed_output}"
+    assert_tool_failed_containing(
+        &globbed,
+        "glob on a fresh caller's workspace",
+        "Path not found",
     );
 
     let grepped = invoke_workspace_tool_as(
@@ -388,12 +415,10 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
         serde_json::json!({ "pattern": "anything" }),
     )
     .await;
-    assert_tool_succeeded(&grepped, "grep on a fresh caller's workspace");
-    let grepped_output = grepped.output.expect("grep returns output"); // safety: test-only assertion in #[cfg(test)] module.
-    assert_eq!(
-        grepped_output["files"].as_array().map(Vec::len),
-        Some(0),
-        "a fresh caller's grep matches nothing, got {grepped_output}"
+    assert_tool_failed_containing(
+        &grepped,
+        "grep on a fresh caller's workspace",
+        "Path not found",
     );
 
     // The first write from that same fresh caller must succeed and become

@@ -11,7 +11,6 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
-#[cfg(any(test, feature = "test-support"))]
 mod omp;
 mod outbound_deliver;
 mod reply_attachment;
@@ -71,7 +70,6 @@ pub use memory::{
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
 };
-#[cfg(any(test, feature = "test-support"))]
 pub use omp::{
     OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
     OMP_WRITE_CAPABILITY_ID, OmpCodingTools, insert_omp_coding_handlers, omp_coding_package,
@@ -262,9 +260,11 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
 pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
-    let mut package = builtin_first_party_package()?;
-    restrict_package_for_process_backend(&mut package, process_backend)?;
-    Ok(package)
+    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
+    // for the /benchmark panel (issue #7392). The atomic cutover removes the
+    // old tools; the omp surface then becomes the only surface and this
+    // marker goes away.
+    omp_coding_package(process_backend)
 }
 
 fn restrict_package_for_process_backend(
@@ -433,6 +433,11 @@ pub fn builtin_first_party_handlers_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers(trigger_repository)?;
+    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
+    // for the /benchmark panel (issue #7392). The atomic cutover removes the
+    // old tools; the omp surface then becomes the only surface and this
+    // marker goes away.
+    insert_omp_coding_handlers(&mut registry)?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
     }
@@ -452,6 +457,11 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
+    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
+    // for the /benchmark panel (issue #7392). The atomic cutover removes the
+    // old tools; the omp surface then becomes the only surface and this
+    // marker goes away.
+    insert_omp_coding_handlers(&mut registry)?;
     trigger_management::insert_handlers_with_create_hook(
         &mut registry,
         trigger_repository,

@@ -989,10 +989,13 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
 /// pinned crate assets byte-identical to
 /// `tests/fixtures/omp_coding_contract/schemas/` (verified by the
 /// `omp_registration_assets_byte_match_pinned_fixtures` crate test in
-/// `ironclaw_extension_support`). Additive: production packages never
-/// declare these refs, and this arm compiles to `None` in production
-/// builds, so the stock surface is byte-identical.
-#[cfg(any(test, feature = "test-support"))]
+/// `ironclaw_extension_support`).
+///
+/// ⚠️ TEMPORARY benchmark override (revert at cutover): production packages
+/// now declare these refs (the omp surface ships in every build for the
+/// /benchmark panel, issue #7392), so this arm compiles unconditionally.
+/// After the atomic cutover the omp schemas become the stock schemas and
+/// this separate arm goes away.
 fn resolve_omp_input_schema_ref(reference: &str) -> Option<Value> {
     let raw = match reference {
         "schemas/builtin/omp.read.input.v1.json" => {
@@ -1016,11 +1019,6 @@ fn resolve_omp_input_schema_ref(reference: &str) -> Option<Value> {
     // asset==fixture byte test; a malformed schema fails that test and the
     // build, so `.ok()` here cannot silently mask a real fault.
     serde_json::from_str(raw).ok()
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn resolve_omp_input_schema_ref(_reference: &str) -> Option<Value> {
-    None
 }
 
 fn timestamp_input_schema(description: &str) -> Value {

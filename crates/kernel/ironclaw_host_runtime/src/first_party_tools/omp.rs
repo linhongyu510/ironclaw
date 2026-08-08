@@ -1,5 +1,4 @@
-//! Test-support-gated registration seam for the omp-parity coding engines
-//! (issue #7392 slice 3).
+//! Registration seam for the omp-parity coding engines (issue #7392 slice 3).
 //!
 //! Produces the built-in first-party package PLUS the five omp capabilities
 //! (`builtin.read`, `builtin.write`, `builtin.edit`, `builtin.glob`,
@@ -20,9 +19,13 @@
 //! derived `builtin__glob`/`builtin__grep` spellings, the omp tools the
 //! exact `glob`/`grep`.
 //!
-//! Everything here is compiled only for tests and `test-support` builds:
-//! production binaries ship zero bytes of this module, and the harness
-//! never selects the omp surface by default.
+//! ⚠️ TEMPORARY benchmark override (revert at cutover): the omp surface is
+//! enabled in PRODUCTION builds for the /benchmark panel (issue #7392) — the
+//! stock production package/handler builders now include the five omp
+//! capabilities unconditionally. The atomic cutover removes the old tools;
+//! the omp surface then becomes the only surface and this override (plus the
+//! `// ⚠️ TEMPORARY benchmark override` markers at the wiring points in
+//! `mod.rs`) goes away.
 //!
 //! Documented divergence from the stock coding path: the stock arm runs
 //! `normalize_optional_null_sentinels` (keyed on its derived schema names)
@@ -56,7 +59,7 @@ use ironclaw_host_api::{
 
 use super::{
     GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, MAX_FIRST_PARTY_INPUT_BYTES,
-    MAX_WRITE_FILE_INPUT_BYTES, builtin_first_party_package_for_process_backend,
+    MAX_WRITE_FILE_INPUT_BYTES, builtin_first_party_package,
 };
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -169,18 +172,19 @@ const OMP_CAPABILITIES: &[OmpCapabilityMetadata] = &[
 
 /// The built-in first-party package extended with the five omp capabilities.
 ///
-/// Starts from the ordinary process-backend-restricted builtin package and
-/// swaps the two overlapping ids (`builtin.glob`/`builtin.grep`) for their
-/// omp counterparts while appending the three new ids
-/// (`builtin.read`/`builtin.write`/`builtin.edit`). Everything else —
+/// Starts from the ordinary builtin package, applies the process-backend
+/// restriction, and swaps the two overlapping ids (`builtin.glob`/
+/// `builtin.grep`) for their omp counterparts while appending the three new
+/// ids (`builtin.read`/`builtin.write`/`builtin.edit`). Everything else —
 /// `read_file`, `write_file`, `list_dir`, `apply_patch`, echo, time, shell,
 /// … — is untouched, so the benchmark arm's model surface is the stock
 /// surface plus the five omp tools.
 pub fn omp_coding_package(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
-    let base = builtin_first_party_package_for_process_backend(process_backend)?;
-    let mut manifest = base.manifest;
+    let mut package = builtin_first_party_package()?;
+    super::restrict_package_for_process_backend(&mut package, process_backend)?;
+    let mut manifest = package.manifest;
     manifest.capabilities.retain(|capability| {
         capability.id.as_str() != GLOB_CAPABILITY_ID && capability.id.as_str() != GREP_CAPABILITY_ID
     });

@@ -112,12 +112,13 @@ pub use first_party_tools::{
     register_memory_tool_handler, register_native_memory_tools,
     register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
 };
-#[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
     OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-    OMP_WRITE_CAPABILITY_ID, OmpCodingTools, TriggerManagementClock,
-    builtin_first_party_handlers_with_trigger_clock, insert_omp_coding_handlers,
-    omp_coding_package,
+    OMP_WRITE_CAPABILITY_ID, OmpCodingTools, insert_omp_coding_handlers, omp_coding_package,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use first_party_tools::{
+    TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,
 };
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{

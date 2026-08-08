@@ -55,7 +55,8 @@ use ironclaw_host_runtime::{
     HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+    OMP_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -68,7 +69,9 @@ use ironclaw_host_runtime::{
     TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
     register_native_memory_tools,
 };
@@ -494,6 +497,108 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("local-host shell descriptor");
     assert!(!host_shell.description.contains("/workspace/.venv"));
+}
+
+/// ⚠️ TEMPORARY benchmark override (issue #7392): the process-backend
+/// production builders advertise the omp surface (`builtin.read`/`write`/
+/// `edit` plus the omp `builtin.glob`/`builtin.grep` replacements) until the
+/// atomic cutover removes the old tools. This pins the override so the
+/// cutover revert is a deliberate diff, not a silent drift; the plain
+/// (non-process-backend) builders keep the stock surface.
+#[tokio::test]
+async fn production_process_backend_builders_advertise_omp_coding_surface() {
+    const OMP_IDS: [&str; 5] = [
+        OMP_READ_CAPABILITY_ID,
+        OMP_WRITE_CAPABILITY_ID,
+        OMP_EDIT_CAPABILITY_ID,
+        GLOB_CAPABILITY_ID,
+        GREP_CAPABILITY_ID,
+    ];
+    for process_backend in [
+        ProcessBackendKind::None,
+        ProcessBackendKind::LocalHost,
+        ProcessBackendKind::UserSandbox,
+        ProcessBackendKind::Docker,
+    ] {
+        let package =
+            builtin_first_party_package_for_process_backend(process_backend).unwrap();
+        for id in OMP_IDS {
+            assert!(
+                package
+                    .capabilities
+                    .iter()
+                    .any(|descriptor| descriptor.id.as_str() == id),
+                "omp capability {id} missing from {process_backend:?} package"
+            );
+            assert!(
+                package
+                    .manifest
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id.as_str() == id),
+                "omp capability {id} missing from {process_backend:?} manifest"
+            );
+        }
+        // The omp engines REPLACE the v1 glob/grep manifests in the
+        // omp-extended package (one declaration per id, no duplicates).
+        assert_eq!(
+            package
+                .manifest
+                .capabilities
+                .iter()
+                .filter(|capability| capability.id.as_str() == GLOB_CAPABILITY_ID)
+                .count(),
+            1,
+            "{process_backend:?} package must declare exactly one glob"
+        );
+        assert_eq!(
+            package
+                .manifest
+                .capabilities
+                .iter()
+                .filter(|capability| capability.id.as_str() == GREP_CAPABILITY_ID)
+                .count(),
+            1,
+            "{process_backend:?} package must declare exactly one grep"
+        );
+
+        let handlers = builtin_first_party_handlers_for_process_backend(
+            Arc::new(InMemoryTriggerRepository::default()),
+            process_backend,
+        )
+        .unwrap();
+        for id in OMP_IDS {
+            assert!(
+                handlers.contains_handler(&capability_id(id)),
+                "omp handler for {id} missing from {process_backend:?} handlers"
+            );
+        }
+    }
+
+    let trigger_hook_handlers = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        Arc::new(NoopTriggerCreateHook),
+        Arc::new(MissingTriggerActiveRunLookup),
+        ProcessBackendKind::Docker,
+    )
+    .unwrap();
+    for id in OMP_IDS {
+        assert!(
+            trigger_hook_handlers.contains_handler(&capability_id(id)),
+            "omp handler for {id} missing from trigger-create-hook handlers"
+        );
+    }
+}
+
+/// No-op `TriggerCreateHook` for the omp-surface registration assertion.
+#[derive(Debug)]
+struct NoopTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
