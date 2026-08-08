@@ -6,6 +6,32 @@
 const SLACK_TEXT_SOFT_LIMIT_CHARS: usize = 35_000;
 const SLACK_TEXT_CHUNK_BODY_CHARS: usize = 34_900;
 
+/// Slack streaming `markdown_text` cap: 12,000 characters per call on
+/// `chat.startStream` / `chat.appendStream` / `chat.stopStream` — lower than
+/// the postMessage path's soft limit above.
+pub(crate) const SLACK_STREAM_TEXT_LIMIT_CHARS: usize = 12_000;
+
+/// Split stream text into chunks at most [`SLACK_STREAM_TEXT_LIMIT_CHARS`]
+/// long, on character boundaries (never splits a multi-byte codepoint).
+/// The last chunk rides `StreamStop`; earlier ones `StreamAppend`.
+pub(crate) fn slack_stream_text_chunks(text: &str) -> Vec<String> {
+    if text.chars().count() <= SLACK_STREAM_TEXT_LIMIT_CHARS {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::with_capacity(SLACK_STREAM_TEXT_LIMIT_CHARS);
+    for ch in text.chars() {
+        current.push(ch);
+        if current.chars().count() >= SLACK_STREAM_TEXT_LIMIT_CHARS {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 pub(crate) fn render_slack_mrkdwn(markdown: &str) -> String {
     let mut rendered = String::with_capacity(markdown.len());
     let lines = markdown.lines().collect::<Vec<_>>();

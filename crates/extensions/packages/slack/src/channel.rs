@@ -174,6 +174,79 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
+                OutboundPart::StreamStart { .. } => {
+                    let is_dm = channel.starts_with('D');
+                    // Recipients are required for channel streams (not DMs);
+                    // an absent reply_context user degrades to a coordinator
+                    // Text fallback, never a silent drop.
+                    let recipient_user = (!is_dm)
+                        .then(|| slack_stream_recipient_user(&envelope))
+                        .flatten();
+                    let outcome = match slack_stream_thread_ts(&envelope) {
+                        Some(_) if !is_dm && recipient_user.is_none() => {
+                            PartDeliveryOutcome::Permanent {
+                                reason: "chat.startStream to a channel requires a recipient user id (reply_context absent)".to_string(),
+                            }
+                        }
+                        Some(thread_ts) => {
+                            start_slack_stream(
+                                egress,
+                                &credential,
+                                &channel,
+                                &thread_ts,
+                                recipient_user.as_deref(),
+                                (!is_dm)
+                                    .then_some(envelope.target.conversation.space_id())
+                                    .flatten(),
+                            )
+                            .await
+                        }
+                        None => PartDeliveryOutcome::Permanent {
+                            reason: "chat.startStream requires a thread_ts reply anchor".to_string(),
+                        },
+                    };
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
+                OutboundPart::StreamAppend {
+                    vendor_message_ref,
+                    markdown_text,
+                } => {
+                    let outcome = append_slack_stream(
+                        egress,
+                        &credential,
+                        &channel,
+                        vendor_message_ref,
+                        markdown_text,
+                    )
+                    .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
+                OutboundPart::StreamStop {
+                    vendor_message_ref,
+                    markdown_text,
+                } => {
+                    let outcome = stop_slack_stream(
+                        egress,
+                        &credential,
+                        &channel,
+                        vendor_message_ref,
+                        markdown_text,
+                    )
+                    .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome =
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)
@@ -348,6 +421,238 @@ async fn post_slack_chunk(
     part_outcome_for_kind(
         slack_error_kind(&error),
         format!("slack rejected chat.postMessage ({error})"),
+    )
+}
+
+/// thread_ts for stream parts: an explicit anchor wins, then the
+/// conversation topic (thread), then the originating user message `ts`
+/// (plain DMs have no topic). Slack requires streamed messages to reply to
+/// a user request.
+fn slack_stream_thread_ts(envelope: &OutboundEnvelope) -> Option<String> {
+    envelope
+        .target
+        .thread_anchor
+        .clone()
+        .or_else(|| envelope.target.conversation.topic_id().map(str::to_string))
+        .or_else(|| {
+            envelope
+                .target
+                .conversation
+                .reply_target_message_id()
+                .map(str::to_string)
+        })
+}
+
+/// The originating user id for `chat.startStream`'s `recipient_user_id`
+/// (required when streaming to channels), recovered from the opaque
+/// reply_context this adapter attached at inbound.
+fn slack_stream_recipient_user(envelope: &OutboundEnvelope) -> Option<String> {
+    let context = envelope.reply_context.as_deref()?;
+    let parsed: serde_json::Value = serde_json::from_slice(context).ok()?;
+    parsed.get("user")?.as_str().map(str::to_string)
+}
+
+/// Start a Slack streaming conversation (`chat.startStream`). `thread_ts`
+/// is required by the vendor; recipients are required for channel (non-DM)
+/// streams.
+async fn start_slack_stream(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    thread_ts: &str,
+    recipient_user_id: Option<&str>,
+    recipient_team_id: Option<&str>,
+) -> PartDeliveryOutcome {
+    let mut body = serde_json::json!({ "channel": channel, "thread_ts": thread_ts });
+    if let Some(user) = recipient_user_id {
+        body["recipient_user_id"] = serde_json::Value::String(user.to_string());
+    }
+    if let Some(team) = recipient_team_id {
+        body["recipient_team_id"] = serde_json::Value::String(team.to_string());
+    }
+    let body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.startStream body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.startStream"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.startStream response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.ts,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.startStream ({error})"),
+    )
+}
+
+/// Append text to an existing streaming conversation (`chat.appendStream`).
+async fn append_slack_stream(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+    markdown_text: &str,
+) -> PartDeliveryOutcome {
+    let body = match serde_json::to_vec(&serde_json::json!({
+        "channel": channel,
+        "ts": ts,
+        "markdown_text": markdown_text,
+    })) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.appendStream body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.appendStream"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.appendStream response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.ts,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.appendStream ({error})"),
+    )
+}
+
+/// Finalize a streaming conversation (`chat.stopStream`). `markdown_text`
+/// may be empty only when the already-streamed content is the full payload;
+/// `message_not_in_streaming_state` is success-equivalent (already stopped).
+async fn stop_slack_stream(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+    markdown_text: &str,
+) -> PartDeliveryOutcome {
+    let mut body = serde_json::json!({ "channel": channel, "ts": ts });
+    if !markdown_text.is_empty() {
+        body["markdown_text"] = serde_json::Value::String(markdown_text.to_string());
+    }
+    let body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.stopStream body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.stopStream"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.stopStream response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        // The finalized stream message's ts is the delivery identity.
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.ts.or_else(|| Some(ts.to_string())),
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    if error == "message_not_in_streaming_state" {
+        // Already stopped (e.g. idempotent retry): the stream is finalized.
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: Some(ts.to_string()),
+        };
+    }
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.stopStream ({error})"),
     )
 }
 
