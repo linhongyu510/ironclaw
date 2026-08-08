@@ -16,6 +16,11 @@ mod state;
 mod text;
 mod types;
 
+/// Unregistered omp-parity coding engines (issue #7392 slice 2); wired to
+/// production dispatch only at atomic cutover. See the module docs.
+#[doc(hidden)]
+pub mod omp;
+
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;

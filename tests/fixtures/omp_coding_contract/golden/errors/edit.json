@@ -37,8 +37,8 @@
     {
       "case": "invalid_absolute_range",
       "kind": "error",
-      "template": "line ${patchLine}: Invalid absolute range: start ${start}, end ${end}. The value after `:=` is an absolute source line, not a line count or replacement length. For one line use `${single}`.",
-      "example": "line 3: Invalid absolute range: start 10, end 15. The value after `:=` is an absolute source line, not a line count or replacement length. For one line use `PUT 10:=10:`.",
+      "template": "line ${patchLine}: Invalid absolute range: start ${start}, end ${end}. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `${single}`.",
+      "example": "line 3: Invalid absolute range: start 10, end 15. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `PUT 10:`.",
       "source_path": "packages/hashline/src/messages.ts",
       "source_line": 82
     },

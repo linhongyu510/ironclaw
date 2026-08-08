@@ -63,7 +63,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **51** group scenarios · **55** flat integration bins (49 in
-`tests/integration/`, 6 in `tests/integration/auth/`) · **40** top-level Rust bins ·
+`tests/integration/`, 6 in `tests/integration/auth/`) · **41** top-level Rust bins ·
 **102** Python scenario files (**868** test functions).
 
 ---
@@ -257,7 +257,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (40)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (41)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -315,6 +315,15 @@ the vendored full MIT license text, the rendered read description for the
 issue-target context, exact selector/error/output case-ID inventories, and the
 reusable differential comparison factory — all offline from
 `tests/fixtures/omp_coding_contract/` (issue #7392, first delivery slice).
+`reborn_omp_coding_engines.rs` drives the unregistered omp-parity engines
+(`ironclaw_extension_support::coding::omp::*`, issue #7392 second delivery
+slice) against the same snapshot over an in-memory backend: golden selector
+parity (all 29 cases), read output formats (hashline header/tag, numbered
+rows, elision footer, 3000-line/50KB truncation notices, directory listing),
+write success shape + URI-like-target error, edit snapshot/CAS semantics
+(stale-anchor recognized/not-from-session, chained edits, block resolution,
+noop, line/range errors), glob/grep behavior and exact errors, and the
+`compare_cases` differential seam over the golden error templates.
 
 ---
 

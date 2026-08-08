@@ -481,8 +481,8 @@
     },
     {
       "path": "golden/errors/edit.json",
-      "sha256": "e372dba94ef7be5c9b37c486a5b421a093521f5428d2040ea188b215235c7565",
-      "bytes": 4545,
+      "sha256": "e50a91307546ee9372bbec674dc9b6b2c96cfa1efb5106c9e4cccd15d443541b",
+      "bytes": 4541,
       "role": "error-golden",
       "note": "Representative edit/hashline error shapes; templates verbatim from cited upstream sources"
     },
