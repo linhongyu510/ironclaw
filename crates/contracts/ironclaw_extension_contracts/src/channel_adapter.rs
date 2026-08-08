@@ -294,36 +294,30 @@ pub enum OutboundPart {
         view: Box<crate::auth_prompt::AuthPromptView>,
         direct_message: bool,
     },
-    /// Start a vendor-native progressive-response stream (e.g. Slack
-    /// `chat.startStream`). `markdown_text` is the optional initial text;
-    /// when `None` the vendor renders its streaming state alone. Only
-    /// emitted by the coordinator for channels that declare
-    /// `streams_working_indicator`; other adapters return a typed failure.
-    StreamStart {
-        markdown_text: Option<String>,
-    },
-    /// Append text to a stream started by [`Self::StreamStart`] (e.g. Slack
-    /// `chat.appendStream`). Used both for live text deltas and for
-    /// splitting payloads over the vendor's per-call text cap; the last
-    /// chunk rides [`Self::StreamStop`] instead.
-    StreamAppend {
-        vendor_message_ref: String,
-        markdown_text: String,
-    },
-    /// Finalize a stream started by [`Self::StreamStart`]; the finalized
-    /// message IS the delivery (replaces a post). `vendor_message_ref` is
-    /// the reference a previous [`PartDeliveryOutcome::Sent`] returned;
-    /// `markdown_text` may be empty only when the streamed content already
-    /// is the full payload.
-    StreamStop {
-        vendor_message_ref: String,
-        markdown_text: String,
-    },
+    /// Best-effort, disposable presentation while a response is generated.
+    /// The final answer always uses the ordinary delivery path.
+    ProgressivePreview(ProgressivePreviewPart),
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
     /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
     /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the
     /// adapter resolves it against the envelope's target conversation.
     Retract {
+        vendor_message_ref: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ProgressivePreviewPart {
+    Start,
+    /// `current_text` is cumulative; `accepted_text` is the exact cumulative
+    /// prefix Ironclaw knows the provider accepted.
+    Update {
+        vendor_message_ref: String,
+        accepted_text: String,
+        current_text: String,
+    },
+    /// Close and discard the preview. This never represents final delivery.
+    Stop {
         vendor_message_ref: String,
     },
 }

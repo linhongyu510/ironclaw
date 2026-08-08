@@ -324,9 +324,8 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgr
 
 struct StaticResolver {
     adapter: Arc<RecordingChannelAdapter>,
-    /// Mirrors the manifest-declared `streams_working_indicator` capability;
-    /// tests that exercise streaming set this to true.
-    streams_working_indicator: bool,
+    progressive_preview:
+        Option<ironclaw_extension_contracts::channel::ProgressivePreviewPresentation>,
 }
 
 impl ChannelDeliveryResolver for StaticResolver {
@@ -337,7 +336,7 @@ impl ChannelDeliveryResolver for StaticResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
-            streams_working_indicator: self.streams_working_indicator,
+            progressive_preview: self.progressive_preview.clone(),
         })
     }
 }
@@ -852,7 +851,7 @@ fn build_harness_with_settings(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
-            streams_working_indicator: false,
+            progressive_preview: None,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
@@ -2051,7 +2050,7 @@ fn build_triggered_harness_with_catalog(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
-            streams_working_indicator: false,
+            progressive_preview: None,
         }),
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {

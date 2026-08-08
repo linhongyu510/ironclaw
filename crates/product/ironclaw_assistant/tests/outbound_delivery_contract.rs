@@ -356,7 +356,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            streams_working_indicator: false,
+            progressive_preview: None,
         })
     }
 }
@@ -411,7 +411,7 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            streams_working_indicator: false,
+            progressive_preview: None,
         })
     }
 }
@@ -977,6 +977,59 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn coordinator_does_not_retry_progressive_preview_updates() {
+    use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ProgressivePreviewPart};
+
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![sent("must-not-send")],
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    request.intent = DeliveryIntent::ProgressivePreview;
+    request.parts = vec![OutboundPart::ProgressivePreview(
+        ProgressivePreviewPart::Update {
+            vendor_message_ref: "preview-1".to_string(),
+            accepted_text: "Hello".to_string(),
+            current_text: "Hello world".to_string(),
+        },
+    )];
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("preview attempt is recorded");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::TransportUnavailable,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
 }
 
 #[tokio::test]
@@ -1959,10 +2012,12 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
 }
 
 #[test]
-fn model_delivery_is_policy_class() {
+fn model_text_deliveries_are_policy_class() {
     use ironclaw_assistant::DeliveryIntent;
     assert!(DeliveryIntent::ModelDelivery.runs_outbound_policy());
     assert!(!DeliveryIntent::ModelDelivery.is_notice_class());
+    assert!(DeliveryIntent::ProgressivePreview.runs_outbound_policy());
+    assert!(!DeliveryIntent::ProgressivePreview.is_notice_class());
 }
 
 #[tokio::test]

@@ -111,7 +111,7 @@ pub struct ChannelWorkflowDeliveryServices {
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
     /// The live projection feed (WebUI's SSE source). The run-delivery
-    /// streaming forwarder subscribes here for token deltas.
+    /// progressive-preview forwarder subscribes here for token deltas.
     pub projection_stream: Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
     pub settings: RunDeliverySettings,
     /// Durable outcome record for proactive (trigger-fired) deliveries.

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
-    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
-    VerifiedInbound,
+    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ProgressivePreviewPart, TargetCandidate,
+    TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -174,7 +174,7 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::StreamStart { .. } => {
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start) => {
                     let is_dm = channel.starts_with('D');
                     // Recipients are required for channel streams (not DMs);
                     // an absent reply_context user degrades to a coordinator
@@ -211,67 +211,61 @@ impl ChannelAdapter for SlackChannelAdapter {
                         break 'parts;
                     }
                 }
-                OutboundPart::StreamAppend {
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Update {
                     vendor_message_ref,
-                    markdown_text,
-                } => {
-                    // Defensive: the forwarder's per-flush payload is bounded
-                    // by its coalescing thresholds, but the shutdown flush can
-                    // carry a whole burst — split over the stream cap so a
-                    // large suffix never exceeds `markdown_text`'s 12k limit.
-                    let chunks = crate::mrkdwn::slack_stream_text_chunks(markdown_text);
-                    for chunk in chunks {
-                        let outcome = append_slack_stream(
-                            egress,
-                            &credential,
-                            &channel,
-                            vendor_message_ref,
-                            &chunk,
-                        )
-                        .await;
-                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                        parts.push(outcome);
-                        if !sent {
-                            break 'parts;
+                    accepted_text,
+                    current_text,
+                }) => {
+                    let outcome = match current_text.strip_prefix(accepted_text) {
+                        Some("") => PartDeliveryOutcome::Sent {
+                            vendor_message_ref: Some(vendor_message_ref.clone()),
+                        },
+                        Some(suffix)
+                            if suffix.chars().count()
+                                <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
+                        {
+                            append_slack_stream(
+                                egress,
+                                &credential,
+                                &channel,
+                                vendor_message_ref,
+                                suffix,
+                            )
+                            .await
                         }
-                    }
-                }
-                OutboundPart::StreamStop {
-                    vendor_message_ref,
-                    markdown_text,
-                } => {
-                    // Split over the stream cap internally: earlier chunks
-                    // ride chat.appendStream, the last rides
-                    // chat.stopStream. The observer sees ONE part; a failed
-                    // stop with an unsplit tail means nothing was sent, but
-                    // with a >12k tail some chunks may have been accepted —
-                    // the observer's re-drive then duplicates them (rare,
-                    // documented in the observer recovery comment).
-                    let chunks = crate::mrkdwn::slack_stream_text_chunks(markdown_text);
-                    let mut all_sent = true;
-                    for chunk in &chunks[..chunks.len().saturating_sub(1)] {
-                        let outcome = append_slack_stream(
-                            egress,
-                            &credential,
-                            &channel,
-                            vendor_message_ref,
-                            chunk,
-                        )
-                        .await;
-                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                        parts.push(outcome);
-                        if !sent {
-                            all_sent = false;
-                            break;
-                        }
-                    }
-                    if !all_sent {
+                        Some(_) => PartDeliveryOutcome::Permanent {
+                            reason:
+                                "progressive preview update exceeds Slack's per-call text limit"
+                                    .to_string(),
+                        },
+                        None => PartDeliveryOutcome::Permanent {
+                            reason: "progressive preview no longer extends the accepted text"
+                                .to_string(),
+                        },
+                    };
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
                         break 'parts;
                     }
-                    let last = chunks.last().map(String::as_str).unwrap_or_default();
-                    let outcome =
-                        stop_slack_stream(egress, &credential, &channel, vendor_message_ref, last)
-                            .await;
+                }
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Stop {
+                    vendor_message_ref,
+                }) => {
+                    let outcome = stop_slack_stream(
+                        egress,
+                        &credential,
+                        &channel,
+                        vendor_message_ref,
+                        "Preview complete",
+                    )
+                    .await;
+                    let outcome = if matches!(outcome, PartDeliveryOutcome::Sent { .. }) {
+                        delete_slack_message(egress, &credential, &channel, vendor_message_ref)
+                            .await
+                    } else {
+                        outcome
+                    };
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
                     if !sent {
@@ -2311,7 +2305,7 @@ mod tests {
         assert!(matches!(error, ChannelError::Render { .. }));
     }
 
-    // ── streaming parts ────────────────────────────────────────────────────
+    // ── progressive preview ────────────────────────────────────────────────
 
     fn stream_envelope(
         parts: Vec<OutboundPart>,
@@ -2340,16 +2334,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_start_posts_chat_start_stream_with_thread_ts() {
+    async fn progressive_preview_start_uses_slack_stream_with_thread_ts() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
         )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStart {
-                        markdown_text: None,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start,
+                    )],
                     "D123",
                     None,
                     Some("1710000000.000150"),
@@ -2383,16 +2377,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_start_in_channel_carries_recipients_from_reply_context() {
+    async fn progressive_preview_start_in_channel_uses_reply_context_recipient() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":"C123","ts":"1710000000.000200"}"#,
         )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStart {
-                        markdown_text: None,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start,
+                    )],
                     "C123",
                     Some("1710000000.000100"),
                     None,
@@ -2415,14 +2409,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_start_in_channel_without_recipient_is_permanent() {
+    async fn progressive_preview_start_without_channel_recipient_is_permanent() {
         let egress = ScriptedEgress::new(Vec::new());
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStart {
-                        markdown_text: None,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start,
+                    )],
                     "C123",
                     Some("1710000000.000100"),
                     None,
@@ -2440,14 +2434,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_start_without_any_thread_anchor_is_permanent() {
+    async fn progressive_preview_start_without_thread_anchor_is_permanent() {
         let egress = ScriptedEgress::new(Vec::new());
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStart {
-                        markdown_text: None,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start,
+                    )],
                     "D123",
                     None,
                     None,
@@ -2465,17 +2459,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_append_posts_chat_append_stream_with_ts_and_text() {
+    async fn progressive_preview_update_appends_only_the_new_suffix() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
         )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamAppend {
-                        vendor_message_ref: "1710000000.000200".to_string(),
-                        markdown_text: "world".to_string(),
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Update {
+                            vendor_message_ref: "1710000000.000200".to_string(),
+                            accepted_text: "Hello ".to_string(),
+                            current_text: "Hello world".to_string(),
+                        },
+                    )],
                     "D123",
                     None,
                     Some("1710000000.000150"),
@@ -2502,83 +2499,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_stop_posts_chat_stop_stream_and_treats_already_stopped_as_sent() {
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200","message":{"text":"done"}}"#,
-        )]);
-        let report = SlackChannelAdapter
-            .deliver(
-                stream_envelope(
-                    vec![OutboundPart::StreamStop {
-                        vendor_message_ref: "1710000000.000200".to_string(),
-                        markdown_text: "done".to_string(),
-                    }],
-                    "D123",
-                    None,
-                    Some("1710000000.000150"),
-                    None,
-                ),
-                &egress,
-            )
-            .await
-            .expect("deliver drives");
-        let body = body_json(&egress.requests()[0]);
-        assert!(
-            egress.requests()[0].url.ends_with("/api/chat.stopStream"),
-            "url: {}",
-            egress.requests()[0].url
-        );
-        assert_eq!(body["ts"], "1710000000.000200");
-        assert_eq!(body["markdown_text"], "done");
-        assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: Some(reference),
-            }] if reference == "1710000000.000200"
-        ));
-
-        // An already-stopped stream is success-equivalent (idempotent retry).
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":false,"error":"message_not_in_streaming_state"}"#,
-        )]);
-        let report = SlackChannelAdapter
-            .deliver(
-                stream_envelope(
-                    vec![OutboundPart::StreamStop {
-                        vendor_message_ref: "1710000000.000200".to_string(),
-                        markdown_text: "done".to_string(),
-                    }],
-                    "D123",
-                    None,
-                    Some("1710000000.000150"),
-                    None,
-                ),
-                &egress,
-            )
-            .await
-            .expect("deliver drives");
-        assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: Some(reference),
-            }] if reference == "1710000000.000200"
-        ));
-    }
-
-    #[tokio::test]
-    async fn deliver_stream_stop_splits_oversized_text_across_append_and_stop() {
-        let long_text = "x".repeat(crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS + 10);
+    async fn progressive_preview_stop_finalizes_then_deletes_the_preview() {
         let egress = ScriptedEgress::new(vec![
-            ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#),
-            ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#),
+            ScriptedEgress::ok(
+                r#"{"ok":true,"channel":"D123","ts":"1710000000.000200","message":{"text":"done"}}"#,
+            ),
+            ScriptedEgress::ok(r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#),
         ]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStop {
-                        vendor_message_ref: "1".to_string(),
-                        markdown_text: long_text,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Stop {
+                            vendor_message_ref: "1710000000.000200".to_string(),
+                        },
+                    )],
                     "D123",
                     None,
                     Some("1710000000.000150"),
@@ -2590,46 +2525,65 @@ mod tests {
             .expect("deliver drives");
         let requests = egress.requests();
         assert_eq!(requests.len(), 2);
+        let body = body_json(&requests[0]);
         assert!(
-            requests[0].url.ends_with("/api/chat.appendStream"),
-            "first chunk rides appendStream: {}",
-            requests[0].url
+            egress.requests()[0].url.ends_with("/api/chat.stopStream"),
+            "url: {}",
+            egress.requests()[0].url
         );
-        assert!(
-            requests[1].url.ends_with("/api/chat.stopStream"),
-            "last chunk rides stopStream: {}",
-            requests[1].url
-        );
-        let appended = body_json(&requests[0]);
-        assert_eq!(
-            appended["markdown_text"].as_str().unwrap().chars().count(),
-            crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS
-        );
-        let stopped = body_json(&requests[1]);
-        assert_eq!(
-            stopped["markdown_text"].as_str().unwrap().chars().count(),
-            10
-        );
-        assert_eq!(report.parts.len(), 2);
-        assert!(
-            report
-                .parts
-                .iter()
-                .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
-        );
+        assert_eq!(body["ts"], "1710000000.000200");
+        assert_eq!(body["markdown_text"], "Preview complete");
+        assert!(requests[1].url.ends_with("/api/chat.delete"));
+        assert_eq!(body_json(&requests[1])["ts"], "1710000000.000200");
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }]
+        ));
     }
 
     #[tokio::test]
-    async fn deliver_stream_vendor_rejection_maps_to_permanent() {
+    async fn progressive_preview_update_rejects_a_changed_prefix_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Update {
+                            vendor_message_ref: "1".to_string(),
+                            accepted_text: "old".to_string(),
+                            current_text: "replacement".to_string(),
+                        },
+                    )],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(egress.requests().is_empty());
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Permanent { reason }]
+                if reason.contains("no longer extends")
+        ));
+    }
+
+    #[tokio::test]
+    async fn progressive_preview_start_vendor_rejection_maps_to_unauthorized() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":false,"error":"not_allowed_token_type"}"#,
         )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
-                    vec![OutboundPart::StreamStart {
-                        markdown_text: None,
-                    }],
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Start,
+                    )],
                     "D123",
                     None,
                     Some("1710000000.000150"),

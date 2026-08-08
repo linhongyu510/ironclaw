@@ -289,16 +289,11 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         }
                     }
                 }
-                // Telegram has no progressive-response stream surface; these
-                // parts are never emitted for this channel (the coordinator
-                // reduces Working to Text unless the manifest declares
-                // streams_working_indicator), but the match must be total.
-                OutboundPart::StreamStart { .. }
-                | OutboundPart::StreamAppend { .. }
-                | OutboundPart::StreamStop { .. } => {
+                // Telegram does not advertise progressive preview, but the
+                // cross-channel contract remains exhaustive.
+                OutboundPart::ProgressivePreview(_) => {
                     parts.push(PartDeliveryOutcome::Permanent {
-                        reason: "telegram channel does not support working-indicator streaming"
-                            .to_string(),
+                        reason: "telegram channel does not support progressive preview".to_string(),
                     });
                     break 'parts;
                 }

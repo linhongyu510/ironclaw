@@ -274,7 +274,10 @@ supports_markdown = true
 supports_threads = true
 max_message_chars = 40000
 command_prefix = "/ironclaw "
-streams_working_indicator = true
+
+[channel.presentation.progressive_preview]
+scope = "all"
+max_chars = 12000
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 

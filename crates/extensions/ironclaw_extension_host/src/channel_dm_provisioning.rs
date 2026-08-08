@@ -325,7 +325,7 @@ mod tests {
                     .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
-                streams_working_indicator: false,
+                progressive_preview: None,
             })
         }
     }
@@ -346,7 +346,7 @@ mod tests {
                     .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
-                streams_working_indicator: false,
+                progressive_preview: None,
             })
         }
     }

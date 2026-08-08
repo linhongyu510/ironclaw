@@ -74,6 +74,8 @@ pub enum DeliveryIntent {
     CommandFeedback,
     /// A transient "working on it" indicator.
     Working,
+    /// Disposable model-text preview while a final reply is being generated.
+    ProgressivePreview,
     /// Remove an earlier delivery (e.g. delete the working indicator).
     Cleanup,
     /// A background (routine) run needs the user's attention on a
@@ -98,6 +100,7 @@ impl DeliveryIntent {
                 | Self::AuthPrompt
                 | Self::BackgroundRunNotice
                 | Self::ModelDelivery
+                | Self::ProgressivePreview
         )
     }
 
@@ -118,6 +121,7 @@ impl DeliveryIntent {
             Self::ConnectionStatus => "connection-status",
             Self::CommandFeedback => "command-feedback",
             Self::Working => "working",
+            Self::ProgressivePreview => "progressive-preview",
             Self::Cleanup => "cleanup",
             Self::BackgroundRunNotice => "background-run-notice",
             Self::ModelDelivery => "model-delivery",
@@ -203,14 +207,14 @@ pub struct NoticeDeliveryRequest<'a> {
 }
 
 /// Outcome of a working-notice delivery: which vendor ref was accepted and
-/// whether it is a progressive stream (finalize via `StreamStop`) or a plain
-/// transient message (stop via `Retract`). The observer dispatches cleanup
-/// on `streamed` — it never guesses which shape the vendor accepted.
+/// whether it is a disposable progressive preview or a plain transient
+/// message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingNoticeOutcome {
     pub conversation: ExternalConversationRef,
     pub vendor_message_ref: Option<String>,
-    pub streamed: bool,
+    pub progressive: bool,
+    pub max_chars: u32,
 }
 
 /// The first provider-issued message ref of a delivered outcome, if any.
@@ -582,8 +586,8 @@ impl DeliveryCoordinator {
     }
 
     /// Deliver the `Working` intent to the resolved channel, reducing it to
-    /// [`OutboundPart::StreamStart`] when the channel's manifest declares
-    /// `streams_working_indicator`, else to the plain [`OutboundPart::Text`]
+    /// [`ProgressivePreviewPart::Start`] when the channel's manifest declares
+    /// progressive preview, else to the plain [`OutboundPart::Text`]
     /// notice. On a stream-start failure with nothing sent, re-drives the
     /// notice as `Text` (the degraded path) so the working indicator is
     /// never lost. `request.parts` must be empty; the parts are built here.
@@ -591,6 +595,7 @@ impl DeliveryCoordinator {
         &self,
         request: NoticeDeliveryRequest<'_>,
         text: &str,
+        direct_message: bool,
     ) -> Result<WorkingNoticeOutcome, CoordinatedDeliveryError> {
         if request.intent != DeliveryIntent::Working {
             return Err(CoordinatedDeliveryError::IntentClassMismatch {
@@ -599,13 +604,17 @@ impl DeliveryCoordinator {
         }
         reject_caller_supplied_files(&request.parts)?;
 
-        let streams_working_indicator = self
+        let progressive_preview = self
             .resolver
             .resolve_channel_delivery(request.extension_id)
-            .map(|channel| channel.streams_working_indicator)
-            .unwrap_or(false);
+            .and_then(|channel| channel.progressive_preview)
+            .filter(|preview| {
+                direct_message
+                    || preview.scope
+                        == ironclaw_extension_contracts::channel::ProgressivePreviewScope::All
+            });
 
-        if !streams_working_indicator {
+        if progressive_preview.is_none() {
             let conversation = request.conversation.clone();
             let outcome = self
                 .deliver_notice_parts(request, vec![OutboundPart::Text(text.to_string())])
@@ -613,7 +622,8 @@ impl DeliveryCoordinator {
             return Ok(WorkingNoticeOutcome {
                 conversation,
                 vendor_message_ref: first_sent_ref(&outcome),
-                streamed: false,
+                progressive: false,
+                max_chars: 0,
             });
         }
 
@@ -621,9 +631,9 @@ impl DeliveryCoordinator {
         let outcome = self
             .deliver_notice_parts(
                 request.clone(),
-                vec![OutboundPart::StreamStart {
-                    markdown_text: None,
-                }],
+                vec![OutboundPart::ProgressivePreview(
+                    ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Start,
+                )],
             )
             .await?;
         match outcome {
@@ -637,7 +647,8 @@ impl DeliveryCoordinator {
             } => Ok(WorkingNoticeOutcome {
                 conversation,
                 vendor_message_ref: vendor_message_refs.first().cloned(),
-                streamed: true,
+                progressive: true,
+                max_chars: progressive_preview.map_or(0, |preview| preview.max_chars),
             }),
             // Degraded path: the stream could not be started (vendor
             // rejection, missing recipient, capability not provisioned).
@@ -650,7 +661,8 @@ impl DeliveryCoordinator {
                 Ok(WorkingNoticeOutcome {
                     conversation,
                     vendor_message_ref: first_sent_ref(&outcome),
-                    streamed: false,
+                    progressive: false,
+                    max_chars: 0,
                 })
             }
         }
@@ -777,6 +789,21 @@ impl DeliveryCoordinator {
         parts: Vec<OutboundPart>,
         reply_context: Option<Vec<u8>>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        let max_attempts =
+            if parts.iter().any(|part| {
+                matches!(
+                part,
+                OutboundPart::ProgressivePreview(
+                    ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Update {
+                        ..
+                    }
+                )
+            )
+            }) {
+                1
+            } else {
+                self.retry.max_attempts
+            };
         let envelope = OutboundEnvelope {
             extension_id: channel.extension_id.as_str().to_string(),
             installation_id: channel.installation_id.as_str().to_string(),
@@ -863,7 +890,7 @@ impl DeliveryCoordinator {
                         });
                     }
                     // Fully-retryable report (nothing sent).
-                    if attempts_used >= self.retry.max_attempts {
+                    if attempts_used >= max_attempts {
                         let kind = DeliveryFailureKind::TransportUnavailable;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
@@ -880,7 +907,7 @@ impl DeliveryCoordinator {
                         error = %error,
                         "delivery coordinator: adapter deliver failed"
                     );
-                    if attempts_used >= self.retry.max_attempts {
+                    if attempts_used >= max_attempts {
                         let kind = DeliveryFailureKind::TransportUnavailable;
                         self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                             .await;
@@ -1151,9 +1178,7 @@ fn validate_final_workspace_files(parts: &[OutboundPart]) -> Result<(), Coordina
         OutboundPart::File(file) => Some(file),
         OutboundPart::Text(_)
         | OutboundPart::AuthPrompt { .. }
-        | OutboundPart::StreamStart { .. }
-        | OutboundPart::StreamAppend { .. }
-        | OutboundPart::StreamStop { .. }
+        | OutboundPart::ProgressivePreview(_)
         | OutboundPart::Retract { .. } => None,
     }) {
         count = count

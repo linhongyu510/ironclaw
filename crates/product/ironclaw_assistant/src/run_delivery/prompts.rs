@@ -13,11 +13,6 @@ use ironclaw_product_contracts::outbound::{ApprovalPromptContextView, GatePrompt
 use crate::is_approval_gate_ref;
 
 pub(crate) const WORKING_MESSAGE: &str = "Ironclaw is thinking...";
-/// Non-empty terminal text for `StreamStop` on paths where the stream holds
-/// no answer (no-final-text runs, blocked runs, empty-tail stop retries).
-/// `chat.stopStream` rejects empty text (`no_text`), and a stopped stream
-/// finalizes as a persistent message — so the stop never carries nothing.
-pub(crate) const WORKING_STREAM_STOP_TEXT: &str = "Ironclaw finished.";
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run has no channel-serviceable auth challenge. This stays
 /// deliberately generic because missing/unknown challenge metadata cannot

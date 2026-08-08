@@ -732,12 +732,12 @@ impl crate::ProjectFilesystemReader for NoProjectFilesystem {
     }
 }
 
-/// A projection stream with live push semantics, for the streaming forwarder.
+/// A projection stream with live push semantics, for progressive previews.
 ///
 /// `push` fans the envelope out to every open subscription immediately (no
 /// replay — mirrors the live feed's ephemerality). A subscriber whose queue
-/// overflows drops updates, which the LCP-tail stop recovers — the same
-/// contract the production live feed has.
+/// overflows drops updates. Preview delivery is best-effort, so a later
+/// cumulative update supersedes a missed one.
 pub struct LiveProjectionStream {
     subscribers: std::sync::Mutex<
         Vec<
@@ -819,12 +819,12 @@ impl ironclaw_product_contracts::projection::ProjectionStream for LiveProjection
 
 /// A projection stream that holds nothing.
 ///
-/// Run-delivery components that never stream live text (triggered delivery,
+/// Run-delivery components that never preview live text (triggered delivery,
 /// tests without a composed projection pipeline) still have to supply the
-/// stream the streaming forwarder subscribes through. One inert double lives
+/// stream the preview forwarder subscribes through. One inert double lives
 /// here, beside the trait it implements, so those suites do not each carry an
-/// identical copy. The LCP-tail stop recovers the full answer when the
-/// forwarder's subscription is unavailable.
+/// identical copy. The ordinary final delivery is unaffected when the
+/// subscription is unavailable.
 pub struct NoopProjectionStream;
 
 #[async_trait]

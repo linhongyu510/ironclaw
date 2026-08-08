@@ -43,7 +43,7 @@ use ironclaw_turns::{
 use tokio::sync::Semaphore;
 
 use super::prompts;
-use super::streaming::StreamForwarderHandle;
+use super::streaming::PreviewForwarderHandle;
 use super::{
     BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet,
     PostedWorkingNotice, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
@@ -457,7 +457,7 @@ impl RunDeliveryObserver {
         }
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
         let mut working_notice: Option<PostedWorkingNotice> = None;
-        let mut forwarder: Option<StreamForwarderHandle> = None;
+        let mut forwarder: Option<PreviewForwarderHandle> = None;
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         let result = self
             .deliver_final_reply_inner(
@@ -473,23 +473,14 @@ impl RunDeliveryObserver {
                 &mut messages_to_delete_after_final,
             )
             .await;
-        // Safety net: on EVERY exit — success, error, timeout, the
-        // no-final-text early return — the working stream must be stopped
-        // and the forwarder shut down. A stream left open is a message stuck
-        // in Slack's streaming state; the pre-existing orphaned "thinking"
-        // message leak this replaces was already a bug.
+        // Safety net: on every exit, stop forwarding and remove any remaining
+        // disposable working indicator/preview.
         if let Some(forwarder) = forwarder.take() {
             forwarder.shutdown().await;
         }
         if let Some(notice) = working_notice.take() {
             self.services
-                .stop_working_notice(
-                    scope.clone(),
-                    Some(run_id),
-                    notice,
-                    prompts::WORKING_STREAM_STOP_TEXT,
-                    true,
-                )
+                .stop_working_notice(scope.clone(), Some(run_id), notice)
                 .await;
         }
         result
@@ -509,13 +500,14 @@ impl RunDeliveryObserver {
         run_id: TurnRunId,
         delivered_blocked_marker: &mut Option<BlockedActionableMarker>,
         working_notice: &mut Option<PostedWorkingNotice>,
-        forwarder: &mut Option<StreamForwarderHandle>,
+        forwarder: &mut Option<PreviewForwarderHandle>,
         messages_to_delete_after_final: &mut Vec<DeliveredChannelMessage>,
     ) -> Result<(), RunDeliveryError> {
         loop {
             let actionable_state = {
                 self.wait_for_actionable(
                     envelope,
+                    thread_scope,
                     scope,
                     actor,
                     run_id,
@@ -545,17 +537,10 @@ impl RunDeliveryObserver {
                 if let Some(forwarder) = forwarder.take() {
                     forwarder.shutdown().await;
                 }
-                // Stop the stream BEFORE the gate prompt posts (ordering
-                // preserved from the pre-stream retract); the partial text
-                // must not linger as an answer-shaped message.
+                // Remove the preview before the gate prompt posts; partial
+                // model text must not linger beside an actionable prompt.
                 self.services
-                    .stop_working_notice(
-                        scope.clone(),
-                        Some(run_id),
-                        notice,
-                        prompts::WORKING_STREAM_STOP_TEXT,
-                        true,
-                    )
+                    .stop_working_notice(scope.clone(), Some(run_id), notice)
                     .await;
             }
             let Some(notification) = self
@@ -577,45 +562,26 @@ impl RunDeliveryObserver {
             let is_terminal = next_blocked_marker.is_none();
             let is_final_reply = event_kind == RunNotificationEventKind::FinalReplyReady;
 
-            // The final reply of a streamed run IS the stream: exactly one
-            // `StreamStop` carrying the LCP-tail (the adapter splits over the
-            // vendor cap internally, so a failed stop means nothing was sent
-            // and the re-drive stays uniform). A plain notice stays in place
-            // until delivery succeeds — the outer safety net handles errors.
             let final_text = notification.text.clone();
-            let mut streamed_stop: Option<PostedWorkingNotice> = None;
-            let mut appended_for_tail = String::new();
-            let parts = if is_terminal && is_final_reply {
-                match working_notice.take() {
-                    Some(notice) if notice.streamed => {
-                        // Shut down the forwarder FIRST (it flushes pending
-                        // text), then read the final appended ledger — the
-                        // LCP-tail must never race the final flush.
-                        let appended = if let Some(forwarder) = forwarder.take() {
-                            forwarder.shutdown_and_appended().await
-                        } else {
-                            String::new()
-                        };
-                        streamed_stop = Some(notice.clone());
-                        let (parts, tail) = super::streaming::stream_final_parts(
-                            &notice.vendor_message_ref,
-                            &final_text,
-                            &appended,
-                        );
-                        appended_for_tail = tail;
-                        parts
-                    }
-                    Some(notice) => {
-                        // Plain (degraded) notice: retract after delivery.
-                        *working_notice = Some(notice);
-                        vec![OutboundPart::Text(final_text.clone())]
-                    }
-                    None => vec![OutboundPart::Text(final_text.clone())],
+            if is_terminal
+                && is_final_reply
+                && working_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.progressive)
+            {
+                if let Some(forwarder) = forwarder.take() {
+                    forwarder.shutdown().await;
                 }
-            } else {
-                vec![OutboundPart::Text(final_text.clone())]
-            };
-            let delivered_messages = match self
+                if let Some(notice) = working_notice.take() {
+                    self.services
+                        .stop_working_notice(scope.clone(), Some(run_id), notice)
+                        .await;
+                }
+            }
+            // The complete finalized text always uses the ordinary delivery
+            // path. Preview state is never authoritative and never affects
+            // retries or recovery of the final reply.
+            let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
                         envelope,
@@ -626,77 +592,10 @@ impl RunDeliveryObserver {
                     run_id,
                     &actionable_state,
                     &notification,
-                    parts,
+                    vec![OutboundPart::Text(final_text)],
                     None,
                 )
-                .await
-            {
-                Ok(messages) => messages,
-                Err(error) if streamed_stop.is_some() => {
-                    // The stop failed. The answer must never be lost. The
-                    // recovery converges on ONE rule, derived from the same
-                    // tail the happy path built: a non-empty tail (some
-                    // content was never streamed) re-drives the full final
-                    // text as a plain message, then stops+deletes the stuck
-                    // stream; an empty tail (everything was already
-                    // streamed) first retries the text-less stop, and only
-                    // if that also fails — the answer would otherwise be
-                    // stranded in an open stream — follows the same
-                    // re-drive+stop+delete path. The short-text stop is
-                    // NEVER appended to a stream that carries the answer.
-                    // The recovery converges on ONE rule, derived from the
-                    // same tail the happy path built: `appended_for_tail` IS
-                    // the tail (empty = everything was already streamed).
-                    let tail_empty = appended_for_tail.is_empty();
-                    if !tail_empty {
-                        tracing::warn!(
-                            target: "ironclaw::reborn::run_delivery",
-                            %run_id,
-                            %error,
-                            "stream stop failed; re-delivering the final answer as a plain message"
-                        );
-                    } else if let Some(notice) = streamed_stop.clone()
-                        && self
-                            .services
-                            .stop_working_notice(scope.clone(), Some(run_id), notice, "", false)
-                            .await
-                    {
-                        // The text-less retry finalized the fully-streamed
-                        // answer in place. No postMessage, no delete.
-                        return Ok(());
-                    }
-                    if let Some(notice) = streamed_stop.clone() {
-                        let redelivery = self
-                            .deliver_run_notification(
-                                RunNotificationDeliveryContext {
-                                    envelope,
-                                    scope,
-                                    thread_scope,
-                                    actor,
-                                },
-                                run_id,
-                                &actionable_state,
-                                &notification,
-                                vec![OutboundPart::Text(final_text.clone())],
-                                Some("stream-fallback"),
-                            )
-                            .await;
-                        self.services
-                            .stop_working_notice(
-                                scope.clone(),
-                                Some(run_id),
-                                notice,
-                                prompts::WORKING_STREAM_STOP_TEXT,
-                                true,
-                            )
-                            .await;
-                        redelivery?
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Err(error) => return Err(error),
-            };
+                .await?;
             if (event_kind == RunNotificationEventKind::ApprovalNeeded
                 || event_kind == RunNotificationEventKind::AuthRequired)
                 && let Some(gate_ref_str) = gate_ref_for_routing.as_deref()
@@ -723,18 +622,11 @@ impl RunDeliveryObserver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record_delivered(run_id);
-                // A plain (degraded) working notice still needs its Retract;
-                // a streamed one was already finalized by the stop part above
-                // (and taken out of `working_notice`).
+                // A plain working notice still needs its retract; a preview
+                // was removed before the final post.
                 if let Some(notice) = working_notice.take() {
                     self.services
-                        .stop_working_notice(
-                            scope.clone(),
-                            Some(run_id),
-                            notice,
-                            prompts::WORKING_STREAM_STOP_TEXT,
-                            true,
-                        )
+                        .stop_working_notice(scope.clone(), Some(run_id), notice)
                         .await;
                 }
                 for message in messages_to_delete_after_final.drain(..) {
@@ -753,7 +645,7 @@ impl RunDeliveryObserver {
 
     /// The live-path poll loop: waits for a terminal or newly-blocked state,
     /// raising the working indicator once while the run is quietly running,
-    /// and spawning the streaming forwarder the moment a streamed notice is
+    /// and spawning the preview forwarder when a progressive notice is
     /// raised (the live feed has no replay — every poll delay would lose
     /// deltas). (Mirror of `wait_for_actionable_state`; kept separate so the
     /// indicator side effect stays on the live path only.)
@@ -761,12 +653,13 @@ impl RunDeliveryObserver {
     async fn wait_for_actionable(
         &self,
         envelope: &ProductInboundEnvelope,
+        thread_scope: &ThreadScope,
         scope: &TurnScope,
         actor: &TurnActor,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
         working_notice: &mut Option<PostedWorkingNotice>,
-        forwarder: &mut Option<StreamForwarderHandle>,
+        forwarder: &mut Option<PreviewForwarderHandle>,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
@@ -797,20 +690,27 @@ impl RunDeliveryObserver {
                         scope.clone(),
                         Some(run_id),
                         envelope.external_conversation_ref(),
+                        envelope_is_direct_chat(envelope),
                     )
                     .await;
                 if forwarder.is_none()
                     && working_notice
                         .as_ref()
-                        .is_some_and(|notice| notice.streamed)
+                        .is_some_and(|notice| notice.progressive)
                     && let Some(notice) = working_notice.clone()
                 {
-                    *forwarder = Some(super::streaming::spawn_stream_forwarder(
+                    *forwarder = Some(super::streaming::spawn_preview_forwarder(
                         Arc::new(self.services.clone()),
                         scope.clone(),
                         actor.clone(),
                         run_id,
                         notice,
+                        super::streaming::PreviewSourceRoute {
+                            thread_scope: thread_scope.clone(),
+                            reply_target: state.reply_target_binding_ref.clone(),
+                            conversation: envelope.external_conversation_ref().clone(),
+                            actor_ref: envelope.external_actor_ref().clone(),
+                        },
                     ));
                 }
             }
