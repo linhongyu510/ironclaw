@@ -803,7 +803,7 @@ fn event_start_instant(event: &Value) -> Option<DateTime<Utc>> {
 }
 
 static LINKED_RESOURCE_URL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"https://[^\s<>"']+"#).expect("static linked-resource URL pattern is valid")
+    Regex::new(r#"https://[^\s<>"']+"#).unwrap() // safety: hardcoded constant pattern
 });
 
 fn linked_resources(event: &Value, limit: usize) -> Vec<Value> {
