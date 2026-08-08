@@ -215,18 +215,25 @@ impl ChannelAdapter for SlackChannelAdapter {
                     vendor_message_ref,
                     markdown_text,
                 } => {
-                    let outcome = append_slack_stream(
-                        egress,
-                        &credential,
-                        &channel,
-                        vendor_message_ref,
-                        markdown_text,
-                    )
-                    .await;
-                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
-                    parts.push(outcome);
-                    if !sent {
-                        break 'parts;
+                    // Defensive: the forwarder's per-flush payload is bounded
+                    // by its coalescing thresholds, but the shutdown flush can
+                    // carry a whole burst — split over the stream cap so a
+                    // large suffix never exceeds `markdown_text`'s 12k limit.
+                    let chunks = crate::mrkdwn::slack_stream_text_chunks(markdown_text);
+                    for chunk in chunks {
+                        let outcome = append_slack_stream(
+                            egress,
+                            &credential,
+                            &channel,
+                            vendor_message_ref,
+                            &chunk,
+                        )
+                        .await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
+                            break 'parts;
+                        }
                     }
                 }
                 OutboundPart::StreamStop {
@@ -235,9 +242,11 @@ impl ChannelAdapter for SlackChannelAdapter {
                 } => {
                     // Split over the stream cap internally: earlier chunks
                     // ride chat.appendStream, the last rides
-                    // chat.stopStream. The observer sees ONE part, so a
-                    // failed stop means nothing was sent — its re-drive
-                    // fallback stays uniform.
+                    // chat.stopStream. The observer sees ONE part; a failed
+                    // stop with an unsplit tail means nothing was sent, but
+                    // with a >12k tail some chunks may have been accepted —
+                    // the observer's re-drive then duplicates them (rare,
+                    // documented in the observer recovery comment).
                     let chunks = crate::mrkdwn::slack_stream_text_chunks(markdown_text);
                     let mut all_sent = true;
                     for chunk in &chunks[..chunks.len().saturating_sub(1)] {

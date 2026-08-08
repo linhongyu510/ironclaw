@@ -596,13 +596,14 @@ impl RunDeliveryObserver {
                         } else {
                             String::new()
                         };
-                        appended_for_tail = appended.clone();
                         streamed_stop = Some(notice.clone());
-                        super::streaming::stream_final_parts(
+                        let (parts, tail) = super::streaming::stream_final_parts(
                             &notice.vendor_message_ref,
                             &final_text,
                             &appended,
-                        )
+                        );
+                        appended_for_tail = tail;
+                        parts
                     }
                     Some(notice) => {
                         // Plain (degraded) notice: retract after delivery.
@@ -632,22 +633,39 @@ impl RunDeliveryObserver {
             {
                 Ok(messages) => messages,
                 Err(error) if streamed_stop.is_some() => {
-                    // The stop failed. The answer must never be lost. When
-                    // the tail was non-empty, re-drive the full final text
-                    // as a plain message, then stop+delete the stuck stream;
-                    // when the tail was empty the answer was already fully
-                    // streamed and a short-text stop finalizes it in place
-                    // (no delete — the stream carries the answer).
-                    let notice = streamed_stop.clone().expect("guarded by is_some");
-                    let tail_len =
-                        super::streaming::common_prefix_len(&appended_for_tail, &final_text);
-                    if tail_len < final_text.len() {
+                    // The stop failed. The answer must never be lost. The
+                    // recovery converges on ONE rule, derived from the same
+                    // tail the happy path built: a non-empty tail (some
+                    // content was never streamed) re-drives the full final
+                    // text as a plain message, then stops+deletes the stuck
+                    // stream; an empty tail (everything was already
+                    // streamed) first retries the text-less stop, and only
+                    // if that also fails — the answer would otherwise be
+                    // stranded in an open stream — follows the same
+                    // re-drive+stop+delete path. The short-text stop is
+                    // NEVER appended to a stream that carries the answer.
+                    // The recovery converges on ONE rule, derived from the
+                    // same tail the happy path built: `appended_for_tail` IS
+                    // the tail (empty = everything was already streamed).
+                    let tail_empty = appended_for_tail.is_empty();
+                    if !tail_empty {
                         tracing::warn!(
                             target: "ironclaw::reborn::run_delivery",
                             %run_id,
                             %error,
                             "stream stop failed; re-delivering the final answer as a plain message"
                         );
+                    } else if let Some(notice) = streamed_stop.clone()
+                        && self
+                            .services
+                            .stop_working_notice(scope.clone(), Some(run_id), notice, "", false)
+                            .await
+                    {
+                        // The text-less retry finalized the fully-streamed
+                        // answer in place. No postMessage, no delete.
+                        return Ok(());
+                    }
+                    if let Some(notice) = streamed_stop.clone() {
                         let redelivery = self
                             .deliver_run_notification(
                                 RunNotificationDeliveryContext {
@@ -674,15 +692,6 @@ impl RunDeliveryObserver {
                             .await;
                         redelivery?
                     } else {
-                        self.services
-                            .stop_working_notice(
-                                scope.clone(),
-                                Some(run_id),
-                                notice,
-                                prompts::WORKING_STREAM_STOP_TEXT,
-                                false,
-                            )
-                            .await;
                         Vec::new()
                     }
                 }

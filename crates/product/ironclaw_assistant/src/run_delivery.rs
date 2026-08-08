@@ -49,6 +49,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
+
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
@@ -550,17 +551,20 @@ impl RunDeliveryServices {
         }
     }
 
-    /// Append one live text suffix to the working stream. Best-effort;
-    /// returns the error so the forwarder retains the suffix (a failed append
-    /// must not be dropped — the LCP-tail stop recovers it, but holding it
-    /// avoids a gap in the middle of the stream).
+    /// Append one live text suffix to the working stream. Returns whether
+    /// the vendor accepted it — `false` on any failure, so the forwarder
+    /// DROPS the suffix (the LCP-tail stop recomputes the remainder from the
+    /// ledger at completion). The ledger must never advance without the
+    /// vendor having the text: a false positive would compute an empty tail
+    /// and lose the answer.
     pub(crate) async fn append_to_stream(
         &self,
         scope: TurnScope,
         run_id: Option<TurnRunId>,
         append: PendingStreamAppend,
-    ) -> Result<(), CoordinatedDeliveryError> {
-        self.coordinator
+    ) -> bool {
+        match self
+            .coordinator
             .deliver_notice(NoticeDeliveryRequest {
                 intent: DeliveryIntent::Working,
                 scope,
@@ -574,8 +578,24 @@ impl RunDeliveryServices {
                 extension_id: &self.extension_id,
                 notice_ref: "stream-append".to_string(),
             })
-            .await?;
-        Ok(())
+            .await
+        {
+            // `DeliveredUnconfirmed` sent the part (only the durable write
+            // failed) — the vendor has the text; count it as accepted.
+            Ok(
+                CoordinatedDeliveryOutcome::Delivered { .. }
+                | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+            ) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "stream append delivery failed"
+                );
+                false
+            }
+        }
     }
 
     /// Finalize a working notice. Streamed notices get a `StreamStop` with
@@ -591,7 +611,7 @@ impl RunDeliveryServices {
         notice: PostedWorkingNotice,
         markdown_text: &str,
         delete_after_stop: bool,
-    ) {
+    ) -> bool {
         let notice_ref = format!(
             "retract-{}",
             notice
@@ -616,7 +636,7 @@ impl RunDeliveryServices {
                 vendor_message_ref: notice.vendor_message_ref,
             });
         }
-        if let Err(error) = self
+        match self
             .coordinator
             .deliver_notice(NoticeDeliveryRequest {
                 intent: DeliveryIntent::Cleanup,
@@ -630,11 +650,21 @@ impl RunDeliveryServices {
             })
             .await
         {
-            tracing::warn!(
-                target: "ironclaw::reborn::run_delivery",
-                %error,
-                "failed to stop working indicator stream/message"
-            );
+            // `DeliveredUnconfirmed` sent the parts (only the durable write
+            // failed) — the stream is finalized; count it as stopped.
+            Ok(
+                CoordinatedDeliveryOutcome::Delivered { .. }
+                | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+            ) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %error,
+                    "failed to stop working indicator stream/message"
+                );
+                false
+            }
         }
     }
 }

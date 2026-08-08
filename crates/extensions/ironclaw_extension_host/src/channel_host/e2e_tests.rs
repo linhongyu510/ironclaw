@@ -2634,7 +2634,7 @@ async fn slack_dm_streams_working_state_and_finalizes_with_the_answer() {
     // LCP-tail stop recovers, the test must not depend on that race).
     harness.wait_for_live_subscriber().await;
     let run_id = harness.coordinator.active_run_id().expect("run id");
-    let live_body = "Hello world — ".repeat(15); // 210+ chars > flush threshold
+    let live_body = "Hello world — ".repeat(18); // 252 chars > 250 flush threshold
     harness.push_live_text(run_id, "text:r:0", &live_body);
     for _ in 0..80 {
         if !harness.slack_stream_appends().is_empty() {
@@ -2943,7 +2943,9 @@ async fn slack_dm_stream_is_stopped_when_the_run_fails() {
     harness.drain().await;
 
     // No final text exists: the stream stops with the short text and the
-    // partial message is deleted — never an orphaned open stream.
+    // partial message is deleted — never an orphaned open stream, and no
+    // error/feedback post accompanies the cleanup.
+    assert!(harness.slack_messages().is_empty());
     let stops = harness.slack_stream_stops();
     assert_eq!(stops.len(), 1);
     assert_eq!(stops[0]["markdown_text"], "Ironclaw finished.");
@@ -2996,7 +2998,9 @@ async fn slack_dm_falls_back_to_plain_indicator_when_stream_start_is_rejected() 
 #[tokio::test]
 async fn slack_dm_stop_stream_failure_redelivers_the_answer_as_post_message() {
     let harness = build_harness(TurnMode::Running).await;
-    harness.egress.fail_stream_method("chat.stopStream");
+    // Fail only the FIRST stopStream: the recovery's short stop and the
+    // stuck-stream delete must succeed so the full cleanup path is pinned.
+    harness.egress.fail_stream_method_n("chat.stopStream", 1);
 
     let response = harness.post_event(dm_message("Ev-working", "think")).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -3022,11 +3026,227 @@ async fn slack_dm_stop_stream_failure_redelivers_the_answer_as_post_message() {
     assert_eq!(messages[0]["text"], "never lose the answer");
     // Two stop attempts: the failed final stop (which carried the answer
     // text) and the recovery's best-effort short-text stop of the stuck
-    // stream.
+    // stream, followed by the delete of the stuck message.
     let stops = harness.slack_stream_stops();
     assert_eq!(stops.len(), 2);
     assert_eq!(stops[0]["markdown_text"], "never lose the answer");
     assert_eq!(stops[1]["markdown_text"], "Ironclaw finished.");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(
+        deletes[0]["ts"],
+        stable_slack_test_ts(
+            &serde_json::to_vec(&harness.slack_stream_starts()[0]).expect("serialize") // safety: test JSON is serializable.
+        )
+    );
+}
+
+#[tokio::test]
+async fn slack_dm_stop_stream_failure_with_fully_streamed_answer_finalizes_in_place() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness.egress.fail_stream_method_n("chat.stopStream", 1);
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_stream_starts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+
+    // Stream the FULL final answer before completing (empty LCP-tail).
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    let live_body = "already streamed answer — ".repeat(18); // > 250-char flush threshold
+    harness.push_live_text(run_id, "text:r:0", &live_body);
+    for _ in 0..80 {
+        if !harness.slack_stream_appends().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!harness.slack_stream_appends().is_empty());
+
+    harness
+        .coordinator
+        .complete_active_run(&live_body)
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    // The first (failed) stop carried no text; the recovery retried the
+    // text-less stop and finalized the fully-streamed answer IN PLACE: no
+    // postMessage, no short-text corruption, no delete.
+    let stops = harness.slack_stream_stops();
+    assert_eq!(stops.len(), 2);
+    for stop in &stops {
+        assert!(
+            stop.get("markdown_text").is_none(),
+            "empty-tail stops must carry no text: {stops:?}"
+        );
+    }
+    assert!(harness.slack_messages().is_empty());
+    assert!(harness.slack_deletes().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_stream_is_stopped_when_the_delivery_times_out() {
+    let harness = build_harness_with_max_wait(TurnMode::Running, Duration::from_millis(300)).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_stream_starts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+
+    // Let max_wait expire with the run still running.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    harness.drain().await;
+
+    // The safety net stops the stream with the short text and deletes the
+    // partial message; the pre-existing timeout feedback posts alongside.
+    let stops = harness.slack_stream_stops();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0]["markdown_text"], "Ironclaw finished.");
+    let deletes = harness.slack_deletes();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(
+        deletes[0]["ts"],
+        stable_slack_test_ts(
+            &serde_json::to_vec(&harness.slack_stream_starts()[0]).expect("serialize") // safety: test JSON is serializable.
+        )
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("taking longer than expected")),
+        "timeout feedback expected, got: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn slack_dm_stream_stops_before_the_gate_prompt_and_resumes_a_new_stream() {
+    let harness = build_harness(TurnMode::Running).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_stream_starts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+
+    // The run blocks while streaming: the stream stops BEFORE the prompt
+    // posts (the partial text must not linger as an answer-shaped message).
+    harness
+        .coordinator
+        .transition_running_to_blocked_approval()
+        .await
+        .expect("block the running turn");
+    for _ in 0..80 {
+        if !harness.slack_messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let requests = harness.egress.requests();
+    let stop_index = requests
+        .iter()
+        .position(|request| request.url.ends_with("/api/chat.stopStream"))
+        .expect("blocked run must stop its stream");
+    let prompt_index = requests
+        .iter()
+        .position(|request| request.url.ends_with("/api/chat.postMessage"))
+        .expect("blocked run must post the gate prompt");
+    assert!(
+        stop_index < prompt_index,
+        "the stream must stop BEFORE the gate prompt posts"
+    );
+    assert_eq!(harness.slack_stream_stops().len(), 1);
+    assert_eq!(
+        harness.slack_stream_stops()[0]["markdown_text"],
+        "Ironclaw finished."
+    );
+
+    // Resume: a SECOND stream starts, and the final answer finalizes it.
+    harness
+        .coordinator
+        .resume_blocked_run_to_running()
+        .await
+        .expect("resume the blocked run");
+    for _ in 0..80 {
+        if harness.slack_stream_starts().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_stream_starts().len(), 2);
+    harness
+        .coordinator
+        .complete_active_run("blocked then resumed answer")
+        .await
+        .expect("complete the resumed run");
+    harness.drain().await;
+
+    let stops = harness.slack_stream_stops();
+    assert_eq!(stops.len(), 2);
+    assert_eq!(stops[1]["markdown_text"], "blocked then resumed answer");
+    // Only the blocked stream's partial message is deleted — approval
+    // prompts are not retracted after the final reply (auth prompts are,
+    // via messages_to_delete_after_final).
+    assert_eq!(harness.slack_deletes().len(), 1);
+}
+
+#[tokio::test]
+async fn slack_dm_append_failure_drops_the_suffix_and_the_tail_recovers_it() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness.egress.fail_stream_method_n("chat.appendStream", 1);
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for _ in 0..80 {
+        if !harness.slack_stream_starts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    let live_body = "append will fail — ".repeat(18); // > 250-char flush threshold
+    harness.push_live_text(run_id, "text:r:0", &live_body);
+    for _ in 0..80 {
+        if !harness.slack_stream_appends().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The append was attempted and rejected (request recorded, suffix
+    // dropped); the completion tail must carry the full text exactly once.
+    assert_eq!(harness.slack_stream_appends().len(), 1);
+
+    harness
+        .coordinator
+        .complete_active_run(&live_body)
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    let stops = harness.slack_stream_stops();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0]["markdown_text"], live_body);
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[derive(Debug, Clone)]
@@ -3247,6 +3467,30 @@ impl RecordingTurnCoordinator {
         run.gate_ref = None;
         state.active_run_id = Some(run_id);
         state.blocked_run_id = None;
+        Ok(())
+    }
+
+    /// Transition the ACTIVE running run to `BlockedApproval` with a gate ref
+    /// (the "stream started, then the run blocked" scenario).
+    async fn transition_running_to_blocked_approval(&self) -> Result<(), ProductSurfaceFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let run_id =
+            state
+                .active_run_id
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        let run = state.runs.get_mut(&run_id).ok_or_else(|| {
+            ProductSurfaceFailure::TurnResumeRejected {
+                reason: "missing active run state".into(),
+            }
+        })?;
+        run.status = TurnStatus::BlockedApproval;
+        run.gate_ref = Some(TurnGateRef::new("gate:approval:stream-block").expect("gate ref")); // safety: static gate ref is valid.
+        state.blocked_run_id = Some(run_id);
         Ok(())
     }
 
@@ -3815,8 +4059,9 @@ impl ironclaw_product_contracts::surface::ProductSurface for RecordingCommandExe
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<ApprovedChannelEgress>>>,
     /// Slack chat.*Stream methods to reject with `not_allowed_token_type`
-    /// (failure-injection for the streaming fallback tests).
-    fail_stream_methods: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// (failure-injection for the streaming fallback tests), and how many
+    /// more times each rejection applies. `usize::MAX` = fail forever.
+    fail_stream_methods: Arc<Mutex<std::collections::HashMap<String, usize>>>,
 }
 
 impl RecordingEgress {
@@ -3840,10 +4085,16 @@ impl RecordingEgress {
     /// Make the given `chat.*Stream` method fail with an Unauthorized
     /// rejection (the vendor's `not_allowed_token_type`).
     fn fail_stream_method(&self, method: &str) {
+        self.fail_stream_method_n(method, usize::MAX);
+    }
+
+    /// Fail the method only the next `failures` calls (recovery paths then
+    /// succeed — e.g. the stop-failure re-drive's best-effort stop+delete).
+    fn fail_stream_method_n(&self, method: &str, failures: usize) {
         self.fail_stream_methods
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(method.to_string());
+            .insert(method.to_string(), failures);
     }
 
     fn slack_response(
@@ -3870,13 +4121,19 @@ impl RecordingEgress {
             }
         }
         let method = path.strip_prefix("/api/").unwrap_or_default().to_string();
-        if self
-            .fail_stream_methods
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(&method)
         {
-            return response(br#"{"ok":false,"error":"not_allowed_token_type"}"#);
+            let mut fails = self
+                .fail_stream_methods
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(remaining) = fails.get_mut(&method)
+                && *remaining > 0
+            {
+                if *remaining != usize::MAX {
+                    *remaining -= 1;
+                }
+                return response(br#"{"ok":false,"error":"not_allowed_token_type"}"#);
+            }
         }
         if path == "/api/chat.postMessage" {
             let body: serde_json::Value = match serde_json::from_slice(&approved.body) {

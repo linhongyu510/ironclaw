@@ -140,15 +140,23 @@ async fn forward_loop(
     // Cumulative text of the run's latest live Text items, keyed by item id
     // (a new phase restarts an id; the coalescer replaces a phase's body).
     let mut bodies: Vec<(String, String)> = Vec::new();
-    // The model text already folded into `pending` (advances on every update,
-    // independent of vendor acceptance — a failed flush retries `pending` as
-    // a whole, never recomputing an overlapping suffix).
+    // The model text already folded in (advances on every update). A failed
+    // flush DROPS the pending suffix: the LCP-tail stop recomputes the
+    // remainder from the appended ledger, so dropped text is recovered
+    // exactly once at completion — while re-sending an ambiguously-failed
+    // suffix could duplicate it (appendStream has no idempotency key, and
+    // duplication is NOT recoverable by the tail).
     let mut incorporated = String::new();
-    // The suffix not yet accepted by the vendor. Retained on failure; never
-    // dropped.
+    // The suffix not yet accepted by the vendor. Cleared on failure (see
+    // above) and after success; never grows past one accumulation window.
     let mut pending = String::new();
     let mut flush_timer = tokio::time::interval(STREAM_APPEND_IDLE);
     flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Minimum inter-append pacing: the per-item chunk flush never fires more
+    // often than the idle window, so bursty generation cannot exceed Slack
+    // per-method rate limits and a sustained vendor failure cannot turn into
+    // a per-item retry storm.
+    let mut last_flush = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -159,20 +167,20 @@ async fn forward_loop(
             item = subscription.next() => {
                 match item {
                     Some(Ok(envelope)) => {
-                        if let Some(cumulative) = live_cumulative_text(&envelope, run_id, &mut bodies)
-                            && cumulative.len() > incorporated.len()
-                            && cumulative.starts_with(&incorporated)
+                        if let Some(cumulative) =
+                            live_cumulative_text(&envelope, run_id, &mut bodies)
+                            && let Some(suffix) = next_suffix(&cumulative, &mut incorporated)
                         {
-                            let suffix = &cumulative[incorporated.len()..];
-                            if !suffix.is_empty() {
-                                pending.push_str(suffix);
-                            }
-                            incorporated = cumulative;
+                            pending.push_str(&suffix);
                         }
                         // A body that no longer extends what we folded in
                         // (regeneration) holds until it realigns; the
                         // LCP-tail stop carries the corrected remainder.
-                        if pending.chars().count() >= STREAM_APPEND_CHUNK_CHARS {
+                        if should_chunk_flush(
+                            pending.chars().count(),
+                            last_flush.elapsed(),
+                        ) {
+                            last_flush = std::time::Instant::now();
                             flush(&services, &scope, Some(run_id), &notice, &appended, &mut pending).await;
                         }
                     }
@@ -193,10 +201,34 @@ async fn forward_loop(
                 }
             }
             _ = flush_timer.tick() => {
+                last_flush = std::time::Instant::now();
                 flush(&services, &scope, Some(run_id), &notice, &appended, &mut pending).await;
             }
         }
     }
+}
+
+/// The next suffix to append for a cumulative body, or `None` when the body
+/// does not extend what we already folded in (regeneration — appends hold
+/// until realignment). Advances `incorporated` on extension; the suffix is
+/// dropped on append failure (the LCP-tail stop recomputes the remainder),
+/// never re-derived from a stale `incorporated`.
+fn next_suffix(cumulative: &str, incorporated: &mut String) -> Option<String> {
+    if cumulative.len() > incorporated.len() && cumulative.starts_with(incorporated.as_str()) {
+        let suffix = cumulative[incorporated.len()..].to_string();
+        *incorporated = cumulative.to_string();
+        (!suffix.is_empty()).then_some(suffix)
+    } else {
+        None
+    }
+}
+
+/// Whether the pending suffix should flush on the item path: at or above the
+/// chunk threshold AND past the minimum inter-append window (rate-limit
+/// pacing — bursty generation cannot exceed ~1 append per idle window, and a
+/// sustained vendor failure cannot become a per-item retry storm).
+fn should_chunk_flush(pending_chars: usize, since_last_flush: std::time::Duration) -> bool {
+    pending_chars >= STREAM_APPEND_CHUNK_CHARS && since_last_flush >= STREAM_APPEND_IDLE
 }
 
 /// The run's cumulative live text: the concatenation of every Text item's
@@ -246,7 +278,10 @@ fn live_cumulative_text(
 }
 
 /// Send the pending suffix; on success advance the appended ledger (what
-/// Slack actually has). On failure retain the suffix for the next flush.
+/// Slack actually has). On failure DROP the suffix: re-sending an
+/// ambiguously-failed append could duplicate text (appendStream has no
+/// idempotency key), and the LCP-tail stop recomputes the remainder from
+/// the ledger at completion — dropped text is recovered exactly once.
 async fn flush(
     services: &RunDeliveryServices,
     scope: &TurnScope,
@@ -258,53 +293,54 @@ async fn flush(
     if pending.is_empty() {
         return;
     }
-    let suffix = pending.clone();
-    match services
+    let suffix = std::mem::take(pending);
+    if services
         .append_to_stream(
             scope.clone(),
             run_id,
             PendingStreamAppend {
                 conversation: notice.conversation.clone(),
                 vendor_message_ref: notice.vendor_message_ref.clone(),
-                suffix,
+                suffix: suffix.clone(),
             },
         )
         .await
     {
-        Ok(()) => {
-            let mut ledger = appended
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            ledger.push_str(pending);
-            pending.clear();
-        }
-        Err(error) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %error,
-                "stream append failed; retaining suffix (the completion tail recovers it)"
-            );
-        }
+        let mut ledger = appended
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ledger.push_str(&suffix);
+    } else {
+        tracing::debug!(
+            target: "ironclaw::reborn::run_delivery",
+            "stream append not accepted; dropping the suffix (the completion tail recovers it exactly once)"
+        );
     }
 }
 
-/// The completion stop parts for a streamed final reply: exactly ONE
-/// `StreamStop` carrying the LCP-tail (`final_text` minus the common prefix
-/// with what was already appended). The adapter splits over the vendor's
-/// per-call cap internally, so the observer always sees one part — a failed
-/// stop therefore means nothing was sent, keeping the re-drive fallback
-/// uniform.
+/// The completion stop parts for a streamed final reply, plus the tail they
+/// carry: exactly ONE `StreamStop` whose `markdown_text` is the LCP-tail
+/// (`final_text` minus the common prefix with what was already appended).
+/// The adapter splits over the vendor's per-call cap internally, so the
+/// observer always sees one part; a failed stop therefore means nothing was
+/// sent (modulo an already-split >12k tail, where the re-drive may duplicate
+/// accepted chunks — documented in the recovery comment). Returning the tail
+/// keeps the stop-failure recovery's empty-vs-non-empty decision on the same
+/// rule as the happy path.
 pub(crate) fn stream_final_parts(
     vendor_message_ref: &str,
     final_text: &str,
     appended: &str,
-) -> Vec<OutboundPart> {
+) -> (Vec<OutboundPart>, String) {
     let common = common_prefix_len(appended, final_text);
     let tail = final_text.get(common..).unwrap_or_default().to_string();
-    vec![OutboundPart::StreamStop {
-        vendor_message_ref: vendor_message_ref.to_string(),
-        markdown_text: tail,
-    }]
+    (
+        vec![OutboundPart::StreamStop {
+            vendor_message_ref: vendor_message_ref.to_string(),
+            markdown_text: tail.clone(),
+        }],
+        tail,
+    )
 }
 
 /// Byte length of the longest common prefix of `a` and `b`, measured on
@@ -375,7 +411,8 @@ mod tests {
 
     #[test]
     fn stream_final_parts_carries_only_the_tail() {
-        let parts = stream_final_parts("ts-1", "Hello world", "Hello ");
+        let (parts, tail) = stream_final_parts("ts-1", "Hello world", "Hello ");
+        assert_eq!(tail, "world");
         assert!(matches!(
             &parts[..],
             [OutboundPart::StreamStop {
@@ -387,7 +424,8 @@ mod tests {
 
     #[test]
     fn stream_final_parts_with_empty_tail_is_an_empty_text_stop() {
-        let parts = stream_final_parts("ts-1", "Hello world", "Hello world");
+        let (parts, tail) = stream_final_parts("ts-1", "Hello world", "Hello world");
+        assert!(tail.is_empty());
         assert!(matches!(
             &parts[..],
             [OutboundPart::StreamStop {
@@ -400,7 +438,8 @@ mod tests {
     #[test]
     fn stream_final_parts_recovers_a_diverged_tail() {
         // Regeneration: the final text no longer extends what was appended.
-        let parts = stream_final_parts("ts-1", "REPLACED answer", "old prefix");
+        let (parts, tail) = stream_final_parts("ts-1", "REPLACED answer", "old prefix");
+        assert_eq!(tail, "REPLACED answer");
         assert!(matches!(
             &parts[..],
             [OutboundPart::StreamStop {
@@ -408,6 +447,43 @@ mod tests {
                 markdown_text,
             }] if vendor_message_ref == "ts-1" && markdown_text == "REPLACED answer"
         ));
+    }
+
+    #[test]
+    fn next_suffix_emits_only_the_extension_and_holds_on_divergence() {
+        let mut incorporated = String::new();
+        assert_eq!(
+            next_suffix("Hello ", &mut incorporated).as_deref(),
+            Some("Hello ")
+        );
+        assert_eq!(
+            next_suffix("Hello world", &mut incorporated).as_deref(),
+            Some("world")
+        );
+        assert_eq!(incorporated, "Hello world");
+        // Regeneration: the new body no longer extends what we folded in —
+        // holds (None) until a body realigns with the incorporated prefix.
+        assert_eq!(next_suffix("REPLACED", &mut incorporated), None);
+        assert_eq!(incorporated, "Hello world");
+        assert_eq!(
+            next_suffix("Hello world again", &mut incorporated).as_deref(),
+            Some(" again")
+        );
+        // A body identical to what we folded in produces no suffix.
+        assert_eq!(next_suffix("Hello world again", &mut incorporated), None);
+    }
+
+    #[test]
+    fn should_chunk_flush_gates_on_threshold_and_inter_append_window() {
+        let window = STREAM_APPEND_IDLE;
+        assert!(!should_chunk_flush(STREAM_APPEND_CHUNK_CHARS - 1, window));
+        assert!(should_chunk_flush(STREAM_APPEND_CHUNK_CHARS, window));
+        // Within the pacing window the chunk flush defers to the idle timer.
+        assert!(!should_chunk_flush(
+            STREAM_APPEND_CHUNK_CHARS * 2,
+            window - std::time::Duration::from_millis(1)
+        ));
+        assert!(should_chunk_flush(STREAM_APPEND_CHUNK_CHARS, window));
     }
 
     #[tokio::test]

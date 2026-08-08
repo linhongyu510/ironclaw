@@ -21,15 +21,13 @@ use crate::inbound::{
     ProductRejectionKind,
 };
 use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
-use crate::projection::{
-    ProjectionStream, ProjectionStreamSubscription, ProjectionSubscriptionRequest,
-};
+use crate::projection::{ProjectionStream, ProjectionSubscriptionRequest};
 
 /// Buffered envelope + optional expected-subscription matcher. `push_for_request`
 /// envelopes are delivered only to matching subscriptions; `push` envelopes to
-/// every subscription. Envelopes pushed AFTER a subscription exists are not
-/// delivered (the live feed has no replay) — tests that push live text while a
-/// run streams wait for [`FakeProjectionStream::subscriber_count`] first.
+/// every subscription. Drains only — tests that need live push semantics use
+/// `ironclaw_assistant::LiveProjectionStream` (the streaming forwarder's
+/// shape: push while the run streams).
 pub struct FakeProjectionStream {
     state: Mutex<
         Vec<(
@@ -37,14 +35,12 @@ pub struct FakeProjectionStream {
             ProductOutboundEnvelope,
         )>,
     >,
-    subscribers: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeProjectionStream {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(Vec::new()),
-            subscribers: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -61,19 +57,6 @@ impl FakeProjectionStream {
     ) {
         let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
         state.push((Some(request), envelope));
-    }
-
-    /// Live subscriptions currently open (the streaming forwarder subscribes
-    /// once per stream). Tests push live text only after this is non-zero —
-    /// otherwise the push lands in the no-replay past.
-    pub fn subscriber_count(&self) -> usize {
-        self.subscribers.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-impl Default for FakeProjectionStream {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -99,42 +82,11 @@ impl ProjectionStream for FakeProjectionStream {
         *state = retained;
         Ok(drained)
     }
+}
 
-    fn supports_subscription(&self) -> bool {
-        true
-    }
-
-    async fn subscribe(
-        &self,
-        request: ProjectionSubscriptionRequest,
-    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
-        // Replay envelopes buffered before the subscription (the live feed
-        // has no replay; tests coordinate via `subscriber_count`).
-        let buffered: Vec<Result<ProductOutboundEnvelope, ProductAdapterError>> = {
-            let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state;
-            let mut replayed = Vec::new();
-            let mut retained = Vec::new();
-            for (expected, envelope) in std::mem::take(&mut *state) {
-                if expected
-                    .as_ref()
-                    .is_none_or(|expected| expected == &request)
-                {
-                    replayed.push(Ok(envelope));
-                } else {
-                    retained.push((expected, envelope));
-                }
-            }
-            *state = retained;
-            replayed
-        };
-        self.subscribers
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        for envelope in buffered {
-            let _ = sender.send(envelope).await;
-        }
-        drop(sender);
-        Ok(ProjectionStreamSubscription::new(receiver))
+impl Default for FakeProjectionStream {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

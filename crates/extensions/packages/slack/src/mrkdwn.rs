@@ -20,10 +20,14 @@ pub(crate) fn slack_stream_text_chunks(text: &str) -> Vec<String> {
     }
     let mut chunks = Vec::new();
     let mut current = String::with_capacity(SLACK_STREAM_TEXT_LIMIT_CHARS);
+    // Running counter (one `chars()` scan per chunk, not per character).
+    let mut current_chars = 0usize;
     for ch in text.chars() {
         current.push(ch);
-        if current.chars().count() >= SLACK_STREAM_TEXT_LIMIT_CHARS {
+        current_chars += 1;
+        if current_chars >= SLACK_STREAM_TEXT_LIMIT_CHARS {
             chunks.push(std::mem::take(&mut current));
+            current_chars = 0;
         }
     }
     if !current.is_empty() {
