@@ -63,7 +63,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **51** group scenarios · **55** flat integration bins (49 in
-`tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+`tests/integration/`, 6 in `tests/integration/auth/`) · **40** top-level Rust bins ·
 **102** Python scenario files (**868** test functions).
 
 ---
@@ -257,7 +257,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (39)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (40)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -304,6 +304,17 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 ceiling × yolo narrowing), `e2e_trace_runtime_policy_serde.rs` (wire-stable policy
 enums), `trace_format.rs`, `trace_llm_tests.rs`,
 `reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom).
+
+**Pinned omp contract**: `reborn_omp_coding_contract_snapshot.rs` validates the
+checked-in snapshot of the seven pinned omp core coding tools
+(`read`, `write`, `edit`, `glob`, `grep`, `ast_grep`, `ast_edit` at
+`can1357/oh-my-pi` commit `08819b2`) — exact commit/provenance/tool inventory
+integrity, offline SHA-256 verification of every vendored and derived asset
+(plus `manifest.json`; unsnapshotted upstream records stay capture-time pins),
+the vendored full MIT license text, the rendered read description for the
+issue-target context, exact selector/error/output case-ID inventories, and the
+reusable differential comparison factory — all offline from
+`tests/fixtures/omp_coding_contract/` (issue #7392, first delivery slice).
 
 ---
 
