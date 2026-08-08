@@ -233,12 +233,39 @@ impl ChannelAdapter for SlackChannelAdapter {
                     vendor_message_ref,
                     markdown_text,
                 } => {
+                    // Split over the stream cap internally: earlier chunks
+                    // ride chat.appendStream, the last rides
+                    // chat.stopStream. The observer sees ONE part, so a
+                    // failed stop means nothing was sent — its re-drive
+                    // fallback stays uniform.
+                    let chunks = crate::mrkdwn::slack_stream_text_chunks(markdown_text);
+                    let mut all_sent = true;
+                    for chunk in &chunks[..chunks.len().saturating_sub(1)] {
+                        let outcome = append_slack_stream(
+                            egress,
+                            &credential,
+                            &channel,
+                            vendor_message_ref,
+                            chunk,
+                        )
+                        .await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
+                            all_sent = false;
+                            break;
+                        }
+                    }
+                    if !all_sent {
+                        break 'parts;
+                    }
+                    let last = chunks.last().map(String::as_str).unwrap_or_default();
                     let outcome = stop_slack_stream(
                         egress,
                         &credential,
                         &channel,
                         vendor_message_ref,
-                        markdown_text,
+                        last,
                     )
                     .await;
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });

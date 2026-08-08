@@ -854,6 +854,8 @@ fn build_harness_with_settings(
             adapter: Arc::clone(&adapter),
             streams_working_indicator: false,
         }),
+        Arc::new(ironclaw_product_contracts::test_support::fakes::FakeProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
             max_attempts: 2,
@@ -2051,6 +2053,8 @@ fn build_triggered_harness_with_catalog(
             adapter: Arc::clone(&adapter),
             streams_working_indicator: false,
         }),
+        Arc::new(ironclaw_product_contracts::test_support::fakes::FakeProjectionStream::default())
+            as Arc<dyn ironclaw_product_contracts::projection::ProjectionStream>,
         Arc::new(NoStoredReplyContext),
         DeliveryRetryPolicy {
             max_attempts: 2,

@@ -45,6 +45,12 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::test_support::fakes::FakeProjectionStream;
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
@@ -255,6 +261,10 @@ struct Harness {
     workflow_factory: Arc<ironclaw_assistant::RebornChannelWorkflowFactory>,
     /// The store that factory wired into every triggered driver it builds.
     triggered_delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    /// The live projection fake wired into the workflow's delivery services;
+    /// streaming tests push live text through it and wait on
+    /// [`Self::wait_for_live_subscriber`].
+    projection: Arc<FakeProjectionStream>,
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -405,6 +415,63 @@ impl Harness {
     fn slack_deletes(&self) -> Vec<serde_json::Value> {
         self.egress.bodies_for("/api/chat.delete")
     }
+
+    fn slack_stream_starts(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.startStream")
+    }
+
+    fn slack_stream_appends(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.appendStream")
+    }
+
+    fn slack_stream_stops(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.stopStream")
+    }
+
+    /// Push one live cumulative-text update for `run_id` into the projection
+    /// fake (the shape `LiveProjectionPublisher` emits: cumulative body,
+    /// run-scoped item id).
+    fn push_live_text(&self, run_id: TurnRunId, id: &str, body: &str) {
+        self.projection.push(live_text_envelope(run_id, id, body));
+    }
+
+    /// Wait until the streaming forwarder subscribed to the projection fake
+    /// (the live feed has no replay — pushes must land after this).
+    async fn wait_for_live_subscriber(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.projection.subscriber_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "streaming forwarder never subscribed to the live projection"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+/// One cumulative live-text projection update for a run (mirrors
+/// `LiveProjectionPublisher`'s product envelope shape).
+fn live_text_envelope(run_id: TurnRunId, id: &str, body: &str) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new("slack").expect("adapter id"), // safety: static literal is valid.
+        AdapterInstallationId::new(INSTALLATION).expect("installation id"), // safety: static literal is valid.
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("binding").expect("binding ref"), // safety: static literal is valid.
+            ExternalConversationRef::new(None, "C-E2E", None, None).expect("conversation"), // safety: static literal is valid.
+            None,
+        ),
+        ironclaw_product_contracts::outbound::ProjectionCursor::new("cursor:live").expect("cursor"), // safety: static literal is valid.
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState {
+                thread_id: "thread-e2e".to_string(),
+                items: vec![ProductProjectionItem::Text {
+                    id: id.to_string(),
+                    run_id: Some(run_id),
+                    body: body.to_string(),
+                }],
+            },
+        },
+    )
 }
 
 /// Options every harness variant composes; the core builder is the single
@@ -525,6 +592,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
+    let projection = Arc::new(FakeProjectionStream::default());
 
     let host =
         slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
@@ -622,6 +690,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                     max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
                 },
                 triggered_delivery_store: Arc::clone(&triggered_delivery_store),
+                projection_stream: Arc::clone(&projection)
+                    as Arc<dyn ProjectionStream>,
             }),
         },
     ));
@@ -677,6 +747,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         assembly,
         workflow_factory,
         triggered_delivery_store,
+        projection,
     }
 }
 
@@ -1542,6 +1613,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1821,6 +1894,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1947,6 +2022,8 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        projection_stream: Arc::new(ironclaw_assistant::NoopProjectionStream)
+            as Arc<dyn ProjectionStream>,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
