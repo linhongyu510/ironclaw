@@ -530,13 +530,15 @@ impl RunDeliveryServices {
             )
             .await
         {
-            Ok(outcome) => outcome.vendor_message_ref.map(|vendor_message_ref| {
-                PostedWorkingNotice {
-                    conversation: outcome.conversation,
-                    vendor_message_ref,
-                    streamed: outcome.streamed,
-                }
-            }),
+            Ok(outcome) => {
+                outcome
+                    .vendor_message_ref
+                    .map(|vendor_message_ref| PostedWorkingNotice {
+                        conversation: outcome.conversation,
+                        vendor_message_ref,
+                        streamed: outcome.streamed,
+                    })
+            }
             Err(error) => {
                 tracing::debug!(
                     target: "ironclaw::reborn::run_delivery",

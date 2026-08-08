@@ -42,24 +42,31 @@ const STREAM_APPEND_CHUNK_CHARS: usize = 250;
 const STREAM_APPEND_IDLE: Duration = Duration::from_millis(500);
 
 /// Handle to one run's live-text forwarder task. Shutting it down stops
-/// appends before the completion stop is built, so a stop can never race a
-/// concurrent append; `appended_text` is read after shutdown for the LCP-tail.
+/// appends (the task flushes pending text first) and AWAITS the task, so
+/// `appended_text` read afterwards is stable — the completion stop's LCP-tail
+/// is computed only after the final flush, never racing a concurrent append.
 pub(crate) struct StreamForwarderHandle {
     shutdown: Option<oneshot::Sender<()>>,
+    join: Option<tokio::task::JoinHandle<()>>,
     appended: Arc<Mutex<String>>,
 }
 
 impl StreamForwarderHandle {
-    /// Stop the forwarder (idempotent; the task flushes pending text first).
-    pub(crate) async fn shutdown(mut self) {
+    /// Stop the forwarder (idempotent) and wait for its final flush.
+    pub(crate) async fn shutdown(self) {
+        let _ = self.shutdown_and_appended().await;
+    }
+
+    /// Stop the forwarder, wait for its final flush, and return the text
+    /// Slack actually accepted. The completion stop must use this: reading
+    /// the ledger before the flush would race a concurrent append.
+    pub(crate) async fn shutdown_and_appended(mut self) -> String {
         if let Some(sender) = self.shutdown.take() {
             let _ = sender.send(());
         }
-    }
-
-    /// The text Slack has actually accepted for this stream (advances only on
-    /// successful appends). Call after [`Self::shutdown`] for a stable value.
-    pub(crate) fn appended_text(&self) -> String {
+        if let Some(join) = self.join.take() {
+            let _ = join.await;
+        }
         self.appended
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -79,11 +86,12 @@ pub(crate) fn spawn_stream_forwarder(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let appended = Arc::new(Mutex::new(String::new()));
     let appended_for_task = Arc::clone(&appended);
-    let handle = StreamForwarderHandle {
+    let mut handle = StreamForwarderHandle {
         shutdown: Some(shutdown_tx),
+        join: None,
         appended,
     };
-    tokio::spawn(async move {
+    handle.join = Some(tokio::spawn(async move {
         let subscription = match services
             .projection_stream
             .subscribe(ProjectionSubscriptionRequest {
@@ -116,7 +124,7 @@ pub(crate) fn spawn_stream_forwarder(
             shutdown_rx,
         )
         .await;
-    });
+    }));
     handle
 }
 
@@ -132,8 +140,12 @@ async fn forward_loop(
     // Cumulative text of the run's latest live Text items, keyed by item id
     // (a new phase restarts an id; the coalescer replaces a phase's body).
     let mut bodies: Vec<(String, String)> = Vec::new();
-    // The suffix computed from the latest cumulative body, not yet accepted
-    // by the vendor. Retained on failure; never dropped.
+    // The model text already folded into `pending` (advances on every update,
+    // independent of vendor acceptance — a failed flush retries `pending` as
+    // a whole, never recomputing an overlapping suffix).
+    let mut incorporated = String::new();
+    // The suffix not yet accepted by the vendor. Retained on failure; never
+    // dropped.
     let mut pending = String::new();
     let mut flush_timer = tokio::time::interval(STREAM_APPEND_IDLE);
     flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -148,17 +160,18 @@ async fn forward_loop(
                 match item {
                     Some(Ok(envelope)) => {
                         if let Some(cumulative) = live_cumulative_text(&envelope, run_id, &mut bodies)
-                            && cumulative.len() > appended_len(&appended)
+                            && cumulative.len() > incorporated.len()
+                            && cumulative.starts_with(&incorporated)
                         {
-                            let current = appended_len(&appended);
-                            let suffix = cumulative
-                                .get(current..)
-                                .map(str::to_string)
-                                .unwrap_or_default();
+                            let suffix = &cumulative[incorporated.len()..];
                             if !suffix.is_empty() {
-                                pending.push_str(&suffix);
+                                pending.push_str(suffix);
                             }
+                            incorporated = cumulative;
                         }
+                        // A body that no longer extends what we folded in
+                        // (regeneration) holds until it realigns; the
+                        // LCP-tail stop carries the corrected remainder.
                         if pending.chars().count() >= STREAM_APPEND_CHUNK_CHARS {
                             flush(&services, &scope, Some(run_id), &notice, &appended, &mut pending).await;
                         }
@@ -232,13 +245,6 @@ fn live_cumulative_text(
     Some(cumulative)
 }
 
-fn appended_len(appended: &Arc<Mutex<String>>) -> usize {
-    appended
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .len()
-}
-
 /// Send the pending suffix; on success advance the appended ledger (what
 /// Slack actually has). On failure retain the suffix for the next flush.
 async fn flush(
@@ -294,10 +300,7 @@ pub(crate) fn stream_final_parts(
     appended: &str,
 ) -> Vec<OutboundPart> {
     let common = common_prefix_len(appended, final_text);
-    let tail = final_text
-        .get(common..)
-        .unwrap_or_default()
-        .to_string();
+    let tail = final_text.get(common..).unwrap_or_default().to_string();
     vec![OutboundPart::StreamStop {
         vendor_message_ref: vendor_message_ref.to_string(),
         markdown_text: tail,
@@ -317,32 +320,10 @@ pub(crate) fn common_prefix_len(a: &str, b: &str) -> usize {
     len
 }
 
-/// A subscription channel for tests: yields a canned update stream.
-#[cfg(test)]
-pub(crate) struct ScriptedSubscription {
-    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, String>>,
-}
-
-#[cfg(test)]
-use tokio::sync::mpsc;
-
-#[cfg(test)]
-pub(crate) fn scripted_subscription(
-    envelopes: Vec<ProductOutboundEnvelope>,
-) -> ScriptedSubscription {
-    let (sender, receiver) = mpsc::channel(16);
-    for envelope in envelopes {
-        let _ = sender.try_send(Ok(envelope));
-    }
-    drop(sender);
-    ScriptedSubscription { receiver }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_extension_contracts::external::ExternalConversationRef;
-    use ironclaw_host_api::ids::UserId;
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::outbound::{
         ProductOutboundEnvelope, ProductOutboundTarget, ProductProjectionState,
@@ -350,16 +331,13 @@ mod tests {
     use ironclaw_turns::ReplyTargetBindingRef;
 
     fn conversation() -> ExternalConversationRef {
-        ExternalConversationRef::new(None, "C123", Some("1700000000.000001"), Some("1700000000.000001"))
-            .expect("conversation")
-    }
-
-    fn notice(run_id: TurnRunId) -> PostedWorkingNotice {
-        PostedWorkingNotice {
-            conversation: conversation(),
-            vendor_message_ref: "1700000000.000100".to_string(),
-            streamed: true,
-        }
+        ExternalConversationRef::new(
+            None,
+            "C123",
+            Some("1700000000.000001"),
+            Some("1700000000.000001"),
+        )
+        .expect("conversation")
     }
 
     fn text_envelope(run_id: TurnRunId, id: &str, body: &str) -> ProductOutboundEnvelope {
@@ -371,6 +349,8 @@ mod tests {
                 conversation(),
                 None,
             ),
+            ironclaw_product_contracts::outbound::ProjectionCursor::new("cursor:test")
+                .expect("cursor"),
             ProductOutboundPayload::ProjectionUpdate {
                 state: ProductProjectionState {
                     thread_id: "thread-1".to_string(),
@@ -386,7 +366,7 @@ mod tests {
 
     #[test]
     fn common_prefix_len_is_char_boundary_safe() {
-        assert_eq!(common_prefix_len("héllo", "héllo world"), 7);
+        assert_eq!(common_prefix_len("héllo", "héllo world"), 6);
         assert_eq!(common_prefix_len("abc", "abd"), 2);
         assert_eq!(common_prefix_len("abc", "xyz"), 0);
         assert_eq!(common_prefix_len("abc", "abc"), 3);
@@ -396,38 +376,38 @@ mod tests {
     #[test]
     fn stream_final_parts_carries_only_the_tail() {
         let parts = stream_final_parts("ts-1", "Hello world", "Hello ");
-        assert_eq!(
-            parts,
-            vec![OutboundPart::StreamStop {
-                vendor_message_ref: "ts-1".to_string(),
-                markdown_text: "world".to_string(),
-            }]
-        );
+        assert!(matches!(
+            &parts[..],
+            [OutboundPart::StreamStop {
+                vendor_message_ref,
+                markdown_text,
+            }] if vendor_message_ref == "ts-1" && markdown_text == "world"
+        ));
     }
 
     #[test]
     fn stream_final_parts_with_empty_tail_is_an_empty_text_stop() {
         let parts = stream_final_parts("ts-1", "Hello world", "Hello world");
-        assert_eq!(
-            parts,
-            vec![OutboundPart::StreamStop {
-                vendor_message_ref: "ts-1".to_string(),
-                markdown_text: String::new(),
-            }]
-        );
+        assert!(matches!(
+            &parts[..],
+            [OutboundPart::StreamStop {
+                vendor_message_ref,
+                markdown_text,
+            }] if vendor_message_ref == "ts-1" && markdown_text.is_empty()
+        ));
     }
 
     #[test]
     fn stream_final_parts_recovers_a_diverged_tail() {
         // Regeneration: the final text no longer extends what was appended.
         let parts = stream_final_parts("ts-1", "REPLACED answer", "old prefix");
-        assert_eq!(
-            parts,
-            vec![OutboundPart::StreamStop {
-                vendor_message_ref: "ts-1".to_string(),
-                markdown_text: "REPLACED answer".to_string(),
-            }]
-        );
+        assert!(matches!(
+            &parts[..],
+            [OutboundPart::StreamStop {
+                vendor_message_ref,
+                markdown_text,
+            }] if vendor_message_ref == "ts-1" && markdown_text == "REPLACED answer"
+        ));
     }
 
     #[tokio::test]

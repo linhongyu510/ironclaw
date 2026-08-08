@@ -517,9 +517,11 @@ impl RunDeliveryObserver {
                 self.wait_for_actionable(
                     envelope,
                     scope,
+                    actor,
                     run_id,
                     delivered_blocked_marker.as_ref(),
                     working_notice,
+                    forwarder,
                 )
                 .await
                 .map_err(|err| {
@@ -535,24 +537,6 @@ impl RunDeliveryObserver {
                     }
                 })?
             };
-            // Once the stream is up, the forwarder follows it: subscribe to
-            // the live projection and start appending token deltas. Spawned
-            // after the notice is raised (the subscription has no replay, so
-            // the LCP-tail stop recovers anything missed).
-            if forwarder.is_none()
-                && working_notice
-                    .as_ref()
-                    .is_some_and(|notice| notice.streamed)
-                && let Some(notice) = working_notice.clone()
-            {
-                *forwarder = Some(super::streaming::spawn_stream_forwarder(
-                    Arc::new(self.services.clone()),
-                    scope.clone(),
-                    actor.clone(),
-                    run_id,
-                    notice,
-                ));
-            }
             if matches!(
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
@@ -604,10 +588,11 @@ impl RunDeliveryObserver {
             let parts = if is_terminal && is_final_reply {
                 match working_notice.take() {
                     Some(notice) if notice.streamed => {
+                        // Shut down the forwarder FIRST (it flushes pending
+                        // text), then read the final appended ledger — the
+                        // LCP-tail must never race the final flush.
                         let appended = if let Some(forwarder) = forwarder.take() {
-                            let appended = forwarder.appended_text();
-                            forwarder.shutdown().await;
-                            appended
+                            forwarder.shutdown_and_appended().await
                         } else {
                             String::new()
                         };
@@ -641,6 +626,7 @@ impl RunDeliveryObserver {
                     &actionable_state,
                     &notification,
                     parts,
+                    None,
                 )
                 .await
             {
@@ -652,9 +638,7 @@ impl RunDeliveryObserver {
                     // when the tail was empty the answer was already fully
                     // streamed and a short-text stop finalizes it in place
                     // (no delete — the stream carries the answer).
-                    let notice = streamed_stop
-                        .clone()
-                        .expect("guarded by is_some");
+                    let notice = streamed_stop.clone().expect("guarded by is_some");
                     let tail_len =
                         super::streaming::common_prefix_len(&appended_for_tail, &final_text);
                     if tail_len < final_text.len() {
@@ -676,6 +660,7 @@ impl RunDeliveryObserver {
                                 &actionable_state,
                                 &notification,
                                 vec![OutboundPart::Text(final_text.clone())],
+                                Some("stream-fallback"),
                             )
                             .await;
                         self.services
@@ -701,7 +686,7 @@ impl RunDeliveryObserver {
                         Vec::new()
                     }
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             if (event_kind == RunNotificationEventKind::ApprovalNeeded
                 || event_kind == RunNotificationEventKind::AuthRequired)
@@ -758,16 +743,21 @@ impl RunDeliveryObserver {
     }
 
     /// The live-path poll loop: waits for a terminal or newly-blocked state,
-    /// raising the working indicator once while the run is quietly running.
-    /// (Mirror of `wait_for_actionable_state`; kept separate so the indicator
-    /// side effect stays on the live path only.)
+    /// raising the working indicator once while the run is quietly running,
+    /// and spawning the streaming forwarder the moment a streamed notice is
+    /// raised (the live feed has no replay — every poll delay would lose
+    /// deltas). (Mirror of `wait_for_actionable_state`; kept separate so the
+    /// indicator side effect stays on the live path only.)
+    #[allow(clippy::too_many_arguments)]
     async fn wait_for_actionable(
         &self,
         envelope: &ProductInboundEnvelope,
         scope: &TurnScope,
+        actor: &TurnActor,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
         working_notice: &mut Option<PostedWorkingNotice>,
+        forwarder: &mut Option<StreamForwarderHandle>,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
@@ -800,6 +790,20 @@ impl RunDeliveryObserver {
                         envelope.external_conversation_ref(),
                     )
                     .await;
+                if forwarder.is_none()
+                    && working_notice
+                        .as_ref()
+                        .is_some_and(|notice| notice.streamed)
+                    && let Some(notice) = working_notice.clone()
+                {
+                    *forwarder = Some(super::streaming::spawn_stream_forwarder(
+                        Arc::new(self.services.clone()),
+                        scope.clone(),
+                        actor.clone(),
+                        run_id,
+                        notice,
+                    ));
+                }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
@@ -979,6 +983,7 @@ impl RunDeliveryObserver {
         state: &TurnRunState,
         notification: &ActionableNotification,
         parts: Vec<OutboundPart>,
+        projection_discriminator: Option<&str>,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
             envelope,
@@ -1000,8 +1005,11 @@ impl RunDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id =
-            prompts::run_notification_projection_id(run_id, notification.event_kind, None);
+        let projection_id = prompts::run_notification_projection_id(
+            run_id,
+            notification.event_kind,
+            projection_discriminator,
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id)
             .map_err(|reason| RunDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = PrepareCommunicationDeliveryRequest {

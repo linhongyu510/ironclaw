@@ -608,10 +608,7 @@ impl DeliveryCoordinator {
         if !streams_working_indicator {
             let conversation = request.conversation.clone();
             let outcome = self
-                .deliver_notice_parts(
-                    request,
-                    vec![OutboundPart::Text(text.to_string())],
-                )
+                .deliver_notice_parts(request, vec![OutboundPart::Text(text.to_string())])
                 .await?;
             return Ok(WorkingNoticeOutcome {
                 conversation,
@@ -624,7 +621,9 @@ impl DeliveryCoordinator {
         let outcome = self
             .deliver_notice_parts(
                 request.clone(),
-                vec![OutboundPart::StreamStart { markdown_text: None }],
+                vec![OutboundPart::StreamStart {
+                    markdown_text: None,
+                }],
             )
             .await?;
         match outcome {

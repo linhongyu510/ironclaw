@@ -21,7 +21,9 @@ use crate::inbound::{
     ProductRejectionKind,
 };
 use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
-use crate::projection::{ProjectionStream, ProjectionStreamSubscription, ProjectionSubscriptionRequest};
+use crate::projection::{
+    ProjectionStream, ProjectionStreamSubscription, ProjectionSubscriptionRequest,
+};
 
 /// Buffered envelope + optional expected-subscription matcher. `push_for_request`
 /// envelopes are delivered only to matching subscriptions; `push` envelopes to
@@ -129,7 +131,7 @@ impl ProjectionStream for FakeProjectionStream {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         for envelope in buffered {
-            let _ = sender.send(envelope);
+            let _ = sender.send(envelope).await;
         }
         drop(sender);
         Ok(ProjectionStreamSubscription::new(receiver))

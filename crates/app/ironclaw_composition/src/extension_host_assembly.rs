@@ -527,7 +527,7 @@ pub(crate) fn start_channel_host(
             auth_flow_cancel,
             settings: run_delivery_settings,
             triggered_delivery_store: Arc::clone(triggered_delivery_store),
-            projection_stream: Arc::clone(&projection_stream),
+            projection_stream: projection_stream.clone(),
         }
     });
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
@@ -664,9 +664,6 @@ pub(crate) fn start_channel_host_from_stores(
 ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
     // Test-support paths without a composed projection pipeline get the inert
     // stream; suites that exercise live streaming inject their own.
-    let source = channel_host_source(
-        services,
-        Arc::new(ironclaw_assistant::NoopProjectionStream),
-    )?;
+    let source = channel_host_source(services, Arc::new(ironclaw_assistant::NoopProjectionStream))?;
     Some(start_channel_host(&source, wiring).assembly)
 }

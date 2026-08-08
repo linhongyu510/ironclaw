@@ -260,14 +260,9 @@ impl ChannelAdapter for SlackChannelAdapter {
                         break 'parts;
                     }
                     let last = chunks.last().map(String::as_str).unwrap_or_default();
-                    let outcome = stop_slack_stream(
-                        egress,
-                        &credential,
-                        &channel,
-                        vendor_message_ref,
-                        last,
-                    )
-                    .await;
+                    let outcome =
+                        stop_slack_stream(egress, &credential, &channel, vendor_message_ref, last)
+                            .await;
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
                     if !sent {
@@ -845,7 +840,11 @@ mod tests {
         assert_eq!(message.event_id.as_str(), "slack-install_alpha-Ev123");
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
-        assert!(message.reply_context.is_none());
+        // The originating user id is carried for channel streaming recipients.
+        let context: serde_json::Value =
+            serde_json::from_slice(message.reply_context.as_deref().expect("reply context set"))
+                .expect("reply context is json");
+        assert_eq!(context["user"], "U123");
     }
 
     #[test]
@@ -2301,5 +2300,339 @@ mod tests {
             .await
             .expect_err("empty envelope is a render error");
         assert!(matches!(error, ChannelError::Render { .. }));
+    }
+
+    // ── streaming parts ────────────────────────────────────────────────────
+
+    fn stream_envelope(
+        parts: Vec<OutboundPart>,
+        conversation_id: &str,
+        topic: Option<&str>,
+        reply_target: Option<&str>,
+        reply_context: Option<&str>,
+    ) -> OutboundEnvelope {
+        OutboundEnvelope {
+            extension_id: "slack".to_string(),
+            installation_id: "install_alpha".to_string(),
+            delivery_attempt_id: "attempt-stream".to_string(),
+            target: ironclaw_extension_contracts::channel_adapter::OutboundTarget {
+                conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
+                    Some("T-A"),
+                    conversation_id,
+                    topic,
+                    reply_target,
+                )
+                .expect("conversation"),
+                thread_anchor: None,
+            },
+            parts,
+            reply_context: reply_context.map(|json| json.as_bytes().to_vec()),
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_start_posts_chat_start_stream_with_thread_ts() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStart {
+                        markdown_text: None,
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].url.ends_with("/api/chat.startStream"),
+            "url: {}",
+            requests[0].url
+        );
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        // thread_ts falls back to the user's message ts (plain DMs have no
+        // topic); no recipients for DM streams.
+        assert_eq!(body["thread_ts"], "1710000000.000150");
+        assert!(body.get("recipient_user_id").is_none());
+        assert!(body.get("recipient_team_id").is_none());
+        assert!(body.get("markdown_text").is_none());
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_start_in_channel_carries_recipients_from_reply_context() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"C123","ts":"1710000000.000200"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStart {
+                        markdown_text: None,
+                    }],
+                    "C123",
+                    Some("1710000000.000100"),
+                    None,
+                    Some(r#"{"user":"U123"}"#),
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let body = body_json(&egress.requests()[0]);
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(body["recipient_user_id"], "U123");
+        assert_eq!(body["recipient_team_id"], "T-A");
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_start_in_channel_without_recipient_is_permanent() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStart {
+                        markdown_text: None,
+                    }],
+                    "C123",
+                    Some("1710000000.000100"),
+                    None,
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(egress.requests().is_empty(), "no egress without recipient");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("recipient")
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_start_without_any_thread_anchor_is_permanent() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStart {
+                        markdown_text: None,
+                    }],
+                    "D123",
+                    None,
+                    None,
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(egress.requests().is_empty());
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("thread_ts")
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_append_posts_chat_append_stream_with_ts_and_text() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamAppend {
+                        vendor_message_ref: "1710000000.000200".to_string(),
+                        markdown_text: "world".to_string(),
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let body = body_json(&egress.requests()[0]);
+        assert!(
+            egress.requests()[0].url.ends_with("/api/chat.appendStream"),
+            "url: {}",
+            egress.requests()[0].url
+        );
+        assert_eq!(body["ts"], "1710000000.000200");
+        assert_eq!(body["markdown_text"], "world");
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_stop_posts_chat_stop_stream_and_treats_already_stopped_as_sent() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200","message":{"text":"done"}}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStop {
+                        vendor_message_ref: "1710000000.000200".to_string(),
+                        markdown_text: "done".to_string(),
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let body = body_json(&egress.requests()[0]);
+        assert!(
+            egress.requests()[0].url.ends_with("/api/chat.stopStream"),
+            "url: {}",
+            egress.requests()[0].url
+        );
+        assert_eq!(body["ts"], "1710000000.000200");
+        assert_eq!(body["markdown_text"], "done");
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
+        ));
+
+        // An already-stopped stream is success-equivalent (idempotent retry).
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"message_not_in_streaming_state"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStop {
+                        vendor_message_ref: "1710000000.000200".to_string(),
+                        markdown_text: "done".to_string(),
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_stop_splits_oversized_text_across_append_and_stop() {
+        let long_text = "x".repeat(crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS + 10);
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#),
+            ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#),
+        ]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStop {
+                        vendor_message_ref: "1".to_string(),
+                        markdown_text: long_text,
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].url.ends_with("/api/chat.appendStream"),
+            "first chunk rides appendStream: {}",
+            requests[0].url
+        );
+        assert!(
+            requests[1].url.ends_with("/api/chat.stopStream"),
+            "last chunk rides stopStream: {}",
+            requests[1].url
+        );
+        let appended = body_json(&requests[0]);
+        assert_eq!(
+            appended["markdown_text"].as_str().unwrap().chars().count(),
+            crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS
+        );
+        let stopped = body_json(&requests[1]);
+        assert_eq!(
+            stopped["markdown_text"].as_str().unwrap().chars().count(),
+            10
+        );
+        assert_eq!(report.parts.len(), 2);
+        assert!(
+            report
+                .parts
+                .iter()
+                .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_stream_vendor_rejection_maps_to_permanent() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"not_allowed_token_type"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::StreamStart {
+                        markdown_text: None,
+                    }],
+                    "D123",
+                    None,
+                    Some("1710000000.000150"),
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Unauthorized { .. }
+        ));
     }
 }
