@@ -114,7 +114,10 @@ pub use first_party_tools::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
-    TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,
+    OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+    OMP_WRITE_CAPABILITY_ID, OmpCodingTools, TriggerManagementClock,
+    builtin_first_party_handlers_with_trigger_clock, insert_omp_coding_handlers,
+    omp_coding_package,
 };
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{

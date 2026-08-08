@@ -5,6 +5,7 @@ pub(crate) mod extension;
 pub(crate) mod file;
 pub(crate) mod github;
 pub(crate) mod mock_mcp;
+pub(crate) mod omp_coding;
 pub(crate) mod outbound;
 pub(crate) mod process;
 pub(crate) mod profile;

@@ -483,6 +483,10 @@ path = "tests/integration/webui_v2_router_smoke.rs"
 name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
 
+[[test]]
+name = "reborn_omp_registration"
+path = "tests/integration/reborn_omp_registration.rs"
+
 [profile.release]
 strip = true          # Remove debug symbols from release binaries
 

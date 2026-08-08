@@ -1427,6 +1427,7 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         resource_profile: None,
         origin_gate_matrix: None,
         standard_op: None,
+        provider_tool_name: None,
     }
 }
 

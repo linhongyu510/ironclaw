@@ -1,0 +1,329 @@
+//! Test-support-gated registration seam for the omp-parity coding engines
+//! (issue #7392 slice 3).
+//!
+//! Produces the built-in first-party package PLUS the five omp capabilities
+//! (`builtin.read`, `builtin.write`, `builtin.edit`, `builtin.glob`,
+//! `builtin.grep`) with exact provider-name overrides (`read`, `write`,
+//! `edit`, `glob`, `grep`), the pinned fixture schemas and descriptions as
+//! model-visible contract bytes, and a [`FirstPartyCapabilityHandler`]
+//! adapter dispatching to `ironclaw_extension_support::coding::omp::*`
+//! through the ordinary first-party capability path (CapabilityHost,
+//! authorization, approvals, resource accounting, RootFilesystem/MountView,
+//! durable tool results).
+//!
+//! Two canonical ids overlap with the stock builtins: `builtin.glob` and
+//! `builtin.grep`. A package cannot declare the same id twice, so the
+//! omp-extended package REPLACES those two capabilities (same ids, omp
+//! manifest + handler + exact names) while the other old coding tools
+//! (`read_file`, `write_file`, `list_dir`, `apply_patch`) stay registered
+//! unchanged. The provider names never collide: the old tools advertise the
+//! derived `builtin__glob`/`builtin__grep` spellings, the omp tools the
+//! exact `glob`/`grep`.
+//!
+//! Everything here is compiled only for tests and `test-support` builds:
+//! production binaries ship zero bytes of this module, and the harness
+//! never selects the omp surface by default.
+//!
+//! Documented divergence from the stock coding path: the stock arm runs
+//! `normalize_optional_null_sentinels` (keyed on its derived schema names)
+//! before dispatch; the omp schemas are pinned fixture bytes under their own
+//! refs, so that normalization does not apply here — optional fields
+//! populated with the string `"null"` reach the omp engines verbatim and get
+//! the pinned engine error rather than graceful absent-field handling. This
+//! is the exact pinned contract; revisit only if the benchmark arm shows a
+//! real model-behavior delta.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use ironclaw_extension_registry::{
+    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
+};
+use ironclaw_extension_support::coding::omp::{
+    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, OmpSnapshotRegistry,
+};
+use ironclaw_host_api::{
+    capability::{EffectKind, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    path::VirtualPath,
+    resource::ResourceUsage,
+    runtime_policy::ProcessBackendKind,
+};
+
+use super::{
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, MAX_FIRST_PARTY_INPUT_BYTES,
+    MAX_WRITE_FILE_INPUT_BYTES, builtin_first_party_package_for_process_backend,
+};
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
+
+/// Canonical capability id of the omp `read` engine (slice 2). New id —
+/// no stock builtin shares it.
+pub const OMP_READ_CAPABILITY_ID: &str = "builtin.read";
+/// Canonical capability id of the omp `write` engine (slice 2). New id.
+pub const OMP_WRITE_CAPABILITY_ID: &str = "builtin.write";
+/// Canonical capability id of the omp hashline `edit` engine (slice 2).
+/// New id.
+pub const OMP_EDIT_CAPABILITY_ID: &str = "builtin.edit";
+/// The omp `glob` engine rides the existing `builtin.glob` canonical id
+/// (replacing the stock v1 glob capability in the omp-extended package).
+/// See the module docs.
+///
+/// Canonical ids stay namespaced (`builtin.*`); only the model-visible names
+/// are overridden to the exact unqualified omp names.
+pub const OMP_GLOB_CAPABILITY_ID: &str = GLOB_CAPABILITY_ID;
+/// The omp `grep` engine rides the existing `builtin.grep` canonical id
+/// (replacing the stock v1 grep capability in the omp-extended package).
+pub const OMP_GREP_CAPABILITY_ID: &str = GREP_CAPABILITY_ID;
+
+/// Exact model-visible provider names (the pinned omp tool names).
+const OMP_READ_PROVIDER_TOOL_NAME: &str = "read";
+const OMP_WRITE_PROVIDER_TOOL_NAME: &str = "write";
+const OMP_EDIT_PROVIDER_TOOL_NAME: &str = "edit";
+const OMP_GLOB_PROVIDER_TOOL_NAME: &str = "glob";
+const OMP_GREP_PROVIDER_TOOL_NAME: &str = "grep";
+
+/// Pinned model-visible descriptions. `read` uses the RENDERED prompt for
+/// the issue-target context (fixture `prompts/read.rendered.md`); the others
+/// use the verbatim pinned prompt files (`write.md`, `hashline.md`,
+/// `glob.md`, `grep.md` — upstream renders `write`/`edit` with an empty
+/// context and the fixture pins the `glob`/`grep` templates raw).
+const OMP_READ_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::omp::omp_assets::OMP_READ_DESCRIPTION;
+const OMP_WRITE_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::omp::omp_assets::OMP_WRITE_DESCRIPTION;
+const OMP_EDIT_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::omp::omp_assets::OMP_EDIT_DESCRIPTION;
+const OMP_GLOB_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::omp::omp_assets::OMP_GLOB_DESCRIPTION;
+const OMP_GREP_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::omp::omp_assets::OMP_GREP_DESCRIPTION;
+
+/// Schema refs resolving through `super::schemas::resolve_builtin_input_schema_ref`
+/// to the pinned fixture schema assets (byte-identical, verified by the
+/// `omp_registration_assets_byte_match_pinned_fixtures` crate test).
+const OMP_READ_SCHEMA_REF: &str = "schemas/builtin/omp.read.input.v1.json";
+const OMP_WRITE_SCHEMA_REF: &str = "schemas/builtin/omp.write.input.v1.json";
+const OMP_EDIT_SCHEMA_REF: &str = "schemas/builtin/omp.edit.input.v1.json";
+const OMP_GLOB_SCHEMA_REF: &str = "schemas/builtin/omp.glob.input.v1.json";
+const OMP_GREP_SCHEMA_REF: &str = "schemas/builtin/omp.grep.input.v1.json";
+
+#[derive(Debug, Clone, Copy)]
+struct OmpCapabilityMetadata {
+    id: &'static str,
+    provider_tool_name: &'static str,
+    description: &'static str,
+    effects: &'static [EffectKind],
+    max_input_bytes: usize,
+    schema_ref: &'static str,
+}
+
+const OMP_CAPABILITIES: &[OmpCapabilityMetadata] = &[
+    OmpCapabilityMetadata {
+        id: OMP_READ_CAPABILITY_ID,
+        provider_tool_name: OMP_READ_PROVIDER_TOOL_NAME,
+        description: OMP_READ_DESCRIPTION,
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+        schema_ref: OMP_READ_SCHEMA_REF,
+    },
+    OmpCapabilityMetadata {
+        id: OMP_WRITE_CAPABILITY_ID,
+        provider_tool_name: OMP_WRITE_PROVIDER_TOOL_NAME,
+        description: OMP_WRITE_DESCRIPTION,
+        effects: &[EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
+        schema_ref: OMP_WRITE_SCHEMA_REF,
+    },
+    OmpCapabilityMetadata {
+        id: OMP_EDIT_CAPABILITY_ID,
+        provider_tool_name: OMP_EDIT_PROVIDER_TOOL_NAME,
+        description: OMP_EDIT_DESCRIPTION,
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
+        schema_ref: OMP_EDIT_SCHEMA_REF,
+    },
+    OmpCapabilityMetadata {
+        id: GLOB_CAPABILITY_ID,
+        provider_tool_name: OMP_GLOB_PROVIDER_TOOL_NAME,
+        description: OMP_GLOB_DESCRIPTION,
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+        schema_ref: OMP_GLOB_SCHEMA_REF,
+    },
+    OmpCapabilityMetadata {
+        id: GREP_CAPABILITY_ID,
+        provider_tool_name: OMP_GREP_PROVIDER_TOOL_NAME,
+        description: OMP_GREP_DESCRIPTION,
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+        schema_ref: OMP_GREP_SCHEMA_REF,
+    },
+];
+
+/// The built-in first-party package extended with the five omp capabilities.
+///
+/// Starts from the ordinary process-backend-restricted builtin package and
+/// swaps the two overlapping ids (`builtin.glob`/`builtin.grep`) for their
+/// omp counterparts while appending the three new ids
+/// (`builtin.read`/`builtin.write`/`builtin.edit`). Everything else —
+/// `read_file`, `write_file`, `list_dir`, `apply_patch`, echo, time, shell,
+/// … — is untouched, so the benchmark arm's model surface is the stock
+/// surface plus the five omp tools.
+pub fn omp_coding_package(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionPackage, ExtensionError> {
+    let base = builtin_first_party_package_for_process_backend(process_backend)?;
+    let mut manifest = base.manifest;
+    manifest.capabilities.retain(|capability| {
+        capability.id.as_str() != GLOB_CAPABILITY_ID && capability.id.as_str() != GREP_CAPABILITY_ID
+    });
+    manifest.capabilities.extend(omp_coding_manifests()?);
+    ExtensionPackage::from_manifest(manifest, VirtualPath::new("/system/extensions/builtin")?)
+}
+
+fn omp_coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
+    OMP_CAPABILITIES
+        .iter()
+        .map(omp_capability_manifest)
+        .collect()
+}
+
+fn omp_capability_manifest(
+    metadata: &OmpCapabilityMetadata,
+) -> Result<CapabilityManifest, ExtensionError> {
+    Ok(CapabilityManifest {
+        id: CapabilityId::new(metadata.id)?,
+        description: metadata.description.to_string(),
+        effects: metadata.effects.to_vec(),
+        default_permission: PermissionMode::Allow,
+        visibility: CapabilityVisibility::Model,
+        standard_op: None,
+        input_schema_ref: CapabilityProfileSchemaRef::new(metadata.schema_ref)?,
+        output_schema_ref: None,
+        prompt_doc_ref: None,
+        required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
+        resource_profile: super::resource_profile(),
+        origin_gate_matrix: Some(super::first_party_origin_gate_matrix(metadata.id)),
+        provider_tool_name: Some(metadata.provider_tool_name.to_string()),
+    })
+}
+
+/// Register the omp handler adapter for the five omp capability ids.
+///
+/// Overwrites the stock builtin handler for `builtin.glob`/`builtin.grep`
+/// (upsert semantics of [`FirstPartyCapabilityRegistry::insert_handler`]);
+/// the other builtin ids keep their stock handlers.
+pub fn insert_omp_coding_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+) -> Result<(), HostApiError> {
+    let handler = Arc::new(OmpCodingTools::new(
+        Arc::new(OmpSnapshotRegistry::default()),
+    ));
+    for metadata in OMP_CAPABILITIES {
+        registry.insert_handler(CapabilityId::new(metadata.id)?, Arc::clone(&handler));
+    }
+    Ok(())
+}
+
+/// First-party handler adapter translating the five omp capability ids to the
+/// `coding::omp` engines.
+///
+/// Mirrors the stock coding path's resource discipline: bounded input size,
+/// bounded output bytes, wall-clock + output-byte accounting. The engine
+/// context is built from the already-authorized request (filesystem, mount
+/// view, caller scope, run identity) plus the shared snapshot registry that
+/// binds hashline edit tags to reads from the SAME run.
+pub struct OmpCodingTools {
+    snapshots: Arc<OmpSnapshotRegistry>,
+}
+
+impl OmpCodingTools {
+    pub fn new(snapshots: Arc<OmpSnapshotRegistry>) -> Self {
+        Self { snapshots }
+    }
+}
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for OmpCodingTools {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let Some(metadata) = omp_capability_metadata(request.capability_id.as_str()) else {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::UndeclaredCapability,
+            ));
+        };
+        super::bounded_input_size_with_max(&request.input, metadata.max_input_bytes)?;
+        let start = Instant::now();
+        let context = OmpEngineContext {
+            filesystem: Arc::clone(&request.services.filesystem),
+            mounts: request.mounts.clone().unwrap_or_default(),
+            scope: request.scope.clone(),
+            run_id: request.run_id,
+            snapshots: Arc::clone(&self.snapshots),
+        };
+        let output = match request.capability_id.as_str() {
+            OMP_READ_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::omp::read(&context, request.input.clone()).await
+            }
+            OMP_WRITE_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::omp::write(&context, request.input.clone())
+                    .await
+            }
+            OMP_EDIT_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::omp::edit(&context, request.input.clone()).await
+            }
+            GLOB_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::omp::glob(&context, request.input.clone()).await
+            }
+            GREP_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::omp::grep(&context, request.input.clone()).await
+            }
+            _ => unreachable!("omp handler is registered only for the five omp ids"),
+        }
+        .map_err(omp_error)?;
+        let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let output_bytes =
+            super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES).map_err(
+                |error| error.with_usage(ResourceUsage::default().set_wall_clock_ms(wall_clock_ms)),
+            )?;
+        Ok(FirstPartyCapabilityResult::new(
+            output,
+            ResourceUsage::default()
+                .set_wall_clock_ms(wall_clock_ms)
+                .set_output_bytes(output_bytes),
+        ))
+    }
+}
+
+fn omp_capability_metadata(capability_id: &str) -> Option<OmpCapabilityMetadata> {
+    OMP_CAPABILITIES
+        .iter()
+        .copied()
+        .find(|metadata| metadata.id == capability_id)
+}
+
+/// Map an omp engine failure onto the first-party capability error surface.
+///
+/// The pinned omp error text is the model-visible contract, but it is free
+/// text (paths, newlines) that the strict `SafeSummary` validator rejects,
+/// so it rides the untrusted diagnostic channel exactly like the stock shell
+/// path routes raw failure causes.
+fn omp_error(error: OmpEngineError) -> FirstPartyCapabilityError {
+    let kind = match error.kind() {
+        OmpEngineErrorKind::Input => RuntimeDispatchErrorKind::InputEncode,
+        _ => RuntimeDispatchErrorKind::OperationFailed,
+    };
+    FirstPartyCapabilityError::dispatch_with_diagnostic(kind, None, error.message())
+}

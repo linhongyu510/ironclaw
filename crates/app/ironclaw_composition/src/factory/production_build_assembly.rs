@@ -21,6 +21,8 @@ pub(super) async fn build_production_shaped(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        omp_coding_tools_for_test,
         memory_binding_policy,
         memory_provider_connection,
         ..
@@ -94,6 +96,8 @@ pub(super) async fn build_production_shaped(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        omp_coding_tools_for_test,
     };
     match storage {
         RebornStorageInput::Disabled => Err(RebornBuildError::InvalidConfig {
@@ -373,6 +377,11 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) trust_fixture_extensions_for_test: bool,
+    /// Issue #7392 slice 3 seam: select the omp-extended built-in package +
+    /// handlers. Test-support only; default `false` keeps the stock surface
+    /// byte-identical.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) omp_coding_tools_for_test: bool,
 }
 
 fn production_wiring(

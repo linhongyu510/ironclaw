@@ -263,6 +263,14 @@ pub struct CapabilityDescriptor {
     /// or serialized before this field existed rehydrate to `None`.
     #[serde(default)]
     pub standard_op: Option<StandardMessagingOp>,
+    /// Optional exact provider-facing tool name (issue #7392 provider-name
+    /// resolver). `None` keeps the derived name (`capability_port.rs`'s
+    /// `'.' -> "__"` encoding plus collision-digest suffix); when set, the
+    /// loop advertises exactly this name while the derived spelling keeps
+    /// resolving for back-compat. Additive: `#[serde(default)]` so existing
+    /// descriptors/records parse to `None` and serialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +391,7 @@ mod capability_descriptor_runtime_kind_tests {
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            provider_tool_name: None,
         }
     }
 

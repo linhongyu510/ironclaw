@@ -669,6 +669,16 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Select the omp-extended first-party coding surface (issue #7392
+    /// slice 3): exact `read`/`write`/`edit`/`glob`/`grep` tools with the
+    /// pinned schemas/descriptions, dispatched through the real capability
+    /// path. Auto-approve is ON (the profile default); use the
+    /// `omp_coding_tools_with_approvals()` group for the gated arm.
+    pub fn with_omp_coding_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::OmpCodingTools;
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The

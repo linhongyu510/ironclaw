@@ -701,6 +701,7 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             google_oauth_backend_for_test,
             sandboxed_shell,
+            omp_coding_tools,
             workspace_scoped_per_caller,
         } = options;
         let root = Arc::new(if sandboxed_shell {
@@ -763,6 +764,12 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         input = input.with_bundled_first_party_for_test();
+        if omp_coding_tools {
+            // Issue #7392 slice 3 registration seam: swap the composed
+            // runtime's built-in package + handlers for the omp-extended
+            // variants (exact read/write/edit/glob/grep model surface).
+            input = input.with_omp_coding_tools_for_test();
+        }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }

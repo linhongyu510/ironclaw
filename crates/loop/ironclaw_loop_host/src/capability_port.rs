@@ -1839,11 +1839,23 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         "host runtime capability id is reserved for a synthetic loop capability",
                     ));
                 }
-                let provider_tool_name =
-                    provider_tool_name(&capability.descriptor.id, &snapshot.provider_names);
+                let (provider_tool_name, derived_alias) = resolve_provider_tool_name(
+                    &capability.descriptor.id,
+                    capability.descriptor.provider_tool_name.as_deref(),
+                    &snapshot.provider_names,
+                )?;
                 snapshot
                     .provider_names
                     .insert(provider_tool_name.clone(), capability_id.clone());
+                // Back-compat within the override seam: the derived spelling
+                // of an overridden capability keeps resolving alongside the
+                // advertised name (see `resolve_provider_tool_name`).
+                if let Some(derived_alias) = derived_alias {
+                    snapshot
+                        .provider_names
+                        .entry(derived_alias)
+                        .or_insert_with(|| capability_id.clone());
+                }
                 snapshot.capabilities.insert(
                     capability_id.clone(),
                     SurfaceCapabilitySnapshot::Runtime(Box::new(
@@ -3092,6 +3104,48 @@ fn provider_tool_name(
         return name;
     }
     provider_tool_name_with_digest(&base, capability_id.as_str(), existing, 0)
+}
+
+/// Resolve the provider-facing tool name for one surfaced capability.
+///
+/// Issue #7392 provider-name resolver: an explicit `provider_tool_name`
+/// override on the descriptor wins for advertisement (validated here at the
+/// provider boundary); without one the name derives from the capability id
+/// (`'.' -> "__"` encoding plus collision-digest suffix, [`provider_tool_name`]).
+/// When an override is present, the derived spelling is ALSO returned as a
+/// resolution alias so transcripts that call the derived name keep resolving
+/// (back-compat within the override seam — the advertised surface shows only
+/// the override).
+///
+/// A collision between an override and any name already registered on the
+/// surface (another capability's override or derived name) fails loudly
+/// rather than silently shadowing that capability.
+fn resolve_provider_tool_name(
+    capability_id: &CapabilityId,
+    override_name: Option<&str>,
+    existing: &HashMap<ProviderToolName, CapabilityId>,
+) -> Result<(ProviderToolName, Option<ProviderToolName>), AgentLoopHostError> {
+    let Some(override_name) = override_name else {
+        return Ok((provider_tool_name(capability_id, existing), None));
+    };
+    let advertised = ProviderToolName::new(override_name.to_string()).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability provider tool name override is not a valid provider tool name",
+        )
+    })?;
+    if existing
+        .get(&advertised)
+        .is_some_and(|existing_id| existing_id != capability_id)
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability provider tool name override collides with another capability on the surface",
+        ));
+    }
+    let derived = provider_tool_name(capability_id, existing);
+    let alias = (derived != advertised).then_some(derived);
+    Ok((advertised, alias))
 }
 
 fn provider_tool_name_with_digest(
@@ -4846,6 +4900,56 @@ mod tests {
         assert_eq!(name.as_str(), "demo__echo__v1");
         provider_validation::validate_provider_tool_name(name.as_str())
             .expect("provider-safe name");
+    }
+
+    #[test]
+    fn provider_tool_name_override_advertises_exactly_and_keeps_derived_alias() {
+        let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+        let (advertised, alias) =
+            resolve_provider_tool_name(&capability_id, Some("read"), &HashMap::new())
+                .expect("override resolves");
+
+        assert_eq!(advertised.as_str(), "read");
+        assert_eq!(
+            alias.as_ref().map(|name| name.as_str()),
+            Some("builtin__read")
+        );
+    }
+
+    #[test]
+    fn provider_tool_name_without_override_derives_unchanged() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let (advertised, alias) = resolve_provider_tool_name(&capability_id, None, &HashMap::new())
+            .expect("derived name resolves");
+
+        assert_eq!(advertised.as_str(), "demo__echo");
+        assert!(alias.is_none(), "no override means no derived alias");
+    }
+
+    #[test]
+    fn provider_tool_name_override_rejects_invalid_names() {
+        let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+        // ProviderToolName forbids dots; the exact-name mechanism must not
+        // smuggle an id-shaped override past the boundary validation.
+        let error =
+            resolve_provider_tool_name(&capability_id, Some("builtin.read"), &HashMap::new())
+                .expect_err("dotted override is rejected");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_name_override_collision_fails_loudly() {
+        let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+        let mut existing = HashMap::new();
+        existing.insert(
+            ProviderToolName::new("read").expect("provider tool name"),
+            CapabilityId::new("builtin.write").expect("valid capability id"),
+        );
+        let error = resolve_provider_tool_name(&capability_id, Some("read"), &existing)
+            .expect_err("colliding override is rejected");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     #[test]
@@ -9882,6 +9986,7 @@ mod tests {
                 resource_profile: None,
                 origin_gate_matrix: None,
                 standard_op: None,
+                provider_tool_name: None,
             },
             description_trust: Default::default(),
             access: VisibleCapabilityAccess::Available,

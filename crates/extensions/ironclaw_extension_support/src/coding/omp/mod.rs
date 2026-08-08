@@ -27,6 +27,11 @@ use serde_json::{Value, json};
 mod glob;
 mod grep;
 mod hashline;
+/// Public surface for the pinned registration assets (issue #7392 slice 3):
+/// the model-visible descriptions and input schemas, embedded in this crate
+/// and exposed so downstream crates resolve them without cross-crate
+/// `include_str!` reach-ins.
+pub mod omp_assets;
 mod read;
 mod selector;
 mod state;
@@ -288,6 +293,16 @@ pub mod harness {
         hashline::BARE_BODY_AUTO_PIPED_WARNING.to_string()
     }
 
+    /// Compute the pinned hashline snapshot tag for `text` (xxHash32 low 16
+    /// bits rendered as 4 uppercase hex digits, after the pinned
+    /// normalization). The registration-seam integration test authors an
+    /// `edit` payload with the tag of its seeded file BEFORE the scripted
+    /// `read` result arrives, so it needs the same deterministic tag the
+    /// engine will advertise.
+    pub fn compute_file_hash(text: &str) -> String {
+        hashline::format::compute_file_hash(text)
+    }
+
     pub fn render_unknown_uri_like_target(trimmed: &str, suggestion: &str) -> String {
         super::write::render_unknown_uri_like_target(trimmed, suggestion)
     }
@@ -460,4 +475,72 @@ pub(crate) fn workspace_virtual_root(
         .resolve_with_grant(&scoped)
         .ok()
         .map(|(virtual_path, _)| virtual_path)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The registration-seam assets (issue #7392 slice 3) must stay
+    /// byte-identical to the pinned fixture snapshot: the model-visible
+    /// schemas and descriptions ARE the pinned contract bytes, so a fixture
+    /// regeneration must land in the assets tree too.
+    macro_rules! assert_asset_matches_fixture {
+        ($asset:literal, $fixture:literal) => {
+            assert_eq!(
+                include_str!($asset),
+                include_str!($fixture),
+                "{} drifted from the pinned fixture {}",
+                $asset,
+                $fixture
+            );
+        };
+    }
+
+    // The assets/ tree (schemas + prompts) is a byte-copy of the pinned
+    // upstream contract from can1357/oh-my-pi @ 08819b279cf02ae2545e69dad7111ab48d91d35e
+    // (MIT). The full license text and per-file SHA-256 provenance live at
+    // tests/fixtures/omp_coding_contract/licenses/LICENSE + provenance.json;
+    // these assertions pin the two trees together.
+    #[test]
+    fn omp_registration_assets_byte_match_pinned_fixtures() {
+        assert_asset_matches_fixture!(
+            "assets/schemas/read.json",
+            "../../../../../../tests/fixtures/omp_coding_contract/schemas/read.json"
+        );
+        assert_asset_matches_fixture!(
+            "assets/schemas/write.json",
+            "../../../../../../tests/fixtures/omp_coding_contract/schemas/write.json"
+        );
+        assert_asset_matches_fixture!(
+            "assets/schemas/edit.json",
+            "../../../../../../tests/fixtures/omp_coding_contract/schemas/edit.json"
+        );
+        assert_asset_matches_fixture!(
+            "assets/schemas/glob.json",
+            "../../../../../../tests/fixtures/omp_coding_contract/schemas/glob.json"
+        );
+        assert_asset_matches_fixture!(
+            "assets/schemas/grep.json",
+            "../../../../../../tests/fixtures/omp_coding_contract/schemas/grep.json"
+        );
+        assert_asset_matches_fixture!(
+            "assets/prompts/read.rendered.md",
+            "../../../../../../tests/fixtures/omp_coding_contract/prompts/read.rendered.md"
+        );
+        assert_asset_matches_fixture!(
+            "assets/prompts/write.md",
+            "../../../../../../tests/fixtures/omp_coding_contract/prompts/write.md"
+        );
+        assert_asset_matches_fixture!(
+            "assets/prompts/hashline.md",
+            "../../../../../../tests/fixtures/omp_coding_contract/prompts/hashline.md"
+        );
+        assert_asset_matches_fixture!(
+            "assets/prompts/glob.md",
+            "../../../../../../tests/fixtures/omp_coding_contract/prompts/glob.md"
+        );
+        assert_asset_matches_fixture!(
+            "assets/prompts/grep.md",
+            "../../../../../../tests/fixtures/omp_coding_contract/prompts/grep.md"
+        );
+    }
 }

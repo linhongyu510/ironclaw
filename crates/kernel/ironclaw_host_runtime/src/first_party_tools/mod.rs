@@ -11,6 +11,8 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+#[cfg(any(test, feature = "test-support"))]
+mod omp;
 mod outbound_deliver;
 mod reply_attachment;
 mod schemas;
@@ -68,6 +70,11 @@ pub use memory::{
     invocation_for_request as memory_invocation_for_request, map_memory_service_error,
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use omp::{
+    OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+    OMP_WRITE_CAPABILITY_ID, OmpCodingTools, insert_omp_coding_handlers, omp_coding_package,
 };
 pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
@@ -618,6 +625,9 @@ fn first_party_capability_manifest(
         max_egress_bytes: None,
         resource_profile,
         origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
+        // The stock builtins never declare a provider-name override; their
+        // model-visible names derive from the capability id.
+        provider_tool_name: None,
     })
 }
 
@@ -821,10 +831,20 @@ pub(super) fn bounded_input_size(
     capability_id: &str,
     input: &serde_json::Value,
 ) -> Result<(), FirstPartyCapabilityError> {
-    let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
     let max_bytes = coding_capability_metadata(capability_id)
         .map(|metadata| metadata.max_input_bytes)
         .unwrap_or(MAX_FIRST_PARTY_INPUT_BYTES);
+    bounded_input_size_with_max(input, max_bytes)
+}
+
+/// Bounded-input check with an explicit byte cap. The omp adapter uses this
+/// with its own metadata table (`first_party_tools::omp`), whose capabilities
+/// are not in `CODING_CAPABILITIES`.
+pub(super) fn bounded_input_size_with_max(
+    input: &serde_json::Value,
+    max_bytes: usize,
+) -> Result<(), FirstPartyCapabilityError> {
+    let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
     if bytes.len() > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,

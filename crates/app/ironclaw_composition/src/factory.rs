@@ -124,7 +124,7 @@ use ironclaw_extension_manager::{
 };
 use ironclaw_extension_registry::{
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::ScopedFilesystem;
 #[cfg(test)]
@@ -1115,13 +1115,29 @@ fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
     memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
-    let mut registry = ExtensionRegistry::new();
     let package =
         builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("built-in first-party package is invalid: {error}"),
             }
         })?;
+    let package = extend_builtin_package(package)?;
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    insert_bound_memory_package(&mut registry, memory_package)?;
+    Ok(registry)
+}
+
+/// The host-owned extension packages layered on top of the built-in
+/// first-party package (extension lifecycle, IronHub, admin configuration,
+/// operator configuration, skill auto-activation) — shared by the stock and
+/// omp-extended builtin registries so the omp arm differs ONLY in the five
+/// omp capabilities, never in the extension layers.
+fn extend_builtin_package(package: ExtensionPackage) -> Result<ExtensionPackage, RebornBuildError> {
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension lifecycle package is invalid: {error}"),
@@ -1147,10 +1163,31 @@ fn production_builtin_extension_registry(
             reason: format!("skill auto-activation package is invalid: {error}"),
         }
     })?;
+    Ok(package)
+}
+
+/// Issue #7392 slice 3 seam (test-support only): the built-in first-party
+/// registry whose coding capabilities are the omp-extended package
+/// (`ironclaw_host_runtime::omp_coding_package`) — the stock surface plus
+/// the five omp tools under the exact `read`/`write`/`edit`/`glob`/`grep`
+/// names. The extension layers and the bound memory package ride on top
+/// exactly as in production.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn omp_extended_builtin_extension_registry(
+    process_backend: ProcessBackendKind,
+    memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let package = ironclaw_host_runtime::omp_coding_package(process_backend).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("omp-extended built-in package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_package(package)?;
+    let mut registry = ExtensionRegistry::new();
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party registry is invalid: {error}"),
+            reason: format!("omp-extended first-party registry is invalid: {error}"),
         })?;
     insert_bound_memory_package(&mut registry, memory_package)?;
     Ok(registry)

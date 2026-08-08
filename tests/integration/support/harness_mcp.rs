@@ -143,6 +143,7 @@ pub(super) fn mock_mcp_extension_package(
             default_permission: PermissionMode::Allow,
             visibility: CapabilityVisibility::Model,
             standard_op: None,
+            provider_tool_name: None,
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
@@ -176,6 +177,7 @@ pub(super) fn mock_mcp_extension_package(
         resource_profile: None,
         origin_gate_matrix: None,
         standard_op: None,
+        provider_tool_name: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

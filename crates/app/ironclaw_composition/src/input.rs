@@ -190,6 +190,13 @@ pub struct RebornHostBindings {
     /// `InstalledLocal` (#5459).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) trust_fixture_extensions_for_test: bool,
+    /// Issue #7392 slice 3 seam: when `true`, the built-in first-party
+    /// package and handler registry are replaced by the omp-extended
+    /// variants (exact `read`/`write`/`edit`/`glob`/`grep` model surface).
+    /// Test-support only; the harness never sets it by default and the field
+    /// ships zero bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) omp_coding_tools_for_test: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     /// `first_party`-runtime extension factories the binary assembles
     /// (extension-runtime P2). Empty until concrete extension crates extract
@@ -842,6 +849,17 @@ impl RebornHostBindings {
         self
     }
 
+    /// Select the omp-extended built-in first-party package + handler
+    /// registry (issue #7392 slice 3): the stock builtin surface plus the
+    /// five omp capabilities under the exact `read`/`write`/`edit`/`glob`/
+    /// `grep` names. Test-support only; the default surface is
+    /// byte-identical to today.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_omp_coding_tools_for_test(mut self) -> Self {
+        self.omp_coding_tools_for_test = true;
+        self
+    }
+
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
@@ -928,6 +946,8 @@ impl RebornHostBindings {
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             trust_fixture_extensions_for_test: false,
+            #[cfg(any(test, feature = "test-support"))]
+            omp_coding_tools_for_test: false,
             product_auth_ports: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),

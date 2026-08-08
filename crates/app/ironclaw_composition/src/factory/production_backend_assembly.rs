@@ -350,6 +350,8 @@ pub(super) async fn build_backend_production(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        omp_coding_tools_for_test,
     } = context;
     let deployment_is_local_single_user = matches!(
         production_wiring.runtime_policy.deployment,
@@ -478,6 +480,13 @@ pub(super) async fn build_backend_production(
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
+    #[cfg(any(test, feature = "test-support"))]
+    let extension_registry = if omp_coding_tools_for_test {
+        omp_extended_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?
+    } else {
+        production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
     let extension_registry =
         production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?;
     let extension_registry = Arc::new(extension_registry);
@@ -590,6 +599,17 @@ pub(super) async fn build_backend_production(
         trigger_active_run_lookup,
         process_backend,
     )?;
+    #[cfg(any(test, feature = "test-support"))]
+    if omp_coding_tools_for_test {
+        // The omp handler adapter replaces the stock builtin handler for
+        // `builtin.glob`/`builtin.grep` and adds `builtin.read`/`write`/`edit`
+        // (issue #7392 slice 3 registration seam).
+        ironclaw_host_runtime::insert_omp_coding_handlers(&mut first_party_registry).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("omp first-party handlers are invalid: {error}"),
+            },
+        )?;
+    }
     if let (Some(package), Some(handler)) = (
         resolved_memory.package.as_ref(),
         resolved_memory.tool_handler.as_ref(),

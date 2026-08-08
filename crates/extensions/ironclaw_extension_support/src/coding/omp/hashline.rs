@@ -3586,7 +3586,7 @@ pub(crate) struct PatchSection {
     pub(crate) path: String,
     pub(crate) file_hash: Option<String>,
     pub(crate) diff: String,
-    parsed: std::cell::OnceCell<ParsedPatch>,
+    parsed: std::sync::OnceLock<ParsedPatch>,
 }
 
 impl PatchSection {
@@ -3595,7 +3595,7 @@ impl PatchSection {
             path,
             file_hash,
             diff,
-            parsed: std::cell::OnceCell::new(),
+            parsed: std::sync::OnceLock::new(),
         }
     }
 
@@ -4291,15 +4291,46 @@ async fn commit_section(
         (true, Some(version)) => CasExpectation::Version(version),
         _ => CasExpectation::Any,
     };
-    ctx.filesystem
-        .put(&virtual_path, Entry::bytes(persisted.into_bytes()), cas)
-        .await
-        .map_err(|error| {
-            omp_error(
+    let cas_result = ctx
+        .filesystem
+        .put(
+            &virtual_path,
+            Entry::bytes(persisted.clone().into_bytes()),
+            cas,
+        )
+        .await;
+    match cas_result {
+        Ok(_) => {}
+        // Byte-only backends (disk/in-memory) cannot honor a version CAS; the
+        // tag/live-hash validation in `prepare_section` already guards against
+        // mid-air collisions, so fall back to the unconditional write exactly
+        // like the `write` engine and the stock `apply_patch` builtin (which
+        // CAS-free via `write_file`). Production record backends keep the CAS.
+        Err(ironclaw_filesystem::FilesystemError::Unsupported {
+            operation: ironclaw_filesystem::FilesystemOperation::WriteFile,
+            ..
+        }) => {
+            ctx.filesystem
+                .put(
+                    &virtual_path,
+                    Entry::bytes(persisted.clone().into_bytes()),
+                    CasExpectation::Any,
+                )
+                .await
+                .map_err(|error| {
+                    omp_error(
+                        OmpEngineErrorKind::Filesystem,
+                        format!("filesystem error: {error}"),
+                    )
+                })?;
+        }
+        Err(error) => {
+            return Err(omp_error(
                 OmpEngineErrorKind::Filesystem,
                 format!("filesystem error: {error}"),
-            )
-        })?;
+            ));
+        }
+    }
     let op = if exists {
         SectionOp::Update
     } else {

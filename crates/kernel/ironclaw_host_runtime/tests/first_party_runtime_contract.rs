@@ -706,6 +706,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 max_egress_bytes: None,
                 resource_profile: None,
                 origin_gate_matrix: None,
+                provider_tool_name: None,
             }],
             hooks: Vec::new(),
         },

@@ -980,8 +980,47 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
-        _ => return None,
+        _ => return resolve_omp_input_schema_ref(reference),
     })
+}
+
+/// Resolve the input schema refs of the omp coding capabilities
+/// (`schemas/builtin/omp.*.input.v1.json`, issue #7392 slice 3) from the
+/// pinned crate assets byte-identical to
+/// `tests/fixtures/omp_coding_contract/schemas/` (verified by the
+/// `omp_registration_assets_byte_match_pinned_fixtures` crate test in
+/// `ironclaw_extension_support`). Additive: production packages never
+/// declare these refs, and this arm compiles to `None` in production
+/// builds, so the stock surface is byte-identical.
+#[cfg(any(test, feature = "test-support"))]
+fn resolve_omp_input_schema_ref(reference: &str) -> Option<Value> {
+    let raw = match reference {
+        "schemas/builtin/omp.read.input.v1.json" => {
+            ironclaw_extension_support::coding::omp::omp_assets::OMP_READ_SCHEMA
+        }
+        "schemas/builtin/omp.write.input.v1.json" => {
+            ironclaw_extension_support::coding::omp::omp_assets::OMP_WRITE_SCHEMA
+        }
+        "schemas/builtin/omp.edit.input.v1.json" => {
+            ironclaw_extension_support::coding::omp::omp_assets::OMP_EDIT_SCHEMA
+        }
+        "schemas/builtin/omp.glob.input.v1.json" => {
+            ironclaw_extension_support::coding::omp::omp_assets::OMP_GLOB_SCHEMA
+        }
+        "schemas/builtin/omp.grep.input.v1.json" => {
+            ironclaw_extension_support::coding::omp::omp_assets::OMP_GREP_SCHEMA
+        }
+        _ => return None,
+    };
+    // silent-ok: these are compile-embedded assets validated by the
+    // asset==fixture byte test; a malformed schema fails that test and the
+    // build, so `.ok()` here cannot silently mask a real fault.
+    serde_json::from_str(raw).ok()
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn resolve_omp_input_schema_ref(_reference: &str) -> Option<Value> {
+    None
 }
 
 fn timestamp_input_schema(description: &str) -> Value {

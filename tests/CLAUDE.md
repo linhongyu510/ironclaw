@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **55** flat integration bins (49 in
+Totals: **51** group scenarios · **56** flat integration bins (50 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **41** top-level Rust bins ·
 **102** Python scenario files (**868** test functions).
 
@@ -158,7 +158,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (56)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -196,6 +196,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
 | Delivery-target tools resolve through the real outbound service | `outbound_target.rs` |
+| The omp-registration seam (issue #7392) advertises the exact pinned `read`/`write`/`edit`/`glob`/`grep` names with fixture-byte schemas/descriptions while the old tools coexist, flows read→edit→read through the real path, keeps the derived spelling resolving, and gates omp writes | `reborn_omp_registration.rs` |
 
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
@@ -324,6 +325,12 @@ write success shape + URI-like-target error, edit snapshot/CAS semantics
 (stale-anchor recognized/not-from-session, chained edits, block resolution,
 noop, line/range errors), glob/grep behavior and exact errors, and the
 `compare_cases` differential seam over the golden error templates.
+`reborn_omp_registration.rs` (issue #7392 third delivery slice) registers the
+five omp engines at the MODEL boundary through the existing first-party
+capability path under the exact pinned names (`read`/`write`/`edit`/`glob`/
+`grep`; schemas/descriptions byte-matched to the fixture snapshot), proves
+the read→edit→read chain and the derived-spelling back-compat alias through
+a real turn, and gates omp writes through the real approval path.
 
 ---
 

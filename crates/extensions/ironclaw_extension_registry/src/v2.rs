@@ -50,7 +50,7 @@ use ironclaw_host_api::{
     error::HostApiError,
     host_port::{HostPortCatalog, HostPortId},
     http::RuntimeCredentialTarget,
-    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+    ids::{CapabilityId, ExtensionId, ProviderToolName, SecretHandle, VendorId},
     messaging::{STANDARD_SCHEMA_REF_PREFIX, StandardMessagingOp},
     resource::ResourceProfile,
     runtime::{RuntimeKind, TrustClass},
@@ -579,6 +579,15 @@ pub struct CapabilityDeclV2 {
     /// Declared per-origin gate matrix (§5.2.1). `None` = undeclared; a later
     /// slice populates real matrices and threads this into authorization.
     pub origin_gate_matrix: Option<OriginGateMatrix>,
+    /// Optional exact provider-facing tool name (issue #7392 provider-name
+    /// resolver): when set, the loop advertises exactly this name at the
+    /// model boundary instead of the derived `'.' -> "__"` encoding, while
+    /// the derived spelling keeps resolving for back-compat. Validated as a
+    /// [`ProviderToolName`] at parse; `None` keeps the derived name.
+    /// `#[serde(default)]` so resolved records persisted before this field
+    /// existed rehydrate to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tool_name: Option<String>,
 }
 
 /// One product-facing surface a validated manifest declares, with the
@@ -1199,6 +1208,22 @@ impl CapabilityDeclV2 {
             });
         }
 
+        // The provider-name override (issue #7392 provider-name resolver):
+        // an exact provider-facing tool name must be representable as a
+        // `ProviderToolName` (no dots, bounded, provider-safe charset) —
+        // the same validation the loop boundary applies before advertising
+        // it. `None` keeps the derived name; the field is additive so
+        // existing manifests parse unchanged.
+        if let Some(provider_tool_name) = &raw.provider_tool_name {
+            ProviderToolName::new(provider_tool_name.clone()).map_err(|_| {
+                ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares invalid provider_tool_name {provider_tool_name:?}"
+                    ),
+                }
+            })?;
+        }
+
         // A `standard_op` binding's model-facing description is host-composed
         // from the canonical description core plus the extension's vendor
         // addendum (Task 3 of the standardized messaging framework); an
@@ -1398,6 +1423,7 @@ impl CapabilityDeclV2 {
             max_egress_bytes: raw.max_egress_bytes,
             resource_profile: raw.resource_profile,
             origin_gate_matrix: raw.origin_gate_matrix,
+            provider_tool_name: raw.provider_tool_name,
         })
     }
 }
@@ -1955,6 +1981,11 @@ pub(crate) struct RawCapabilityV2 {
     /// `Forbidden` when omitted), so no raw mirror is needed.
     #[serde(default)]
     pub(crate) origin_gate_matrix: Option<OriginGateMatrix>,
+    /// Optional exact provider-facing tool name (issue #7392). `#[serde(default)]`
+    /// so existing manifests without the key parse to `None`; validated as a
+    /// `ProviderToolName` in `CapabilityDeclV2::from_raw`.
+    #[serde(default)]
+    pub(crate) provider_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

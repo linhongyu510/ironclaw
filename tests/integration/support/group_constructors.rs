@@ -62,6 +62,21 @@ impl RebornIntegrationGroup {
         Self::builder().live_approvals().await
     }
 
+    /// Group with the omp-extended first-party coding surface (issue #7392
+    /// slice 3): exact `read`/`write`/`edit`/`glob`/`grep` tools with the
+    /// pinned schemas/descriptions, plus the stock builtins, dispatched
+    /// through the real capability path. Auto-approve is enabled.
+    pub async fn omp_coding_tools() -> HarnessResult<Self> {
+        Self::builder().omp_coding_tools().await
+    }
+
+    /// Same omp surface with auto-approve DISABLED, so a scripted omp
+    /// `write` raises a real `BlockedApproval` gate through the ordinary
+    /// gate path (resolve with `approve_gate`/`deny_gate`).
+    pub async fn omp_coding_tools_with_approvals() -> HarnessResult<Self> {
+        Self::builder().omp_coding_tools_with_approvals().await
+    }
+
     /// Group with core built-in tools (memory/http/echo/time/json/shell).
     /// Auto-approve is enabled for all capability ids in the group scope.
     pub async fn builtin_tools() -> HarnessResult<Self> {
@@ -335,6 +350,38 @@ impl RebornIntegrationGroupBuilder {
         let arc = group
             .capability_harness()
             .expect("live_approvals always uses HostRuntime");
+        arc.disable_global_auto_approve(scope).await?;
+        Ok(group)
+    }
+
+    /// Build an omp-coding group. See [`RebornIntegrationGroup::omp_coding_tools`].
+    pub async fn omp_coding_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::omp_coding::omp_coding_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build an omp-coding group whose writes raise real approval gates. See
+    /// [`RebornIntegrationGroup::omp_coding_tools_with_approvals`].
+    pub async fn omp_coding_tools_with_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::omp_coding::omp_coding_tools_requiring_approval_profile()?,
+            &base,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        let group = self.into_group(base, capability).await?;
+        // Disable auto-approve once so every thread faces real approval gates
+        // (the profile already disables it for the harness users; this also
+        // covers the product scope, mirroring `live_approvals`).
+        let scope = group
+            .shared
+            .auto_approve_scope()
+            .expect("omp approvals always uses HostRuntime; scope is always Some");
+        let arc = group
+            .capability_harness()
+            .expect("omp approvals always uses HostRuntime");
         arc.disable_global_auto_approve(scope).await?;
         Ok(group)
     }

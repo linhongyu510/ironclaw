@@ -157,6 +157,7 @@ impl HostRuntime for StubHostRuntime {
                     resource_profile: None,
                     origin_gate_matrix: None,
                     standard_op: None,
+                    provider_tool_name: None,
                 },
                 description_trust: Default::default(),
                 access: VisibleCapabilityAccess::Available,

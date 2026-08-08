@@ -636,7 +636,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // sandbox transport now exposes graceful lifecycle release. This is
         // contract vocabulary; execution and provider cleanup remain in the
         // sandbox runtime lane.
-        ("ironclaw_host_api", 18_799),
+        // Raised 18_799 -> 18_808 (2026-08-08, #7392 slice 3): the additive
+        // `provider_tool_name` override field on CapabilityDescriptor (serde
+        // default None + skip_serializing_if) plus its doc comment — pure
+        // declarative vocabulary, 9 lines. Count read from this test's own
+        // failure message.
+        ("ironclaw_host_api", 18_808),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -1768,6 +1773,34 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_host_api/src/ids.rs",
         "crates/ironclaw_safety/src/lib.rs",
         "crates/ironclaw_safety/src/provider_validation.rs",
+        // Issue #7392 provider-name resolver: the additive declarative field
+        // (`provider_tool_name`) lives on the capability declaration and the
+        // runtime descriptor as plain serialized data, validated as
+        // `ProviderToolName` only where it becomes provider-protocol identity
+        // (manifest parse + the loop boundary). These files are declarative
+        // storage/propagation, not routing or product logic.
+        "crates/ironclaw_host_api/src/capability.rs",
+        "crates/ironclaw_extension_registry/src/v2.rs",
+        "crates/ironclaw_extension_registry/src/v3.rs",
+        "crates/ironclaw_extension_registry/src/package.rs",
+        "crates/ironclaw_extension_registry/src/hosted_mcp_discovery.rs",
+        // Host-owned manifest/descriptor builders that carry the additive
+        // declarative field through to the descriptor (same storage role as
+        // the registry mappings above).
+        "crates/ironclaw_extension_host/src/active.rs",
+        "crates/ironclaw_extension_host/src/generic_host.rs",
+        "crates/ironclaw_extension_host/src/hosted_mcp_manifest.rs",
+        "crates/ironclaw_extension_host/src/mcp.rs",
+        "crates/ironclaw_extension_manager/src/admin_configuration_capability.rs",
+        "crates/ironclaw_extension_manager/src/extension_lifecycle_capabilities.rs",
+        "crates/ironclaw_extension_manager/src/operator_config_capability.rs",
+        "crates/ironclaw_extension_manager/src/skill_auto_activate_capability.rs",
+        "crates/ironclaw_extension_manager/src/ironhub/capabilities.rs",
+        "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+        // Test-support-gated omp registration seam (issue #7392 slice 3):
+        // builds the builtin package plus the five omp capabilities with
+        // their exact-name overrides; compiled out of production binaries.
+        "crates/ironclaw_host_runtime/src/first_party_tools/omp.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
         // The provider-tool-call DTOs live in the `capability` submodule of the

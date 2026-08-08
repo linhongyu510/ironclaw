@@ -76,6 +76,13 @@ pub(super) enum RebornCapabilityBackend {
     BuiltinHttpToolsConfirmedHostMount,
     /// `builtin.shell` through the production Docker sandbox composition.
     SandboxShellTools,
+    /// Issue #7392 slice 3 registration seam: the omp-extended first-party
+    /// surface (exact `read`/`write`/`edit`/`glob`/`grep` names, pinned
+    /// schemas/descriptions) selected in the composed runtime via
+    /// `HostRuntimeHarnessOptions::with_omp_coding_tools`. Same real
+    /// capability path as `BuiltinHttpTools` — CapabilityHost, grants,
+    /// approvals, RootFilesystem/MountView.
+    OmpCodingTools,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -253,6 +260,22 @@ impl RebornCapabilityBackend {
                 }
                 let host_runtime =
                     super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::OmpCodingTools => {
+                if !matches!(shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "omp coding harness has no shell capability and does not support \
+                         shell mode overrides"
+                            .into(),
+                    );
+                }
+                if park_capability_gate.is_some() {
+                    return Err("park_tool_dispatch is only supported by \
+                         RebornCapabilityBackend::BuiltinHttpTools"
+                        .into());
+                }
+                let host_runtime = super::harness::profiles::omp_coding::omp_coding_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })
