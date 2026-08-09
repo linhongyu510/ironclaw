@@ -27,7 +27,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
 
-const PREVIEW_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+const PREVIEW_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct PreviewForwarderHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -120,7 +120,10 @@ async fn forward_loop(
     let mut accepted = String::new();
     let mut current = String::new();
     let mut sequence = 0_u64;
-    let mut interval = tokio::time::interval(PREVIEW_UPDATE_INTERVAL);
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + PREVIEW_UPDATE_INTERVAL,
+        PREVIEW_UPDATE_INTERVAL,
+    );
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {

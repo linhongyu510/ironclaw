@@ -9,7 +9,7 @@ Streaming is a disposable preview, not a delivery mode.
 ```text
 preview start
   -> best-effort cumulative updates
-  -> preview stop/delete
+  -> preview stop or native expiry
   -> ordinary complete final message
 ```
 
@@ -55,7 +55,7 @@ it; the generic forwarder then stops sending previews for that run.
 - `Update` uses the normal outbound-policy pipeline as a `ProgressUpdate`.
   Preview text is model output and receives the same target revalidation as
   other policy-class run notifications.
-- Updates are coalesced to at most one attempt per 500 ms.
+- Updates are coalesced to at most one attempt per second.
 - A changed prefix, provider rejection, policy rejection, or character-limit
   breach disables further preview updates. There is no retry.
 - `Stop` is best-effort cleanup. It runs before a final reply or gate prompt,
@@ -72,9 +72,20 @@ it; the generic forwarder then stops sending previews for that run.
   `chat.delete`.
 - Slack declares `scope = "all"` and `max_chars = 12000`.
 
-Telegram does not declare the capability, so it continues to use the ordinary
-working indicator and final-message paths. Adding Telegram preview later is an
-adapter and manifest change, not a product-orchestration change.
+## Telegram implementation
+
+- `Start` maps to `sendMessageDraft` with an empty text, which renders
+  Telegram's native thinking state.
+- The adapter derives a stable nonzero `draft_id` from the delivery attempt and
+  returns it as the vendor message reference.
+- `Update` validates the accepted prefix and sends cumulative plain text with
+  the same `draft_id` through `sendMessageDraft`.
+- Telegram has no explicit draft-stop method. `Stop` validates the reference
+  without vendor I/O; the normal final message clears the draft, and Telegram
+  expires abandoned drafts after 30 seconds.
+- Telegram declares `scope = "direct_only"` and `max_chars = 4096`. Groups
+  retain the ordinary working indicator rather than emulating streaming with
+  durable message edits.
 
 ## Verification
 
@@ -88,4 +99,5 @@ Coverage pins:
   failure;
 - preview cleanup on blocked, failed, and timeout paths;
 - plain-indicator fallback when preview start fails;
-- Telegram remains unaffected without declaring the capability.
+- Telegram native draft start/update behavior, stable draft identity,
+  private-chat enforcement, native expiry cleanup, and durable final delivery.
