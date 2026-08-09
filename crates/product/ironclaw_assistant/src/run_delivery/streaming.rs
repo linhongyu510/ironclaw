@@ -27,6 +27,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
 
+const FIRST_PREVIEW_UPDATE_DELAY: Duration = Duration::from_millis(150);
 const PREVIEW_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct PreviewForwarderHandle {
@@ -120,19 +121,25 @@ async fn forward_loop(
     let mut accepted = String::new();
     let mut current = String::new();
     let mut sequence = 0_u64;
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + PREVIEW_UPDATE_INTERVAL,
-        PREVIEW_UPDATE_INTERVAL,
-    );
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_update_at = None;
+    let mut next_update_at = None;
 
     loop {
+        let update_timer =
+            tokio::time::sleep_until(next_update_at.unwrap_or_else(tokio::time::Instant::now));
+        tokio::pin!(update_timer);
         tokio::select! {
             _ = &mut shutdown => break,
             item = subscription.next() => match item {
                 Some(Ok(envelope)) => {
                     if let Some(text) = live_cumulative_text(&envelope, forwarder.run_id, &mut bodies) {
                         current = text;
+                        if next_update_at.is_none() && current != accepted && !current.is_empty() {
+                            next_update_at = Some(next_preview_update_at(
+                                last_update_at,
+                                tokio::time::Instant::now(),
+                            ));
+                        }
                     }
                 }
                 Some(Err(error)) => {
@@ -145,13 +152,15 @@ async fn forward_loop(
                 }
                 None => break,
             },
-            _ = interval.tick() => {
+            _ = &mut update_timer, if next_update_at.is_some() => {
+                next_update_at = None;
                 if current == accepted || current.is_empty() {
                     continue;
                 }
                 if current.chars().count() > forwarder.notice.max_chars as usize {
                     break;
                 }
+                let update_started_at = tokio::time::Instant::now();
                 sequence = sequence.saturating_add(1);
                 if !deliver_preview_update(
                     &forwarder,
@@ -164,8 +173,19 @@ async fn forward_loop(
                     break;
                 }
                 accepted.clone_from(&current);
+                last_update_at = Some(update_started_at);
             }
         }
+    }
+}
+
+fn next_preview_update_at(
+    last_update_at: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> tokio::time::Instant {
+    match last_update_at {
+        Some(last_update_at) => std::cmp::max(now, last_update_at + PREVIEW_UPDATE_INTERVAL),
+        None => now + FIRST_PREVIEW_UPDATE_DELAY,
     }
 }
 
@@ -286,6 +306,38 @@ mod tests {
     use super::*;
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::outbound::{ProductOutboundTarget, ProductProjectionState};
+
+    #[test]
+    fn preview_cadence_debounces_the_first_update_for_150_milliseconds() {
+        let now = tokio::time::Instant::now();
+
+        assert_eq!(
+            next_preview_update_at(None, now),
+            now + Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn preview_cadence_throttles_follow_up_updates_to_one_second() {
+        let first_sent_at = tokio::time::Instant::now();
+        let more_text_at = first_sent_at + Duration::from_millis(200);
+
+        assert_eq!(
+            next_preview_update_at(Some(first_sent_at), more_text_at),
+            first_sent_at + Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn preview_cadence_does_not_delay_text_after_the_throttle_window() {
+        let first_sent_at = tokio::time::Instant::now();
+        let more_text_at = first_sent_at + Duration::from_secs(2);
+
+        assert_eq!(
+            next_preview_update_at(Some(first_sent_at), more_text_at),
+            more_text_at
+        );
+    }
 
     #[test]
     fn cumulative_text_replaces_phases_in_first_seen_order() {
