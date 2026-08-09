@@ -37,6 +37,18 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+test("automation queries request the full model-visible trigger page", async () => {
+  automationApi.listAutomations.mockResolvedValue({ automations: [] });
+
+  await createAutomationsQueryOptions(false).queryFn();
+  await createAutomationsQueryOptions(true).queryFn();
+
+  assert.deepEqual(automationApi.listAutomations.mock.calls, [
+    [{ limit: 100, runLimit: 25, includeCompleted: false }],
+    [{ limit: 100, runLimit: 25, includeCompleted: true }],
+  ]);
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;

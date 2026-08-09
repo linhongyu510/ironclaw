@@ -26,7 +26,9 @@ import {
   nextAutomationsRefetchDelay,
 } from "../lib/automations-refresh";
 
-const AUTOMATIONS_PAGE_LIMIT = 50;
+// Keep the dashboard's bounded projection aligned with the model-facing
+// `builtin.trigger_list` page so their reported automation counts agree.
+const AUTOMATIONS_PAGE_LIMIT = 100;
 const AUTOMATION_RUNS_LIMIT = 25;
 
 type RenameAutomationVariables = {
