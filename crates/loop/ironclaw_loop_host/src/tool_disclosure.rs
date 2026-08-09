@@ -33,6 +33,13 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "apply_patch",
+    // ⚠️ TEMPORARY benchmark override (issue #7392 bench arm): the omp-parity
+    // tools advertise the exact names read/write/edit; they must be core so
+    // the bridged disclosure surface exposes them alongside glob/grep.
+    // Revert at cutover when the old tools are removed.
+    "read",
+    "write",
+    "edit",
     "shell",
     // memory
     "memory_search",
