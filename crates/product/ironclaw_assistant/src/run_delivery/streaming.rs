@@ -280,6 +280,7 @@ fn live_cumulative_text(
         | ProductOutboundPayload::ProjectionSnapshot { state } => state,
         _ => return None,
     };
+    let previous: String = bodies.iter().map(|(_, body)| body.as_str()).collect();
     let mut changed = false;
     for item in &state.items {
         if let ProductProjectionItem::Text {
@@ -298,7 +299,8 @@ fn live_cumulative_text(
             }
         }
     }
-    changed.then(|| bodies.iter().map(|(_, body)| body.as_str()).collect())
+    let current: String = bodies.iter().map(|(_, body)| body.as_str()).collect();
+    (changed && current.trim_end() != previous.trim_end()).then_some(current)
 }
 
 #[cfg(test)]
@@ -377,6 +379,23 @@ mod tests {
         assert_eq!(
             live_cumulative_text(&envelope("phase-1", "Hi "), run_id, &mut bodies).as_deref(),
             Some("Hi world")
+        );
+        assert_eq!(
+            live_cumulative_text(&envelope("phase-2", "world\n"), run_id, &mut bodies),
+            None
+        );
+        assert_eq!(
+            live_cumulative_text(&envelope("phase-2", "world\nagain"), run_id, &mut bodies)
+                .as_deref(),
+            Some("Hi world\nagain")
+        );
+        assert_eq!(
+            live_cumulative_text(&envelope("phase-3", "\n"), run_id, &mut bodies),
+            None
+        );
+        assert_eq!(
+            live_cumulative_text(&envelope("phase-3", "\nfinally"), run_id, &mut bodies).as_deref(),
+            Some("Hi world\nagain\nfinally")
         );
     }
 }
