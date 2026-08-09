@@ -810,6 +810,7 @@ registerPack("ar", {
   "automations.summary.paused": "متوقف مؤقتًا",
   "automations.summary.pausedDetail": "لا يُتوقع تشغيل الجداول حاليًا.",
   "automations.summary.filterAction": "عرض {label}",
+  "automations.summary.showingOf": "عرض {shown} من أصل {total} من عمليات الأتمتة",
   "automations.summary.nextRun": "التشغيل التالي",
   "automations.summary.none": "لا شيء",
   "automations.summary.nextRunDetail": "أقرب تشغيل مجدول في هذه القائمة.",

@@ -810,6 +810,7 @@ registerPack("ko", {
   "automations.summary.paused": "일시중지됨",
   "automations.summary.pausedDetail": "현재 실행될 것으로 예상되지 않는 일정입니다.",
   "automations.summary.filterAction": "{label} 보기",
+  "automations.summary.showingOf": "자동화 {total}개 중 {shown}개 표시",
   "automations.summary.nextRun": "다음 실행",
   "automations.summary.none": "없음",
   "automations.summary.nextRunDetail": "이 목록에서 가장 빨리 예약된 실행입니다.",

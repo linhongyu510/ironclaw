@@ -810,6 +810,7 @@ registerPack("ja", {
   "automations.summary.paused": "一時停止",
   "automations.summary.pausedDetail": "スケジュールは現在実行される予定がありません。",
   "automations.summary.filterAction": "{label}を表示",
+  "automations.summary.showingOf": "{total} 件の自動化のうち {shown} 件を表示",
   "automations.summary.nextRun": "次の実行",
   "automations.summary.none": "なし",
   "automations.summary.nextRunDetail": "このリストで最も早くスケジュールされた実行。",

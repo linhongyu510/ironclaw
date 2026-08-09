@@ -305,6 +305,52 @@ impl TriggerRepository for PostgresTriggerRepository {
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
+    async fn count_scoped_triggers_by_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Result<crate::ScopedTriggerStateCounts, TriggerError> {
+        let client = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT state, COUNT(*) AS state_count
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1
+                       AND creator_user_id = $2
+                       AND agent_id IS NOT DISTINCT FROM $3
+                       AND project_id IS NOT DISTINCT FROM $4
+                     GROUP BY state"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("count scoped trigger records", error))?;
+        let mut counts = crate::ScopedTriggerStateCounts::default();
+        for row in rows {
+            let state_text: String = row
+                .try_get("state")
+                .map_err(|error| backend_error("read scoped trigger state count state", error))?;
+            let raw_count: i64 = row
+                .try_get("state_count")
+                .map_err(|error| backend_error("read scoped trigger state count", error))?;
+            let count = u64::try_from(raw_count).map_err(|error| TriggerError::Backend {
+                reason: format!("invalid scoped trigger state count: {error}"),
+            })?;
+            counts.set(crate::parse_state_codec(&state_text)?, count);
+        }
+        Ok(counts)
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,

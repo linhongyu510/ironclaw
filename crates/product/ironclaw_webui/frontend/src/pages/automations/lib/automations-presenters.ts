@@ -84,7 +84,7 @@ export function filterAutomations(automations, filter) {
   return strategy ? automations.filter(strategy) : automations;
 }
 
-export function automationSummary(automations) {
+export function automationSummary(automations, backendSummary) {
   // Exclude completed (soft-completed one-shots) from summary cards so that
   // fetching with include_completed=true does not inflate the counts shown on
   // all other tabs.
@@ -111,8 +111,8 @@ export function automationSummary(automations) {
         (b.next_run_timestamp ?? Number.MAX_SAFE_INTEGER),
     )[0];
   return {
-    scheduled: visible.length,
-    active,
+    scheduled: backendSummary?.scheduled ?? visible.length,
+    active: backendSummary?.active ?? active,
     running,
     failures,
     nextRun: next?.next_run_label || null,

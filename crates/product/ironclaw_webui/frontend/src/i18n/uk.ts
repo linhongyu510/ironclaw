@@ -810,6 +810,7 @@ registerPack("uk", {
   "automations.summary.paused": "Призупинено",
   "automations.summary.pausedDetail": "Розклади наразі не запускаються.",
   "automations.summary.filterAction": "Показати {label}",
+  "automations.summary.showingOf": "Показано {shown} з {total} автоматизацій",
   "automations.summary.nextRun": "Наступний запуск",
   "automations.summary.none": "Жодного",
   "automations.summary.nextRunDetail": "Найближчий запланований запуск у цьому списку.",

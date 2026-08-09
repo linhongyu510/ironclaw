@@ -810,6 +810,7 @@ registerPack("es", {
   "automations.summary.paused": "En pausa",
   "automations.summary.pausedDetail": "Actualmente no se espera que se ejecuten los horarios.",
   "automations.summary.filterAction": "Mostrar {label}",
+  "automations.summary.showingOf": "Mostrando {shown} de {total} automatizaciones",
   "automations.summary.nextRun": "Próxima ejecución",
   "automations.summary.none": "Ninguno",
   "automations.summary.nextRunDetail": "Ejecución programada más próxima en esta lista.",

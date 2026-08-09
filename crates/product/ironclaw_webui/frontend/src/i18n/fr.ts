@@ -810,6 +810,7 @@ registerPack("fr", {
   "automations.summary.paused": "En pause",
   "automations.summary.pausedDetail": "Les programmes ne devraient pas s'exécuter actuellement.",
   "automations.summary.filterAction": "Afficher {label}",
+  "automations.summary.showingOf": "Affichage de {shown} sur {total} automatisations",
   "automations.summary.nextRun": "Prochaine exécution",
   "automations.summary.none": "Aucun",
   "automations.summary.nextRunDetail": "Exécution planifiée la plus proche de cette liste.",

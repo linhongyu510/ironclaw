@@ -35,10 +35,10 @@ use ironclaw_assistant::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationListRequest, AutomationProductService, ChannelConnectionRequirement,
-    CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    AutomationListRequest, AutomationProductService, AutomationStateCounts,
+    ChannelConnectionRequirement, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
+    EmptyProductCommandInput, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
     FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
     LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
@@ -1435,6 +1435,7 @@ impl AutomationProductService for RecordingAutomationService {
 struct StaticAutomationService {
     output: Vec<RebornAutomationInfo>,
     scheduler_enabled: bool,
+    state_counts: Option<AutomationStateCounts>,
     list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
     /// thread id so tests prove the lookup contract rather than accepting a
@@ -1448,6 +1449,7 @@ impl StaticAutomationService {
         Self {
             output,
             scheduler_enabled: true,
+            state_counts: None,
             list_calls: Arc::new(Mutex::new(Vec::new())),
             resolve_scopes: HashMap::new(),
             resolve_calls: Arc::new(Mutex::new(Vec::new())),
@@ -1456,6 +1458,11 @@ impl StaticAutomationService {
 
     fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
         self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    fn with_state_counts(mut self, state_counts: AutomationStateCounts) -> Self {
+        self.state_counts = Some(state_counts);
         self
     }
 
@@ -1498,6 +1505,13 @@ impl AutomationProductService for StaticAutomationService {
                 include_completed: request.include_completed,
             });
         Ok(self.output.clone())
+    }
+
+    async fn automation_state_counts(
+        &self,
+        _caller: ProductAgentBoundCaller,
+    ) -> Result<Option<AutomationStateCounts>, ProductSurfaceError> {
+        Ok(self.state_counts)
     }
 
     async fn resolve_run_thread_scope(
@@ -9948,6 +9962,45 @@ async fn list_automations_surfaces_disabled_scheduler() {
     .expect("list automations");
 
     assert!(!listed.scheduler_enabled);
+}
+
+#[tokio::test]
+async fn list_automations_returns_exact_totals_beyond_the_loaded_page() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(Arc::new(
+        StaticAutomationService::new(Vec::new()).with_state_counts(AutomationStateCounts {
+            scheduled: 101,
+            paused: 2,
+            completed: 4,
+        }),
+    ));
+
+    let active_page = query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect("list active automations");
+    let active_summary = active_page.summary.expect("exact active summary");
+    assert_eq!(active_summary.total, 103);
+    assert_eq!(active_summary.scheduled, 103);
+    assert_eq!(active_summary.active, 101);
+
+    let completed_page = query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default().set_include_completed(true),
+    )
+    .await
+    .expect("list completed automations");
+    let completed_summary = completed_page.summary.expect("exact completed summary");
+    assert_eq!(completed_summary.total, 107);
+    assert_eq!(completed_summary.scheduled, 103);
+    assert_eq!(completed_summary.active, 101);
 }
 
 #[tokio::test]

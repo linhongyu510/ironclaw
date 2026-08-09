@@ -529,9 +529,24 @@ pub struct RebornGetRunStateRequest {
 /// The beta API currently returns one capped page without a cursor. Future
 /// pagination can extend this response with an optional cursor without changing
 /// the source-tagged automation rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationSummary {
+    /// Number of automations represented by this query, including completed
+    /// one-shots only when `include_completed=true`.
+    pub total: u64,
+    /// Exact number of non-completed automations, including paused rows.
+    pub scheduled: u64,
+    /// Exact number of scheduled, runnable automations.
+    pub active: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+    /// Exact backend totals. Absent only for compatibility services that do
+    /// not implement aggregation; browsers fall back to loaded-row counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<RebornAutomationSummary>,
     /// Whether the background trigger poller (scheduler) is running. When
     /// `false`, listed schedule automations will never actually fire, and the
     /// browser surfaces a "scheduling is off" notice. Defaults to `true` on the

@@ -22,6 +22,7 @@ const COPY = {
   "automations.summary.runningDetail": "Runs in progress",
   "automations.summary.scheduled": "Scheduled",
   "automations.summary.scheduledDetail": "Scheduled automations",
+  "automations.summary.showingOf": "Showing {shown} of {total} automations",
 };
 
 function sourceForTest() {
@@ -56,6 +57,17 @@ function visit(node, fn) {
   if (Array.isArray(node.values)) {
     for (const value of node.values) visit(value, fn);
   }
+}
+
+function collectScalars(root) {
+  const values = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (typeof value === "string" || typeof value === "number") values.push(value);
+    }
+  });
+  return values;
 }
 
 function nativeProps(root, tagName) {
@@ -120,6 +132,29 @@ test("summary cards filter all, active, running, and nonzero failures", () => {
   for (const button of buttons) button.onClick();
 
   assert.deepEqual(selected, ["all", "active", "running", "failures"]);
+});
+
+test("summary discloses when only a bounded page is loaded", () => {
+  const AutomationsSummaryStrip = loadComponent();
+
+  const rendered = AutomationsSummaryStrip({
+    summary: {
+      scheduled: 61,
+      active: 61,
+      running: 0,
+      failures: 0,
+      nextRun: null,
+    },
+    loadedCount: 50,
+    totalCount: 61,
+    activeFilter: "all",
+    onSelectFilter: () => {},
+  });
+
+  assert.ok(
+    collectScalars(rendered).includes("Showing 50 of 61 automations"),
+    "the dashboard must not present a bounded page as the complete list"
+  );
 });
 
 test("zero-failure summary card is not interactive", () => {

@@ -676,6 +676,31 @@ pub enum TriggerState {
     Completed,
 }
 
+/// Exact caller-scoped trigger counts grouped by persisted lifecycle state.
+///
+/// Unlike [`TriggerRepository::list_scoped_triggers`], these counts are not
+/// subject to the bounded user-facing list-page limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopedTriggerStateCounts {
+    pub scheduled: u64,
+    pub paused: u64,
+    pub completed: u64,
+}
+
+impl ScopedTriggerStateCounts {
+    pub fn total(self) -> u64 {
+        self.scheduled + self.paused + self.completed
+    }
+
+    pub(crate) fn set(&mut self, state: TriggerState, count: u64) {
+        match state {
+            TriggerState::Scheduled => self.scheduled = count,
+            TriggerState::Paused => self.paused = count,
+            TriggerState::Completed => self.completed = count,
+        }
+    }
+}
+
 fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), TriggerError> {
     match state {
         TriggerState::Scheduled | TriggerState::Paused => Ok(()),
@@ -1118,6 +1143,23 @@ pub trait TriggerRepository: Send + Sync {
         limit: usize,
         excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
+
+    /// Returns exact caller-scoped trigger counts grouped by lifecycle state.
+    ///
+    /// Storage-backed repositories used by user-facing list surfaces must
+    /// override this with an aggregate query; list-page limits must not cap the
+    /// result.
+    async fn count_scoped_triggers_by_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+    ) -> Result<ScopedTriggerStateCounts, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "count_scoped_triggers_by_state not implemented by this repository".to_string(),
+        })
+    }
 
     async fn remove_trigger(
         &self,

@@ -810,6 +810,7 @@ registerPack("hi", {
   "automations.summary.paused": "रोका गया",
   "automations.summary.pausedDetail": "शेड्यूल फिलहाल चलने की उम्मीद नहीं है।",
   "automations.summary.filterAction": "{label} दिखाएँ",
+  "automations.summary.showingOf": "{total} ऑटोमेशन में से {shown} दिखाए जा रहे हैं",
   "automations.summary.nextRun": "अगला रन",
   "automations.summary.none": "कोई नहीं",
   "automations.summary.nextRunDetail": "इस सूची में सबसे जल्दी शेड्यूल किया गया रन।",

@@ -105,6 +105,29 @@ impl AutomationProductService for RebornAutomationProductService {
         self.scheduler_enabled
     }
 
+    async fn automation_state_counts(
+        &self,
+        caller: ProductAgentBoundCaller,
+    ) -> Result<Option<crate::AutomationStateCounts>, ProductSurfaceError> {
+        let counts = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.count_scoped_triggers_by_state(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+        Ok(Some(crate::AutomationStateCounts {
+            scheduled: counts.scheduled,
+            paused: counts.paused,
+            completed: counts.completed,
+        }))
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,

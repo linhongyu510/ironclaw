@@ -2,7 +2,13 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatCard } from "../../../design-system/primitives";
 import { cn } from "../../../utils/cn";
 
-export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter }) {
+export function AutomationsSummaryStrip({
+  summary,
+  loadedCount,
+  totalCount,
+  activeFilter,
+  onSelectFilter,
+}) {
   const t = useT();
   const cards = [
     {
@@ -95,6 +101,14 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
           );
         })}
       </div>
+      {totalCount > loadedCount && (
+        <p className="mt-3 text-xs text-iron-300" role="status">
+          {t("automations.summary.showingOf", {
+            shown: loadedCount,
+            total: totalCount,
+          })}
+        </p>
+      )}
     </Panel>
   );
 }

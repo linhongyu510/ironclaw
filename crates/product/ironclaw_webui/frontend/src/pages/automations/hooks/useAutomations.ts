@@ -26,9 +26,7 @@ import {
   nextAutomationsRefetchDelay,
 } from "../lib/automations-refresh";
 
-// Keep the dashboard's bounded projection aligned with the model-facing
-// `builtin.trigger_list` page so their reported automation counts agree.
-const AUTOMATIONS_PAGE_LIMIT = 100;
+const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;
 
 type RenameAutomationVariables = {
@@ -159,21 +157,18 @@ export function useAutomations(includeCompleted = false) {
     () => normalizeAutomations(query.data, t, lang),
     [query.data, t, lang]
   );
+  const summaryData = includeCompleted
+    ? query.data
+    : completedSummaryQuery.data ?? query.data;
   const summaryAutomations = React.useMemo(
-    () =>
-      normalizeAutomations(
-        includeCompleted
-          ? query.data
-          : completedSummaryQuery.data ?? query.data,
-        t,
-        lang
-      ),
-    [completedSummaryQuery.data, includeCompleted, lang, query.data, t]
+    () => normalizeAutomations(summaryData, t, lang),
+    [lang, summaryData, t]
   );
   const summary = React.useMemo(
-    () => automationSummary(summaryAutomations),
-    [summaryAutomations]
+    () => automationSummary(summaryAutomations, summaryData?.summary),
+    [summaryAutomations, summaryData?.summary]
   );
+  const totalCount = query.data?.summary?.total ?? automations.length;
   const nextRefreshDelay = React.useMemo(
     () => nextAutomationsRefetchDelay(automations),
     [automations]
@@ -250,6 +245,7 @@ export function useAutomations(includeCompleted = false) {
   return {
     automations,
     summary,
+    totalCount,
     schedulerEnabled,
     isLoading: query.isLoading,
     // A manual refresh updates both the visible list and the background

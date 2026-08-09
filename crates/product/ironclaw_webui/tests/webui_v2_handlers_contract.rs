@@ -1078,6 +1078,7 @@ impl StubServices {
                             automation_info("automation-listed", "Daily status", "0 9 * * *"),
                             automation_info("automation-alpha", "Renamed status", "0 9 * * *"),
                         ],
+                        summary: None,
                         scheduler_enabled: true,
                     })
                     .expect("automation list payload"),

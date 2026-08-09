@@ -98,6 +98,8 @@ export function AutomationsPage() {
                 )}
                 <AutomationsSummaryStrip
                   summary={automationsState.summary}
+                  loadedCount={automationsState.automations.length}
+                  totalCount={automationsState.totalCount}
                   activeFilter={filter}
                   onSelectFilter={setFilter}
                 />

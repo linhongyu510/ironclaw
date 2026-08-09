@@ -128,6 +128,30 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(records)
     }
 
+    async fn count_scoped_triggers_by_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Result<crate::ScopedTriggerStateCounts, TriggerError> {
+        let state = self.lock_state()?;
+        let mut counts = crate::ScopedTriggerStateCounts::default();
+        for record in state.records.values().filter(|record| {
+            record.tenant_id == tenant_id
+                && record.creator_user_id == creator_user_id
+                && record.agent_id == agent_id
+                && record.project_id == project_id
+        }) {
+            match record.state {
+                TriggerState::Scheduled => counts.scheduled += 1,
+                TriggerState::Paused => counts.paused += 1,
+                TriggerState::Completed => counts.completed += 1,
+            }
+        }
+        Ok(counts)
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,

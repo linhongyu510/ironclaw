@@ -4880,4 +4880,71 @@ async fn libsql_once_trigger_completes_on_clear_active_fire() {
         "once trigger must transition to Completed after clear_active_fire"
     );
 }
+
+mod scoped_trigger_state_counts_contract {
+    use super::*;
+
+    async fn assert_counts_are_exact_beyond_list_page(repo: &impl TriggerRepository) {
+        let tenant_id = tenant("tenant-counts");
+        for index in 0..101 {
+            let mut record = sample_record(TriggerId::new(), tenant_id.clone(), ts(1_704_067_200));
+            record.name = format!("scheduled-{index}");
+            repo.upsert_trigger(record).await.expect("insert scheduled");
+        }
+
+        let mut paused = sample_record(TriggerId::new(), tenant_id.clone(), ts(1_704_067_200));
+        paused.state = TriggerState::Paused;
+        repo.upsert_trigger(paused).await.expect("insert paused");
+
+        let mut completed = sample_record(TriggerId::new(), tenant_id.clone(), ts(1_704_067_200));
+        completed.state = TriggerState::Completed;
+        repo.upsert_trigger(completed)
+            .await
+            .expect("insert completed");
+
+        let mut other_user = sample_record(TriggerId::new(), tenant_id, ts(1_704_067_200));
+        other_user.creator_user_id = user("user-b");
+        repo.upsert_trigger(other_user)
+            .await
+            .expect("insert other user");
+
+        let counts = repo
+            .count_scoped_triggers_by_state(
+                tenant("tenant-counts"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+            )
+            .await
+            .expect("count scoped triggers");
+
+        assert_eq!(counts.scheduled, 101);
+        assert_eq!(counts.paused, 1);
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.total(), 103);
+    }
+
+    #[tokio::test]
+    async fn in_memory_counts_are_exact_beyond_list_page() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_counts_are_exact_beyond_list_page(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn libsql_counts_are_exact_beyond_list_page() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_counts_are_exact_beyond_list_page(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_counts_are_exact_beyond_list_page() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_counts_are_exact_beyond_list_page(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+}
 // arch-exempt: large_file, fallible libSQL runtime construction only adjusts existing contract setup, plan #6175

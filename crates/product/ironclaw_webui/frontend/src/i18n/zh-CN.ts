@@ -809,6 +809,7 @@ registerPack("zh-CN", {
   "automations.summary.paused": "暂停情况项",
   "automations.summary.pausedDetail": "目前存在于系统中但预计近期不会再发生活跃或执行任何活动事件调度的已排期计划项目任务状态说明。",
   "automations.summary.filterAction": "显示{label}",
+  "automations.summary.showingOf": "正在显示 {total} 个自动化中的 {shown} 个",
   "automations.summary.nextRun": "次运行时间阶段",
   "automations.summary.none": "无活动情况",
   "automations.summary.nextRunDetail": "系统中预期的最快运行的执行调度的发生间隔范围说明表。这将被列入下面情况列表中。",

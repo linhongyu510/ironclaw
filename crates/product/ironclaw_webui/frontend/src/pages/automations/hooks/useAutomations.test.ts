@@ -37,15 +37,15 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-test("automation queries request the full model-visible trigger page", async () => {
+test("automation queries keep the bounded 50-row list page", async () => {
   automationApi.listAutomations.mockResolvedValue({ automations: [] });
 
   await createAutomationsQueryOptions(false).queryFn();
   await createAutomationsQueryOptions(true).queryFn();
 
   assert.deepEqual(automationApi.listAutomations.mock.calls, [
-    [{ limit: 100, runLimit: 25, includeCompleted: false }],
-    [{ limit: 100, runLimit: 25, includeCompleted: true }],
+    [{ limit: 50, runLimit: 25, includeCompleted: false }],
+    [{ limit: 50, runLimit: 25, includeCompleted: true }],
   ]);
 });
 
@@ -154,6 +154,36 @@ test("a background summary failure does not become the primary page error", asyn
       );
     });
     assert.deepEqual(rendered.current().automations, []);
+  } finally {
+    rendered.cleanup();
+  }
+});
+
+test("backend totals override loaded-row scheduled and active counts", async () => {
+  const payload = {
+    automations: [
+      {
+        automation_id: "loaded",
+        source: { type: "schedule", cron: "0 9 * * *", timezone: "UTC" },
+        state: "scheduled",
+        recent_runs: [],
+      },
+    ],
+    summary: { total: 61, scheduled: 61, active: 61 },
+    scheduler_enabled: true,
+  };
+  automationApi.listAutomations.mockResolvedValue(payload);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const rendered = await renderAutomationsHook(queryClient);
+
+  try {
+    await vi.waitFor(() => assert.equal(rendered.current().isLoading, false));
+    assert.equal(rendered.current().automations.length, 1);
+    assert.equal(rendered.current().summary.scheduled, 61);
+    assert.equal(rendered.current().summary.active, 61);
+    assert.equal(rendered.current().totalCount, 61);
   } finally {
     rendered.cleanup();
   }

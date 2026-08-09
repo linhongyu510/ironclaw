@@ -866,6 +866,7 @@ registerPack("en", {
   "automations.summary.failuresDetail":
     "Automations with a failed run in recent history.",
   "automations.summary.filterAction": "Show {label}",
+  "automations.summary.showingOf": "Showing {shown} of {total} automations",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",

@@ -202,18 +202,18 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
-    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornNotificationChannel, RebornNotificationChannelsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAutomationSource, RebornAutomationState, RebornAutomationSummary,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornCommandRejection,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornGetRunStateRequest, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornLogEntry,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornNotificationChannel,
+    RebornNotificationChannelsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -998,6 +998,13 @@ pub struct AutomationListRequest {
     pub include_completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutomationStateCounts {
+    pub scheduled: u64,
+    pub paused: u64,
+    pub completed: u64,
+}
+
 /// Stored scope of a trigger-fired thread, returned by
 /// `AutomationProductService::resolve_run_thread_scope`.
 ///
@@ -1061,6 +1068,13 @@ pub trait AutomationProductService: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, ProductSurfaceError>;
+
+    async fn automation_state_counts(
+        &self,
+        _caller: ProductAgentBoundCaller,
+    ) -> Result<Option<AutomationStateCounts>, ProductSurfaceError> {
+        Ok(None)
+    }
 
     async fn pause_automation(
         &self,
@@ -2621,19 +2635,30 @@ where
         let limit = clamp_automation_list_limit(request.limit);
         let run_limit = clamp_automation_run_limit(request.run_limit);
         let scheduler_enabled = self.automation_service.scheduler_enabled();
-        let automations = self
-            .automation_service
-            .list_automations(
-                caller,
+        let include_completed = request.include_completed;
+        let (automations, state_counts) = tokio::try_join!(
+            self.automation_service.list_automations(
+                caller.clone(),
                 AutomationListRequest {
                     limit,
                     run_limit,
-                    include_completed: request.include_completed,
+                    include_completed,
                 },
-            )
-            .await?;
+            ),
+            self.automation_service.automation_state_counts(caller),
+        )?;
+        let summary = state_counts.map(|counts| RebornAutomationSummary {
+            total: if include_completed {
+                counts.scheduled + counts.paused + counts.completed
+            } else {
+                counts.scheduled + counts.paused
+            },
+            scheduled: counts.scheduled + counts.paused,
+            active: counts.scheduled,
+        });
         Ok(RebornListAutomationsResponse {
             automations,
+            summary,
             scheduler_enabled,
         })
     }

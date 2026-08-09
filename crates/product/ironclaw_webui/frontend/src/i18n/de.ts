@@ -810,6 +810,7 @@ registerPack("de", {
   "automations.summary.paused": "Angehalten",
   "automations.summary.pausedDetail": "Zeitpläne werden derzeit voraussichtlich nicht ausgeführt.",
   "automations.summary.filterAction": "{label} anzeigen",
+  "automations.summary.showingOf": "{shown} von {total} Automatisierungen werden angezeigt",
   "automations.summary.nextRun": "Nächster Lauf",
   "automations.summary.none": "Keine",
   "automations.summary.nextRunDetail": "Frühester geplanter Lauf in dieser Liste.",
