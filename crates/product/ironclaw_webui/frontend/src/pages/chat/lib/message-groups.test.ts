@@ -348,7 +348,7 @@ test("groupMessages: delayed same-run activity moves before its final reply", ()
   );
 });
 
-test("groupMessages: same-run activity stays before streaming assistant text", () => {
+test("groupMessages: streaming assistant progress stays before later same-run activity", () => {
   const grouped = groupMessages([
     { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
     {
@@ -369,12 +369,9 @@ test("groupMessages: same-run activity stays before streaming assistant text", (
   assert.equal(grouped.length, 3);
   assert.deepEqual(
     grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
-    ["u1", "activity-run-tool-web-search", "text-text:run-1"],
+    ["u1", "text-text:run-1", "activity-run-tool-web-search"],
   );
-  assert.deepEqual(
-    grouped[1].activity.map((item) => item.id),
-    ["tool-web-search"],
-  );
+  assert.deepEqual(grouped[2].activity.map((item) => item.id), ["tool-web-search"]);
 });
 
 test("groupMessages: final reply boundary keeps same-run activity before answer", () => {

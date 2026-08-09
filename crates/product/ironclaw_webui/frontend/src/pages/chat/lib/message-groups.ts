@@ -1,14 +1,13 @@
 /* Collapse ordered reasoning/tool events into one activity run. If delayed
-   same-run activity arrives after assistant text, render that activity before
-   the text so tools stay at the top of the run during streaming and after the
-   final answer, including when a later user follow-up has already been
-   appended. */
+   same-run activity arrives after a final assistant reply, render that
+   activity before the reply so the answer still closes its turn, including
+   when a later user follow-up has already been appended. Streaming assistant
+   progress stays in the execution order in which it was received. */
 export function groupMessages(messages) {
   const renderableMessages = messages.filter(
     (message) => !isEmptyIntermediateAssistantPhase(message),
   );
-  const orderedMessages =
-    moveDelayedActivityBeforeAssistantBoundary(renderableMessages);
+  const orderedMessages = moveDelayedActivityBeforeFinalReply(renderableMessages);
   const runStartedAtById = new Map();
   const items = [];
 
@@ -39,12 +38,12 @@ export function groupMessages(messages) {
   return items;
 }
 
-function moveDelayedActivityBeforeAssistantBoundary(messages) {
+function moveDelayedActivityBeforeFinalReply(messages) {
   const replyBoundaryByRun = new Map();
   for (let index = 0; index < messages.length; index += 1) {
     const msg = messages[index];
     const runId = turnRunIdForMessage(msg);
-    if (runId && isAssistantReplyBoundary(msg)) {
+    if (runId && isFinalAssistantReply(msg)) {
       replyBoundaryByRun.set(runId, index);
     }
   }
@@ -153,19 +152,6 @@ function isFinalAssistantReply(msg) {
     (msg.isFinalReply === true ||
       ((msg.kind === "assistant" || msg.kind === "assistant_message") &&
         msg.status === "finalized"))
-  );
-}
-
-function isAssistantReplyBoundary(msg) {
-  return isFinalAssistantReply(msg) || isStreamingAssistantText(msg);
-}
-
-function isStreamingAssistantText(msg) {
-  return (
-    msg?.role === "assistant" &&
-    !hasToolCalls(msg) &&
-    msg.isFinalReply === false &&
-    Boolean(turnRunIdForMessage(msg))
   );
 }
 
