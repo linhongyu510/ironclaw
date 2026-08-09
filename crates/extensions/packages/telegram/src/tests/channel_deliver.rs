@@ -81,7 +81,7 @@ async fn progressive_preview_uses_native_telegram_drafts_in_private_topics() {
         .deliver(
             envelope(
                 vec![OutboundPart::ProgressivePreview(
-                    ProgressivePreviewPart::Start,
+                    ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                 )],
                 Some("77"),
             ),
@@ -148,7 +148,7 @@ async fn progressive_preview_is_retry_stable_private_only_and_append_only() {
     let start = || {
         envelope(
             vec![OutboundPart::ProgressivePreview(
-                ProgressivePreviewPart::Start,
+                ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
             )],
             None,
         )
@@ -174,7 +174,7 @@ async fn progressive_preview_is_retry_stable_private_only_and_append_only() {
             envelope_for_chat(
                 "-1008675309",
                 vec![OutboundPart::ProgressivePreview(
-                    ProgressivePreviewPart::Start,
+                    ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                 )],
                 None,
             ),
@@ -243,7 +243,7 @@ async fn progressive_preview_start_requires_true_result_evidence() {
             .deliver(
                 envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     None,
                 ),

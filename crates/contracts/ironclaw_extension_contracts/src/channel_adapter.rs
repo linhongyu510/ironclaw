@@ -308,7 +308,8 @@ pub enum OutboundPart {
 
 #[derive(Debug, Clone)]
 pub enum ProgressivePreviewPart {
-    Start,
+    /// Product-owned text shown until the first generated text arrives.
+    Start(String),
     /// `current_text` is cumulative; `accepted_text` is the exact cumulative
     /// prefix Ironclaw knows the provider accepted.
     Update {
@@ -317,9 +318,7 @@ pub enum ProgressivePreviewPart {
         current_text: String,
     },
     /// Close and discard the preview. This never represents final delivery.
-    Stop {
-        vendor_message_ref: String,
-    },
+    Stop { vendor_message_ref: String },
 }
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything

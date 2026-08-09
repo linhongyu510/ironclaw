@@ -174,36 +174,36 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start) => {
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start(initial_text)) => {
                     let is_dm = channel.starts_with('D');
                     // Recipients are required for channel streams (not DMs);
                     // an absent reply_context user degrades to a coordinator
                     // Text fallback, never a silent drop.
-                    let recipient_user = (!is_dm)
-                        .then(|| slack_stream_recipient_user(&envelope))
-                        .flatten();
-                    let outcome = match slack_stream_thread_ts(&envelope) {
-                        Some(_) if !is_dm && recipient_user.is_none() => {
-                            PartDeliveryOutcome::Permanent {
+                    let outcome = if is_dm {
+                        let rendered = render_slack_mrkdwn(initial_text);
+                        post_slack_chunk(egress, &credential, &channel, None, &rendered).await
+                    } else {
+                        match (
+                            slack_stream_thread_ts(&envelope),
+                            slack_stream_recipient_user(&envelope),
+                        ) {
+                            (Some(_), None) => PartDeliveryOutcome::Permanent {
                                 reason: "chat.startStream to a channel requires a recipient user id (reply_context absent)".to_string(),
-                            }
-                        }
-                        Some(thread_ts) => {
-                            start_slack_stream(
+                            },
+                            (Some(thread_ts), Some(recipient_user)) => start_slack_stream(
                                 egress,
                                 &credential,
                                 &channel,
                                 &thread_ts,
-                                recipient_user.as_deref(),
-                                (!is_dm)
-                                    .then_some(envelope.target.conversation.space_id())
-                                    .flatten(),
+                                Some(&recipient_user),
+                                envelope.target.conversation.space_id(),
                             )
-                            .await
+                            .await,
+                            (None, _) => PartDeliveryOutcome::Permanent {
+                                reason: "chat.startStream requires a thread_ts reply anchor"
+                                    .to_string(),
+                            },
                         }
-                        None => PartDeliveryOutcome::Permanent {
-                            reason: "chat.startStream requires a thread_ts reply anchor".to_string(),
-                        },
                     };
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
@@ -216,13 +216,29 @@ impl ChannelAdapter for SlackChannelAdapter {
                     accepted_text,
                     current_text,
                 }) => {
+                    let is_dm = channel.starts_with('D');
                     let outcome = match current_text.strip_prefix(accepted_text) {
                         Some("") => PartDeliveryOutcome::Sent {
                             vendor_message_ref: Some(vendor_message_ref.clone()),
                         },
+                        Some(_)
+                            if is_dm
+                                && current_text.chars().count()
+                                    <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
+                        {
+                            update_slack_message(
+                                egress,
+                                &credential,
+                                &channel,
+                                vendor_message_ref,
+                                current_text,
+                            )
+                            .await
+                        }
                         Some(suffix)
-                            if suffix.chars().count()
-                                <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
+                            if !is_dm
+                                && suffix.chars().count()
+                                    <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
                         {
                             append_slack_stream(
                                 egress,
@@ -252,19 +268,24 @@ impl ChannelAdapter for SlackChannelAdapter {
                 OutboundPart::ProgressivePreview(ProgressivePreviewPart::Stop {
                     vendor_message_ref,
                 }) => {
-                    let outcome = stop_slack_stream(
-                        egress,
-                        &credential,
-                        &channel,
-                        vendor_message_ref,
-                        "Preview complete",
-                    )
-                    .await;
-                    let outcome = if matches!(outcome, PartDeliveryOutcome::Sent { .. }) {
+                    let outcome = if channel.starts_with('D') {
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)
                             .await
                     } else {
-                        outcome
+                        let outcome = stop_slack_stream(
+                            egress,
+                            &credential,
+                            &channel,
+                            vendor_message_ref,
+                            "Preview complete",
+                        )
+                        .await;
+                        if matches!(outcome, PartDeliveryOutcome::Sent { .. }) {
+                            delete_slack_message(egress, &credential, &channel, vendor_message_ref)
+                                .await
+                        } else {
+                            outcome
+                        }
                     };
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
@@ -446,6 +467,68 @@ async fn post_slack_chunk(
     part_outcome_for_kind(
         slack_error_kind(&error),
         format!("slack rejected chat.postMessage ({error})"),
+    )
+}
+
+async fn update_slack_message(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+    markdown_text: &str,
+) -> PartDeliveryOutcome {
+    let body = match serde_json::to_vec(&serde_json::json!({
+        "channel": channel,
+        "ts": ts,
+        "markdown_text": markdown_text,
+    })) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.update body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.update"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.update response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.ts.or_else(|| Some(ts.to_string())),
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.update ({error})"),
     )
 }
 
@@ -2334,7 +2417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_start_uses_slack_stream_with_thread_ts() {
+    async fn progressive_preview_start_in_dm_posts_top_level_placeholder() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
         )]);
@@ -2342,7 +2425,7 @@ mod tests {
             .deliver(
                 stream_envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     "D123",
                     None,
@@ -2356,15 +2439,14 @@ mod tests {
         let requests = egress.requests();
         assert_eq!(requests.len(), 1);
         assert!(
-            requests[0].url.ends_with("/api/chat.startStream"),
+            requests[0].url.ends_with("/api/chat.postMessage"),
             "url: {}",
             requests[0].url
         );
         let body = body_json(&requests[0]);
         assert_eq!(body["channel"], "D123");
-        // thread_ts falls back to the user's message ts (plain DMs have no
-        // topic); no recipients for DM streams.
-        assert_eq!(body["thread_ts"], "1710000000.000150");
+        assert_eq!(body["text"], "Ironclaw is thinking...");
+        assert!(body.get("thread_ts").is_none());
         assert!(body.get("recipient_user_id").is_none());
         assert!(body.get("recipient_team_id").is_none());
         assert!(body.get("markdown_text").is_none());
@@ -2385,7 +2467,7 @@ mod tests {
             .deliver(
                 stream_envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     "C123",
                     Some("1710000000.000100"),
@@ -2415,7 +2497,7 @@ mod tests {
             .deliver(
                 stream_envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     "C123",
                     Some("1710000000.000100"),
@@ -2434,13 +2516,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_start_without_thread_anchor_is_permanent() {
-        let egress = ScriptedEgress::new(Vec::new());
+    async fn progressive_preview_start_in_dm_does_not_require_thread_anchor() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
+        )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     "D123",
                     None,
@@ -2451,15 +2535,20 @@ mod tests {
             )
             .await
             .expect("deliver drives");
-        assert!(egress.requests().is_empty());
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/api/chat.postMessage"));
+        assert!(body_json(&requests[0]).get("thread_ts").is_none());
         assert!(matches!(
-            &report.parts[0],
-            PartDeliveryOutcome::Permanent { reason } if reason.contains("thread_ts")
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(reference),
+            }] if reference == "1710000000.000200"
         ));
     }
 
     #[tokio::test]
-    async fn progressive_preview_update_appends_only_the_new_suffix() {
+    async fn progressive_preview_update_in_dm_replaces_the_top_level_message() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
         )]);
@@ -2484,12 +2573,12 @@ mod tests {
             .expect("deliver drives");
         let body = body_json(&egress.requests()[0]);
         assert!(
-            egress.requests()[0].url.ends_with("/api/chat.appendStream"),
+            egress.requests()[0].url.ends_with("/api/chat.update"),
             "url: {}",
             egress.requests()[0].url
         );
         assert_eq!(body["ts"], "1710000000.000200");
-        assert_eq!(body["markdown_text"], "world");
+        assert_eq!(body["markdown_text"], "Hello world");
         assert!(matches!(
             &report.parts[..],
             [PartDeliveryOutcome::Sent {
@@ -2499,13 +2588,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_stop_finalizes_then_deletes_the_preview() {
-        let egress = ScriptedEgress::new(vec![
-            ScriptedEgress::ok(
-                r#"{"ok":true,"channel":"D123","ts":"1710000000.000200","message":{"text":"done"}}"#,
-            ),
-            ScriptedEgress::ok(r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#),
-        ]);
+    async fn progressive_preview_update_in_channel_appends_only_the_new_suffix() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"C123","ts":"1710000000.000200"}"#,
+        )]);
+        SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Update {
+                            vendor_message_ref: "1710000000.000200".to_string(),
+                            accepted_text: "Hello ".to_string(),
+                            current_text: "Hello world".to_string(),
+                        },
+                    )],
+                    "C123",
+                    Some("1710000000.000100"),
+                    None,
+                    Some(r#"{"user":"U123"}"#),
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/api/chat.appendStream"));
+        assert_eq!(body_json(&requests[0])["markdown_text"], "world");
+    }
+
+    #[tokio::test]
+    async fn progressive_preview_stop_in_dm_deletes_the_preview() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
+        )]);
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
@@ -2524,23 +2640,47 @@ mod tests {
             .await
             .expect("deliver drives");
         let requests = egress.requests();
-        assert_eq!(requests.len(), 2);
-        let body = body_json(&requests[0]);
-        assert!(
-            egress.requests()[0].url.ends_with("/api/chat.stopStream"),
-            "url: {}",
-            egress.requests()[0].url
-        );
-        assert_eq!(body["ts"], "1710000000.000200");
-        assert_eq!(body["markdown_text"], "Preview complete");
-        assert!(requests[1].url.ends_with("/api/chat.delete"));
-        assert_eq!(body_json(&requests[1])["ts"], "1710000000.000200");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/api/chat.delete"));
+        assert_eq!(body_json(&requests[0])["ts"], "1710000000.000200");
         assert!(matches!(
             &report.parts[..],
             [PartDeliveryOutcome::Sent {
                 vendor_message_ref: None,
             }]
         ));
+    }
+
+    #[tokio::test]
+    async fn progressive_preview_stop_in_channel_finalizes_then_deletes_the_preview() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(
+                r#"{"ok":true,"channel":"C123","ts":"1710000000.000200","message":{"text":"done"}}"#,
+            ),
+            ScriptedEgress::ok(r#"{"ok":true,"channel":"C123","ts":"1710000000.000200"}"#),
+        ]);
+        SlackChannelAdapter
+            .deliver(
+                stream_envelope(
+                    vec![OutboundPart::ProgressivePreview(
+                        ProgressivePreviewPart::Stop {
+                            vendor_message_ref: "1710000000.000200".to_string(),
+                        },
+                    )],
+                    "C123",
+                    Some("1710000000.000100"),
+                    None,
+                    Some(r#"{"user":"U123"}"#),
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.ends_with("/api/chat.stopStream"));
+        assert_eq!(body_json(&requests[0])["markdown_text"], "Preview complete");
+        assert!(requests[1].url.ends_with("/api/chat.delete"));
     }
 
     #[tokio::test]
@@ -2582,7 +2722,7 @@ mod tests {
             .deliver(
                 stream_envelope(
                     vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start,
+                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
                     "D123",
                     None,

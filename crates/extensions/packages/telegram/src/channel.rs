@@ -289,7 +289,7 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start) => {
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start(_)) => {
                     let outcome = match private_telegram_chat_id(&chat_id) {
                         Ok(chat_id) => {
                             let draft_id = telegram_draft_id(&envelope.delivery_attempt_id);

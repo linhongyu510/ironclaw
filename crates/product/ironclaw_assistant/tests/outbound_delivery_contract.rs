@@ -344,6 +344,8 @@ impl ChannelAdapter for ScriptedChannelAdapter {
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
+    progressive_preview:
+        Option<ironclaw_extension_contracts::channel::ProgressivePreviewPresentation>,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -356,7 +358,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            progressive_preview: None,
+            progressive_preview: self.progressive_preview.clone(),
         })
     }
 }
@@ -626,6 +628,7 @@ fn coordinator_over_recording_reply_lookups(
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
+            progressive_preview: None,
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1707,6 +1710,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
+            progressive_preview: None,
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1824,6 +1828,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            progressive_preview: None,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -1879,6 +1884,51 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
         extension_id,
         notice_ref: "run-42".to_string(),
     }
+}
+
+#[tokio::test]
+async fn coordinator_passes_product_working_text_to_progressive_preview_start() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-preview")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            progressive_preview: Some(
+                ironclaw_extension_contracts::channel::ProgressivePreviewPresentation {
+                    scope: ironclaw_extension_contracts::channel::ProgressivePreviewScope::All,
+                    max_chars: 12_000,
+                },
+            ),
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+    let mut request = working_notice(scope, "vendorx");
+    request.parts.clear();
+
+    let outcome = coordinator
+        .deliver_working_notice(request, "Ironclaw is thinking...", true)
+        .await
+        .expect("working preview starts");
+
+    assert!(outcome.progressive);
+    assert_eq!(outcome.vendor_message_ref.as_deref(), Some("ts-preview"));
+    let envelopes = adapter.envelopes();
+    assert!(matches!(
+        &envelopes[0].parts[..],
+        [ironclaw_extension_contracts::channel_adapter::OutboundPart::ProgressivePreview(
+            ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Start(initial_text),
+        )] if initial_text == "Ironclaw is thinking..."
+    ));
 }
 
 #[tokio::test]
@@ -2129,6 +2179,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            progressive_preview: None,
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),

@@ -228,6 +228,7 @@ methods = ["post"]
 credential_handle = "slack_bot_token"
 paths = [
   "/api/chat.postMessage",
+  "/api/chat.update",
   "/api/chat.delete",
   "/api/chat.startStream",
   "/api/chat.appendStream",

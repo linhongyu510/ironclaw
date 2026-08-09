@@ -632,7 +632,9 @@ impl DeliveryCoordinator {
             .deliver_notice_parts(
                 request.clone(),
                 vec![OutboundPart::ProgressivePreview(
-                    ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Start,
+                    ironclaw_extension_contracts::channel_adapter::ProgressivePreviewPart::Start(
+                        text.to_string(),
+                    ),
                 )],
             )
             .await?;
