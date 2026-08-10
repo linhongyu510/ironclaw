@@ -52,6 +52,15 @@ master key), `system/` (host-managed extensions, prompts, and skills),
 `workspaces/` (tenant-plus-user leaves), and `runtime/` (provider/runtime
 bookkeeping). Do not add a deployment ID or the selected profile to this path.
 
+When upgrading a populated legacy home, stop every old container before the
+new release starts. For the first migration startup only, set
+`IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1`. The new process revalidates
+one supported legacy source under a cutover lock, adopts it through the durable
+journal, verifies the canonical stores, and binds only after `layout.toml` is
+committed. Remove the variable after the deployment is healthy. Without this
+authority, legacy detection fails before mutation and reports the manual
+`ironclaw storage adopt` recovery command.
+
 Profiles choose policy and a process backend, not a physical storage root. A
 profile change is an operator-controlled restart: startup checks the persisted
 security envelope and rejects an incompatible backend, tenancy, or workspace

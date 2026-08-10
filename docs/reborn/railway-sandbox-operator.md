@@ -70,9 +70,18 @@ Configure the Railway service with all of the following:
   destroy the live Railway sandboxes owned by that process. Shutdown time is
   finite in a hosted deployment, and a crash cannot run cleanup at all, so the
   configured idle timeout is the hard resource-leak backstop.
+
 - The usual WebUI and LLM secrets described in
   [the Docker deployment guide](deploy-reborn-cli-docker.md); do not invent or
   bake values into this runbook.
+
+For the release that first adopts the profile-agnostic storage layout, stop the
+old deployment completely and take a Railway volume backup or snapshot. Set
+`IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1` for the first new startup.
+That process automatically adopts exactly one supported legacy root before it
+binds the listener. Remove the variable after `layout.toml` is present and the
+deployment is healthy. Do not authorize cutover during an overlapping or
+rolling deployment; old binaries do not honor the new migration locks.
 
 The volume is the durable IronClaw installation boundary. It holds the Reborn
 home's direct `state/`, `system/`, `workspaces/`, and `runtime/` namespaces,

@@ -83,6 +83,68 @@ fn wait_for_serve_banner(child: &mut std::process::Child) {
     }
 }
 
+fn adoption_serve_command(
+    reborn_home: &std::path::Path,
+    isolated_home: &std::path::Path,
+    owner: &UserId,
+    port: u16,
+) -> Command {
+    let mut command = Command::new(reborn_bin());
+    command
+        .args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
+        .env_clear()
+        .env("HOME", isolated_home)
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_HOME", reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", owner.as_str())
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "adoption-test-token-0123456789abcdef",
+        )
+        .env("LLM_USE_CODEX_AUTH", "false")
+        .env("LLM_BACKEND", "")
+        .env("LLM_MODEL", "")
+        .env("OPENAI_API_KEY", "")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null());
+    command
+}
+
+fn snapshot_tree(root: &std::path::Path) -> Vec<(std::path::PathBuf, bool, Vec<u8>)> {
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        snapshot: &mut Vec<(std::path::PathBuf, bool, Vec<u8>)>,
+    ) {
+        let mut entries = fs::read_dir(current)
+            .expect("read snapshot directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read snapshot entries");
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).expect("snapshot relative path");
+            let file_type = entry.file_type().expect("snapshot entry type");
+            if file_type.is_dir() {
+                snapshot.push((relative.to_path_buf(), true, Vec::new()));
+                visit(root, &path, snapshot);
+            } else {
+                assert!(file_type.is_file(), "snapshot fixture contains no symlinks");
+                snapshot.push((
+                    relative.to_path_buf(),
+                    false,
+                    fs::read(&path).expect("snapshot file bytes"),
+                ));
+            }
+        }
+    }
+
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
 #[tokio::test]
 async fn released_local_dev_adoption_preserves_durable_state_and_user_isolation() {
     const THREAD_MESSAGE: &str = "ADOPTED_THREAD_MESSAGE_SENTINEL";
@@ -305,44 +367,41 @@ output_schema_ref = "schemas/read.output.json"
     fs::write(&legacy_unscoped_skill, UNSCOPED_SKILL_CONTENT)
         .expect("seed released unscoped skill");
 
-    let output = Command::new(reborn_bin())
-        .args([
-            "storage",
-            "adopt",
-            "--confirm-processes-stopped",
-            "--confirm-backup-snapshot",
-        ])
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
-        .output()
-        .expect("run the production storage adoption command");
-    assert!(
-        output.status.success(),
-        "storage adoption failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     let adopted_paths = RebornStoragePaths::from_installation_root(&reborn_home);
-    let mut serve = Command::new(reborn_bin())
-        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
-        .env_clear()
-        .env("HOME", temp.path().join("isolated-home"))
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
-        .env("IRONCLAW_REBORN_WEBUI_USER_ID", owner.as_str())
-        .env(
-            "IRONCLAW_REBORN_WEBUI_TOKEN",
-            "adoption-test-token-0123456789abcdef",
-        )
-        .env("LLM_USE_CODEX_AUTH", "false")
-        .env("LLM_BACKEND", "")
-        .env("LLM_MODEL", "")
-        .env("OPENAI_API_KEY", "")
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
+    assert!(
+        !reborn_home.join("layout.toml").exists(),
+        "fixture must enter normal startup with only the released legacy layout"
+    );
+    let isolated_home = temp.path().join("isolated-home");
+    let home_before_denied_start = snapshot_tree(&reborn_home);
+    let occupied_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a port that startup must not try to bind");
+    let occupied_port = occupied_listener
+        .local_addr()
+        .expect("occupied listener address")
+        .port();
+    let denied = adoption_serve_command(&reborn_home, &isolated_home, &owner, occupied_port)
+        .output()
+        .expect("start without deployment cutover authority");
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr)
+            .contains("IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1")
+    );
+    assert!(legacy_root.join("reborn-local-dev.db").is_file());
+    assert!(!reborn_home.join("layout.toml").exists());
+    assert!(
+        !reborn_home
+            .join("runtime/layout-adoption/journal.toml")
+            .exists()
+    );
+    assert_eq!(snapshot_tree(&reborn_home), home_before_denied_start);
+    drop(occupied_listener);
+
+    let mut serve = adoption_serve_command(&reborn_home, &isolated_home, &owner, 0)
+        .env("IRONCLAW_REBORN_STORAGE_CUTOVER", "legacy-layout-v1")
         .spawn()
-        .expect("start a fresh production serve process after adoption");
+        .expect("start production serve process that automatically adopts legacy storage");
     wait_for_serve_banner(&mut serve);
     serve.kill().expect("stop fresh serve process");
     serve.wait().expect("reap fresh serve process");

@@ -1,8 +1,9 @@
 # Reborn Storage Layout Adoption Runbook
 
 This is the operator procedure for moving one supported released Reborn home
-to the profile-stable layout. It is an offline, bounded operation. It does not
-merge deployments, discover arbitrary directories, or make profiles
+to the profile-stable layout. It is a bounded operation performed either by a
+deployment-authorized migration startup or by the manual recovery command. It
+does not merge deployments, discover arbitrary directories, or make profiles
 interchangeable.
 
 ## Target layout and boundary
@@ -44,7 +45,8 @@ refuses to open stores or start traffic.
 1. Stop every `ironclaw` process and service that could use the home. Verify
    this operationally; lack of a known PID or socket is not proof of quiescence.
 2. Take and retain a filesystem/volume snapshot or backup of the entire home.
-   Do not rely on the adoption snapshot as the only backup.
+   Automatic adoption retains its own rollback snapshot, but that snapshot is
+   on the same storage and is not protection against volume loss.
 3. Perform a read-only inventory. There is no write-free `storage adopt`
    mode. `doctor` checks binary/configuration readiness only; it does **not**
    inspect `layout.toml`, adoption journals, legacy candidates, or security
@@ -74,9 +76,41 @@ refuses to open stores or start traffic.
    It is not an adoption source. Preserve it for inspection and explicitly
    archive it under operator control; do not expect automatic workspace merge.
 
-## Adopt and resume
+## Deployment-authorized automatic adoption
 
-After the preconditions are true, run the explicit acknowledgement command:
+Normal startup never treats the presence of a legacy root as proof that old
+replicas are stopped. Without explicit cutover authority it exits before
+creating a journal or moving the source and prints the recovery command.
+
+After the deployment has stopped every old replica, authorize the migration
+startup with the exact versioned value:
+
+```bash
+IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1 ironclaw serve
+```
+
+Startup performs automatic adoption only for exactly one supported legacy
+source or a compatible interrupted journal. It takes a new-binary cutover lock,
+revalidates the source or journal under that lock, verifies the production
+store, runs the existing journaled state machine, publishes `layout.toml` last,
+and starts traffic only after the canonical stores reopen successfully. A
+competing new replica fails before verification or source mutation.
+
+Remove `IRONCLAW_REBORN_STORAGE_CUTOVER` after the canonical layout is ready.
+Later starts see the valid manifest and do not need migration authority.
+
+The environment value is an operator/deployment attestation, not a process
+probe. Never set it while an old binary can still write the legacy database.
+Old releases do not participate in the new cutover or adoption locks.
+
+Automatic startup refuses multiple roots, unknown content, the unreleased
+sandbox root, incompatible security envelopes, invalid journals, and journals
+that contain an external workspace import. Those cases remain manual.
+
+## Manual adoption and recovery
+
+For an ambiguous deployment, an explicit external workspace import, or manual
+recovery, keep services stopped and run:
 
 ```bash
 ironclaw storage adopt \
@@ -106,11 +140,13 @@ snapshot and are imported through the normal boot importer into the canonical
 database. Any other content under a legacy `tenants/` tree is rejected rather
 than guessed or broadened to another owner.
 
-If adoption is interrupted, leave the home in place, keep services stopped,
-and rerun the same explicit command. It resumes only the exact journaled phase
-and snapshot; it refuses unexplained partial layouts, unsupported journal or
-manifest versions, symlinks, unknown source content, or canonical conflicts.
-Do not manually combine staged files, database sidecars, or workspace leaves.
+If automatic adoption is interrupted, leave the home in place and keep old
+services stopped. Retry startup with the same versioned cutover value when the
+journal has no external workspace import; otherwise rerun the explicit manual
+command. Both paths resume only the exact journaled phase and snapshot. They
+refuse unexplained partial layouts, unsupported journal or manifest versions,
+symlinks, unknown source content, or canonical conflicts. Do not manually
+combine staged files, database sidecars, or workspace leaves.
 
 ## Profiles, workspaces, and credentials
 

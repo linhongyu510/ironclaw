@@ -28,6 +28,7 @@ const SNAPSHOT_DIR: &str = "snapshot";
 const STAGING_DIR: &str = "staging";
 const STAGING_OWNER_FILE: &str = ".adoption-owner";
 const ADOPTION_LOCK_FILE: &str = "adoption.lock";
+const CUTOVER_LOCK_FILE: &str = ".reborn-storage-cutover.lock";
 const JOURNAL_SCHEMA_VERSION: u32 = 4;
 const DB_FILE: &str = "reborn-local-dev.db";
 const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
@@ -298,14 +299,422 @@ impl AdoptionJournal {
     }
 }
 
-/// Validate a ready layout, initialize a genuinely fresh home, or fail closed.
+/// Typed startup decision before any legacy adoption work begins.
+#[derive(Debug)]
+pub(crate) enum StartupLayoutAdmission {
+    Ready(RebornStoragePaths),
+    AdoptionRequired,
+}
+
+/// Ephemeral deployment evidence that old replicas were stopped before this
+/// process was allowed to mutate a released storage layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StartupAdoptionAuthority(());
+
+impl StartupAdoptionAuthority {
+    pub(crate) const ENV: &'static str = "IRONCLAW_REBORN_STORAGE_CUTOVER";
+    pub(crate) const LEGACY_LAYOUT_V1: &'static str = "legacy-layout-v1";
+
+    pub(crate) fn from_environment_value(value: Option<&str>) -> anyhow::Result<Self> {
+        match value {
+            Some(Self::LEGACY_LAYOUT_V1) => Ok(Self(())),
+            None => bail!(
+                "legacy durable storage requires a deployment cutover before automatic adoption; stop every old replica, then set {}={} for the migration startup, or run `{OFFLINE_ADOPT_COMMAND}`",
+                Self::ENV,
+                Self::LEGACY_LAYOUT_V1
+            ),
+            Some(_) => bail!(
+                "{} must be exactly `{}` when the deployment has stopped every old replica",
+                Self::ENV,
+                Self::LEGACY_LAYOUT_V1
+            ),
+        }
+    }
+}
+
+/// Holds the new-binary cutover lock from preflight through store verification
+/// and the complete journaled adoption operation.
+pub(crate) struct AutomaticAdoptionPermit {
+    home: PathBuf,
+    requirement: LayoutRequirement,
+    _lock: AdoptionLock,
+}
+
+pub(crate) fn prepare_automatic_adoption(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+    _authority: StartupAdoptionAuthority,
+) -> anyhow::Result<AutomaticAdoptionPermit> {
+    preflight_automatic_adoption(home, requirement)?;
+    let lock = acquire_named_lock(home.path(), CUTOVER_LOCK_FILE, "automatic storage cutover")?;
+    // Classification happened before the lock. Re-read every source/journal
+    // invariant under the lock before a PostgreSQL verifier can run.
+    preflight_automatic_adoption(home, requirement)?;
+    Ok(AutomaticAdoptionPermit {
+        home: home.path().to_path_buf(),
+        requirement,
+        _lock: lock,
+    })
+}
+
+fn preflight_automatic_adoption(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<()> {
+    let home_path = home.path();
+    let paths = RebornStoragePaths::from_home(home);
+    let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
+    if manifest_path.exists() {
+        bail!("automatic adoption is unnecessary because the canonical layout is already ready");
+    }
+    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+    let journal_path = adoption_root.join(JOURNAL_FILE);
+    validate_adoption_ancestors(home_path, &paths, &adoption_root)?;
+    if journal_path.exists() {
+        validate_journal_owned_runtime(&paths, &adoption_root)?;
+        let journal = read_journal(&journal_path)?;
+        journal.validate_source_requirement()?;
+        admit_manifest(
+            &LayoutManifest::new(journal.source_requirement),
+            requirement,
+        )?;
+        if journal.target_requirement != requirement {
+            bail!("adoption journal security requirement does not match this automatic restart");
+        }
+        if journal.workspace.is_some() {
+            bail!(
+                "automatic startup will not resume an external workspace import; keep services stopped and resume with `{OFFLINE_ADOPT_COMMAND}` so tenant/user ownership remains explicit"
+            );
+        }
+        validate_automatic_journal_resume_shape(home_path, &paths, &adoption_root, &journal)?;
+        return Ok(());
+    }
+
+    let candidates = inspect_legacy_candidates(home_path)?;
+    if candidates.len() != 1 {
+        if candidates.is_empty() {
+            bail!("automatic adoption requires exactly one supported populated legacy source");
+        }
+        bail!(
+            "multiple populated legacy roots detected; no source was selected or modified: {}",
+            candidate_paths(&candidates)
+        );
+    }
+    admit_manifest(
+        &LayoutManifest::new(candidates[0].kind.requirement()),
+        requirement,
+    )?;
+    validate_initial_adoption_namespaces_empty(&paths)
+}
+
+/// Prove that an interrupted journal's recorded phase matches the filesystem
+/// before startup is allowed to connect to or migrate an external store.
+fn validate_automatic_journal_resume_shape(
+    home: &Path,
+    paths: &RebornStoragePaths,
+    adoption_root: &Path,
+    journal: &AdoptionJournal,
+) -> anyhow::Result<()> {
+    let candidate = journal.candidate(home);
+    let snapshot = candidate.snapshot_root(adoption_root);
+    validate_automatic_workspace_namespace(paths)?;
+    match journal.phase {
+        AdoptionPhase::Prepare => {
+            validate_pre_install_namespaces(paths)?;
+            if ordinary_directory_presence(
+                &adoption_root.join(STAGING_DIR),
+                "prepare-phase staging root",
+            )? {
+                bail!("prepare-phase adoption journal cannot own a staging tree");
+            }
+            validate_prepare_recovery_shape(home, &candidate, &snapshot)
+        }
+        AdoptionPhase::SnapshotOwned => {
+            validate_pre_install_namespaces(paths)?;
+            require_snapshot_shape(&candidate, &snapshot)?;
+            validate_discardable_staging(adoption_root, &journal.operation_id)
+        }
+        AdoptionPhase::Staged => {
+            require_snapshot_shape(&candidate, &snapshot)?;
+            validate_staged_recovery_shape(
+                paths,
+                &candidate,
+                &snapshot,
+                adoption_root,
+                &journal.operation_id,
+            )
+        }
+        AdoptionPhase::CanonicalInstalled => {
+            require_snapshot_shape(&candidate, &snapshot)?;
+            verify_canonical_inventory(paths, &candidate, &snapshot)?;
+            validate_completed_staging(adoption_root, &journal.operation_id)
+        }
+        AdoptionPhase::MigrationPending => {
+            require_snapshot_shape(&candidate, &snapshot)?;
+            validate_no_staging_root(adoption_root, "migration-pending")?;
+            verify_post_migration_canonical_shape(paths, &candidate, &snapshot, false)
+        }
+        AdoptionPhase::StoreVerified => {
+            require_snapshot_shape(&candidate, &snapshot)?;
+            validate_no_staging_root(adoption_root, "store-verified")?;
+            verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)
+        }
+    }
+}
+
+fn validate_automatic_workspace_namespace(paths: &RebornStoragePaths) -> anyhow::Result<()> {
+    if ordinary_directory_presence(
+        paths.workspace_root(),
+        "automatic-adoption workspace namespace",
+    )? && !directory_is_empty(paths.workspace_root())?
+    {
+        bail!(
+            "automatic adoption journal has no workspace owner but {} contains data",
+            paths.workspace_root().display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_no_staging_root(adoption_root: &Path, phase: &str) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    if ordinary_directory_presence(&staging, &format!("{phase} staging root"))? {
+        bail!("adoption journal phase `{phase}` cannot retain a staging tree");
+    }
+    Ok(())
+}
+
+fn validate_pre_install_namespaces(paths: &RebornStoragePaths) -> anyhow::Result<()> {
+    for path in [paths.state_root(), paths.system_root()] {
+        if ordinary_directory_presence(path, "pre-install canonical destination")? {
+            bail!(
+                "pre-install adoption journal conflicts with canonical destination {}",
+                path.display()
+            );
+        }
+    }
+    if ordinary_directory_presence(paths.workspace_root(), "pre-install workspace namespace")?
+        && !directory_is_empty(paths.workspace_root())?
+    {
+        bail!(
+            "pre-install adoption journal conflicts with populated workspace namespace {}",
+            paths.workspace_root().display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_prepare_recovery_shape(
+    home: &Path,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+) -> anyhow::Result<()> {
+    if ordinary_directory_presence(snapshot, "prepare-phase adoption snapshot")? {
+        let source_is_absent = if candidate.kind == LegacySourceKind::BareHome {
+            recorded_bare_source_entries_absent(candidate)?
+        } else {
+            path_is_absent(&candidate.source_root)?
+        };
+        if !source_is_absent {
+            bail!(
+                "adoption journal phase `prepare` has both source and snapshot content for {}",
+                candidate.kind.label()
+            );
+        }
+        return require_snapshot_shape(candidate, snapshot);
+    }
+
+    let candidates = inspect_legacy_candidates(home)?;
+    if candidates.len() == 1 && candidates[0] == *candidate {
+        Ok(())
+    } else {
+        bail!(
+            "adoption journal phase `prepare` does not match the exact source/snapshot shape for {}; refusing to verify an external store",
+            candidate.kind.label()
+        )
+    }
+}
+
+fn recorded_bare_source_entries_absent(candidate: &LegacyCandidate) -> anyhow::Result<bool> {
+    for entry in &candidate.db_files {
+        if !path_is_absent(&candidate.source_root.join(entry))? {
+            return Ok(false);
+        }
+    }
+    if candidate.has_master_key && !path_is_absent(&candidate.source_root.join(MASTER_KEY_FILE))? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn path_is_absent(path: &Path) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).with_context(|| format!("inspect path {}", path.display())),
+        Ok(_) => Ok(false),
+    }
+}
+
+fn ordinary_directory_presence(path: &Path, label: &str) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {label} {}", path.display())),
+        Ok(_) => {
+            require_ordinary_directory(path)
+                .with_context(|| format!("validate {label} {}", path.display()))?;
+            Ok(true)
+        }
+    }
+}
+
+fn validate_discardable_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    match fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect staging root {}", staging.display()))
+        }
+        Ok(_) => {
+            require_ordinary_directory(&staging)?;
+            let marker = staging.join(STAGING_OWNER_FILE);
+            match fs::symlink_metadata(&marker) {
+                Ok(_) => {
+                    require_proven_staging(&staging, operation_id)?;
+                    validate_ordinary_tree(&staging)
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    if directory_is_empty(&staging)? {
+                        Ok(())
+                    } else {
+                        bail!(
+                            "staging tree at {} has mutable content but no ownership marker",
+                            staging.display()
+                        )
+                    }
+                }
+                Err(error) => Err(error).with_context(|| {
+                    format!("inspect staging ownership marker {}", marker.display())
+                }),
+            }
+        }
+    }
+}
+
+fn validate_staged_recovery_shape(
+    paths: &RebornStoragePaths,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    adoption_root: &Path,
+    operation_id: &str,
+) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    if !ordinary_directory_presence(&staging, "staged recovery root")? {
+        return verify_completed_staged_install(paths, candidate, snapshot, None);
+    }
+    require_proven_staging(&staging, operation_id)?;
+    validate_staged_or_canonical_state(
+        candidate,
+        snapshot,
+        &staging.join("state"),
+        paths.state_root(),
+    )?;
+    validate_staged_or_canonical_system(
+        candidate,
+        snapshot,
+        &staging.join("system"),
+        paths.system_root(),
+    )?;
+    Ok(())
+}
+
+fn validate_staged_or_canonical_state(
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    staged: &Path,
+    canonical: &Path,
+) -> anyhow::Result<()> {
+    match (
+        ordinary_directory_presence(staged, "staged state")?,
+        ordinary_directory_presence(canonical, "canonical state")?,
+    ) {
+        (true, false) => verify_state_inventory(staged, candidate, snapshot, "staged state"),
+        (false, true) => verify_state_inventory(canonical, candidate, snapshot, "canonical state"),
+        (true, true) => bail!("staged and canonical state both exist"),
+        (false, false) => bail!("staged recovery is missing both staged and canonical state"),
+    }
+}
+
+fn validate_staged_or_canonical_system(
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    staged: &Path,
+    canonical: &Path,
+) -> anyhow::Result<()> {
+    match (
+        ordinary_directory_presence(staged, "staged system")?,
+        ordinary_directory_presence(canonical, "canonical system")?,
+    ) {
+        (true, false) => verify_system_inventory(staged, candidate, snapshot, "staged system"),
+        (false, true) => {
+            verify_system_inventory(canonical, candidate, snapshot, "canonical system")
+        }
+        (true, true) => bail!("staged and canonical system content both exist"),
+        (false, false) => {
+            bail!("staged recovery is missing both staged and canonical system content")
+        }
+    }
+}
+
+fn validate_completed_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    match fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect completed staging root {}", staging.display())),
+        Ok(_) => {
+            require_ordinary_directory(&staging)?;
+            let marker = staging.join(STAGING_OWNER_FILE);
+            match fs::symlink_metadata(&marker) {
+                Ok(_) => {
+                    require_proven_staging(&staging, operation_id)?;
+                    let mut entries = fs::read_dir(&staging).with_context(|| {
+                        format!("read completed staging root {}", staging.display())
+                    })?;
+                    let only = entries.next().transpose()?.map(|entry| entry.file_name());
+                    if only.as_deref() != Some(std::ffi::OsStr::new(STAGING_OWNER_FILE))
+                        || entries.next().transpose()?.is_some()
+                    {
+                        bail!("completed staging tree contains unexplained content");
+                    }
+                    Ok(())
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    if directory_is_empty(&staging)? {
+                        Ok(())
+                    } else {
+                        bail!("completed staging tree has content but no ownership marker")
+                    }
+                }
+                Err(error) => Err(error).with_context(|| {
+                    format!(
+                        "inspect completed staging ownership marker {}",
+                        marker.display()
+                    )
+                }),
+            }
+        }
+    }
+}
+
+/// Validate a ready layout, initialize a genuinely fresh home, or classify a
+/// single supported legacy source for adoption.
 ///
 /// This never performs adoption work. In particular it never creates an
 /// adoption journal, snapshots a source, or copies legacy state.
-pub(crate) fn ensure_ready_layout(
+pub(crate) fn admit_startup_layout(
     home: &RebornHome,
     requirement: LayoutRequirement,
-) -> anyhow::Result<RebornStoragePaths> {
+) -> anyhow::Result<StartupLayoutAdmission> {
     let home_path = home.path();
     let paths = RebornStoragePaths::from_home(home);
     let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
@@ -324,26 +733,21 @@ pub(crate) fn ensure_ready_layout(
             }
         }
         admit_manifest(&manifest, requirement)?;
-        return Ok(paths);
+        return Ok(StartupLayoutAdmission::Ready(paths));
     }
 
     if adoption_journal.exists() {
-        bail!(
-            "durable layout adoption is incomplete; stop IronClaw and resume offline with `{OFFLINE_ADOPT_COMMAND}`"
-        );
+        return Ok(StartupLayoutAdmission::AdoptionRequired);
     }
 
     let candidates = inspect_legacy_candidates(home_path)?;
     if candidates.is_empty() && canonical_layout_is_empty(&paths)? {
         initialize_fresh_layout(home_path, &paths, requirement)?;
-        return Ok(paths);
+        return Ok(StartupLayoutAdmission::Ready(paths));
     }
 
     if candidates.len() == 1 {
-        bail!(
-            "legacy durable state detected at {}; normal boot will not copy it. Stop every old IronClaw process, take an operator backup/snapshot, then run `{OFFLINE_ADOPT_COMMAND}`",
-            candidates[0].source_root.display()
-        );
+        return Ok(StartupLayoutAdmission::AdoptionRequired);
     }
     if candidates.len() > 1 {
         bail!(
@@ -355,7 +759,21 @@ pub(crate) fn ensure_ready_layout(
     bail!(
         "canonical durable layout is incomplete or unrecognized at {}; refusing to open stores without a valid layout.toml. Inspect it and use `{OFFLINE_ADOPT_COMMAND}` only for one supported legacy source",
         home_path.display()
-    );
+    )
+}
+
+/// Validate a ready layout, initialize a genuinely fresh home, or retain the
+/// manual-command behavior for stateful CLI commands outside runtime startup.
+pub(crate) fn ensure_ready_layout(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<RebornStoragePaths> {
+    match admit_startup_layout(home, requirement)? {
+        StartupLayoutAdmission::Ready(paths) => Ok(paths),
+        StartupLayoutAdmission::AdoptionRequired => bail!(
+            "legacy durable storage requires adoption; run `{OFFLINE_ADOPT_COMMAND}` or start the Reborn runtime to perform safe automatic adoption"
+        ),
+    }
 }
 
 /// Validate a ready canonical layout without creating any directories,
@@ -436,6 +854,38 @@ pub(crate) fn adopt_layout_with_store_verification(
     store_verification: CanonicalStoreVerification,
 ) -> anyhow::Result<()> {
     validate_adopt_options(&options)?;
+    run_adoption_with_store_verification(
+        home,
+        requirement,
+        options.workspace_import.as_ref(),
+        store_verification,
+    )
+}
+
+/// Run or resume automatic startup adoption without inferring an external
+/// workspace owner. Ambiguous and unsupported sources still fail closed in
+/// the shared state machine.
+pub(crate) fn automatically_adopt_layout_with_store_verification(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+    permit: AutomaticAdoptionPermit,
+    store_verification: CanonicalStoreVerification,
+) -> anyhow::Result<()> {
+    if permit.home != home.path() || permit.requirement != requirement {
+        bail!("automatic adoption permit does not match this home and layout requirement");
+    }
+    // The permit keeps the cutover lock alive through this call. Revalidate
+    // after external-store verification and immediately before mutation.
+    preflight_automatic_adoption(home, requirement)?;
+    run_adoption_with_store_verification(home, requirement, None, store_verification)
+}
+
+fn run_adoption_with_store_verification(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+    workspace_import: Option<&WorkspaceImportOptions>,
+    store_verification: CanonicalStoreVerification,
+) -> anyhow::Result<()> {
     let home_path = home.path();
     let paths = RebornStoragePaths::from_home(home);
     let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
@@ -473,7 +923,7 @@ pub(crate) fn adopt_layout_with_store_verification(
             requirement,
         )?;
         ensure_initial_adoption_namespaces_empty(&paths)?;
-        let workspace = prepare_workspace_import(options.workspace_import.as_ref(), &paths)?;
+        let workspace = prepare_workspace_import(workspace_import, &paths)?;
         create_adoption_root(home_path, &paths, &adoption_root)?;
         let lock = acquire_adoption_lock(&adoption_root)?;
         if journal_path.exists() {
@@ -1623,6 +2073,23 @@ fn ensure_initial_adoption_namespaces_empty(paths: &RebornStoragePaths) -> anyho
     Ok(())
 }
 
+fn validate_initial_adoption_namespaces_empty(paths: &RebornStoragePaths) -> anyhow::Result<()> {
+    for path in [
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
+        paths.runtime_root(),
+    ] {
+        if path.exists() && !directory_is_empty(path)? {
+            bail!(
+                "canonical namespace {} contains unexplained data; automatic adoption never overwrites, merges, or infers ownership",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_adoption_ancestors(
     home: &Path,
     paths: &RebornStoragePaths,
@@ -2250,8 +2717,16 @@ impl Drop for AdoptionLock {
 }
 
 fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
-    let path = adoption_root.join(ADOPTION_LOCK_FILE);
-    require_ordinary_directory(adoption_root)?;
+    acquire_named_lock(adoption_root, ADOPTION_LOCK_FILE, "storage adoption")
+}
+
+fn acquire_named_lock(
+    directory: &Path,
+    file_name: &str,
+    operation: &str,
+) -> anyhow::Result<AdoptionLock> {
+    let path = directory.join(file_name);
+    require_ordinary_directory(directory)?;
     #[cfg(unix)]
     let mut file = open_adoption_lock_file(&path)?;
     #[cfg(not(unix))]
@@ -2261,14 +2736,14 @@ fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
         .open(&path)
         .with_context(|| {
             format!(
-                "another storage adoption may already be running; advisory lock {} exists",
+                "another {operation} may already be running; advisory lock {} exists",
                 path.display()
             )
         })?;
     #[cfg(unix)]
     file.try_lock_exclusive().with_context(|| {
         format!(
-            "another storage adoption is holding advisory lock {}; wait for it to finish before retrying",
+            "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
             path.display()
         )
     })?;
@@ -2278,7 +2753,7 @@ fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
         .with_context(|| format!("write advisory lock {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("sync advisory lock {}", path.display()))?;
-    sync_directory(adoption_root)?;
+    sync_directory(directory)?;
     Ok(AdoptionLock {
         #[cfg(unix)]
         _file: file,
@@ -2381,10 +2856,13 @@ mod tests {
 
     use super::{
         ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, CanonicalStoreVerification,
-        LegacySourceKind, RebornStoragePaths, STAGING_OWNER_FILE, TestAdoptionFaultGuard,
+        DB_FILE, LAYOUT_MANIFEST_FILE, LegacySourceKind, RebornStoragePaths, STAGING_OWNER_FILE,
+        StartupAdoptionAuthority, StartupLayoutAdmission, TestAdoptionFaultGuard,
         TestAdoptionFaultPoint, WorkspaceImportDecision, WorkspaceImportOptions,
-        acquire_adoption_lock, adopt_layout, adopt_layout_with_store_verification,
+        acquire_adoption_lock, admit_startup_layout, adopt_layout,
+        adopt_layout_with_store_verification, automatically_adopt_layout_with_store_verification,
         ensure_ready_layout, inspect_legacy_candidates, inspect_ready_layout, install_staged,
+        preflight_automatic_adoption, prepare_automatic_adoption,
         ready_legacy_skill_snapshot_source, snapshot_source, stage_snapshot,
         verify_canonical_store, write_journal,
     };
@@ -2399,6 +2877,141 @@ mod tests {
                 workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
             },
         }
+    }
+
+    #[test]
+    fn startup_adoption_authority_requires_the_exact_versioned_cutover_value() {
+        let missing = StartupAdoptionAuthority::from_environment_value(None)
+            .expect_err("missing deployment authority fails closed");
+        assert!(missing.to_string().contains(StartupAdoptionAuthority::ENV));
+
+        let malformed = StartupAdoptionAuthority::from_environment_value(Some("true"))
+            .expect_err("generic truthy values do not authorize migration");
+        assert!(
+            malformed
+                .to_string()
+                .contains(StartupAdoptionAuthority::LEGACY_LAYOUT_V1)
+        );
+
+        StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("the versioned cutover value authorizes this one migration protocol");
+    }
+
+    #[test]
+    fn automatic_startup_cutover_lock_serializes_competing_new_replicas() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+
+        let _permit = prepare_automatic_adoption(&home, requirement, authority)
+            .expect("first new replica owns the cutover");
+        let contention = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("second new replica must fail before verification and mutation"),
+            Err(error) => error,
+        };
+
+        assert!(contention.to_string().contains("automatic storage cutover"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(!temp.path().join("layout.toml").exists());
+        assert!(
+            !temp
+                .path()
+                .join("runtime/layout-adoption/journal.toml")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_cutover_holder_subprocess() {
+        let Ok(home_path) = std::env::var("IRONCLAW_TEST_CUTOVER_HOME") else {
+            return;
+        };
+        let ready = std::env::var("IRONCLAW_TEST_CUTOVER_READY").expect("cutover ready path");
+        let release = std::env::var("IRONCLAW_TEST_CUTOVER_RELEASE").expect("cutover release path");
+        let home = reborn_home(std::path::Path::new(&home_path));
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+        let _permit =
+            prepare_automatic_adoption(&home, embedded_single_user_requirement(), authority)
+                .expect("subprocess holds automatic cutover lock");
+        fs::write(ready, b"ready").expect("signal held cutover lock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::path::Path::new(&release).is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            std::path::Path::new(&release).is_file(),
+            "parent did not release cutover holder within the bounded test interval"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_cutover_lock_serializes_separate_processes_and_reuses_its_inode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let ready = temp.path().join("cutover-ready");
+        let release = temp.path().join("cutover-release");
+        let test_binary = std::env::current_exe().expect("test binary");
+        let mut child = Command::new(test_binary)
+            .args([
+                "--exact",
+                "runtime::storage_layout::tests::automatic_cutover_holder_subprocess",
+                "--nocapture",
+            ])
+            .env("IRONCLAW_TEST_CUTOVER_HOME", temp.path())
+            .env("IRONCLAW_TEST_CUTOVER_READY", &ready)
+            .env("IRONCLAW_TEST_CUTOVER_RELEASE", &release)
+            .spawn()
+            .expect("spawn automatic cutover holder");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ready.is_file(),
+            "cutover holder reached its critical section"
+        );
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+        let contention = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("a separate process must serialize automatic cutover"),
+            Err(error) => error,
+        };
+        assert!(
+            contention.to_string().contains("automatic storage cutover"),
+            "{contention:#}"
+        );
+        assert!(legacy.join(DB_FILE).is_file());
+        assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+        assert!(
+            !temp
+                .path()
+                .join("runtime/layout-adoption/journal.toml")
+                .exists()
+        );
+
+        fs::write(&release, b"release").expect("release cutover holder");
+        let status = child.wait().expect("wait for released cutover holder");
+        assert!(status.success(), "cutover holder exits cleanly");
+        let _permit = prepare_automatic_adoption(&home, requirement, authority)
+            .expect("the persistent lock inode is reusable after process exit");
     }
 
     fn external_single_user_requirement() -> LayoutRequirement {
@@ -2595,16 +3208,19 @@ mod tests {
     }
 
     #[test]
-    fn normal_boot_refuses_legacy_root_without_mutating_it() {
+    fn startup_classifies_one_legacy_root_for_adoption_without_mutating_it() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
         let legacy = temp.path().join("local-dev");
         seed_legacy_embedded_store(&legacy);
 
-        let error = ensure_ready_layout(&home, embedded_single_user_requirement())
-            .expect_err("normal boot must require offline adoption");
+        let admission = admit_startup_layout(&home, embedded_single_user_requirement())
+            .expect("one supported source has a typed automatic-adoption decision");
 
-        assert!(error.to_string().contains("ironclaw storage adopt"));
+        assert!(matches!(
+            admission,
+            StartupLayoutAdmission::AdoptionRequired
+        ));
         assert!(legacy.join("reborn-local-dev.db").exists());
         assert!(!temp.path().join("layout.toml").exists());
         assert!(!temp.path().join("state").exists());
@@ -3442,6 +4058,198 @@ mod tests {
     }
 
     #[test]
+    fn automatic_startup_refuses_a_journaled_external_workspace_import() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let workspace_source = temp.path().join("legacy-workspace");
+        fs::create_dir(&workspace_source).expect("workspace source");
+        fs::write(workspace_source.join("keep.txt"), b"workspace data").expect("workspace file");
+        let tenant = TenantId::new("tenant-a").expect("tenant");
+        let user = UserId::new("user-a").expect("user");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let journal = AdoptionJournal::new(
+            candidates.first().expect("one candidate"),
+            requirement,
+            Some(WorkspaceImportDecision {
+                source: workspace_source.clone(),
+                tenant: tenant.to_string(),
+                user: user.to_string(),
+                digest: TenantUserWorkspaceKey::from_tenant_user(&tenant, &user)
+                    .digest_segment()
+                    .to_string(),
+            }),
+        );
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        let error = preflight_automatic_adoption(&home, requirement)
+            .expect_err("automatic startup never assumes workspace migration authority");
+
+        assert!(error.to_string().contains("external workspace import"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(workspace_source.join("keep.txt").is_file());
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
+    #[test]
+    fn automatic_startup_rejects_an_impossible_journal_shape_before_store_verification() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = external_single_user_requirement();
+        let legacy_prompt = temp
+            .path()
+            .join("hosted-single-tenant/system/prompts/operator.md");
+        fs::create_dir_all(legacy_prompt.parent().expect("prompt parent"))
+            .expect("legacy system root");
+        fs::write(&legacy_prompt, b"operator prompt").expect("legacy prompt");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let mut journal = AdoptionJournal::new(
+            candidates.first().expect("one candidate"),
+            requirement,
+            None,
+        );
+        // SnapshotOwned requires the source to be absent and its exact snapshot
+        // to exist. This impossible shape must fail before the caller can open
+        // or migrate PostgreSQL.
+        journal.phase = AdoptionPhase::SnapshotOwned;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+
+        let error = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("invalid journal shape must fail during read-only preflight"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("snapshot"), "{error:#}");
+        assert!(legacy_prompt.is_file());
+        assert!(!temp.path().join("layout.toml").exists());
+        assert!(!temp.path().join(".reborn-storage-cutover.lock").exists());
+    }
+
+    #[test]
+    fn automatic_startup_rejects_prepare_journal_with_canonical_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = external_single_user_requirement();
+        let legacy_prompt = temp
+            .path()
+            .join("hosted-single-tenant/system/prompts/operator.md");
+        fs::create_dir_all(legacy_prompt.parent().expect("prompt parent"))
+            .expect("legacy system root");
+        fs::write(&legacy_prompt, b"operator prompt").expect("legacy prompt");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let journal = AdoptionJournal::new(
+            candidates.first().expect("one candidate"),
+            requirement,
+            None,
+        );
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+        fs::create_dir_all(paths.state_root()).expect("conflicting canonical state");
+        fs::write(paths.state_root().join("unowned.db"), b"conflict")
+            .expect("conflicting canonical file");
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+
+        let error = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("canonical conflict must fail during read-only preflight"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("canonical destination"),
+            "{error:#}"
+        );
+        assert!(legacy_prompt.is_file());
+        assert!(paths.state_root().join("unowned.db").is_file());
+        assert!(!temp.path().join("layout.toml").exists());
+        assert!(!temp.path().join(".reborn-storage-cutover.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_startup_rejects_unowned_workspace_and_dangling_staged_child() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        seed_legacy_embedded_store(&temp.path().join("local-dev"));
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        stage_snapshot(
+            candidate,
+            &snapshot,
+            &adoption_root,
+            None,
+            &journal.operation_id,
+        )
+        .expect("stage snapshot");
+        journal.phase = AdoptionPhase::Staged;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+        fs::create_dir_all(paths.workspace_root()).expect("workspace root");
+        fs::write(paths.workspace_root().join("unowned.txt"), b"unowned")
+            .expect("unowned workspace content");
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+        let workspace_error = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("unowned workspace must fail during read-only preflight"),
+            Err(error) => error,
+        };
+        assert!(
+            workspace_error
+                .to_string()
+                .contains("has no workspace owner"),
+            "{workspace_error:#}"
+        );
+        fs::remove_dir_all(paths.workspace_root()).expect("remove unowned workspace fixture");
+
+        let staged_state = adoption_root.join("staging/state");
+        fs::remove_dir_all(&staged_state).expect("remove staged state");
+        symlink(adoption_root.join("missing-state"), &staged_state)
+            .expect("dangling staged-state symlink");
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+
+        let error = match prepare_automatic_adoption(&home, requirement, authority) {
+            Ok(_) => panic!("dangling staged child must fail during read-only preflight"),
+            Err(error) => error,
+        };
+
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
+        assert!(!temp.path().join("layout.toml").exists());
+        assert!(!temp.path().join(".reborn-storage-cutover.lock").exists());
+    }
+
+    #[test]
     fn tampered_workspace_journal_identity_is_rejected_before_snapshot_or_install() {
         for journal_digest in ["not-the-canonical-digest", "../escape"] {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -3997,13 +4805,24 @@ mod tests {
                 .is_dir()
         );
 
-        adopt_layout(&home, requirement, confirmed_options())
-            .expect("recovery completes the remaining system rename");
+        let authority = StartupAdoptionAuthority::from_environment_value(Some(
+            StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        ))
+        .expect("cutover authority");
+        let permit = prepare_automatic_adoption(&home, requirement, authority)
+            .expect("automatic recovery preflight");
+        automatically_adopt_layout_with_store_verification(
+            &home,
+            requirement,
+            permit,
+            CanonicalStoreVerification::EmbeddedLibSql,
+        )
+        .expect("automatic recovery completes the remaining system rename");
         assert!(temp.path().join("layout.toml").is_file());
     }
 
     #[test]
-    fn offline_adopt_resumes_every_persisted_phase_and_commits_manifest_last() {
+    fn automatic_startup_resumes_every_persisted_phase_and_commits_manifest_last() {
         for phase in [
             AdoptionPhase::Prepare,
             AdoptionPhase::SnapshotOwned,
@@ -4055,6 +4874,9 @@ mod tests {
                 install_staged(&paths, &adoption_root, None).expect("install staged content");
                 journal.phase = AdoptionPhase::CanonicalInstalled;
             }
+            if phase == AdoptionPhase::MigrationPending {
+                journal.phase = AdoptionPhase::MigrationPending;
+            }
             if phase == AdoptionPhase::StoreVerified {
                 verify_canonical_store(
                     &paths,
@@ -4067,8 +4889,19 @@ mod tests {
             write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal phase");
 
             assert!(!temp.path().join("layout.toml").exists());
-            adopt_layout(&home, requirement, confirmed_options())
-                .expect("resume exact persisted phase");
+            let authority = StartupAdoptionAuthority::from_environment_value(Some(
+                StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+            ))
+            .expect("cutover authority");
+            let permit = prepare_automatic_adoption(&home, requirement, authority)
+                .expect("automatic recovery preflight");
+            automatically_adopt_layout_with_store_verification(
+                &home,
+                requirement,
+                permit,
+                CanonicalStoreVerification::EmbeddedLibSql,
+            )
+            .expect("resume exact persisted phase automatically");
             assert!(temp.path().join("layout.toml").is_file());
             assert!(temp.path().join("state/reborn-local-dev.db").is_file());
         }

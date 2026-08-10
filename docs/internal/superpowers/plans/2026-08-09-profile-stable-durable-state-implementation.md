@@ -106,9 +106,27 @@ home would reduce composition churn, but it is intentionally not selected. It
 would defer the reviewed `state/` namespace, retain the overloaded application
 root, and leave the current `/projects -> root` hazard to solve later. This plan
 accepts the broader state/system/workspace split because that split is the
-stated target, while containing its migration risk behind an offline command
-and manifest-last commit. If reviewers want the narrow flat-root release
+stated target, while containing its migration risk behind a deployment-authorized
+cutover, the same bounded manual recovery command, and manifest-last commit. If reviewers want the narrow flat-root release
 instead, that is a product-scope change requiring approval before coding.
+
+### 2026-08-10 adoption amendment
+
+The reviewed implementation combines Designs A and B. Ordinary startup still
+does not infer that a legacy source is safe to move. When exactly one supported
+source (or a compatible interrupted journal) is present, startup mutates it
+only when the deployment supplies the exact, versioned cutover attestation
+`IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1` after every old replica has
+stopped. New binaries serialize that migration, revalidate the source or
+journal under the cutover lock, verify the configured store, publish
+`layout.toml` last, and only then start traffic.
+
+Without that attestation, or for ambiguous/unsafe state, startup fails before
+source mutation and prints the manual recovery command. The manual command
+remains required for explicit external-workspace ownership and exceptional
+recovery. This does not reverse the old-binary safety finding below: the
+environment value is deployment authority, not evidence the binary can derive
+locally, and it must never be used during a rolling old/new deployment.
 
 ## Designs considered
 
@@ -137,10 +155,12 @@ Costs:
   operator supplies its tenant/user owner through the explicit adoption
   command described below; the product must not guess that ownership.
 
-Fatal limitation for released layouts: old binaries do not participate in the
+Fatal limitation for unconditional adoption: old binaries do not participate in the
 new lock. A still-running process may retain DB/WAL file descriptors while the
 new binary renames or copies the legacy root, so a consistent libSQL snapshot
-cannot be guaranteed. Reject automatic physical adoption for this release.
+cannot be guaranteed. Therefore automatic physical adoption is admitted only
+after the deployment supplies the versioned cutover attestation described in
+the amendment above; otherwise startup fails closed.
 
 ### Design B: explicit offline `ironclaw storage adopt` command
 
@@ -164,8 +184,9 @@ Costs:
   binary that does not know about it.
 - A small command surface is maintained alongside read-only boot detection.
 
-Recommendation: use this design despite the operational stop. Safety beats an
-unattended but potentially inconsistent libSQL copy. Optional workspace import
+Original recommendation: use this design despite the operational stop. The
+2026-08-10 amendment preserves its quiescence requirement while allowing the
+deployment to authorize the same state machine during startup. Optional workspace import
 uses `--workspace-source <path> --tenant <id> --user <id>`; it previews the
 source and destination, requires confirmation, records the decision in the
 same journal, and never deletes the external source. This remains one bounded
@@ -231,10 +252,12 @@ there is no second profile-policy table in `ironclaw_config`.
 
 ### `ironclaw_cli`: installation-layout adoption and boot orchestration
 
-Add `runtime/storage_layout.rs` as the sole physical adoption owner. Normal
-boot only performs read-only detection and one of three actions: use a valid
-ready manifest, initialize a genuinely fresh empty layout, or fail with the
-offline adoption command. It never copies or renames legacy state.
+Add `runtime/storage_layout.rs` as the sole physical adoption owner. Startup
+uses a valid ready manifest, initializes a genuinely fresh empty layout, or
+classifies legacy state. A single supported source or compatible journal may
+enter the bounded adoption state machine only with the exact deployment
+cutover attestation; otherwise startup fails before migration writes. Multiple,
+unknown, incompatible, or workspace-bearing states remain manual failures.
 
 The explicit command:
 
@@ -404,7 +427,7 @@ The compatibility relation is explicit rather than inferred from enum order.
 Adding a tenancy or access-floor variant must make the match non-exhaustive
 until its transition rules and tests are supplied.
 
-## Offline legacy-adoption state machine
+## Bounded legacy-adoption state machine
 
 The state machine is deliberately finite and specific to this layout change.
 There is no generic migration registry.
@@ -412,20 +435,22 @@ There is no generic migration registry.
 ```text
 BootInspect -> Ready | FreshInit | AdoptionRequired | Conflict
 
-OfflineAdopt:
+AuthorizedStartupOrManualAdopt:
 Inspect -> QuiescenceConfirmed -> SnapshotOwned -> Staged
         -> CanonicalInstalled -> StoreVerified -> Ready
 ```
 
 ### Inspect
 
-Normal boot performs this inspection without migration writes:
+Startup performs this inspection before migration writes:
 
 1. If a supported `layout.toml` exists, validate transition admission and use
    canonical paths. A leftover journal is recovery evidence only: verify that
    it names the same completed adoption, then retain it without resuming copy.
-2. If an adoption journal exists without a ready manifest, fail with the exact
-   offline resume command; normal boot never resumes copying.
+2. If an adoption journal exists without a ready manifest, automatic startup
+   may resume only when the journal is valid and compatible, has no external
+   workspace import, and the deployment supplied the exact cutover authority.
+   Otherwise fail with the manual resume command.
 3. Otherwise inspect only the fixed legacy candidate list.
 4. A candidate is populated when it has an authoritative DB/key, non-empty
    system content, or non-empty known workspace content. Empty directories do
@@ -443,8 +468,9 @@ Outcomes:
 
 - no populated candidate and no canonical content: initialize canonical
   directories and atomically write/sync the ready manifest last;
-- exactly one supported compatible candidate: refuse normal boot and print
-  the exact stopped-service adoption command;
+- exactly one supported compatible candidate: require the exact deployment
+  cutover authority, then adopt automatically; without it refuse startup and
+  print the stopped-service recovery command;
 - more than one populated released candidate: fail with all paths listed;
 - any populated unreleased sandbox candidate: fail with inspect/archive
   guidance, even if it is the only candidate.
@@ -464,9 +490,10 @@ Workspace outcome is independent of profile-root selection:
 
 ### Quiescence, prepare, and snapshot
 
-1. Require explicit operator confirmation that all old processes are stopped
-   and a backup/snapshot exists. Capacity preflight is advisory; absence of a
-   known PID/socket is not treated as proof of quiescence.
+1. Require either the manual command's explicit confirmations or the startup
+   path's exact versioned deployment cutover attestation. Both assert that all
+   old processes are stopped; neither a PID/socket probe nor a new-binary lock
+   proves quiescence against an old release. Capacity preflight is advisory.
 2. Persist and sync `journal.toml` with source identity, source-derived
    security envelope, expected inventory, optional workspace decision, and
    phase `prepare`.
@@ -508,13 +535,13 @@ Install complete staged `state/` and `system/` trees with atomic sibling
 renames and parent-directory syncs. Because two directory renames cannot be
 one filesystem transaction, `layout.toml` is the sole visibility/ready commit:
 without it no normal command opens either tree. If install is interrupted,
-the offline command removes only journal-owned installed/staged trees and
+the shared adoption state machine removes only journal-owned installed/staged trees and
 recopies the whole DB unit from the preserved snapshot; it does not reuse
 individually matching DB/WAL files.
 
 ### Store verification and completion
 
-The offline command performs no listener or capability activation. Its bounded
+The adoption phase performs no listener or capability activation. Its bounded
 completion check opens the configured canonical store, runs the existing
 idempotent migrations, constructs the existing secret resolver from the
 canonical key, and closes those handles. Content-preservation tests, not
@@ -541,14 +568,17 @@ commit.
   it explicitly.
 - Existing canonical content without a valid manifest/journal: normal boot
   fails closed as an unrecognized partial layout.
-- Crash before snapshot rename: the offline command resumes from the source.
-- Crash after snapshot rename: only the offline command resumes from the exact
-  journaled snapshot.
+- Crash before snapshot rename: deployment-authorized startup or the manual
+  command resumes from the source.
+- Crash after snapshot rename: deployment-authorized startup resumes only a
+  compatible journal without external workspace ownership; otherwise only the
+  manual command resumes from the exact journaled snapshot.
 - Crash/ENOSPC during staging or install: source/snapshot remains intact, no
   manifest exists, and only journal-owned staging/installed trees may be
   discarded before a whole-unit recopy.
-- Store verification failure: canonical layout remains non-ready; normal boot
-  refuses traffic and tells the operator how to resume offline verification.
+- Store verification failure: canonical layout remains non-ready; startup
+  refuses traffic and tells the operator how to retry an authorized cutover or
+  resume manual verification.
 - Unsupported manifest/journal version: fail closed without mutation.
 - Old-binary rollback after adoption is not a normal profile rollback. Stop
   IronClaw, archive the incomplete/canonical target, and restore the preserved
@@ -584,16 +614,16 @@ profile transition above. Keep filesystem mutation out of this crate.
 ### Task 3: Add the bounded CLI adoption state machine
 
 Add one focused test module beside the new owner. Test fresh init, root-level
-DB/key candidates, one-source offline adoption, every durable interruption
-point, idempotent command resume, unknown files, unsupported versions,
+DB/key candidates, one-source deployment-authorized startup adoption, every
+durable interruption point, idempotent startup/command resume, unknown files, unsupported versions,
 canonical conflicts, two populated roots, and unreleased sandbox roots.
 
 Use temporary directories and a narrow filesystem-operation seam for fault
 injection. Do not introduce a general migration framework or mock application
 stores. Use separate processes for the advisory-lock race and stopped-service
 precondition; temp-directory fault injection is not evidence about a live
-libSQL writer. Ordinary boot tests assert detection performs zero migration
-writes.
+libSQL writer. Startup without cutover authority asserts detection performs
+zero migration writes.
 
 Drive the real CLI prerequisite from incompatible-manifest tests and assert
 rejection occurs before any store open, process/backend construction,
@@ -623,8 +653,9 @@ trusted mount source. Extend existing tests rather than adding parallel suites.
 
 Split proof by the boundary it actually exercises:
 
-- CLI/process tests drive stopped-service adoption, conflicts, interrupted
-  staging, manifest-last commit, and zero normal-boot migration writes.
+- CLI/process tests drive deployment-authorized stopped-service adoption,
+  conflicts, interrupted staging, manifest-last commit, and zero migration
+  writes when cutover authority is absent.
 - An existing composition cold-reopen harness opens the adopted canonical
   paths and verifies after restart:
 

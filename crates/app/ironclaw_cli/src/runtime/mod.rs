@@ -726,7 +726,7 @@ pub(crate) fn build_services_input_with_options(
 
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
-    let storage_paths = ensure_ready_layout_for_profile(config, profile)?;
+    let storage_paths = ensure_startup_layout(config, profile, config_file.as_ref())?;
     let legacy_skill_snapshot_source =
         storage_layout::ready_legacy_skill_snapshot_source(config.home())?;
     let mut services_input = match profile {
@@ -1380,6 +1380,41 @@ pub(crate) fn ensure_ready_layout_for_profile(
     storage_layout::ensure_ready_layout(config.home(), requirement)
 }
 
+fn ensure_startup_layout(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+) -> anyhow::Result<ironclaw_config::RebornStoragePaths> {
+    let requirement = storage_layout_requirement_for_profile(profile)?;
+    if profile == RebornProfile::MigrationDryRun {
+        return storage_layout::inspect_ready_layout(config.home(), requirement);
+    }
+    match storage_layout::admit_startup_layout(config.home(), requirement)? {
+        storage_layout::StartupLayoutAdmission::Ready(paths) => Ok(paths),
+        storage_layout::StartupLayoutAdmission::AdoptionRequired => {
+            let cutover_value = std::env::var(storage_layout::StartupAdoptionAuthority::ENV).ok();
+            let authority = storage_layout::StartupAdoptionAuthority::from_environment_value(
+                cutover_value.as_deref(),
+            )?;
+            let permit =
+                storage_layout::prepare_automatic_adoption(config.home(), requirement, authority)?;
+            let store_verification = canonical_store_verification_for_adoption(
+                config,
+                profile,
+                config_file,
+                requirement,
+            )?;
+            storage_layout::automatically_adopt_layout_with_store_verification(
+                config.home(),
+                requirement,
+                permit,
+                store_verification,
+            )?;
+            storage_layout::ensure_ready_layout(config.home(), requirement)
+        }
+    }
+}
+
 /// Admit the active profile's durable layout before a CLI command opens a
 /// stateful store outside the runtime assembly path.
 pub(crate) fn ensure_ready_layout_for_active_profile(
@@ -1409,9 +1444,32 @@ pub(crate) fn adopt_storage_layout(
         workspace_import,
     };
     storage_layout::validate_adopt_options(&options)?;
-    let store_verification = match requirement.durable_state {
+    let store_verification = canonical_store_verification_for_adoption(
+        config,
+        profile,
+        config_file.as_ref(),
+        requirement,
+    )?;
+    storage_layout::adopt_layout_with_store_verification(
+        config.home(),
+        requirement,
+        options,
+        store_verification,
+    )?;
+    // The adoption command does not start a runtime. Validate the manifest
+    // through the same normal-boot prerequisite before reporting completion.
+    storage_layout::ensure_ready_layout(config.home(), requirement).map(|_| ())
+}
+
+fn canonical_store_verification_for_adoption(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+    config_file: Option<&ironclaw_config::RebornConfigFile>,
+    requirement: ironclaw_config::LayoutRequirement,
+) -> anyhow::Result<storage_layout::CanonicalStoreVerification> {
+    match requirement.durable_state {
         ironclaw_config::DurableStateKind::EmbeddedLibSql => {
-            storage_layout::CanonicalStoreVerification::EmbeddedLibSql
+            Ok(storage_layout::CanonicalStoreVerification::EmbeddedLibSql)
         }
         ironclaw_config::DurableStateKind::ExternalPostgres => {
             if profile != RebornProfile::HostedSingleTenant {
@@ -1422,9 +1480,9 @@ pub(crate) fn adopt_storage_layout(
             let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
             let bindings = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
                 composition_profile(profile),
-                default_owner_id(config_file.as_ref()),
+                default_owner_id(config_file),
                 paths,
-                config_file.as_ref(),
+                config_file,
             )
             .context(
                 "verify canonical external PostgreSQL store and secret resolver before adoption",
@@ -1435,18 +1493,9 @@ pub(crate) fn adopt_storage_layout(
             .context(
                 "verify canonical external PostgreSQL store and secret resolver before adoption",
             )?;
-            storage_layout::CanonicalStoreVerification::ExternalPostgresVerified
+            Ok(storage_layout::CanonicalStoreVerification::ExternalPostgresVerified)
         }
-    };
-    storage_layout::adopt_layout_with_store_verification(
-        config.home(),
-        requirement,
-        options,
-        store_verification,
-    )?;
-    // The adoption command does not start a runtime. Validate the manifest
-    // through the same normal-boot prerequisite before reporting completion.
-    storage_layout::ensure_ready_layout(config.home(), requirement).map(|_| ())
+    }
 }
 
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
@@ -3167,6 +3216,72 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
                 .exists(),
             "external verification precedes every adoption mutation"
         );
+    }
+
+    #[test]
+    fn automatic_startup_rejects_unsafe_legacy_shapes_before_postgres_verification() {
+        let _lock = lock_runtime_env();
+        let _cutover = EnvGuard::set(
+            super::storage_layout::StartupAdoptionAuthority::ENV,
+            super::storage_layout::StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
+        );
+        let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "not-a-postgres-url");
+        let _master_key = EnvGuard::set(
+            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+            &ironclaw_secrets::keychain::generate_master_key_hex(),
+        );
+        let storage_config = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#;
+
+        for case in ["unknown-entry", "multiple-roots", "unreleased-sandbox"] {
+            let (_temp, config) =
+                boot_config_with_config_toml("hosted-single-tenant", storage_config);
+            let home = config.home().path();
+            match case {
+                "unknown-entry" => {
+                    let legacy = home.join("hosted-single-tenant");
+                    std::fs::create_dir_all(&legacy).expect("legacy root");
+                    std::fs::write(legacy.join("unknown.bin"), b"unknown")
+                        .expect("unknown legacy entry");
+                }
+                "multiple-roots" => {
+                    let prompt = home.join("hosted-single-tenant/system/prompts/operator.md");
+                    std::fs::create_dir_all(prompt.parent().expect("prompt parent"))
+                        .expect("hosted legacy root");
+                    std::fs::write(prompt, b"prompt").expect("legacy prompt");
+                    seed_legacy_embedded_store(&home.join("local-dev"));
+                }
+                "unreleased-sandbox" => {
+                    seed_legacy_embedded_store(&home.join("hosted-single-tenant-volume-sandboxed"));
+                }
+                _ => unreachable!("table is exhaustive"),
+            }
+            let before = layout_tree_snapshot(home);
+            let config_file = super::read_config_file(&config).expect("read config");
+
+            let error = super::ensure_startup_layout(
+                &config,
+                RebornProfile::HostedSingleTenant,
+                config_file.as_ref(),
+            )
+            .expect_err("unsafe legacy state must fail before PostgreSQL verification");
+
+            assert!(
+                !error
+                    .to_string()
+                    .contains("verify canonical external PostgreSQL store"),
+                "{case} reached PostgreSQL verification: {error:#}"
+            );
+            assert_eq!(
+                layout_tree_snapshot(home),
+                before,
+                "{case} must fail without filesystem mutation"
+            );
+        }
     }
 
     #[test]
