@@ -14,6 +14,7 @@ vi.mock("event-source-plus", () => ({
   EventSourcePlus: class EventSourcePlus {
     url: string;
     options: Record<string, unknown>;
+    requestOptions: Record<string, any> = {};
     hooks: Record<string, Function> = {};
     listenCalls = 0;
     controller: { abort: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> };
@@ -23,7 +24,7 @@ vi.mock("event-source-plus", () => ({
       this.options = options;
       this.controller = {
         abort: vi.fn(),
-        reconnect: vi.fn(() => this.hooks.onRequest?.({})),
+        reconnect: vi.fn(() => this.hooks.onRequest?.({ options: this.requestOptions })),
       };
       eventStreams.push(this);
     }
@@ -31,7 +32,7 @@ vi.mock("event-source-plus", () => ({
     listen(hooks: Record<string, Function>) {
       this.listenCalls += 1;
       this.hooks = hooks;
-      hooks.onRequest?.({});
+      hooks.onRequest?.({ options: this.requestOptions });
       return this.controller;
     }
 
@@ -100,12 +101,24 @@ test("loads a scoped snapshot and configures bounded authenticated reconnects", 
     Authorization: "Bearer operator-token",
   });
   assert.equal(new URL(stream.url).searchParams.has("token"), false);
+  assert.match(stream.requestOptions.query.connection_id, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(stream.requestOptions.query.connection_generation, 1);
+
+  await act(async () => stream.message("diagnostic_connected", "", {}));
+  assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
 
   await act(async () => stream.respond());
   assert.equal(latestState?.health, INSPECTOR_HEALTH.CONNECTED);
 
   await act(async () => stream.hooks.onRequestError?.({}));
   assert.equal(latestState?.health, INSPECTOR_HEALTH.RECONNECTING);
+  assert.equal((latestState?.updates[0].update as any)?.data?.kind, "stream_disconnected");
+
+  await act(async () => stream.respond());
+  assert.equal((latestState?.updates[1].update as any)?.data?.kind, "stream_resumed");
+
+  await act(async () => stream.controller.reconnect());
+  assert.equal(stream.requestOptions.query.connection_generation, 2);
 });
 
 test("recovers a transient snapshot failure after the diagnostics stream connects", async () => {
@@ -163,38 +176,95 @@ test("bounds transient snapshot retries", async () => {
   }
 });
 
-test("deduplicates cursors, rebases snapshots, and stops on forbidden", async () => {
-  await act(async () => root?.render(<Probe />));
-  const stream = eventStreams[0];
-  await act(async () => stream.respond());
+test("deduplicates cursors, bounds refresh bursts, rebases, and stops on forbidden", async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => root?.render(<Probe />));
+    const stream = eventStreams[0];
+    await act(async () => stream.respond());
 
-  const streamId = "550e8400-e29b-41d4-a716-446655440000";
-  await act(async () => {
-    stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
-    stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
-    stream.message("diagnostic_update", `${streamId}:2`, { sequence: 2 });
-  });
-  assert.equal(latestState?.updates.length, 2);
-  assert.equal(latestState?.lastCursor, `${streamId}:2`);
-
-  await act(async () => {
-    stream.message("diagnostic_update", `${streamId}:3`, {
-      update: { type: "prompt_updated" },
+    const streamId = "550e8400-e29b-41d4-a716-446655440000";
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
+      stream.message("diagnostic_update", `${streamId}:1`, { sequence: 1 });
+      stream.message("diagnostic_update", `${streamId}:2`, { sequence: 2 });
     });
-  });
-  assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.equal(latestState?.updates.length, 2);
+    assert.equal(latestState?.lastCursor, `${streamId}:2`);
 
-  await act(async () => {
-    stream.message("diagnostic_rebase", `${streamId}:4`, {
-      latest_cursor: { stream_id: streamId, sequence: 4 },
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:3`, {
+        update: { type: "prompt_updated" },
+      });
+      stream.message("diagnostic_update", `${streamId}:4`, {
+        update: { type: "model_call", data: {} },
+      });
+      stream.message("diagnostic_update", `${streamId}:5`, {
+        update: { type: "tool_execution_updated" },
+      });
+      stream.message("diagnostic_update", `${streamId}:6`, {
+        update: { type: "stats" },
+      });
     });
-  });
-  assert.equal(latestState?.updates.length, 0);
-  assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    assert.equal(vi.mocked(fetch).mock.calls.length, 1);
+    await act(async () => vi.advanceTimersByTimeAsync(49));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    assert.deepEqual(stream.options.headers(), {
+      Authorization: "Bearer operator-token",
+      "Last-Event-ID": `${streamId}:6`,
+    });
 
-  await act(async () => stream.respond(403, "application/json"));
-  assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
-  assert.equal(stream.controller.abort.mock.calls.length, 1);
+    for (let sequence = 7; sequence <= 12; sequence += 1) {
+      await act(async () => {
+        stream.message("diagnostic_update", `${streamId}:${sequence}`, {
+          update: { type: "stats" },
+        });
+        await vi.advanceTimersByTimeAsync(40);
+      });
+    }
+    await act(async () => {
+      stream.message("diagnostic_update", `${streamId}:13`, {
+        update: { type: "stats" },
+      });
+    });
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    await act(async () => vi.advanceTimersByTimeAsync(9));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    assert.deepEqual(stream.options.headers(), {
+      Authorization: "Bearer operator-token",
+      "Last-Event-ID": `${streamId}:13`,
+    });
+
+    await act(async () => stream.hooks.onRequestError?.({}));
+    await act(async () => stream.respond());
+    const retainedLocalIds = latestState?.updates
+      .filter((update) => update.local_id)
+      .map((update) => update.local_id);
+    assert.deepEqual(retainedLocalIds, ["transport-1", "transport-2"]);
+
+    await act(async () => {
+      stream.message("diagnostic_rebase", `${streamId}:14`, {
+        latest_cursor: { stream_id: streamId, sequence: 14 },
+      });
+    });
+    assert.deepEqual(
+      latestState?.updates.map((update) => update.local_id),
+      retainedLocalIds,
+    );
+    assert.equal(vi.mocked(fetch).mock.calls.length, 3);
+    await act(async () => vi.advanceTimersByTimeAsync(50));
+    assert.equal(vi.mocked(fetch).mock.calls.length, 4);
+
+    await act(async () => stream.respond(403, "application/json"));
+    assert.equal(latestState?.health, INSPECTOR_HEALTH.FORBIDDEN);
+    assert.equal(stream.controller.abort.mock.calls.length, 1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("hidden tabs release the stream and reconnect when visible", async () => {
