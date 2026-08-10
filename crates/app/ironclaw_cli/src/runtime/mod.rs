@@ -2812,6 +2812,12 @@ regex_activation_enabled = false
 
     #[tokio::test]
     async fn local_runtime_storage_root_is_profile_independent() {
+        for &profile in ironclaw_config::RebornProfile::all() {
+            let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+            let root = local_runtime_storage_root(&config, profile);
+            assert_eq!(root, config.home().path());
+        }
+
         for profile in [
             ironclaw_config::RebornProfile::Standalone,
             ironclaw_config::RebornProfile::StandaloneUnrestricted,
@@ -2821,7 +2827,6 @@ regex_activation_enabled = false
         ] {
             let (_temp, config) = boot_config_with_config_toml("local-dev", "");
             let root = local_runtime_storage_root(&config, profile);
-            assert_eq!(root, config.home().path());
             initialize_local_runtime_storage_root(&config, profile)
                 .await
                 .expect("initialize local runtime storage");
@@ -2831,7 +2836,6 @@ regex_activation_enabled = false
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
         let hosted = ironclaw_config::RebornProfile::HostedSingleTenant;
         let root = local_runtime_storage_root(&config, hosted);
-        assert_eq!(root, config.home().path());
         initialize_local_runtime_storage_root(&config, hosted)
             .await
             .expect("hosted profile is a no-op");
