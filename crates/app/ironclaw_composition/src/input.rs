@@ -292,7 +292,12 @@ pub enum LegacySkillSnapshotSource {
 }
 
 impl LegacySkillSnapshotSource {
-    pub(crate) fn snapshot_root(self, paths: &ironclaw_config::RebornStoragePaths) -> PathBuf {
+    /// Returns the fixed host-side root admitted for this legacy snapshot.
+    ///
+    /// Callers may inspect this location to stage an import, but cannot supply
+    /// an arbitrary path to the runtime importer: admission remains typed by
+    /// [`RebornHostBindings::with_legacy_skill_snapshot_source`].
+    pub fn snapshot_root(self, paths: &ironclaw_config::RebornStoragePaths) -> PathBuf {
         let source = match self {
             Self::LocalDev => "local-dev",
             Self::HostedSingleTenant => "hosted-single-tenant",

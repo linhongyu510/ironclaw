@@ -869,6 +869,34 @@ pub(crate) async fn open_standalone_thread_service_for_test(
     ))
 }
 
+/// Test-only (DURABLE-COLD): reopen the production database-backed user-skill
+/// management service over an existing standalone root. This mirrors the
+/// runtime's `production_skill_management_mount_view` instead of reading the
+/// one-time legacy host-disk import source.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_standalone_skill_management_for_test(
+    storage_root: &Path,
+    owner_user_id: ironclaw_host_api::ids::UserId,
+) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let bundle = build_filesystem(
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
+        None,
+        DurableStorageInput::EmbeddedLibsql,
+    )
+    .await?;
+    let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
+    Ok(Arc::new(
+        ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
+            owner_user_id,
+            filesystem,
+            Arc::new(super::production_backend_assembly::production_skill_management_mount_view),
+        ),
+    ))
+}
+
 /// Test-only (E-DURABLE seam): open a FRESH, independent
 /// [`ExtensionInstallationStore`] at an existing standalone `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql

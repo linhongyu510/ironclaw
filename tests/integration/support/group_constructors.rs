@@ -91,6 +91,18 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// [`Self::extension_lifecycle`] with user-skill fixtures written before
+    /// runtime boot, so the existing legacy import writes them into the
+    /// database-backed tenant/user skill store. Each entry is
+    /// `(name, description, content, installed)`.
+    pub async fn extension_lifecycle_with_preboot_user_skills(
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<Self> {
+        Self::builder()
+            .extension_lifecycle_with_preboot_user_skills(user_skills)
+            .await
+    }
+
     /// Extension-lifecycle group whose credential resolution follows each
     /// run owner. Used to prove one actor cannot dispatch with another
     /// actor's provider account.
@@ -407,9 +419,18 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.extension_lifecycle_with_preboot_user_skills(&[]).await
+    }
+
+    /// See [`RebornIntegrationGroup::extension_lifecycle_with_preboot_user_skills`].
+    pub async fn extension_lifecycle_with_preboot_user_skills(
+        self,
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
             CapabilityDispatchScope::CanonicalOwner,
+            user_skills,
         )
         .await
     }
@@ -420,6 +441,7 @@ impl RebornIntegrationGroupBuilder {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
             CapabilityDispatchScope::RunOwner,
+            &[],
         )
         .await
     }
@@ -438,6 +460,7 @@ impl RebornIntegrationGroupBuilder {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
             CapabilityDispatchScope::CanonicalOwner,
+            &[],
         )
         .await
     }
@@ -450,6 +473,7 @@ impl RebornIntegrationGroupBuilder {
         mut self,
         profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
         dispatch_scope: CapabilityDispatchScope,
+        user_skills: &[(&str, &str, &str, bool)],
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Build the profile with the
@@ -459,7 +483,18 @@ impl RebornIntegrationGroupBuilder {
         // leave the credential rows under the old user and incorrectly block
         // otherwise credential-ready installs on auth.
         let actor_user = base.canonical_actor_user()?;
-        let profile = profile_for_user(actor_user.as_str())?;
+        let mut profile = profile_for_user(actor_user.as_str())?;
+        if !user_skills.is_empty() {
+            let mut options = profile
+                .options
+                .with_skill_activation_tenant(base.canonical_binding.tenant_id.clone())
+                .with_skill_activation_user(actor_user.clone());
+            for (name, description, content, installed) in user_skills {
+                options =
+                    options.with_user_skill_fixture(*name, *description, *content, *installed);
+            }
+            profile.options = options;
+        }
         let mut host_runtime = build_group_capability_with_base(profile, &base).await?;
         if matches!(dispatch_scope, CapabilityDispatchScope::RunOwner) {
             host_runtime = host_runtime.with_run_owner_scoped_capability_dispatch();

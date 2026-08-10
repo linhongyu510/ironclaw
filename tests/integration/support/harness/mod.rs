@@ -30,7 +30,8 @@ use ironclaw_auth::{
 };
 use ironclaw_composition::test_support::SkillActivationTestSource;
 use ironclaw_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
+    LegacySkillSnapshotSource, OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts,
+    RebornRuntimeInput,
 };
 use ironclaw_config::RebornStoragePaths;
 use ironclaw_filesystem::{
@@ -111,11 +112,10 @@ fn write_system_skill_fixture(
     Ok(())
 }
 
-/// Write a USER-scoped skill into the local-dev store, at the path the boot import migrates from.
+/// Write a USER-scoped skill into a fixed legacy snapshot, at the path the boot import migrates from.
 ///
-/// Same layout `seed_user_skill_for_test` writes, extracted so it can run BEFORE the runtime is
-/// built. That ordering is the point: skills are read from the database tree, and the host-disk
-/// store is migrated into it at boot, so a user skill written afterwards is never seen by the run.
+/// This must run before the runtime is built. Skills are read from the database tree, while the
+/// host-disk snapshot is migrated into it once at boot.
 fn write_user_skill_fixture(
     storage_root: &std::path::Path,
     tenant: &TenantId,
@@ -760,7 +760,9 @@ impl HostRuntimeCapabilityHarness {
                 &fixture.prompt,
             )?;
         }
-        if !user_skill_fixtures.is_empty() {
+        let legacy_skill_snapshot_source =
+            (!user_skill_fixtures.is_empty()).then_some(LegacySkillSnapshotSource::BareHome);
+        if let Some(snapshot_source) = legacy_skill_snapshot_source {
             let tenant = skill_activation_tenant
                 .as_ref()
                 .ok_or("user skill fixtures require with_skill_activation_tenant")?;
@@ -769,7 +771,7 @@ impl HostRuntimeCapabilityHarness {
                 .ok_or("user skill fixtures require with_skill_activation_user")?;
             for fixture in &user_skill_fixtures {
                 write_user_skill_fixture(
-                    storage_paths.installation_root(),
+                    &snapshot_source.snapshot_root(&storage_paths),
                     tenant,
                     user,
                     &fixture.name,
@@ -827,6 +829,9 @@ impl HostRuntimeCapabilityHarness {
         }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
+        }
+        if let Some(snapshot_source) = legacy_skill_snapshot_source {
+            input = input.with_legacy_skill_snapshot_source(snapshot_source);
         }
         input = input.with_bundled_first_party_for_test();
         if !native_extension_factories.is_empty() {
@@ -1648,69 +1653,6 @@ impl HostRuntimeCapabilityHarness {
     ) -> HarnessResult<()> {
         let paths = RebornStoragePaths::from_installation_root(self.storage_root_for_test());
         write_system_skill_fixture(paths.system_root(), name, description, prompt)?;
-        Ok(())
-    }
-
-    /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
-    /// USER-scoped skill (writes
-    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`)
-    /// so a name shared with a system-scoped skill
-    /// (`seed_system_skill_for_test`) resolves to TWO Trusted candidates
-    /// (`System` and `User` roots both default `Trusted`), triggering
-    /// `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user` must
-    /// match the driving thread's run scope (`harness.binding`), or the user
-    /// root never matches the run's own `/skills` mount. Tests only.
-    pub(crate) fn seed_user_skill_for_test(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        name: &str,
-        description: &str,
-        prompt: &str,
-    ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("tenants")
-            .join(tenant.as_str())
-            .join("users")
-            .join(user.as_str())
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
-        Ok(())
-    }
-
-    /// C-SKILL baseline: seed the same user-scoped bundle shape as
-    /// [`Self::seed_user_skill_for_test`], then add the URL-install provenance
-    /// sidecar that makes the production filesystem source downgrade its trust
-    /// to `Installed`. This drives the caller-level "listed but not
-    /// model-activatable" behavior without bypassing descriptor discovery.
-    pub(crate) fn seed_installed_user_skill_for_test(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        name: &str,
-        description: &str,
-        prompt: &str,
-    ) -> HarnessResult<()> {
-        self.seed_user_skill_for_test(tenant, user, name, description, prompt)?;
-        let metadata_path = self
-            .storage_root_for_test()
-            .join("tenants")
-            .join(tenant.as_str())
-            .join("users")
-            .join(user.as_str())
-            .join("skills")
-            .join(name)
-            .join(".ironclaw-install.json");
-        std::fs::write(
-            metadata_path,
-            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
-        )?;
         Ok(())
     }
 

@@ -126,7 +126,8 @@ pub use durable::{
 };
 #[cfg(feature = "test-support")]
 pub use durable::{
-    open_standalone_extension_installation_store_for_test, open_standalone_thread_service_for_test,
+    open_standalone_extension_installation_store_for_test,
+    open_standalone_skill_management_for_test, open_standalone_thread_service_for_test,
 };
 pub use libsql_host_bindings::{
     libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,

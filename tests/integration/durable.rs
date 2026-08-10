@@ -19,9 +19,11 @@ use ironclaw_approvals::{CapabilityPermissionOverride, CapabilityPermissionOverr
 use ironclaw_composition::open_standalone_secret_store;
 use ironclaw_composition::test_support::{
     open_standalone_approval_settings_stores_for_test,
-    open_standalone_extension_installation_store_for_test, open_standalone_thread_service_for_test,
+    open_standalone_extension_installation_store_for_test,
+    open_standalone_skill_management_for_test, open_standalone_thread_service_for_test,
 };
 use ironclaw_config::RebornStoragePaths;
+use ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime;
 use ironclaw_extension_registry::{ExtensionInstallationId, InstallationOwner};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, ThreadId, UserId},
@@ -87,6 +89,8 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
     const HOST_SECRET: &str = "DURABLE_HOST_SECRET_SENTINEL";
     const SYSTEM_SKILL: &str = "durable-system-skill";
     const USER_SKILL: &str = "durable-user-skill";
+    const USER_SKILL_PROMPT: &str = "DURABLE_USER_SKILL_SENTINEL";
+    const USER_SKILL_CONTENT: &str = "---\nname: durable-user-skill\ndescription: durable user skill\nactivation:\n  keywords: [\"durable-user-skill\"]\n---\n\nDURABLE_USER_SKILL_SENTINEL";
 
     let (
         installation_root,
@@ -98,9 +102,14 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
         owner,
         rejected_owner,
     ) = {
-        let group = RebornIntegrationGroup::extension_lifecycle()
-            .await
-            .expect("extension lifecycle group builds");
+        let group = RebornIntegrationGroup::extension_lifecycle_with_preboot_user_skills(&[(
+            USER_SKILL,
+            "durable user skill",
+            USER_SKILL_PROMPT,
+            false,
+        )])
+        .await
+        .expect("extension lifecycle group builds with its preboot user skill");
         let harness = group
             .thread("conv-durable-cold-reopen")
             .script([
@@ -142,16 +151,6 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
                 "DURABLE_SYSTEM_SKILL_SENTINEL",
             )
             .expect("system skill fixture seeds in the canonical system namespace");
-        capability
-            .seed_user_skill_for_test(
-                &tenant,
-                &owner,
-                USER_SKILL,
-                "durable user skill",
-                "DURABLE_USER_SKILL_SENTINEL",
-            )
-            .expect("user skill fixture seeds under its typed tenant/user owner");
-
         let setting_capability =
             CapabilityId::new("builtin.write_file").expect("write-file capability id");
         capability
@@ -181,6 +180,13 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
         let runtime = capability
             .reborn_services_for_test()
             .expect("host capability harness retains its production RebornRuntime");
+        let live_user_skill = runtime
+            .skill_management()
+            .read_content_for_scope(secret_scope.clone(), USER_SKILL)
+            .await
+            .expect("preboot fixture imports into the live production user-skill service");
+        assert_eq!(live_user_skill.content, USER_SKILL_CONTENT);
+        assert_eq!(live_user_skill.source.as_str(), "user");
         let thread_service = runtime
             .standalone_thread_service_for_test()
             .expect("standalone thread service");
@@ -316,29 +322,21 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
     )
     .expect("system skill remains in canonical system storage after cold reopen");
     assert!(system_skill.contains("DURABLE_SYSTEM_SKILL_SENTINEL"));
-    let user_skill = std::fs::read_to_string(
-        storage_paths
-            .installation_root()
-            .join("tenants")
-            .join(thread_scope.tenant_id.as_str())
-            .join("users")
-            .join(owner.as_str())
-            .join("skills")
-            .join(USER_SKILL)
-            .join("SKILL.md"),
-    )
-    .expect("user skill remains under exactly its tenant/user owner after cold reopen");
-    assert!(user_skill.contains("DURABLE_USER_SKILL_SENTINEL"));
+    let reopened_skills =
+        open_standalone_skill_management_for_test(&installation_root, owner.clone())
+            .await
+            .expect("fresh production skill-management opener");
+    let user_skill = reopened_skills
+        .read_content_for_scope(secret_scope.clone(), USER_SKILL)
+        .await
+        .expect("original typed tenant/user scope resolves the persisted user skill");
+    assert_eq!(user_skill.content, USER_SKILL_CONTENT);
+    assert_eq!(user_skill.source.as_str(), "user");
     assert!(
-        !storage_paths
-            .installation_root()
-            .join("tenants")
-            .join(thread_scope.tenant_id.as_str())
-            .join("users")
-            .join(rejected_owner.as_str())
-            .join("skills")
-            .join(USER_SKILL)
-            .exists(),
+        reopened_skills
+            .read_content_for_scope(rejected_secret_scope, USER_SKILL)
+            .await
+            .is_err(),
         "the second user must not receive the original user's skill leaf"
     );
 

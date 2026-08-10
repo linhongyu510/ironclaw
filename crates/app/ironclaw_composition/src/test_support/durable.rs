@@ -31,6 +31,21 @@ pub async fn open_standalone_thread_service_for_test(
     crate::factory::test_support::open_standalone_thread_service_for_test(storage_root).await
 }
 
+/// Test-support entry point (DURABLE-COLD): reopen a fresh production
+/// database-backed user-skill management service after the original runtime
+/// has dropped. Tests only.
+#[cfg(feature = "test-support")]
+pub async fn open_standalone_skill_management_for_test(
+    storage_root: &std::path::Path,
+    owner_user_id: ironclaw_host_api::ids::UserId,
+) -> Result<std::sync::Arc<ironclaw_skills::ScopedSkillManagementPort>, crate::RebornBuildError> {
+    crate::factory::test_support::open_standalone_skill_management_for_test(
+        storage_root,
+        owner_user_id,
+    )
+    .await
+}
+
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
 /// `ApprovalRequestStore` at an existing standalone `storage_root`. Mirrors
 /// [`open_standalone_extension_installation_store_for_test`] for approval-gate
