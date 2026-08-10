@@ -72,6 +72,58 @@ Register this WebUI login callback in the Google OAuth client:
 https://<public-host>/auth/callback/google
 ```
 
+## Persistent storage for container deployments
+
+Container filesystems are normally ephemeral. Before deploying IronClaw on
+Docker, Kubernetes, Fly.io, ECS, Railway, or another container platform, mount
+durable storage and place `IRONCLAW_REBORN_HOME` on that mount:
+
+```bash
+IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
+```
+
+When `IRONCLAW_REBORN_WORKSPACE_ROOT` is unset, it defaults to
+`$IRONCLAW_REBORN_HOME/workspace`. Setting only the workspace root is not
+enough: the Reborn home also contains materialized extension packages, IronHub
+WASM and prompt assets, skills, and local configuration. PostgreSQL preserves
+database-backed installation and activation records, but it does not preserve
+these materialized local files.
+
+The durable mount should therefore contain the complete Reborn home:
+
+```text
+/data/ironclaw-reborn/
+├── config.toml
+├── workspace/              # project files and landed attachments
+├── system/extensions/      # installed extension and IronHub package assets
+├── system/skills/          # system-scoped skills
+└── tenants/                # tenant/user-scoped filesystem and skill data
+```
+
+For a plain Docker deployment, a named volume is sufficient:
+
+```bash
+docker volume create ironclaw-reborn-data
+
+docker run --rm \
+  --env-file .env.reborn \
+  -e IRONCLAW_REBORN_HOME=/data/ironclaw-reborn \
+  -v ironclaw-reborn-data:/data/ironclaw-reborn \
+  -p 127.0.0.1:3000:3000 \
+  ironclaw-reborn:local
+```
+
+On other platforms, use the equivalent persistent volume, disk, or filesystem
+mount. Verify that both `IRONCLAW_REBORN_HOME` and any explicit
+`IRONCLAW_REBORN_WORKSPACE_ROOT` resolve beneath that mount. Files written
+directly to an unmounted container path can be lost when the container is
+replaced. Back up the durable volume independently of the database.
+
+For a 1.0.x upgrade, retain the stopped old container's workspace snapshot on
+the same durable storage and set `IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT`
+to that snapshot for the first 1.1.x startup. Do not point it at an ephemeral
+container directory.
+
 ## Railway
 
 Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
@@ -103,7 +155,8 @@ IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
 NEARAI_API_KEY=<nearai-api-key>
 ```
 
-Attach a Railway volume and mount it at `/data`, or set
+Follow the persistent-storage requirements above. Attach a Railway volume and
+mount it at `/data`, or set
 `IRONCLAW_REBORN_HOME` under `RAILWAY_VOLUME_MOUNT_PATH`. The image entrypoint
 will use `$RAILWAY_VOLUME_MOUNT_PATH/ironclaw-reborn` by default when Railway
 exposes a volume mount. It also defaults `IRONCLAW_REBORN_WORKSPACE_ROOT` to
