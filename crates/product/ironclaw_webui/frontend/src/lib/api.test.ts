@@ -10,6 +10,8 @@ import {
   eventStreamRequest,
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
+  fetchThreadModelPreference,
+  fetchUserModelCatalog,
   listAutomations,
   listThreads,
   pauseAutomation,
@@ -18,6 +20,7 @@ import {
   renameAutomation,
   resumeAutomation,
   setNotificationChannels,
+  setThreadModelPreference,
   setupExtension,
 } from "./api";
 
@@ -478,6 +481,59 @@ test("deleteThread rejects before fetch when thread id is missing", async () => 
 
   await assert.rejects(deleteThread(), /threadId is required/);
 
+  assert.equal(fetchCalled, false);
+});
+
+test("thread model selection uses the catalog and encoded thread routes", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    const body = path.endsWith("/llm/models")
+      ? { selection_enabled: true, workspace_default: "model-a", models: ["model-a"] }
+      : { thread_id: "thread/needs encoding", model: "model-a" };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await fetchUserModelCatalog();
+  await fetchThreadModelPreference({ threadId: "thread/needs encoding" });
+  await setThreadModelPreference({
+    threadId: "thread/needs encoding",
+    model: "model-a",
+  });
+  await setThreadModelPreference({
+    threadId: "thread/needs encoding",
+    model: null,
+  });
+
+  assert.equal(calls[0].path, "/api/webchat/v2/llm/models");
+  assert.equal(calls[1].path, "/api/webchat/v2/threads/thread%2Fneeds%20encoding/model");
+  assert.equal(calls[2].options.method, "PUT");
+  assert.deepEqual(JSON.parse(calls[2].options.body), { model: "model-a" });
+  assert.deepEqual(JSON.parse(calls[3].options.body), { model: null });
+});
+
+test("thread model preference rejects before fetch when thread id is missing", async () => {
+  let fetchCalled = false;
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called");
+  };
+
+  await assert.rejects(fetchThreadModelPreference(), /threadId is required/);
+  await assert.rejects(setThreadModelPreference(), /threadId is required/);
   assert.equal(fetchCalled, false);
 });
 

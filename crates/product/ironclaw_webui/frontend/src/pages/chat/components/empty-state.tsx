@@ -15,6 +15,7 @@ export function EmptyState({
   statusText,
   canCancel,
   onCancel,
+  threadId,
 }) {
   const t = useT();
   const suggestions = [
@@ -66,6 +67,7 @@ export function EmptyState({
           statusText={statusText}
           canCancel={canCancel}
           onCancel={onCancel}
+          threadId={threadId}
         />
       </div>
 

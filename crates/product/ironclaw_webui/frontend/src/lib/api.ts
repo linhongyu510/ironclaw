@@ -201,6 +201,31 @@ export function deleteThread({ threadId } = {}) {
   });
 }
 
+export function fetchUserModelCatalog({ signal } = {}) {
+  return apiFetch(`${V2_BASE}/llm/models`, { signal });
+}
+
+function threadModelPreferencePath(threadId) {
+  return `${V2_BASE}/threads/${encodeURIComponent(threadId)}/model`;
+}
+
+export function fetchThreadModelPreference({ threadId, signal } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(threadModelPreferencePath(threadId), { signal });
+}
+
+export function setThreadModelPreference({ threadId, model } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(threadModelPreferencePath(threadId), {
+    method: "PUT",
+    body: JSON.stringify({ model: model || null }),
+  });
+}
+
 // --- Project filesystem (download / navigation) ---
 
 function projectFilesBase(threadId) {

@@ -17,6 +17,8 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     Icon() {},
     Button() {},
     React: {
+      lazy: () => () => {},
+      Suspense: ({ children }) => children,
       useCallback: (callback) => callback,
       useEffect: () => {},
       useRef: (initial) => ({ current: initial }),

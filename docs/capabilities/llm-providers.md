@@ -32,6 +32,28 @@ If no slot is configured, IronClaw falls back to whichever provider environment 
 
 ---
 
+## Choosing a Model per Conversation
+
+When an operator enables user model selection, the WebUI shows a model picker
+beside the message composer. Choose an allowed model for that conversation, or
+choose **Workspace default** to inherit the workspace setting. The preference is
+stored with the conversation and is restored when you return to it.
+
+The same controls are available in chat commands:
+
+```text
+/model
+/model use <model-id>
+/model default
+```
+
+Only models allowed by the workspace policy are selectable. Model selection is
+currently limited to the active provider; it does not switch providers. If an
+operator later removes a selected model, the WebUI marks it unavailable and asks
+you to choose another allowed model or restore the workspace default.
+
+---
+
 ## Provider Overview
 
 `provider_id` is the value used with `models set-provider` and in `[llm.default]`.

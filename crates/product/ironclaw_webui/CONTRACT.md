@@ -313,6 +313,12 @@ Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 release image bundles compiled assets; `frontend/README.md` covers the JS
 toolchain.
 
+For an existing conversation, the composer model picker reads the tenant-safe
+user catalog and the thread preference through the v2 routes above. It lists
+only allowed models, represents the workspace default explicitly, persists a
+selection before the next send, and exposes loading, disabled, unavailable,
+and request-failure states instead of silently falling back in the UI.
+
 ## Why the OAuth login router lives here
 
 The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,

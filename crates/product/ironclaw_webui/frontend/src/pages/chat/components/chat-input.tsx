@@ -27,6 +27,12 @@ import {
   shouldAutoFocusComposer,
 } from "../lib/chat-input-focus";
 
+const ThreadModelPicker = React.lazy(() =>
+  import("./thread-model-picker").then((module) => ({
+    default: module.ThreadModelPicker,
+  })),
+);
+
 export function ChatInput({
   onSend,
   commands = [],
@@ -40,6 +46,7 @@ export function ChatInput({
   variant = "dock",
   context = {},
   statusText = "",
+  threadId = null,
 }) {
   const t = useT();
   const storageScope = authScope();
@@ -848,6 +855,19 @@ export function ChatInput({
               {statusText}
             </span>
           )}
+          <React.Suspense
+            fallback={(
+              <span className="text-xs text-[var(--v2-text-faint)]">
+                {t("common.loading")}
+              </span>
+            )}
+          >
+            <ThreadModelPicker
+              key={threadId || "new"}
+              threadId={threadId}
+              disabled={isSubmitDisabled}
+            />
+          </React.Suspense>
           <div className="ml-auto flex items-center gap-1.5">
             <button
               type="button"

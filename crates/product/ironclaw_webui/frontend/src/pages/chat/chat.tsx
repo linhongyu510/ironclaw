@@ -436,6 +436,7 @@ export function Chat({
             statusText={composerStatusText}
             canCancel={canCancelRun}
             onCancel={handleCancelRun}
+            threadId={activeThreadId}
           />
         )}
         {!showLanding &&
@@ -558,6 +559,7 @@ export function Chat({
             statusText={composerStatusText}
             canCancel={canCancelRun}
             onCancel={handleCancelRun}
+            threadId={activeThreadId}
           />
           </>
         )}
