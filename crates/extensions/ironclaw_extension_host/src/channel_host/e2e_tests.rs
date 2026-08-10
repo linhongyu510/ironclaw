@@ -4276,6 +4276,7 @@ async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_
         accepted_message_ref: AcceptedMessageRef::new("msg:auth-fanout-resolve")
             .expect("accepted message ref"), // safety: static test ref is valid.
         submitted_run_id: blocked_run_id,
+        submission: None,
     };
     let auth_envelope = auth_resolution_allowed_envelope("callback:test-fanout");
     observer.observe_ack(auth_envelope, auth_ack).await;

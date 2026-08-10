@@ -603,7 +603,10 @@ async fn preresolve_slack_scope(
     let envelope =
         ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("inbound envelope");
     let binding = binding_service
-        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .resolve_binding(
+            ResolveBindingRequest::from_envelope(&envelope)
+                .expect("verified envelope binding request"),
+        )
         .await
         .expect("slack DM conversation binding resolves");
     TurnScope::new_with_owner(

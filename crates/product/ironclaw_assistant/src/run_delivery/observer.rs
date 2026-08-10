@@ -408,10 +408,15 @@ impl RunDeliveryObserver {
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
+        let binding_request = ResolveBindingRequest::from_envelope(&envelope).map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?;
         let binding = self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+            .lookup_binding(binding_request)
             .await
             .map_err(ProductSurfaceFailure::from)?;
         let actor = TurnActor::new(binding.actor_user_id.clone());
@@ -895,10 +900,13 @@ impl RunDeliveryObserver {
     /// conversation's binding scope when it resolves, else the host's
     /// fallback notice scope (never silent, always attributed).
     async fn notice_scope(&self, envelope: &ProductInboundEnvelope) -> TurnScope {
+        let Ok(binding_request) = ResolveBindingRequest::from_envelope(envelope) else {
+            return self.services.fallback_notice_scope.clone();
+        };
         match self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .lookup_binding(binding_request)
             .await
         {
             Ok(binding) => thread_scope_from_binding(&binding)
@@ -916,10 +924,13 @@ impl RunDeliveryObserver {
         let Some(hint) = rejection_hint_for_resolution(envelope, ack) else {
             return false;
         };
+        let Ok(binding_request) = ResolveBindingRequest::from_envelope(envelope) else {
+            return false;
+        };
         let binding = match self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .lookup_binding(binding_request)
             .await
         {
             Ok(binding) => binding,
@@ -1131,12 +1142,20 @@ impl RunDeliveryObserver {
         // state-specific. When the conversation has no resolvable binding,
         // fall back to the generic copy rather than going silent — the hint
         // replies to the sender's own conversation and leaks nothing.
-        let (hint, scope) = match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
-            .await
-        {
+        let binding_lookup = match ResolveBindingRequest::from_envelope(envelope) {
+            Ok(binding_request) => {
+                self.services
+                    .binding_service
+                    .lookup_binding(binding_request)
+                    .await
+            }
+            Err(error) => Err(
+                ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            ),
+        };
+        let (hint, scope) = match binding_lookup {
             Ok(binding) => {
                 let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
                 let scope = thread_scope_from_binding(&binding)
@@ -1491,7 +1510,9 @@ fn product_rejection_kind_for_surface_rejection(
         ProductSurfaceRejectionKind::ThreadBusy
         | ProductSurfaceRejectionKind::AdmissionRejected
         | ProductSurfaceRejectionKind::Unavailable
-        | ProductSurfaceRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
+        | ProductSurfaceRejectionKind::Conflict
+        | ProductSurfaceRejectionKind::DuplicateAction
+        | ProductSurfaceRejectionKind::ReplayUnavailable => ProductRejectionKind::PolicyDenied,
     }
 }
 

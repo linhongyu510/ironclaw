@@ -33,8 +33,9 @@ use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
 };
 use ironclaw_product_contracts::surface::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
+    ChannelInboundProductSurface, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+    ChannelInboundSurfaceTrust,
 };
 use tokio::task::JoinSet;
 
@@ -510,10 +511,12 @@ impl InboundSink for GenericChannelInboundSink {
             source_channel: ProductSourceChannel::new(self.config.adapter_id.as_str())
                 .map_err(Self::permanent)?,
             installation_id: installation,
-            evidence,
+            trust: ChannelInboundSurfaceTrust::VerifiedInbound { evidence },
+            binding: ChannelInboundSurfaceBinding::ExternalRef,
             received_at: Utc::now(),
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
+            requested_model: None,
         };
         let response = if request.message.attachments.is_empty() {
             Box::pin(self.config.surface.admit_channel_inbound(request)).await
@@ -948,6 +951,10 @@ mod tests {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
                 submitted_run_id: TurnRunId::new(),
+                submission: None,
+            };
+            let ChannelInboundSurfaceTrust::VerifiedInbound { evidence } = request.trust else {
+                panic!("test surface expects verified-inbound trust");
             };
             let envelope = ProductInboundEnvelope::from_trusted_parse(
                 TrustedInboundContext::from_verified_evidence_with_source_channel(
@@ -955,7 +962,7 @@ mod tests {
                     request.source_channel,
                     request.installation_id,
                     request.received_at,
-                    &request.evidence,
+                    &evidence,
                 )
                 .expect("verified evidence"),
                 ParsedProductInbound::new(

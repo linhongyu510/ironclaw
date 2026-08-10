@@ -1512,6 +1512,7 @@ mod tests {
         let ack = ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
             active_run_id: TurnRunId::new(),
+            busy: None,
         };
         let err = accepted_ack_from_ack(ack).unwrap_err();
         assert_eq!(err.status_code(), 429);
@@ -1523,6 +1524,7 @@ mod tests {
         let ack = ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
             active_run_id: None,
+            busy: None,
         };
         let err = accepted_ack_from_ack(ack).unwrap_err();
         assert_eq!(err.status_code(), 429);

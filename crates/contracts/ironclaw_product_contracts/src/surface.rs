@@ -13,6 +13,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
     product_adapter::ProtocolAuthEvidence,
     product_adapter::identity::{AdapterInstallationId, ProductAdapterId},
@@ -24,6 +25,36 @@ use crate::inbound::{
     ChannelInboundClassification, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
 };
 
+/// Trust class established for one inbound channel message before admission.
+///
+/// The two arms are the two ingress trust stages and must never mix: webhook
+/// ingress carries host-verified protocol evidence (T2), while a session
+/// channel carries the authenticated caller the host transport already
+/// verified (T1). The admission core matches on the arm; the webhook
+/// trust/pairing machinery never runs for a session caller and vice versa.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundSurfaceTrust {
+    /// Webhook-verified inbound (T2): evidence minted by the generic ingress
+    /// verifier after executing the channel's declared verification recipe.
+    VerifiedInbound { evidence: ProtocolAuthEvidence },
+    /// Authenticated-session inbound (T1): the caller stamped by the host
+    /// transport's authentication middleware. Tenant/actor authority comes
+    /// from this caller, never from the message payload.
+    SessionCaller { caller: ProductSurfaceCaller },
+}
+
+/// How the admission core binds this message to a canonical conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundSurfaceBinding {
+    /// Resolve (or look up) the conversation binding from the message's
+    /// external actor/conversation refs through the binding resolver —
+    /// the webhook-channel path.
+    ExternalRef,
+    /// The session caller owns the thread: validate ownership through the
+    /// session thread service and never create a thread implicitly.
+    OwnedThread { thread_id: ThreadId },
+}
+
 /// One verified, normalized channel message admitted through a product surface.
 ///
 /// The channel ingress router verifies the transport request and runs the
@@ -34,10 +65,14 @@ pub struct ChannelInboundSurfaceRequest {
     pub adapter_id: ProductAdapterId,
     pub source_channel: ProductSourceChannel,
     pub installation_id: AdapterInstallationId,
-    pub evidence: ProtocolAuthEvidence,
+    pub trust: ChannelInboundSurfaceTrust,
+    pub binding: ChannelInboundSurfaceBinding,
     pub received_at: chrono::DateTime<chrono::Utc>,
     pub message: NormalizedInboundMessage,
     pub classification: Option<ChannelInboundClassification>,
+    /// Caller-requested model hint for session/API transports. `None` for
+    /// channels that don't select a model.
+    pub requested_model: Option<String>,
 }
 
 /// Durable channel admission evidence returned by product workflow.
@@ -113,6 +148,35 @@ pub trait ChannelInboundProductSurface: Send + Sync {
             retryable: false,
             reason: RedactedString::new(
                 "channel attachment transfer is not supported by this product surface",
+            ),
+        })
+    }
+
+    /// Admit one channel message together with host-staged inline attachment
+    /// bytes — the session-transport door, where a synchronous authenticated
+    /// surface (browser upload, API body) already decoded the bytes and no
+    /// vendor fetch is needed. The bytes never enter the serialized envelope;
+    /// they are landed at message acceptance.
+    ///
+    /// The default admits attachment-free requests through
+    /// [`Self::admit_channel_inbound`] and fails attachment-bearing admission
+    /// closed, permanently: a surface without an inline landing path will
+    /// never grow one for a retry of the same message, and silently dropping
+    /// a user's files is worse than rejecting the send.
+    async fn admit_channel_inbound_with_inline_attachments(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+        attachments: Vec<InboundAttachment>,
+    ) -> ChannelInboundSurfaceOutcome {
+        if attachments.is_empty() {
+            return self.admit_channel_inbound(request).await;
+        }
+        ChannelInboundSurfaceOutcome::Invalid(ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            reason: RedactedString::new(
+                "inline channel attachments are not supported by this product surface",
             ),
         })
     }

@@ -8,15 +8,18 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::outbound::ProjectionCursor;
+use crate::surface::ProductSurfaceCaller;
 use ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_host_api::product_adapter::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
 use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::product_adapter_error::RedactedString;
+use ironclaw_host_api::turn::{EventCursor, TurnStatus};
 
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const REQUESTED_MODEL_MAX_BYTES: usize = 256;
@@ -733,13 +736,38 @@ impl fmt::Display for ProductSourceChannel {
     }
 }
 
+/// Trust class carried on the trusted inbound envelope.
+///
+/// The two arms mirror the two ingress trust stages: `VerifiedInbound` is
+/// webhook evidence (T2, minted by the generic ingress verifier);
+/// `SessionCaller` is the authenticated caller stamped by the host transport
+/// (T1). The workflow matches on the arm — webhook binding/pairing machinery
+/// must never run for a session caller and vice versa.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ProductInboundTrust {
+    VerifiedInbound { auth_claim: VerifiedAuthClaim },
+    SessionCaller { caller: ProductSurfaceCaller },
+}
+
+/// How the workflow binds the envelope to a canonical conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ProductInboundBindingDirective {
+    /// Resolve or look up the conversation binding from the envelope's
+    /// external refs through the binding resolver (webhook channels).
+    ExternalRef,
+    /// The session caller owns the thread; validate ownership through the
+    /// session thread service and never create a thread implicitly.
+    OwnedThread { thread_id: ThreadId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedInboundContext {
     adapter_id: ProductAdapterId,
     source_channel: ProductSourceChannel,
     installation_id: AdapterInstallationId,
     received_at: DateTime<Utc>,
-    auth_claim: VerifiedAuthClaim,
+    trust: ProductInboundTrust,
+    binding_directive: ProductInboundBindingDirective,
 }
 
 impl TrustedInboundContext {
@@ -749,21 +777,14 @@ impl TrustedInboundContext {
         received_at: DateTime<Utc>,
         auth_evidence: &ProtocolAuthEvidence,
     ) -> Result<Self, ProductAdapterError> {
-        let auth_claim =
-            auth_evidence
-                .claim()
-                .cloned()
-                .ok_or(ProductAdapterError::Authentication(
-                    ironclaw_host_api::product_adapter_error::ProtocolAuthFailure::Missing,
-                ))?;
         let source_channel = ProductSourceChannel::new(adapter_id.as_str())?;
-        Ok(Self {
+        Self::from_verified_evidence_with_source_channel(
             adapter_id,
             source_channel,
             installation_id,
             received_at,
-            auth_claim,
-        })
+            auth_evidence,
+        )
     }
 
     pub fn from_verified_evidence_with_source_channel(
@@ -785,8 +806,33 @@ impl TrustedInboundContext {
             source_channel,
             installation_id,
             received_at,
-            auth_claim,
+            trust: ProductInboundTrust::VerifiedInbound { auth_claim },
+            binding_directive: ProductInboundBindingDirective::ExternalRef,
         })
+    }
+
+    /// Build the trusted context for an authenticated-session submission.
+    ///
+    /// The caller was stamped by the host transport's authentication
+    /// middleware; it is the tenant/actor authority. The thread id is the
+    /// caller-owned binding target — ownership is validated downstream by the
+    /// session thread service, and no thread is ever created implicitly.
+    pub fn from_session_caller(
+        adapter_id: ProductAdapterId,
+        source_channel: ProductSourceChannel,
+        installation_id: AdapterInstallationId,
+        received_at: DateTime<Utc>,
+        caller: ProductSurfaceCaller,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self {
+            adapter_id,
+            source_channel,
+            installation_id,
+            received_at,
+            trust: ProductInboundTrust::SessionCaller { caller },
+            binding_directive: ProductInboundBindingDirective::OwnedThread { thread_id },
+        }
     }
 }
 
@@ -799,7 +845,8 @@ pub struct ProductInboundEnvelope {
     external_event_id: ExternalEventId,
     external_actor_ref: ExternalActorRef,
     external_conversation_ref: ExternalConversationRef,
-    auth_claim: VerifiedAuthClaim,
+    trust: ProductInboundTrust,
+    binding_directive: ProductInboundBindingDirective,
     received_at: DateTime<Utc>,
     payload: ProductInboundPayload,
     /// Provider transfer references for channel attachments. Host-only and
@@ -822,7 +869,8 @@ impl ProductInboundEnvelope {
             external_event_id: parsed.external_event_id,
             external_actor_ref: parsed.external_actor_ref,
             external_conversation_ref: parsed.external_conversation_ref,
-            auth_claim: context.auth_claim,
+            trust: context.trust,
+            binding_directive: context.binding_directive,
             received_at: context.received_at,
             payload: parsed.payload,
             channel_attachment_refs: Vec::new(),
@@ -853,8 +901,43 @@ impl ProductInboundEnvelope {
         &self.external_conversation_ref
     }
 
-    pub fn auth_claim(&self) -> &VerifiedAuthClaim {
-        &self.auth_claim
+    /// The verified webhook auth claim, when this envelope entered through
+    /// webhook ingress. `None` for authenticated-session envelopes — those
+    /// carry their authority as [`Self::session_caller`].
+    pub fn auth_claim(&self) -> Option<&VerifiedAuthClaim> {
+        match &self.trust {
+            ProductInboundTrust::VerifiedInbound { auth_claim } => Some(auth_claim),
+            ProductInboundTrust::SessionCaller { .. } => None,
+        }
+    }
+
+    /// The verified webhook auth claim, failing closed for session envelopes.
+    ///
+    /// External-ref workflows (binding resolution, command context,
+    /// projection subjects) require webhook evidence; a session envelope
+    /// reaching one of them is a routing bug, surfaced as an authentication
+    /// failure rather than silently proceeding without a claim.
+    pub fn require_verified_auth_claim(&self) -> Result<&VerifiedAuthClaim, ProductAdapterError> {
+        self.auth_claim().ok_or(ProductAdapterError::Authentication(
+            ironclaw_host_api::product_adapter_error::ProtocolAuthFailure::Missing,
+        ))
+    }
+
+    pub fn trust(&self) -> &ProductInboundTrust {
+        &self.trust
+    }
+
+    /// The authenticated session caller, when this envelope entered through
+    /// an authenticated-session transport. `None` for webhook envelopes.
+    pub fn session_caller(&self) -> Option<&ProductSurfaceCaller> {
+        match &self.trust {
+            ProductInboundTrust::SessionCaller { caller } => Some(caller),
+            ProductInboundTrust::VerifiedInbound { .. } => None,
+        }
+    }
+
+    pub fn binding_directive(&self) -> &ProductInboundBindingDirective {
+        &self.binding_directive
     }
 
     pub fn received_at(&self) -> DateTime<Utc> {
@@ -1067,20 +1150,52 @@ impl ProductCommandResultPayload {
     }
 }
 
+/// Submit-time metadata for a freshly coordinated turn, carried on
+/// [`ProductInboundAck::Accepted`] so session transports can render the full
+/// submission response without a second run-state read. `None` marks an
+/// idempotent replay of an already-submitted message — replays report the
+/// run's *current* state, which the transport reads separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedTurnSubmission {
+    pub turn_id: String,
+    pub status: TurnStatus,
+    pub resolved_run_profile_id: String,
+    pub resolved_run_profile_version: u64,
+    pub event_cursor: EventCursor,
+}
+
+/// Snapshot of the blocking run at the moment a busy submit was decided.
+/// `None` on idempotent replays of a stored busy outcome, where the blocking
+/// run's state at decision time is no longer known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BusyRunSnapshot {
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundAck {
     Accepted {
         accepted_message_ref: AcceptedMessageRef,
         submitted_run_id: TurnRunId,
+        /// `Some` on a fresh coordinator submission; `None` on replay.
+        /// Optional with a serde default so ledger rows settled before this
+        /// field existed still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        submission: Option<Box<AcceptedTurnSubmission>>,
     },
     DeferredBusy {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<Box<BusyRunSnapshot>>,
     },
     RejectedBusy {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: Option<TurnRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<Box<BusyRunSnapshot>>,
     },
     Rejected(ProductRejection),
     CommandResult {

@@ -2496,7 +2496,10 @@ pub(crate) fn binding_request(
         external_conversation_ref: envelope.external_conversation_ref().clone(),
         external_event_id: envelope.external_event_id().clone(),
         route_kind: ProductConversationRouteKind::Direct,
-        auth_claim: envelope.auth_claim().clone(),
+        auth_claim: envelope
+            .require_verified_auth_claim()
+            .expect("harness envelopes carry verified webhook evidence")
+            .clone(),
     }
 }
 

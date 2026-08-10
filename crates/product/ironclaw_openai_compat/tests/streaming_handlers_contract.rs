@@ -871,6 +871,7 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+        busy: None,
     }
 }
 
@@ -878,6 +879,7 @@ fn rejected_busy_ack() -> ProductInboundAck {
     ProductInboundAck::RejectedBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
         active_run_id: None,
+        busy: None,
     }
 }
 

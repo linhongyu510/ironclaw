@@ -778,6 +778,7 @@ fn accepted_ack(run_id: TurnRunId) -> ProductInboundAck {
     ProductInboundAck::Accepted {
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("ref"),
         submitted_run_id: run_id,
+        submission: None,
     }
 }
 
@@ -2011,6 +2012,7 @@ async fn observer_busy_hint_deduplicates_per_conversation_event_pair() {
     let busy = ProductInboundAck::RejectedBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("ref"),
         active_run_id: Some(active_run),
+        busy: None,
     };
 
     let envelope = user_message_envelope(ProductTriggerReason::DirectChat, "evt-busy");

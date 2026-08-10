@@ -411,6 +411,7 @@ fn default_ack(event_id: &str) -> ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef::new(format!("msg:{event_id}"))
             .expect("accepted message ref"),
         submitted_run_id: TurnRunId::new(),
+        submission: None,
     }
 }
 
@@ -424,6 +425,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::Accepted {
                 accepted_message_ref,
                 submitted_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::Submitted {
                     thread_id,
@@ -440,6 +442,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::DeferredBusy {
                 accepted_message_ref,
                 active_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id,
@@ -453,6 +456,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id,

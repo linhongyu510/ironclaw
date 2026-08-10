@@ -490,6 +490,7 @@ fn ack_durable_outcomes_classify_correctly() {
         ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("msg").expect("valid"),
             submitted_run_id: TurnRunId::new(),
+            submission: None,
         }
         .is_durable_outcome()
     );
@@ -633,5 +634,101 @@ fn policy_denied_hint_unchanged() {
     assert_eq!(
         ProductRejectionKind::PolicyDenied.user_facing_hint(),
         "That request was declined by policy."
+    );
+}
+
+// Unified-channel-model regression: acks settled into the durable ledger
+// before the submit-metadata fields existed must still deserialize, and the
+// new metadata must round-trip. The ledger replays stored acks verbatim, so
+// this is persisted-wire compatibility, not merely serde hygiene.
+#[test]
+fn ack_rows_without_submit_metadata_still_deserialize() {
+    let legacy_accepted = serde_json::json!({
+        "accepted": {
+            "accepted_message_ref": "msg:1",
+            "submitted_run_id": TurnRunId::new(),
+        }
+    });
+    let ack: ProductInboundAck =
+        serde_json::from_value(legacy_accepted).expect("legacy accepted row deserializes");
+    let ProductInboundAck::Accepted { submission, .. } = &ack else {
+        panic!("expected accepted ack");
+    };
+    assert!(submission.is_none(), "legacy rows have no submit metadata");
+
+    let legacy_rejected_busy = serde_json::json!({
+        "rejected_busy": {
+            "accepted_message_ref": "msg:2",
+            "active_run_id": null,
+        }
+    });
+    let ack: ProductInboundAck =
+        serde_json::from_value(legacy_rejected_busy).expect("legacy busy row deserializes");
+    let ProductInboundAck::RejectedBusy { busy, .. } = &ack else {
+        panic!("expected rejected-busy ack");
+    };
+    assert!(busy.is_none(), "legacy rows have no busy snapshot");
+}
+
+#[test]
+fn ack_submit_metadata_round_trips() {
+    let ack = ProductInboundAck::Accepted {
+        accepted_message_ref: AcceptedMessageRef::new("msg:3").expect("valid"),
+        submitted_run_id: TurnRunId::new(),
+        submission: Some(Box::new(AcceptedTurnSubmission {
+            turn_id: "turn-1".to_string(),
+            status: ironclaw_host_api::turn::TurnStatus::Queued,
+            resolved_run_profile_id: "profile".to_string(),
+            resolved_run_profile_version: 3,
+            event_cursor: ironclaw_host_api::turn::EventCursor::default(),
+        })),
+    };
+    let json = serde_json::to_value(&ack).expect("serializes");
+    let back: ProductInboundAck = serde_json::from_value(json).expect("round trips");
+    assert_eq!(ack, back);
+}
+
+// The trust seam: a session envelope must never expose a verified webhook
+// claim, and external-ref builders must fail closed on it rather than
+// running the webhook binding machinery for a browser message.
+#[test]
+fn session_envelope_carries_caller_and_no_verified_claim() {
+    let caller = crate::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-a").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user-a").expect("user"),
+        None,
+        None,
+    );
+    let thread_id = ironclaw_host_api::ids::ThreadId::new("thread-a").expect("thread");
+    let context = TrustedInboundContext::from_session_caller(
+        ProductAdapterId::new("web_app").expect("adapter"),
+        ProductSourceChannel::new("webui").expect("source"),
+        AdapterInstallationId::new("tenant-a").expect("installation"),
+        Utc::now(),
+        caller.clone(),
+        thread_id.clone(),
+    );
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new("action-1").expect("event"),
+        ExternalActorRef::new("user", "user-a", Option::<String>::None).expect("actor"),
+        ExternalConversationRef::new(None, "thread-a", None, None).expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                .expect("payload"),
+        ),
+    )
+    .expect("parsed");
+    let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope");
+
+    assert!(envelope.auth_claim().is_none());
+    assert_eq!(envelope.session_caller(), Some(&caller));
+    assert!(matches!(
+        envelope.binding_directive(),
+        ProductInboundBindingDirective::OwnedThread { thread_id: bound } if bound == &thread_id
+    ));
+    assert!(envelope.require_verified_auth_claim().is_err());
+    assert!(
+        crate::binding::ResolveBindingRequest::from_envelope(&envelope).is_err(),
+        "session envelopes must not build external binding requests"
     );
 }
