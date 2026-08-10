@@ -233,6 +233,11 @@ pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
+pub use run_delivery::notifications::{
+    ChannelNotification, ChannelNotificationContext, NotificationChannelTarget,
+    NotificationDeliveryFailure, ResolvedUserNotificationTargets, notify, notify_user,
+    resolve_user_notification_targets,
+};
 pub use run_delivery::{
     DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver, triggered_run_delivery_settings,

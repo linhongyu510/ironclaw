@@ -277,6 +277,7 @@ struct ScriptedChannelAdapter {
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
+    notification_sends: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedChannelAdapter {
@@ -291,7 +292,13 @@ impl ScriptedChannelAdapter {
             observed_status: Mutex::new(Vec::new()),
             store,
             scope,
+            notification_sends: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn notification_sends(&self) -> usize {
+        self.notification_sends
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn deliver_calls(&self) -> usize {
@@ -339,6 +346,16 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             .pop_front()
             .unwrap_or_else(|| Err(ChannelError::Unsupported))
     }
+
+    async fn deliver_notification(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.notification_sends
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.deliver(envelope, egress).await
+    }
 }
 
 struct StaticChannelResolver {
@@ -359,6 +376,16 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             egress: Arc::new(CoordinatorDenyAllEgress),
             reply_mode: self.reply_mode,
         })
+    }
+
+    fn channel_reply_mode(
+        &self,
+        _extension_id: &str,
+    ) -> Option<ironclaw_extension_contracts::channel::ChannelReplyMode> {
+        if self.unavailable {
+            return None;
+        }
+        Some(self.reply_mode)
     }
 }
 
@@ -2342,4 +2369,107 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
         "notification-class sends must flow to a streaming channel, got {outcome:?}"
     );
     assert_eq!(adapter.deliver_calls(), 1);
+}
+
+// ─── §7a adapter dispatch: notifications ride deliver_notification ─────────
+
+fn coordinated_notification<'a>(
+    scope: TurnScope,
+    extension_id: &'a str,
+    thread_scope: &'a ThreadScope,
+) -> CoordinatedDeliveryRequest<'a> {
+    let mut request = coordinated_final_reply(scope.clone(), extension_id, thread_scope);
+    request.intent = DeliveryIntent::BackgroundRunNotice;
+    request.delivery.resolution_request.intent =
+        ironclaw_outbound::CommunicationDeliveryIntent::RunNotification(
+            ironclaw_outbound::RunNotificationContext {
+                event_kind: ironclaw_outbound::RunNotificationEventKind::RunBlocked,
+                origin: ironclaw_outbound::RunNotificationOrigin::RunScopedTarget {
+                    target: validated_reply_target(),
+                },
+            },
+        );
+    request
+}
+
+#[tokio::test]
+async fn notification_class_delivery_rides_the_adapters_notification_send() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-300")],
+        })],
+    ));
+    let (coordinator, _reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
+
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("notification delivers");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(
+        adapter.notification_sends(),
+        1,
+        "a run notification must ride ChannelAdapter::deliver_notification"
+    );
+}
+
+#[tokio::test]
+async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-301")],
+        })],
+    ));
+    let (coordinator, _reply_context) = coordinator_over_recording_reply_lookups(&store, &adapter);
+
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("final reply delivers");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(
+        adapter.notification_sends(),
+        0,
+        "a conversation reply must ride the ordinary delivery, not the notification send"
+    );
 }

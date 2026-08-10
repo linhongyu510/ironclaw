@@ -408,6 +408,19 @@ impl DeliveryCoordinator {
             });
         }
         reject_caller_supplied_files(&request.parts)?;
+        // §7a classification, decided before the request is consumed by the
+        // policy step: a run-notification that is NOT source-routed (i.e. it
+        // targets a notification channel rather than the originating
+        // conversation) and is not an explicitly routed final answer rides
+        // the adapter's notification send.
+        let as_notification = matches!(
+            &request.delivery.resolution_request.intent,
+            ironclaw_outbound::CommunicationDeliveryIntent::RunNotification(context)
+                if !matches!(
+                    context.origin,
+                    ironclaw_outbound::RunNotificationOrigin::LiveSourceRoute { .. }
+                )
+        ) && !matches!(request.intent, DeliveryIntent::FinalReply);
         self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
             .await;
         if self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id) {
@@ -469,6 +482,7 @@ impl DeliveryCoordinator {
                     thread_scope: request.thread_scope,
                     attachments: request.attachments,
                 },
+                as_notification,
             )
             .await;
         self.in_flight
@@ -557,6 +571,7 @@ impl DeliveryCoordinator {
                 request.conversation,
                 request.thread_anchor,
                 request.parts,
+                false,
             )
             .await;
         self.in_flight
@@ -566,6 +581,8 @@ impl DeliveryCoordinator {
         result
     }
 
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_authorized(
         &self,
         target_resolver: &dyn ProductOutboundTargetResolver,
@@ -574,6 +591,7 @@ impl DeliveryCoordinator {
         parts: Vec<OutboundPart>,
         extension_id: &str,
         materialization: WorkspaceMaterialization<'_>,
+        as_notification: bool,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         // 2. Resolve the trusted conversation metadata for the sealed target.
         let metadata: VerifiedProductOutboundTargetMetadata = match target_resolver
@@ -617,6 +635,7 @@ impl DeliveryCoordinator {
             target.thread_anchor,
             parts,
             reply_context,
+            as_notification,
         )
         .await
     }
@@ -624,6 +643,8 @@ impl DeliveryCoordinator {
     /// Shared delivery drive: channel resolution (generation-pinned), reply
     /// context, `Sending` persisted before egress (OUT-3), bounded retries,
     /// and the partial-multipart terminal rule (OUT-7).
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_resolved(
         &self,
         attempt: OutboundDeliveryAttempt,
@@ -631,6 +652,7 @@ impl DeliveryCoordinator {
         conversation: ExternalConversationRef,
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
+        as_notification: bool,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let (channel, reply_context) = self
             .resolve_channel_context(&attempt, extension_id, &conversation)
@@ -642,6 +664,7 @@ impl DeliveryCoordinator {
             thread_anchor,
             parts,
             reply_context,
+            as_notification,
         )
         .await
     }
@@ -659,13 +682,8 @@ impl DeliveryCoordinator {
         extension_id: &str,
     ) -> bool {
         intent.is_conversation_reply()
-            && self
-                .resolver
-                .resolve_channel_delivery(extension_id)
-                .is_some_and(|channel| {
-                    channel.reply_mode
-                        == ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming
-                })
+            && self.resolver.channel_reply_mode(extension_id)
+                == Some(ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming)
     }
 
     async fn resolve_channel_context(
@@ -700,6 +718,8 @@ impl DeliveryCoordinator {
         Ok((channel, reply_context))
     }
 
+    // arch-exempt: too_many_args, delivery drive wants a PreparedDriveContext bundle, plan docs/internal/design/2026-08-10-unified-channel-model.md
+    #[allow(clippy::too_many_arguments)]
     async fn drive_prepared(
         &self,
         attempt: OutboundDeliveryAttempt,
@@ -708,6 +728,7 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
         reply_context: Option<Vec<u8>>,
+        as_notification: bool,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let envelope = OutboundEnvelope {
             extension_id: channel.extension_id.as_str().to_string(),
@@ -726,10 +747,19 @@ impl DeliveryCoordinator {
         let mut attempts_used = 0u32;
         loop {
             attempts_used += 1;
-            let report = channel
-                .adapter
-                .deliver(envelope.clone(), channel.egress.as_ref())
-                .await;
+            // §7a: a notification rides the channel's notification send;
+            // everything else is the channel's ordinary delivery.
+            let report = if as_notification {
+                channel
+                    .adapter
+                    .deliver_notification(envelope.clone(), channel.egress.as_ref())
+                    .await
+            } else {
+                channel
+                    .adapter
+                    .deliver(envelope.clone(), channel.egress.as_ref())
+                    .await
+            };
             match report {
                 Ok(report) => {
                     let mut sent_refs = Vec::new();

@@ -92,6 +92,25 @@ pub trait ChannelAdapter: Send + Sync {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
 
+    /// The channel-specific *notification* send (§7a of the unified channel
+    /// model): a blocked-automation notice, gate/auth prompt fanned out to a
+    /// notification channel, or any other out-of-band notice — gated on the
+    /// channel's `notifications` capability and dispatched by the generic
+    /// `DeliveryCoordinator` facade, never called directly by feature code.
+    ///
+    /// Defaults to the channel's ordinary delivery: on a conversational
+    /// channel a notification is a message in the conversation, and a
+    /// notification-only channel (browser push) implements its whole
+    /// delivery as this send. Override only when notifications render
+    /// differently from conversation replies.
+    async fn deliver_notification(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.deliver(envelope, egress).await
+    }
+
     /// Optional: list/search delivery targets for pickers.
     async fn list_targets(
         &self,

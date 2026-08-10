@@ -51,6 +51,16 @@ pub struct ResolvedChannelDelivery {
 /// extension host's snapshot.
 pub trait ChannelDeliveryResolver: Send + Sync {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery>;
+
+    /// The channel's declared reply mode, when known — a lightweight lookup
+    /// the coordinator's streaming-reply gate consults BEFORE persisting an
+    /// attempt, so it cannot count as (or race with) the single
+    /// generation-pinned resolution `resolve_channel_delivery` performs.
+    /// `None` means unknown: the gate stays out of the way and the delivery
+    /// path's own resolution failure handling remains authoritative.
+    fn channel_reply_mode(&self, _extension_id: &str) -> Option<ChannelReplyMode> {
+        None
+    }
 }
 
 /// Read half of the host-side `reply_context` storage (ING-11): the opaque

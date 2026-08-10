@@ -150,6 +150,26 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             reply_mode,
         })
     }
+
+    fn channel_reply_mode(
+        &self,
+        extension_id: &str,
+    ) -> Option<ironclaw_extension_contracts::channel::ChannelReplyMode> {
+        if let Some(extension) = self.deployment_channels.extension(extension_id) {
+            return extension
+                .resolved
+                .channel
+                .as_ref()
+                .map(|channel| channel.reply_mode);
+        }
+        let snapshot = self.watch.current();
+        let extension = snapshot.extension(extension_id)?;
+        extension
+            .resolved
+            .channel
+            .as_ref()
+            .map(|channel| channel.reply_mode)
+    }
 }
 
 /// The delivery-time read half of the ingress router's `reply_context`
