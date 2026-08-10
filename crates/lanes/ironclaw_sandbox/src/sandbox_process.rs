@@ -116,6 +116,56 @@ mod workspace_prepare_test_hook {
     }
 }
 
+#[cfg(test)]
+mod container_create_test_hook {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, Hook>>> = OnceLock::new();
+
+    pub(super) struct HookGuard {
+        workspace_root: PathBuf,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut hooks = hooks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            hooks.remove(&self.workspace_root);
+        }
+    }
+
+    pub(super) fn install(workspace_root: PathBuf, hook: Hook) -> HookGuard {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut hooks = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            hooks.insert(workspace_root.clone(), hook).is_none(),
+            "only one deterministic container-create hook per workspace root"
+        );
+        HookGuard { workspace_root }
+    }
+
+    pub(super) fn run(workspace_root: &Path) {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let hook = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(workspace_root);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
 
@@ -437,17 +487,95 @@ fn prepare_workspace_leaf_no_follow_blocking(
         }
     }
 
+    fn directory_stat(directory: &OwnedFd) -> Result<libc::stat, RuntimeProcessError> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `directory` is an owned open descriptor and `stat` points
+        // to writable storage for the kernel to initialize.
+        let result = unsafe { libc::fstat(directory.as_raw_fd(), stat.as_mut_ptr()) };
+        if result == 0 {
+            // SAFETY: `fstat` returned success, so it initialized `stat`.
+            Ok(unsafe { stat.assume_init() })
+        } else {
+            let error = std::io::Error::last_os_error();
+            Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary could not inspect directory ownership: {error}"
+            )))
+        }
+    }
+
+    fn current_host_uid() -> libc::uid_t {
+        // SAFETY: `geteuid` has no inputs and only reads the calling process's
+        // effective uid.
+        unsafe { libc::geteuid() }
+    }
+
+    fn validate_host_owned_directory(
+        directory: &OwnedFd,
+        label: &str,
+        require_private_namespace: bool,
+    ) -> Result<(), RuntimeProcessError> {
+        let stat = directory_stat(directory)?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary rejects {label}: not a directory"
+            )));
+        }
+        let current_uid = current_host_uid();
+        if stat.st_uid != current_uid {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary rejects {label}: owner uid does not match the current host uid"
+            )));
+        }
+        if require_private_namespace && stat.st_mode & (libc::S_IWGRP | libc::S_IWOTH) != 0 {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary rejects {label}: group or other write permission is not allowed"
+            )));
+        }
+        Ok(())
+    }
+
     let root = open_directory(workspace_root)
         .map_err(|error| workspace_directory_handle_error("root", error))?;
+    validate_host_owned_directory(&root, "workspace root", true)?;
     let users_name = segment_c_string("users", "users root")?;
     let users = open_or_create_directory_at(root.as_raw_fd(), &users_name, "users root")?;
+    validate_host_owned_directory(&users, "users namespace", true)?;
     #[cfg(test)]
     workspace_prepare_test_hook::run(workspace_root);
     let leaf_name = segment_c_string(key.digest_segment(), "leaf")?;
     let leaf = open_or_create_directory_at(users.as_raw_fd(), &leaf_name, "leaf")?;
+    validate_host_owned_directory(&leaf, "workspace leaf", false)?;
     set_directory_mode(&leaf, workspace_mode)?;
 
     Ok(workspace_root.join("users").join(key.digest_segment()))
+}
+
+async fn revalidate_workspace_host_boundary(
+    workspace_root: PathBuf,
+    key: TenantUserWorkspaceKey,
+    workspace: &Path,
+    workspace_mode: u32,
+) -> Result<(), RuntimeProcessError> {
+    let final_workspace = prepare_workspace_leaf_no_follow(workspace_root, key, workspace_mode)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary could not be admitted before container creation: {error}"
+            ))
+        })?;
+    let final_workspace = tokio::fs::canonicalize(&final_workspace)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary could not resolve the final caller leaf: {error}"
+            ))
+        })?;
+    if final_workspace != workspace {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox trusted host workspace boundary rejected a changed caller leaf before container creation".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
@@ -581,6 +709,15 @@ impl RebornScopedSandboxCommandTransport {
         let launch = self
             .container_launch_config(request, workspace, workdir)
             .await?;
+        #[cfg(test)]
+        container_create_test_hook::run(&self.config.workspace_root);
+        revalidate_workspace_host_boundary(
+            self.config.workspace_root.clone(),
+            user_key,
+            workspace,
+            self.config.container_identity.workspace_mode(),
+        )
+        .await?;
 
         let created = self
             .docker
@@ -984,6 +1121,40 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn workspace_preparation_rejects_a_group_writable_host_namespace() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for writable_directory in ["workspace root", "users namespace"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let scope = caller_scope();
+            let workspace_root = temp.path().join("workspaces");
+            let users_root = workspace_root.join("users");
+            std::fs::create_dir(&workspace_root).expect("workspace root");
+            std::fs::set_permissions(&workspace_root, std::fs::Permissions::from_mode(0o755))
+                .expect("safe workspace root mode");
+            if writable_directory == "users namespace" {
+                std::fs::create_dir(&users_root).expect("users root");
+                std::fs::set_permissions(&users_root, std::fs::Permissions::from_mode(0o775))
+                    .expect("group-writable users mode");
+            } else {
+                std::fs::set_permissions(&workspace_root, std::fs::Permissions::from_mode(0o775))
+                    .expect("group-writable workspace mode");
+            }
+
+            let error = workspace_transport(&workspace_root)
+                .prepare_workspace(&scope)
+                .await
+                .expect_err("group-writable namespace must fail closed");
+
+            assert!(
+                format!("{error}").contains("trusted host workspace boundary"),
+                "{writable_directory} must be rejected: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn workspace_preparation_users_swap_cannot_create_an_outside_leaf() {
         use std::os::unix::fs::symlink;
 
@@ -1070,6 +1241,52 @@ mod tests {
                 & 0o777,
             0o755,
             "workspace preparation must not chmod a leaf through a swapped users symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_create_rejects_a_users_swap_after_bind_validation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let users_root = workspace_root.join("users");
+        let parked_users_root = workspace_root.join("users-before-swap");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
+        std::fs::create_dir(&outside).expect("outside root");
+        let users_root_for_hook = users_root.clone();
+        let outside_for_hook = outside.clone();
+        let hook = container_create_test_hook::install(
+            workspace_root.clone(),
+            Box::new(move || {
+                std::fs::rename(&users_root_for_hook, &parked_users_root).expect("park users root");
+                symlink(&outside_for_hook, &users_root_for_hook).expect("swap users root");
+            }),
+        );
+
+        let error = workspace_transport(&workspace_root)
+            .run_command(CommandExecutionRequest {
+                scope,
+                mounts: None,
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("post-validation users swap must fail before Docker create");
+
+        drop(hook);
+        assert!(
+            format!("{error}").contains("trusted host workspace boundary"),
+            "final host admission must reject the swapped users root: {error}"
+        );
+        assert!(
+            !format!("{error}").contains("sandbox container create failed"),
+            "Docker create must not run after final host admission fails: {error}"
         );
     }
 
