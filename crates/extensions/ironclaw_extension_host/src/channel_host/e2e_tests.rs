@@ -4092,6 +4092,26 @@ impl RecordingEgress {
                 .as_bytes(),
             );
         }
+        if path == "/api/chat.update" {
+            let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
+                Ok(body) => body,
+                Err(_) => return response(br#"{"ok":false,"error":"invalid_json"}"#),
+            };
+            if body["as_user"] != true {
+                return response(br#"{"ok":false,"error":"cant_update_message"}"#);
+            }
+            let channel = body["channel"].as_str().unwrap_or("DTEST");
+            let ts = body["ts"].as_str().unwrap_or("1710000000.000100");
+            return response(
+                serde_json::json!({
+                    "ok": true,
+                    "channel": channel,
+                    "ts": ts,
+                })
+                .to_string()
+                .as_bytes(),
+            );
+        }
         if path == "/api/chat.startStream" {
             let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
                 Ok(body) => body,

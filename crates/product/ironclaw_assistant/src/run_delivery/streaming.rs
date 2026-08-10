@@ -263,11 +263,38 @@ async fn deliver_preview_update(
             },
         )
         .await;
-    matches!(
-        outcome,
-        Ok(CoordinatedDeliveryOutcome::Delivered { .. }
-            | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. })
-    )
+    match outcome {
+        Ok(
+            CoordinatedDeliveryOutcome::Delivered { .. }
+            | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
+        ) => true,
+        Ok(CoordinatedDeliveryOutcome::Failed { failure_kind, .. }) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_delivery",
+                %run_id,
+                ?failure_kind,
+                "progressive preview update rejected"
+            );
+            false
+        }
+        Ok(_) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_delivery",
+                %run_id,
+                "progressive preview update not delivered"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::run_delivery",
+                %run_id,
+                %error,
+                "progressive preview update failed"
+            );
+            false
+        }
+    }
 }
 
 fn live_cumulative_text(
