@@ -1737,7 +1737,7 @@ mod tests {
         KeepaliveSweepSettings, RebornCompositionProfile, RebornHostBindings, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    use ironclaw_config::RebornBootConfig;
+    use ironclaw_config::{RebornBootConfig, RebornProfile};
     use secrecy::SecretString;
 
     use super::apply_run_trigger_fire_access_policy;
@@ -2929,6 +2929,46 @@ regex_activation_enabled = false
         let mut entries = BTreeMap::new();
         collect(root, root, &mut entries);
         entries
+    }
+
+    #[test]
+    fn compatible_base_docker_railway_layout_admission_never_rewrites_the_ready_layout() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (_temp, base_config) = boot_config_with_config_toml("hosted-single-tenant-volume", "");
+        let home = base_config.home().path().to_path_buf();
+
+        let paths = super::ensure_ready_layout_for_profile(
+            &base_config,
+            RebornProfile::HostedSingleTenantVolume,
+        )
+        .expect("base profile initializes the canonical layout");
+        let ready_layout = layout_tree_snapshot(&home);
+
+        for profile in [
+            RebornProfile::HostedSingleTenantVolumeSandboxed,
+            RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(home.clone().into_os_string()),
+                None,
+                None,
+                Some(profile.as_str().into()),
+            )
+            .expect("profile-specific boot config");
+            let admitted = super::ensure_ready_layout_for_profile(&config, profile)
+                .expect("compatible sandbox profile admits the ready layout");
+
+            assert_eq!(
+                admitted, paths,
+                "compatible profile {profile} must resolve the same canonical paths"
+            );
+            assert_eq!(
+                layout_tree_snapshot(&home),
+                ready_layout,
+                "normal boot for compatible profile {profile} must not perform migration writes"
+            );
+        }
     }
 
     #[test]

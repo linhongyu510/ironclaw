@@ -227,6 +227,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
+| A committed canonical layout is admitted unchanged through the compatible hosted-volume base → Docker → Railway sequence; profile selection never creates a new state root or performs a normal-boot migration write | `ironclaw_cli::runtime::tests::compatible_base_docker_railway_layout_admission_never_rewrites_the_ready_layout` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**
