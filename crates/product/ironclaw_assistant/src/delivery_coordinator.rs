@@ -608,10 +608,14 @@ impl DeliveryCoordinator {
             .resolver
             .resolve_channel_delivery(request.extension_id)
             .and_then(|channel| channel.progressive_preview)
-            .filter(|preview| {
-                direct_message
-                    || preview.scope
-                        == ironclaw_extension_contracts::channel::ProgressivePreviewScope::All
+            .filter(|preview| match preview.scope {
+                ironclaw_extension_contracts::channel::ProgressivePreviewScope::All => true,
+                ironclaw_extension_contracts::channel::ProgressivePreviewScope::DirectOnly => {
+                    direct_message
+                }
+                ironclaw_extension_contracts::channel::ProgressivePreviewScope::NonDirectOnly => {
+                    !direct_message
+                }
             });
 
         if progressive_preview.is_none() {

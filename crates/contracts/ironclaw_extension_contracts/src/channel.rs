@@ -517,8 +517,7 @@ pub struct ChannelPresentation {
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
-    /// Optional best-effort preview of the response while it is generated.
-    /// The ordinary final delivery remains authoritative.
+    /// Optional best-effort preview while a response is generated; final delivery is authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progressive_preview: Option<ProgressivePreviewPresentation>,
 }
@@ -529,12 +528,12 @@ pub struct ProgressivePreviewPresentation {
     pub scope: ProgressivePreviewScope,
     pub max_chars: u32,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressivePreviewScope {
     All,
     DirectOnly,
+    NonDirectOnly,
 }
 
 /// Structural channel-descriptor failures (path context added by the

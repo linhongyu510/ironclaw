@@ -228,7 +228,6 @@ methods = ["post"]
 credential_handle = "slack_bot_token"
 paths = [
   "/api/chat.postMessage",
-  "/api/chat.update",
   "/api/chat.delete",
   "/api/chat.startStream",
   "/api/chat.appendStream",
@@ -280,7 +279,7 @@ max_message_chars = 40000
 command_prefix = "/ironclaw "
 
 [channel.presentation.progressive_preview]
-scope = "all"
+scope = "non_direct_only"
 max_chars = 12000
 
 # ---- auth surface: recipe data, zero extension code ------------------------

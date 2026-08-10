@@ -174,14 +174,11 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start(initial_text)) => {
-                    let is_dm = channel.starts_with('D');
-                    // Recipients are required for channel streams (not DMs);
-                    // an absent reply_context user degrades to a coordinator
-                    // Text fallback, never a silent drop.
-                    let outcome = if is_dm {
-                        let rendered = render_slack_mrkdwn(initial_text);
-                        post_slack_chunk(egress, &credential, &channel, None, &rendered).await
+                OutboundPart::ProgressivePreview(ProgressivePreviewPart::Start(_)) => {
+                    let outcome = if channel.starts_with('D') {
+                        PartDeliveryOutcome::Permanent {
+                            reason: "progressive preview is not supported in Slack DMs".to_string(),
+                        }
                     } else {
                         match (
                             slack_stream_thread_ts(&envelope),
@@ -216,48 +213,38 @@ impl ChannelAdapter for SlackChannelAdapter {
                     accepted_text,
                     current_text,
                 }) => {
-                    let is_dm = channel.starts_with('D');
-                    let outcome = match current_text.strip_prefix(accepted_text) {
-                        Some("") => PartDeliveryOutcome::Sent {
-                            vendor_message_ref: Some(vendor_message_ref.clone()),
-                        },
-                        Some(_)
-                            if is_dm
-                                && current_text.chars().count()
-                                    <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
-                        {
-                            update_slack_message(
-                                egress,
-                                &credential,
-                                &channel,
-                                vendor_message_ref,
-                                current_text,
-                            )
-                            .await
+                    let outcome = if channel.starts_with('D') {
+                        PartDeliveryOutcome::Permanent {
+                            reason: "progressive preview is not supported in Slack DMs".to_string(),
                         }
-                        Some(suffix)
-                            if !is_dm
-                                && suffix.chars().count()
+                    } else {
+                        match current_text.strip_prefix(accepted_text) {
+                            Some("") => PartDeliveryOutcome::Sent {
+                                vendor_message_ref: Some(vendor_message_ref.clone()),
+                            },
+                            Some(suffix)
+                                if suffix.chars().count()
                                     <= crate::mrkdwn::SLACK_STREAM_TEXT_LIMIT_CHARS =>
-                        {
-                            append_slack_stream(
-                                egress,
-                                &credential,
-                                &channel,
-                                vendor_message_ref,
-                                suffix,
-                            )
-                            .await
-                        }
-                        Some(_) => PartDeliveryOutcome::Permanent {
-                            reason:
-                                "progressive preview update exceeds Slack's per-call text limit"
+                            {
+                                append_slack_stream(
+                                    egress,
+                                    &credential,
+                                    &channel,
+                                    vendor_message_ref,
+                                    suffix,
+                                )
+                                .await
+                            }
+                            Some(_) => PartDeliveryOutcome::Permanent {
+                                reason:
+                                    "progressive preview update exceeds Slack's per-call text limit"
+                                        .to_string(),
+                            },
+                            None => PartDeliveryOutcome::Permanent {
+                                reason: "progressive preview no longer extends the accepted text"
                                     .to_string(),
-                        },
-                        None => PartDeliveryOutcome::Permanent {
-                            reason: "progressive preview no longer extends the accepted text"
-                                .to_string(),
-                        },
+                            },
+                        }
                     };
                     let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
                     parts.push(outcome);
@@ -269,8 +256,9 @@ impl ChannelAdapter for SlackChannelAdapter {
                     vendor_message_ref,
                 }) => {
                     let outcome = if channel.starts_with('D') {
-                        delete_slack_message(egress, &credential, &channel, vendor_message_ref)
-                            .await
+                        PartDeliveryOutcome::Permanent {
+                            reason: "progressive preview is not supported in Slack DMs".to_string(),
+                        }
                     } else {
                         let outcome = stop_slack_stream(
                             egress,
@@ -467,69 +455,6 @@ async fn post_slack_chunk(
     part_outcome_for_kind(
         slack_error_kind(&error),
         format!("slack rejected chat.postMessage ({error})"),
-    )
-}
-
-async fn update_slack_message(
-    egress: &dyn RestrictedEgress,
-    credential: &SecretHandle,
-    channel: &str,
-    ts: &str,
-    markdown_text: &str,
-) -> PartDeliveryOutcome {
-    let body = match serde_json::to_vec(&serde_json::json!({
-        "channel": channel,
-        "ts": ts,
-        "markdown_text": markdown_text,
-        "as_user": true,
-    })) {
-        Ok(body) => body,
-        Err(error) => {
-            return PartDeliveryOutcome::Permanent {
-                reason: format!("chat.update body did not serialize: {error}"),
-            };
-        }
-    };
-    let response = egress
-        .send(RestrictedEgressRequest {
-            method: NetworkMethod::Post,
-            url: format!("https://{SLACK_API_HOST}/api/chat.update"),
-            headers: vec![(
-                "content-type".to_string(),
-                "application/json; charset=utf-8".to_string(),
-            )],
-            body: Some(body),
-            credential: Some(credential.clone()),
-            body_credentials: Vec::new(),
-        })
-        .await;
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => return part_outcome_for_egress_error(&error),
-    };
-    if !(200..300).contains(&response.status) {
-        return part_outcome_for_kind(
-            SlackDeliveryFailureKind::from_http_status(response.status),
-            format!("slack web api returned status {}", response.status),
-        );
-    }
-    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return PartDeliveryOutcome::Retryable {
-                reason: format!("chat.update response was not valid JSON: {error}"),
-            };
-        }
-    };
-    if parsed.ok {
-        return PartDeliveryOutcome::Sent {
-            vendor_message_ref: parsed.ts.or_else(|| Some(ts.to_string())),
-        };
-    }
-    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
-    part_outcome_for_kind(
-        slack_error_kind(&error),
-        format!("slack rejected chat.update ({error})"),
     )
 }
 
@@ -2418,10 +2343,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_start_in_dm_posts_top_level_placeholder() {
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
-        )]);
+    async fn progressive_preview_start_in_dm_is_rejected_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
@@ -2437,25 +2360,10 @@ mod tests {
             )
             .await
             .expect("deliver drives");
-        let requests = egress.requests();
-        assert_eq!(requests.len(), 1);
-        assert!(
-            requests[0].url.ends_with("/api/chat.postMessage"),
-            "url: {}",
-            requests[0].url
-        );
-        let body = body_json(&requests[0]);
-        assert_eq!(body["channel"], "D123");
-        assert_eq!(body["text"], "Ironclaw is thinking...");
-        assert!(body.get("thread_ts").is_none());
-        assert!(body.get("recipient_user_id").is_none());
-        assert!(body.get("recipient_team_id").is_none());
-        assert!(body.get("markdown_text").is_none());
+        assert!(egress.requests().is_empty());
         assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: Some(reference),
-            }] if reference == "1710000000.000200"
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("Slack DMs")
         ));
     }
 
@@ -2517,42 +2425,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_start_in_dm_does_not_require_thread_anchor() {
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
-        )]);
-        let report = SlackChannelAdapter
-            .deliver(
-                stream_envelope(
-                    vec![OutboundPart::ProgressivePreview(
-                        ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
-                    )],
-                    "D123",
-                    None,
-                    None,
-                    None,
-                ),
-                &egress,
-            )
-            .await
-            .expect("deliver drives");
-        let requests = egress.requests();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].url.ends_with("/api/chat.postMessage"));
-        assert!(body_json(&requests[0]).get("thread_ts").is_none());
-        assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: Some(reference),
-            }] if reference == "1710000000.000200"
-        ));
-    }
-
-    #[tokio::test]
-    async fn progressive_preview_update_in_dm_replaces_the_top_level_message() {
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
-        )]);
+    async fn progressive_preview_update_in_dm_is_rejected_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
@@ -2572,20 +2446,10 @@ mod tests {
             )
             .await
             .expect("deliver drives");
-        let body = body_json(&egress.requests()[0]);
-        assert!(
-            egress.requests()[0].url.ends_with("/api/chat.update"),
-            "url: {}",
-            egress.requests()[0].url
-        );
-        assert_eq!(body["ts"], "1710000000.000200");
-        assert_eq!(body["markdown_text"], "Hello world");
-        assert_eq!(body["as_user"], true);
+        assert!(egress.requests().is_empty());
         assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: Some(reference),
-            }] if reference == "1710000000.000200"
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("Slack DMs")
         ));
     }
 
@@ -2620,10 +2484,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progressive_preview_stop_in_dm_deletes_the_preview() {
-        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
-            r#"{"ok":true,"channel":"D123","ts":"1710000000.000200"}"#,
-        )]);
+    async fn progressive_preview_stop_in_dm_is_rejected_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
         let report = SlackChannelAdapter
             .deliver(
                 stream_envelope(
@@ -2641,15 +2503,10 @@ mod tests {
             )
             .await
             .expect("deliver drives");
-        let requests = egress.requests();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].url.ends_with("/api/chat.delete"));
-        assert_eq!(body_json(&requests[0])["ts"], "1710000000.000200");
+        assert!(egress.requests().is_empty());
         assert!(matches!(
-            &report.parts[..],
-            [PartDeliveryOutcome::Sent {
-                vendor_message_ref: None,
-            }]
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("Slack DMs")
         ));
     }
 
@@ -2698,10 +2555,10 @@ mod tests {
                             current_text: "replacement".to_string(),
                         },
                     )],
-                    "D123",
+                    "C123",
+                    Some("1710000000.000100"),
                     None,
-                    Some("1710000000.000150"),
-                    None,
+                    Some(r#"{"user":"U123"}"#),
                 ),
                 &egress,
             )
@@ -2726,10 +2583,10 @@ mod tests {
                     vec![OutboundPart::ProgressivePreview(
                         ProgressivePreviewPart::Start("Ironclaw is thinking...".to_string()),
                     )],
-                    "D123",
+                    "C123",
+                    Some("1710000000.000100"),
                     None,
-                    Some("1710000000.000150"),
-                    None,
+                    Some(r#"{"user":"U123"}"#),
                 ),
                 &egress,
             )
