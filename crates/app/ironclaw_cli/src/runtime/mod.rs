@@ -921,25 +921,29 @@ fn build_sandboxed_local_runtime_services_input(
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
-/// The workspace root for a cwd-launched local runtime: the caller's cwd when
-/// it is safely isolated from the storage root's skill/extension roots, else
-/// the default `<storage_root>/workspace` (the same workspace the installed
-/// service mounts). Without the fallback, a fresh `ironclaw onboard` +
-/// shell session — cwd=`$HOME`, which contains the default Reborn home —
-/// tripped composition's isolation check and every CLI runtime command died
-/// with "workspace root must not overlap default skill root" (issue #7431).
-fn resolved_local_runtime_workspace_root(storage_root: &Path) -> anyhow::Result<PathBuf> {
-    let cwd = std::env::current_dir().context("failed to resolve current directory for local runtime workspace")?;
-    let workspace_root =
-        ironclaw_composition::resolve_local_runtime_workspace_root(storage_root, &cwd);
-    if workspace_root != cwd {
-        tracing::warn!(
-            cwd = %cwd.display(),
-            workspace = %workspace_root.display(),
-            "current directory overlaps the storage root's skill roots; using the default \
-             workspace instead"
-        );
+/// Use the caller's cwd as the local-runtime workspace unless it contains the
+/// runtime storage root. The latter is the fresh-onboard shape: cwd=`$HOME`
+/// contains `<reborn_home>/local-dev`, so composition correctly rejects it as
+/// an ancestor of the protected skill roots. Fall back to
+/// `<reborn_home>/workspace`, the same workspace the installed service mounts.
+fn resolved_local_runtime_workspace_root(
+    storage_root: &Path,
+    reborn_home: &Path,
+) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .context("failed to resolve current directory for local runtime workspace")?;
+    let storage_root =
+        std::fs::canonicalize(storage_root).unwrap_or_else(|_| storage_root.to_path_buf());
+    if !storage_root.starts_with(&cwd) {
+        return Ok(cwd);
     }
+    let workspace_root = reborn_home.join("workspace");
+    tracing::warn!(
+        cwd = %cwd.display(),
+        workspace = %workspace_root.display(),
+        "current directory contains the local runtime storage root; using the default \
+         workspace instead"
+    );
     Ok(workspace_root)
 }
 
@@ -950,7 +954,8 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = resolved_local_runtime_workspace_root(&local_runtime_root)?;
+    let workspace_root =
+        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path())?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -978,17 +983,16 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = resolved_local_runtime_workspace_root(&local_runtime_storage_root(
-        config,
-        profile,
-    ))?;
+    let local_runtime_root = local_runtime_storage_root(config, profile);
+    let workspace_root =
+        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path())?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
         RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
             composition_profile(profile),
             owner_id,
-            local_runtime_storage_root(config, profile),
+            local_runtime_root,
             config_file,
         )
         .map_err(anyhow::Error::from)?

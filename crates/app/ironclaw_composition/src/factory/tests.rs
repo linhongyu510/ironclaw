@@ -2445,55 +2445,6 @@ fn standalone_workspace_root_overlapping_skill_root_is_rejected() {
 }
 
 #[test]
-fn resolve_local_runtime_workspace_root_keeps_isolated_candidate() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    std::fs::create_dir_all(&storage_root).expect("storage root");
-    let project = dir.path().join("project");
-    std::fs::create_dir_all(&project).expect("project dir");
-
-    let resolved = resolve_local_runtime_workspace_root(&storage_root, &project);
-    assert_eq!(
-        resolved,
-        project.canonicalize().expect("canonical project dir")
-    );
-}
-
-#[test]
-fn resolve_local_runtime_workspace_root_falls_back_when_candidate_is_ancestor() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    std::fs::create_dir_all(&storage_root).expect("storage root");
-
-    // The fresh-onboard shape: the operator's shell sits in `$HOME`, an
-    // ancestor of the Reborn home that contains the storage root.
-    let resolved = resolve_local_runtime_workspace_root(&storage_root, dir.path());
-    assert_eq!(resolved, storage_root.join("workspace"));
-}
-
-#[test]
-fn resolve_local_runtime_workspace_root_falls_back_when_candidate_is_inside_protected_root() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    std::fs::create_dir_all(&storage_root).expect("storage root");
-    let skill_root = storage_root.join("skills");
-    std::fs::create_dir_all(&skill_root).expect("skill root");
-
-    let resolved = resolve_local_runtime_workspace_root(&storage_root, &skill_root);
-    assert_eq!(resolved, storage_root.join("workspace"));
-}
-
-#[test]
-fn resolve_local_runtime_workspace_root_uses_default_when_storage_root_is_missing() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    // Storage root not materialized yet (first boot): the lexical comparison
-    // must still catch the overlap and fall back.
-    let resolved = resolve_local_runtime_workspace_root(&storage_root, dir.path());
-    assert_eq!(resolved, storage_root.join("workspace"));
-}
-
-#[test]
 fn standalone_legacy_skill_backfill_marker_preserves_deletions() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");

@@ -2289,14 +2289,14 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
 
 /// Pins the CLI workspace-root fallback (issue #7431): launching `serve` with
 /// cwd=reborn_home — an ancestor of every default standalone skill root —
-/// boots by falling back to the default `<storage_root>/workspace` workspace
-/// instead of failing composition's isolation check. This is the fresh-onboard
-/// shape: `ironclaw repl`/`run`/`serve` launched from the operator's shell
-/// (cwd=`$HOME`, which contains the Reborn home) must not die with
-/// "workspace root must not overlap default skill root". Composition's own
+/// boots by falling back to `<reborn_home>/workspace`, the same workspace the
+/// installed service mounts, instead of failing composition's isolation
+/// check. This is the fresh-onboard shape: `ironclaw repl`/`run`/`serve`
+/// launched from the operator's shell (cwd=`$HOME`, which contains the Reborn
+/// home) must not die with "workspace root must not overlap default skill
+/// root". Composition's own
 /// `standalone_workspace_root_overlapping_skill_root_is_rejected` pins that
-/// the isolation check itself still rejects an overlapping workspace root
-/// when one is supplied.
+/// the isolation check itself still rejects an overlapping workspace root.
 #[test]
 fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2304,6 +2304,7 @@ fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(reborn_home.join("local-dev")).expect("local runtime storage root");
     let _serve_port_guard = SERVE_PORT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2329,6 +2330,16 @@ fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
     assert!(
         stderr_text.contains("using the default workspace instead"),
         "expected the workspace fallback warning for cwd=<reborn_home>: stderr={stderr_text}"
+    );
+    let expected_workspace = reborn_home.join("workspace");
+    assert!(
+        expected_workspace.is_dir(),
+        "fallback must use the same workspace as the installed service: {}",
+        expected_workspace.display()
+    );
+    assert!(
+        !reborn_home.join("local-dev/workspace").exists(),
+        "fallback must not create a profile-local second workspace"
     );
 
     let _ = child.kill();
