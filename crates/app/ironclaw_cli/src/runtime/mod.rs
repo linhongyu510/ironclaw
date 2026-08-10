@@ -1354,14 +1354,6 @@ pub(crate) fn local_runtime_storage_root(config: &RebornBootConfig) -> PathBuf {
         .to_path_buf()
 }
 
-/// Resolve the existing composition-owned storage requirement for a CLI
-/// command without introducing a second profile-to-policy table in this crate.
-pub(crate) fn storage_layout_requirement(
-    config: &RebornBootConfig,
-) -> anyhow::Result<ironclaw_config::LayoutRequirement> {
-    storage_layout_requirement_for_profile(config.profile())
-}
-
 fn storage_layout_requirement_for_profile(
     profile: RebornProfile,
 ) -> anyhow::Result<ironclaw_config::LayoutRequirement> {
@@ -1404,9 +1396,15 @@ pub(crate) fn adopt_storage_layout(
     confirm_backup_snapshot: bool,
     workspace_import: Option<storage_layout::WorkspaceImportOptions>,
 ) -> anyhow::Result<()> {
-    let requirement = storage_layout_requirement(context.boot_config())?;
+    let config = context.boot_config();
+    let config_file = read_config_file(config)?;
+    let profile = effective_profile(config, config_file.as_ref())?;
+    let requirement = storage_layout_requirement_for_profile(profile)?;
+    if profile == RebornProfile::MigrationDryRun {
+        return ensure_ready_layout_for_profile(config, profile).map(|_| ());
+    }
     storage_layout::adopt_layout(
-        context.boot_config().home(),
+        config.home(),
         requirement,
         storage_layout::AdoptOptions {
             confirm_processes_stopped,
@@ -1416,7 +1414,7 @@ pub(crate) fn adopt_storage_layout(
     )?;
     // The adoption command does not start a runtime. Validate the manifest
     // through the same normal-boot prerequisite before reporting completion.
-    storage_layout::ensure_ready_layout(context.boot_config().home(), requirement).map(|_| ())
+    storage_layout::ensure_ready_layout(config.home(), requirement).map(|_| ())
 }
 
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
@@ -2907,6 +2905,25 @@ regex_activation_enabled = false
         (temp, config)
     }
 
+    fn boot_config_with_file_profile(profile: &str) -> (tempfile::TempDir, RebornBootConfig) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            format!("[boot]\nprofile = \"{profile}\"\n"),
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config without a profile environment override");
+        (temp, config)
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct LayoutEntrySnapshot {
         kind: &'static str,
@@ -2961,6 +2978,100 @@ regex_activation_enabled = false
         let mut entries = BTreeMap::new();
         collect(root, root, &mut entries);
         entries
+    }
+
+    fn seed_legacy_embedded_store(root: &Path) {
+        std::fs::create_dir_all(root).expect("legacy root");
+        let key = ironclaw_secrets::keychain::generate_master_key_hex();
+        std::fs::write(
+            root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+            key,
+        )
+        .expect("legacy key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(
+                root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .expect("owner-only legacy key");
+        }
+        block_on_cli({
+            let root = root.to_path_buf();
+            async move {
+                ironclaw_composition::open_standalone_secret_store(&root)
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .expect("seed legacy libSQL store");
+    }
+
+    #[test]
+    fn storage_adopt_config_file_migration_dry_run_matches_normal_boot_without_mutation() {
+        // Break caught: storage adoption derives its requirement from the raw
+        // environment/default profile instead of the config-file-only profile
+        // that normal boot admits.
+        let _lock = lock_runtime_env();
+        let _profile = EnvGuard::clear(ironclaw_config::REBORN_PROFILE_ENV);
+        let (_temp, config) = boot_config_with_file_profile("migration-dry-run");
+        assert_eq!(config.profile(), RebornProfile::Standalone);
+
+        let legacy = config.home().path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let before = layout_tree_snapshot(config.home().path());
+
+        let normal_boot_error = super::ensure_ready_layout_for_active_profile(&config)
+            .expect_err("config-file migration dry-run must reject the incompatible layout");
+        assert_eq!(layout_tree_snapshot(config.home().path()), before);
+
+        let context = crate::context::RebornCliContext::from_boot_config(config.clone());
+        let adoption_error = super::adopt_storage_layout(&context, true, true, None)
+            .expect_err("storage adoption must honor config-file migration dry-run admission");
+
+        assert_eq!(adoption_error.to_string(), normal_boot_error.to_string());
+        assert_eq!(
+            layout_tree_snapshot(config.home().path()),
+            before,
+            "storage adoption under migration-dry-run must not alter durable layout files"
+        );
+    }
+
+    #[test]
+    fn storage_adopt_uses_the_config_file_sandboxed_profile_requirement() {
+        // Break caught: a config-file-only sandboxed profile is checked as the
+        // default standalone profile, rejecting its own safe multi-user layout.
+        let _lock = lock_runtime_env();
+        let _profile = EnvGuard::clear(ironclaw_config::REBORN_PROFILE_ENV);
+        let (_temp, config) =
+            boot_config_with_file_profile("hosted-single-tenant-volume-sandboxed");
+        assert_eq!(config.profile(), RebornProfile::Standalone);
+
+        let sandboxed_profile = RebornProfile::HostedSingleTenantVolumeSandboxed;
+        let sandboxed_requirement =
+            super::storage_layout_requirement_for_profile(sandboxed_profile)
+                .expect("sandboxed layout requirement");
+        let expected_paths =
+            super::storage_layout::ensure_ready_layout(config.home(), sandboxed_requirement)
+                .expect("prepare a ready sandboxed layout");
+        let before = layout_tree_snapshot(config.home().path());
+
+        let normal_boot_paths = super::ensure_ready_layout_for_active_profile(&config)
+            .expect("normal boot admits the config-file sandboxed layout");
+        assert_eq!(normal_boot_paths, expected_paths);
+        assert_eq!(layout_tree_snapshot(config.home().path()), before);
+
+        let context = crate::context::RebornCliContext::from_boot_config(config);
+        super::adopt_storage_layout(&context, true, true, None)
+            .expect("storage adoption admits the same config-file sandboxed layout");
+
+        assert_eq!(
+            layout_tree_snapshot(context.boot_config().home().path()),
+            before,
+            "admitting an already-ready sandboxed layout must not rewrite it"
+        );
     }
 
     #[test]
