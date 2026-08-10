@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use self::nearai_tool_message_flattening::flatten_tool_messages;
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
+use crate::logprob_sidecar::{self, ChoiceLogprobs, TokenLogprob};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -159,6 +160,10 @@ pub struct NearAiChatProvider {
     session: Arc<SessionManager>,
     active_model: std::sync::RwLock<String>,
     flatten_tool_messages: bool,
+    /// Top-k for per-token logprob capture, or `None` when disabled. Resolved
+    /// once at construction so a mid-run environment change cannot make one
+    /// turn of a session differ from the next.
+    capture_logprobs: Option<u8>,
     /// Per-model pricing fetched from the NEAR AI `/v1/model/list` endpoint.
     /// Maps model ID → (input_cost_per_token, output_cost_per_token).
     pricing: Arc<std::sync::RwLock<HashMap<String, (Decimal, Decimal)>>>,
@@ -214,6 +219,13 @@ impl NearAiChatProvider {
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let pricing = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let capture_logprobs = logprob_capture_top_k();
+        if let Some(top_k) = capture_logprobs {
+            tracing::info!(
+                "NEAR AI logprob capture enabled with top_logprobs={top_k}; responses will be \
+                 larger and carry per-token distributions"
+            );
+        }
 
         let provider = Self {
             client,
@@ -223,6 +235,7 @@ impl NearAiChatProvider {
             session,
             active_model,
             flatten_tool_messages,
+            capture_logprobs,
             pricing,
         };
 
@@ -582,6 +595,12 @@ impl NearAiChatProvider {
                     .min(input_tokens);
             }
             for choice in chunk.choices {
+                // Accumulate alongside the content delta these describe. Empty
+                // unless capture is on; see `logprob_sidecar` for why they do
+                // not go into the event stream.
+                if let Some(logprobs) = choice.logprobs {
+                    parsed.logprobs.extend(logprobs.content);
+                }
                 if let Some(reason) = choice.finish_reason.as_deref() {
                     stream_completed = true;
                     parsed.finish_reason = map_finish_reason(reason);
@@ -701,6 +720,31 @@ impl NearAiChatProvider {
             ),
         })
     }
+
+    /// Write captured distributions to the local sidecar.
+    ///
+    /// No-op unless capture is enabled. `run_id`/`turn_id` come from the
+    /// opaque request metadata that `model_gateway` populates, which is what
+    /// makes a sidecar line correlatable with the turn that produced it.
+    fn record_logprobs(
+        &self,
+        metadata: &HashMap<String, String>,
+        model: &str,
+        streamed: bool,
+        tokens: &[TokenLogprob],
+    ) {
+        if self.capture_logprobs.is_none() || tokens.is_empty() {
+            return;
+        }
+        logprob_sidecar::append(
+            &logprob_sidecar::sidecar_dir(),
+            metadata.get("run_id").map(String::as_str),
+            metadata.get("turn_id").map(String::as_str),
+            model,
+            streamed,
+            tokens,
+        );
+    }
 }
 
 #[async_trait]
@@ -736,7 +780,10 @@ impl LlmProvider for NearAiChatProvider {
             tool_choice: None,
             stream: false,
             stream_options: None,
+            logprobs: self.capture_logprobs.map(|_| true),
+            top_logprobs: self.capture_logprobs,
         };
+        let captured_model = request.model.clone();
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -748,6 +795,10 @@ impl LlmProvider for NearAiChatProvider {
                 .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
                 })?;
+
+        if let Some(logprobs) = choice.logprobs.as_ref() {
+            self.record_logprobs(&req.metadata, &captured_model, false, &logprobs.content);
+        }
 
         // Fall back to reasoning_content when content is null (same as
         // complete_with_tools — reasoning models may put the answer there).
@@ -813,9 +864,13 @@ impl LlmProvider for NearAiChatProvider {
             tool_choice: None,
             stream: true,
             stream_options: None,
+            logprobs: self.capture_logprobs.map(|_| true),
+            top_logprobs: self.capture_logprobs,
         };
+        let captured_model = request.model.clone();
 
         let response = self.send_streaming_request(&request, sink).await?;
+        self.record_logprobs(&req.metadata, &captured_model, true, &response.logprobs);
         let provider_reasoning =
             (!response.reasoning.trim().is_empty()).then(|| response.reasoning.clone());
         emit_reasoning_trace(provider_reasoning.as_deref());
@@ -870,7 +925,9 @@ impl LlmProvider for NearAiChatProvider {
             req.max_tokens,
             req.stop_sequences,
             req.tool_choice,
+            self.capture_logprobs,
         );
+        let captured_model = request.model.clone();
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -882,6 +939,10 @@ impl LlmProvider for NearAiChatProvider {
                 .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
                 })?;
+
+        if let Some(logprobs) = choice.logprobs.as_ref() {
+            self.record_logprobs(&req.metadata, &captured_model, false, &logprobs.content);
+        }
 
         let ChatCompletionResponseMessage {
             content: message_content,
@@ -982,11 +1043,14 @@ impl LlmProvider for NearAiChatProvider {
             req.max_tokens,
             req.stop_sequences,
             req.tool_choice,
+            self.capture_logprobs,
         );
         request.stream = true;
         request.stream_options = None;
+        let captured_model = request.model.clone();
 
         let response = self.send_streaming_request(&request, sink).await?;
+        self.record_logprobs(&req.metadata, &captured_model, true, &response.logprobs);
         let provider_reasoning =
             (!response.reasoning.trim().is_empty()).then(|| response.reasoning.clone());
         emit_reasoning_trace(provider_reasoning.as_deref());
@@ -1093,6 +1157,56 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<ChatCompletionStreamOptions>,
+    /// Ask the backend for per-token log-probabilities. Opt-in; see
+    /// [`parse_logprob_capture_top_k`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logprobs: Option<bool>,
+    /// How many alternatives to return per token. Only meaningful alongside
+    /// `logprobs: Some(true)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_logprobs: Option<u8>,
+}
+
+/// Environment variable enabling per-token logprob capture, set to the number
+/// of alternatives wanted per token (1-20).
+pub const LOGPROB_CAPTURE_ENV: &str = "IRONCLAW_NEARAI_CAPTURE_LOGPROBS";
+
+/// Upper bound the OpenAI-shaped API places on `top_logprobs`.
+const LOGPROB_CAPTURE_MAX_TOP_K: u8 = 20;
+
+/// Read the logprob capture setting from the environment.
+///
+/// Deliberately env-gated rather than a [`NearAiConfig`] field: this is an
+/// experiment, `NearAiConfig` has no `Default` impl and 18 literal
+/// construction sites, and none of them should have to learn about a flag
+/// that will either graduate into a real config surface or be deleted.
+fn logprob_capture_top_k() -> Option<u8> {
+    parse_logprob_capture_top_k(
+        ironclaw_common::env_helpers::env_or_override(LOGPROB_CAPTURE_ENV).as_deref(),
+    )
+}
+
+/// Parse the capture setting. Split out from the environment read so it can be
+/// tested without racing on process-global state.
+///
+/// Absent, empty or unparseable means off — never default-on, because turning
+/// this on changes what is sent to the provider and what is written to disk.
+fn parse_logprob_capture_top_k(raw: Option<&str>) -> Option<u8> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<u32>() {
+        // Clamp before the cast, not after: `9999u32 as u8` is 15.
+        Ok(k) => Some(k.clamp(1, u32::from(LOGPROB_CAPTURE_MAX_TOP_K)) as u8),
+        Err(_) => {
+            tracing::warn!(
+                "{LOGPROB_CAPTURE_ENV} is set to {raw:?}, which is not a number between 1 and \
+                 {LOGPROB_CAPTURE_MAX_TOP_K}; logprob capture stays off"
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1399,6 +1513,9 @@ fn convert_tool_definition(tool: crate::provider::ToolDefinition) -> ChatComplet
     }
 }
 
+// One flat parameter per request field, deliberately: the alternative is a
+// builder struct that exists only to satisfy the lint.
+#[allow(clippy::too_many_arguments)]
 fn build_chat_completion_request(
     model: String,
     messages: Vec<ChatCompletionMessage>,
@@ -1407,6 +1524,7 @@ fn build_chat_completion_request(
     max_tokens: Option<u32>,
     stop: Option<Vec<String>>,
     tool_choice: Option<String>,
+    capture_logprobs: Option<u8>,
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
@@ -1421,6 +1539,8 @@ fn build_chat_completion_request(
         tool_choice: if has_tools { tool_choice } else { None },
         stream: false,
         stream_options: None,
+        logprobs: capture_logprobs.map(|_| true),
+        top_logprobs: capture_logprobs,
     }
 }
 
@@ -1438,6 +1558,10 @@ struct ChatCompletionResponse {
 struct ChatCompletionChoice {
     message: ChatCompletionResponseMessage,
     finish_reason: Option<String>,
+    /// Present only when logprob capture is enabled and the backend honours
+    /// it. Absent and explicit-null both deserialise to `None`.
+    #[serde(default)]
+    logprobs: Option<ChoiceLogprobs>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1499,6 +1623,9 @@ struct NearAiStreamingResponse {
     output_tokens: u32,
     cache_read_input_tokens: u32,
     finish_reason: FinishReason,
+    /// Per-token distributions accumulated across chunks, empty unless capture
+    /// is enabled and the backend honours it.
+    logprobs: Vec<TokenLogprob>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1515,6 +1642,10 @@ struct ChatCompletionStreamChoice {
     delta: ChatCompletionStreamDelta,
     #[serde(default)]
     finish_reason: Option<String>,
+    /// Logprobs arrive per-chunk on the streaming path, alongside the content
+    /// delta they describe. See [`ChoiceLogprobs`] on sensitivity.
+    #[serde(default)]
+    logprobs: Option<ChoiceLogprobs>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3733,6 +3864,7 @@ data: [DONE]
             Some(16),
             None,
             Some("auto".to_string()),
+            None,
         );
 
         let tools = request.tools.expect("tools present");
@@ -3802,6 +3934,8 @@ data: [DONE]
             tool_choice: None,
             stream: false,
             stream_options: None,
+            logprobs: None,
+            top_logprobs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "gpt-4o");
@@ -3838,6 +3972,8 @@ data: [DONE]
             tool_choice: Some("auto".to_string()),
             stream: false,
             stream_options: None,
+            logprobs: None,
+            top_logprobs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         // f32 precision: 0.7f32 serializes as 0.699999988... in JSON
@@ -3853,6 +3989,162 @@ data: [DONE]
         assert_eq!(json["tools"][0]["function"]["name"], "get_weather");
     }
 
+    // -- logprob capture ------------------------------------------------------
+
+    /// Capture is opt-in. An absent or empty setting must leave the request
+    /// byte-identical to what we send today, because every trace produced
+    /// without the flag has to stay comparable to every trace produced before
+    /// the flag existed.
+    #[test]
+    fn test_logprob_capture_disabled_when_unset() {
+        assert_eq!(parse_logprob_capture_top_k(None), None);
+        assert_eq!(parse_logprob_capture_top_k(Some("")), None);
+        assert_eq!(parse_logprob_capture_top_k(Some("  ")), None);
+    }
+
+    #[test]
+    fn test_logprob_capture_parses_top_k() {
+        assert_eq!(parse_logprob_capture_top_k(Some("1")), Some(1));
+        assert_eq!(parse_logprob_capture_top_k(Some("5")), Some(5));
+        assert_eq!(parse_logprob_capture_top_k(Some(" 8 ")), Some(8));
+        assert_eq!(parse_logprob_capture_top_k(Some("20")), Some(20));
+    }
+
+    /// The OpenAI-shaped API caps `top_logprobs` at 20 and rejects 0. Clamp
+    /// rather than reject: a misconfigured k should degrade to a working
+    /// request, not fail the turn.
+    #[test]
+    fn test_logprob_capture_clamps_out_of_range() {
+        assert_eq!(parse_logprob_capture_top_k(Some("0")), Some(1));
+        assert_eq!(parse_logprob_capture_top_k(Some("21")), Some(20));
+        assert_eq!(parse_logprob_capture_top_k(Some("9999")), Some(20));
+    }
+
+    /// Unparseable means off, not a panic and not a default-on.
+    #[test]
+    fn test_logprob_capture_rejects_garbage() {
+        assert_eq!(parse_logprob_capture_top_k(Some("yes")), None);
+        assert_eq!(parse_logprob_capture_top_k(Some("-3")), None);
+        assert_eq!(parse_logprob_capture_top_k(Some("2.5")), None);
+    }
+
+    #[test]
+    fn test_request_omits_logprobs_when_capture_disabled() {
+        let req = ChatCompletionRequest {
+            model: "qwen3-30b".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            logprobs: None,
+            top_logprobs: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        // Absent, not null: some OpenAI-compatible backends reject an explicit
+        // null here, and we must not change the request shape for the default
+        // path.
+        assert!(json.get("logprobs").is_none());
+        assert!(json.get("top_logprobs").is_none());
+    }
+
+    #[test]
+    fn test_request_includes_logprobs_when_capture_enabled() {
+        let req = ChatCompletionRequest {
+            model: "qwen3-30b".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            stream_options: None,
+            logprobs: Some(true),
+            top_logprobs: Some(5),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["logprobs"], true);
+        assert_eq!(json["top_logprobs"], 5);
+    }
+
+    /// Today this data is dropped silently by serde. The whole point of the
+    /// change is that it stops being dropped.
+    #[test]
+    fn test_choice_deserializes_logprobs() {
+        let json = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+                "logprobs": {
+                    "content": [{
+                        "token": "ok",
+                        "logprob": -0.25,
+                        "top_logprobs": [
+                            {"token": "ok", "logprob": -0.25},
+                            {"token": "sure", "logprob": -1.75}
+                        ]
+                    }]
+                }
+            }]
+        });
+        let resp: ChatCompletionResponse = serde_json::from_value(json).unwrap();
+        let logprobs = resp.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs should be captured");
+        assert_eq!(logprobs.content.len(), 1);
+        assert_eq!(logprobs.content[0].token, "ok");
+        assert!((logprobs.content[0].logprob - -0.25).abs() < 1e-6);
+        assert_eq!(logprobs.content[0].top_logprobs.len(), 2);
+        assert_eq!(logprobs.content[0].top_logprobs[1].token, "sure");
+    }
+
+    /// Ironclaw streams by default, so this is the path that actually matters.
+    #[test]
+    fn test_stream_choice_deserializes_logprobs() {
+        let json = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "hel"},
+                "logprobs": {
+                    "content": [{
+                        "token": "hel",
+                        "logprob": -1.5,
+                        "top_logprobs": [{"token": "hel", "logprob": -1.5}]
+                    }]
+                }
+            }]
+        });
+        let chunk: ChatCompletionStreamChunk = serde_json::from_value(json).unwrap();
+        let logprobs = chunk.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("stream logprobs should be captured");
+        assert_eq!(logprobs.content[0].token, "hel");
+    }
+
+    /// A backend that ignores the parameter, or a chunk that carries no
+    /// logprobs, must not break the turn — capture is best-effort.
+    #[test]
+    fn test_logprobs_absent_or_null_is_not_an_error() {
+        let absent: ChatCompletionStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "x"}}]
+        }))
+        .unwrap();
+        assert!(absent.choices[0].logprobs.is_none());
+
+        let null: ChatCompletionStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "x"}, "logprobs": null}]
+        }))
+        .unwrap();
+        assert!(null.choices[0].logprobs.is_none());
+    }
+
     #[test]
     fn test_request_omits_tool_choice_without_tools() {
         let request = build_chat_completion_request(
@@ -3863,6 +4155,7 @@ data: [DONE]
             None,
             None,
             Some("auto".to_string()),
+            None,
         );
 
         let json = serde_json::to_value(&request).unwrap();
