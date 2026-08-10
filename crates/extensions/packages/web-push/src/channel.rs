@@ -45,8 +45,16 @@ impl WebPushChannelAdapter {
 
 #[async_trait]
 impl ChannelAdapter for WebPushChannelAdapter {
-    /// Web Push has no inbound surface: enrollment happens in the
-    /// authenticated WebUI session, never through channel ingress.
+    /// The web app's inbound entrypoint is the authenticated session (the
+    /// generic session-inbound route), whose wire shape is host-owned and
+    /// whose actor authority is the authenticated caller — by the trust
+    /// rules, an adapter can never mint that identity from a payload. Session
+    /// normalization therefore lives at the host session door, and this
+    /// adapter's webhook-shaped `inbound` stays unsupported: no webhook mount
+    /// exists for this channel and a vendor-style parse would have nothing to
+    /// parse. Replies stream over the durable projection pipeline (the
+    /// channel declares `reply_mode = "streaming"`); this adapter's delivery
+    /// half carries only notification-class sends (browser push).
     fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)
     }

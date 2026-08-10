@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel::ChannelReplyMode;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
@@ -38,6 +39,11 @@ pub struct ResolvedChannelDelivery {
     pub adapter: Arc<dyn ChannelAdapter>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
+    /// The channel's declared reply sink. Conversation-reply intents for a
+    /// `streaming` channel ride the durable projection stream and must never
+    /// be delivered through the batched coordinator path; notification-class
+    /// sends flow regardless of mode.
+    pub reply_mode: ChannelReplyMode,
 }
 
 /// Resolver port: the coordinator's view of the active extension set.

@@ -44,6 +44,11 @@ inbound = true
 outbound = true
 notifications = true
 conversation_model = "isolated"
+# Replies stream to the browser over the durable projection pipeline
+# (SSE/WebSocket) — the existing WebChat event stream IS this channel's reply
+# sink. The batched delivery coordinator never carries this channel's
+# conversation replies; only notification-class sends (browser push) do.
+reply_mode = "streaming"
 
 # The authenticated-session entrypoint: no webhook mount, no route_suffix —
 # a browser request can never reach the webhook namespace. Trust is the host
@@ -93,7 +98,9 @@ request_body_limit_bytes = 8192
 response_body_limit_bytes = 65536
 injection = { type = "vapid_authorization" }
 
+# max_message_chars is deliberately undeclared: a streaming reply sink never
+# batches or splits, so the channel is unlimited. (Push notification payloads
+# have their own transport bound, enforced by the adapter.)
 [channel.presentation]
 supports_markdown = false
 supports_threads = false
-max_message_chars = 1500

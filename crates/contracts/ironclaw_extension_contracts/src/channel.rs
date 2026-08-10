@@ -93,6 +93,20 @@ impl<'de> serde::Deserialize<'de> for RouteSuffix {
     }
 }
 
+/// The channel's declared reply-sink behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelReplyMode {
+    /// Replies stream to the client over the durable projection pipeline
+    /// (SSE/WebSocket). Per-conversation reply delivery never routes through
+    /// the batched delivery coordinator.
+    Streaming,
+    /// Replies are collected and sent as channel messages through the
+    /// delivery coordinator, split to fit the channel's declared bounds.
+    #[default]
+    Batched,
+}
+
 /// The declared channel surface of one extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +136,14 @@ pub struct ChannelDescriptor {
     pub egress: Vec<ChannelEgressDescriptor>,
     #[serde(default)]
     pub presentation: ChannelPresentation,
+    /// How this channel's reply sink consumes the durable reply-event stream.
+    /// `streaming` forwards the live/replayed event stream to the client (the
+    /// authenticated-session transports); `batched` collects and sends
+    /// per-message through the delivery coordinator (webhook vendors). The
+    /// sink sits on top of the durable event/projection pipeline either way —
+    /// a consumer of durable reply events, never a replacement.
+    #[serde(default)]
+    pub reply_mode: ChannelReplyMode,
     /// User-account connection behavior for this channel. This declaration is
     /// the only authority for pairing presentation and connection notices;
     /// hosts must not infer a recipe from an extension id or display name.
@@ -191,6 +213,14 @@ impl ChannelDescriptor {
                     return Err(ChannelDescriptorError::WebhookIngressWithoutRouteSuffix);
                 }
                 _ => {}
+            }
+            // A streaming reply sink forwards the projection stream over the
+            // session transport; a webhook vendor has no such stream to
+            // consume. Pair the declared reply mode with the entrypoint.
+            if self.reply_mode == ChannelReplyMode::Streaming
+                && !ingress.verification.is_authenticated_session()
+            {
+                return Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress);
             }
         }
         for egress in &self.egress {
@@ -587,11 +617,43 @@ pub enum ChannelDescriptorError {
     SessionIngressWithRouteSuffix,
     #[error("webhook ingress must declare a route_suffix to mount its receiving route")]
     WebhookIngressWithoutRouteSuffix,
+    #[error(
+        "streaming reply mode requires an authenticated-session entrypoint; webhook channels batch"
+    )]
+    StreamingReplyWithoutSessionIngress,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_reply_mode_requires_the_session_entrypoint() {
+        let mut channel: ChannelDescriptor =
+            toml::from_str(documented_channel_toml()).expect("documented channel deserializes");
+        assert_eq!(
+            channel.reply_mode,
+            ChannelReplyMode::Batched,
+            "undeclared reply mode defaults to batched"
+        );
+        channel.reply_mode = ChannelReplyMode::Streaming;
+        assert!(
+            matches!(
+                channel.validate(),
+                Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress)
+            ),
+            "a webhook channel must not declare a streaming reply sink"
+        );
+
+        let mut session = channel.clone();
+        if let Some(ingress) = session.ingress.as_mut() {
+            ingress.route_suffix = None;
+            ingress.verification = IngressVerificationRecipe::AuthenticatedSession;
+        }
+        session
+            .validate()
+            .expect("streaming reply mode over the session entrypoint validates");
+    }
 
     fn documented_channel_toml() -> &'static str {
         r#"

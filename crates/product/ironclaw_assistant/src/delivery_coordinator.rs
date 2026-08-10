@@ -108,6 +108,15 @@ impl DeliveryIntent {
         !self.runs_outbound_policy()
     }
 
+    /// Conversation-scoped reply/interaction traffic — everything except the
+    /// notification-class sends (`BackgroundRunNotice`, `ModelDelivery`). A
+    /// `streaming` channel's conversation replies ride the durable projection
+    /// stream, so these intents never route through the batched delivery
+    /// path for such a channel; notification-class sends flow regardless.
+    pub fn is_conversation_reply(self) -> bool {
+        !matches!(self, Self::BackgroundRunNotice | Self::ModelDelivery)
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::FinalReply => "final-reply",
@@ -401,6 +410,14 @@ impl DeliveryCoordinator {
         reject_caller_supplied_files(&request.parts)?;
         self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
             .await;
+        if self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id) {
+            tracing::debug!(
+                target: "ironclaw::reborn::delivery",
+                intent = request.intent.as_str(),
+                "conversation reply for a streaming channel rides the projection stream; skipping batched delivery"
+            );
+            return Ok(CoordinatedDeliveryOutcome::NoDelivery);
+        }
 
         // 1. Policy: authorize the candidate and persist the attempt.
         let Some(decision) = outbound_policy
@@ -476,6 +493,14 @@ impl DeliveryCoordinator {
         }
         reject_caller_supplied_files(&request.parts)?;
         self.ensure_scope_recovered(&request.scope).await;
+        if self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id) {
+            tracing::debug!(
+                target: "ironclaw::reborn::delivery",
+                intent = request.intent.as_str(),
+                "conversation notice for a streaming channel rides the projection stream; skipping batched delivery"
+            );
+            return Ok(CoordinatedDeliveryOutcome::NoDelivery);
+        }
 
         // Persist the attempt before anything else. The synthetic reply
         // target names the source conversation (hashed: fingerprints can
@@ -619,6 +644,28 @@ impl DeliveryCoordinator {
             reply_context,
         )
         .await
+    }
+
+    /// Streaming-channel gate: a `streaming` channel's conversation replies
+    /// ride the durable projection stream — the batched path must never
+    /// double-deliver them. Consulted before any attempt is persisted;
+    /// notification-class intents pass through so the channel's
+    /// `notifications` capability still works. Unresolvable channels pass
+    /// too: the delivery path's own resolution failure handling stays
+    /// authoritative.
+    fn streaming_channel_skips_conversation_reply(
+        &self,
+        intent: DeliveryIntent,
+        extension_id: &str,
+    ) -> bool {
+        intent.is_conversation_reply()
+            && self
+                .resolver
+                .resolve_channel_delivery(extension_id)
+                .is_some_and(|channel| {
+                    channel.reply_mode
+                        == ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming
+                })
     }
 
     async fn resolve_channel_context(

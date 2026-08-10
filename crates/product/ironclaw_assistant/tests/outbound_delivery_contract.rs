@@ -344,6 +344,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
+    reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -356,6 +357,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            reply_mode: self.reply_mode,
         })
     }
 }
@@ -410,6 +412,7 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
+            reply_mode: Default::default(),
         })
     }
 }
@@ -624,6 +627,7 @@ fn coordinator_over_recording_reply_lookups(
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
+            reply_mode: Default::default(),
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1652,6 +1656,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
+            reply_mode: Default::default(),
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1769,6 +1774,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            reply_mode: Default::default(),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -2072,6 +2078,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
+            reply_mode: Default::default(),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -2227,4 +2234,112 @@ async fn codec_resolver_enforces_the_dm_rule_from_the_codec_verdict() {
             );
         }
     }
+}
+
+// ─── Streaming reply-mode gate ──────────────────────────────────────────────
+//
+// A `streaming` channel's conversation replies ride the durable projection
+// stream (the SSE/WebSocket path IS the reply sink); the batched coordinator
+// path must never double-deliver them. Notification-class sends
+// (`ModelDelivery`, `BackgroundRunNotice`) still flow so the channel's
+// `notifications` capability works.
+
+#[tokio::test]
+async fn streaming_channel_conversation_reply_skips_batched_delivery() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-100")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("streaming skip is a clean outcome, not an error");
+
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery),
+        "a streaming channel's final reply must not batch-deliver, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        0,
+        "the adapter must never be reached for a streaming conversation reply"
+    );
+}
+
+#[tokio::test]
+async fn streaming_channel_still_receives_notification_class_deliveries() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-200")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    request.intent = DeliveryIntent::ModelDelivery;
+    let outcome = coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+        .await
+        .expect("notification-class delivery drives");
+
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "notification-class sends must flow to a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(adapter.deliver_calls(), 1);
 }

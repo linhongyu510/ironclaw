@@ -183,6 +183,9 @@ display_name = "Slack messages"
 inbound = true
 outbound = true
 conversation_model = "continuous"
+# Replies are collected and sent as channel messages through the delivery
+# coordinator (the batched reply sink).
+reply_mode = "batched"
 commands = ["model", "status", "new", "stop", "interrupt"]
 
 [channel.connection]
