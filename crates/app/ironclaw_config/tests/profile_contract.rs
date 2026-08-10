@@ -112,37 +112,31 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(!RebornProfile::Production.uses_standalone_local_runtime_volume());
     assert!(!RebornProfile::MigrationDryRun.uses_standalone_local_runtime_volume());
 
-    assert_eq!(
-        RebornProfile::Standalone.local_runtime_storage_subdir(),
-        "local-dev"
-    );
+    assert_eq!(RebornProfile::Standalone.local_runtime_storage_subdir(), "");
     assert_eq!(
         RebornProfile::StandaloneUnrestricted.local_runtime_storage_subdir(),
-        "local-dev"
+        ""
     );
     assert_eq!(
         RebornProfile::HostedSingleTenant.local_runtime_storage_subdir(),
-        "hosted-single-tenant"
+        ""
     );
     assert_eq!(
         RebornProfile::HostedSingleTenantVolume.local_runtime_storage_subdir(),
-        "hosted-single-tenant-volume"
+        ""
     );
     assert_eq!(
         RebornProfile::HostedSingleTenantVolumeSandboxed.local_runtime_storage_subdir(),
-        "hosted-single-tenant-volume-sandboxed"
+        ""
     );
     assert_eq!(
         RebornProfile::HostedSingleTenantVolumeSandboxedRailway.local_runtime_storage_subdir(),
-        "hosted-single-tenant-volume-sandboxed"
+        ""
     );
-    assert_eq!(
-        RebornProfile::Production.local_runtime_storage_subdir(),
-        "local-dev"
-    );
+    assert_eq!(RebornProfile::Production.local_runtime_storage_subdir(), "");
     assert_eq!(
         RebornProfile::MigrationDryRun.local_runtime_storage_subdir(),
-        "local-dev"
+        ""
     );
 
     assert!(RebornProfile::Standalone.supports_local_runtime_skill_management());

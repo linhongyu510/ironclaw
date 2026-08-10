@@ -2811,7 +2811,7 @@ regex_activation_enabled = false
     }
 
     #[tokio::test]
-    async fn local_profiles_initialize_their_runtime_storage_roots() {
+    async fn local_runtime_storage_root_is_profile_independent() {
         for profile in [
             ironclaw_config::RebornProfile::Standalone,
             ironclaw_config::RebornProfile::StandaloneUnrestricted,
@@ -2821,7 +2821,7 @@ regex_activation_enabled = false
         ] {
             let (_temp, config) = boot_config_with_config_toml("local-dev", "");
             let root = local_runtime_storage_root(&config, profile);
-            assert!(!root.exists());
+            assert_eq!(root, config.home().path());
             initialize_local_runtime_storage_root(&config, profile)
                 .await
                 .expect("initialize local runtime storage");
@@ -2831,12 +2831,20 @@ regex_activation_enabled = false
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
         let hosted = ironclaw_config::RebornProfile::HostedSingleTenant;
         let root = local_runtime_storage_root(&config, hosted);
+        assert_eq!(root, config.home().path());
         initialize_local_runtime_storage_root(&config, hosted)
             .await
             .expect("hosted profile is a no-op");
-        assert!(!root.exists());
+        assert!(root.is_dir());
 
-        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(temp.path().join("reborn-home").into_os_string()),
+            None,
+            None,
+            Some("local-dev".into()),
+        )
+        .expect("boot config");
         let blocked_root =
             local_runtime_storage_root(&config, ironclaw_config::RebornProfile::Standalone);
         std::fs::write(&blocked_root, "not a directory").expect("block runtime directory");
