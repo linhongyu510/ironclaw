@@ -8,7 +8,6 @@ use crate::root::default_system_prompt::seed_default_system_prompt;
 const DEFAULT_SYSTEM_PROMPT_PATH: &str = "prompts/default-system.md";
 #[cfg(all(test, unix))]
 pub(crate) use ironclaw_extension_host::bundled_skills::LEGACY_SKILLS_BACKFILL_MARKER;
-#[cfg(test)]
 const STANDALONE_LEGACY_SKILL_TENANTS: [&str; 2] = ["default", "reborn-cli"];
 
 /// Apply the legacy standalone skill-tree migration to every tenant identity
@@ -82,6 +81,7 @@ async fn record_skill_disk_import(
 
 pub(crate) async fn import_host_disk_skills_into_database(
     storage_root: &Path,
+    owner_user_id: &UserId,
     filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
 ) -> Result<(), RebornBuildError> {
     use ironclaw_filesystem::RootFilesystem;
@@ -89,8 +89,10 @@ pub(crate) async fn import_host_disk_skills_into_database(
 
     validate_legacy_skill_snapshot_tree(storage_root)?;
     let tenants_root = storage_root.join("tenants");
+    let mut skill_files = disk_skill_files(&tenants_root)?;
+    skill_files.extend(unscoped_disk_skill_files(storage_root, owner_user_id)?);
     let mut imported = 0usize;
-    for (host_path, virtual_path) in disk_skill_files(&tenants_root)? {
+    for (host_path, virtual_path) in skill_files {
         let target = VirtualPath::new(&virtual_path)?;
         let marker = VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
         // Already migrated. Re-reading the disk copy here resurrects a skill the user has deleted.
@@ -126,6 +128,28 @@ pub(crate) async fn import_host_disk_skills_into_database(
         );
     }
     Ok(())
+}
+
+/// Map the oldest unscoped `skills/` tree exactly as the released standalone
+/// backfill did: to the configured owner under both supported tenant aliases.
+fn unscoped_disk_skill_files(
+    storage_root: &Path,
+    owner_user_id: &UserId,
+) -> Result<Vec<(PathBuf, String)>, RebornBuildError> {
+    let skills_root = storage_root.join("skills");
+    let mut files = Vec::new();
+    collect_files_under(&skills_root, &skills_root, &mut |relative, host_path| {
+        for tenant_id in STANDALONE_LEGACY_SKILL_TENANTS {
+            files.push((
+                host_path.to_path_buf(),
+                format!(
+                    "/tenants/{tenant_id}/users/{}/skills/{relative}",
+                    owner_user_id.as_str()
+                ),
+            ));
+        }
+    })?;
+    Ok(files)
 }
 
 /// Every file under `tenants/<tenant>/users/<user>/skills/**`, paired with its database path.
@@ -320,12 +344,16 @@ mod skill_disk_import_tests {
     use std::sync::Arc;
 
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-    use ironclaw_host_api::path::VirtualPath;
+    use ironclaw_host_api::{ids::UserId, path::VirtualPath};
 
     use super::import_host_disk_skills_into_database;
 
     const TENANT: &str = "import-tenant";
     const USER: &str = "import-user";
+
+    fn owner() -> UserId {
+        UserId::new(USER).expect("owner user id")
+    }
 
     fn virtual_skill_path(name: &str) -> VirtualPath {
         VirtualPath::new(format!(
@@ -350,6 +378,40 @@ mod skill_disk_import_tests {
         .expect("skill body");
     }
 
+    fn seed_unscoped_legacy_skill_on_disk(storage_root: &Path, name: &str) {
+        let dir = storage_root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).expect("legacy skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name}\n---\n\nbody\n"),
+        )
+        .expect("legacy skill body");
+    }
+
+    #[tokio::test]
+    async fn unscoped_legacy_skills_keep_the_released_owner_and_tenant_mapping() {
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let filesystem = database_filesystem();
+        seed_unscoped_legacy_skill_on_disk(storage.path(), "unscoped");
+
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+            .await
+            .expect("legacy unscoped import runs");
+
+        for tenant in ["default", "reborn-cli"] {
+            let path = VirtualPath::new(format!(
+                "/tenants/{tenant}/users/{USER}/skills/unscoped/SKILL.md"
+            ))
+            .expect("mapped skill path");
+            assert!(
+                RootFilesystem::stat(filesystem.as_ref(), &path)
+                    .await
+                    .is_ok(),
+                "released backfill mapping is preserved for {tenant}"
+            );
+        }
+    }
+
     fn database_filesystem() -> Arc<ironclaw_filesystem::CompositeRootFilesystem> {
         crate::filesystem_assembly::production_database_root_filesystem(
             Arc::new(InMemoryBackend::new()),
@@ -369,12 +431,12 @@ mod skill_disk_import_tests {
         let filesystem = database_filesystem();
 
         seed_skill_on_disk(storage.path(), "first");
-        import_host_disk_skills_into_database(storage.path(), &filesystem)
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
             .await
             .expect("first import runs");
 
         seed_skill_on_disk(storage.path(), "second");
-        import_host_disk_skills_into_database(storage.path(), &filesystem)
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
             .await
             .expect("second import runs");
 
@@ -399,7 +461,7 @@ mod skill_disk_import_tests {
         let filesystem = database_filesystem();
 
         seed_skill_on_disk(storage.path(), "removed-later");
-        import_host_disk_skills_into_database(storage.path(), &filesystem)
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
             .await
             .expect("first import runs");
 
@@ -408,7 +470,7 @@ mod skill_disk_import_tests {
             .await
             .expect("user deletes the skill through the product");
 
-        import_host_disk_skills_into_database(storage.path(), &filesystem)
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
             .await
             .expect("second import runs");
 
@@ -433,7 +495,7 @@ mod skill_disk_import_tests {
         let snapshot_alias = storage.path().join("snapshot");
         symlink(outside.path(), &snapshot_alias).expect("snapshot alias");
 
-        let error = import_host_disk_skills_into_database(&snapshot_alias, &filesystem)
+        let error = import_host_disk_skills_into_database(&snapshot_alias, &owner(), &filesystem)
             .await
             .expect_err("a legacy snapshot root symlink must fail closed");
 
@@ -473,7 +535,7 @@ mod skill_disk_import_tests {
             .join("escaped-subtree");
         symlink(&outside_skill, skills_root.join("linked")).expect("skill subtree symlink");
 
-        let error = import_host_disk_skills_into_database(storage.path(), &filesystem)
+        let error = import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
             .await
             .expect_err("a legacy snapshot subtree symlink must fail closed");
 

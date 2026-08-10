@@ -330,6 +330,7 @@ async fn build_local_storage_production_shaped(
     if let Some(snapshot_root) = legacy_skill_snapshot.as_deref() {
         crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(
             snapshot_root,
+            &owner_user_id,
             &filesystem,
         )
         .await?;

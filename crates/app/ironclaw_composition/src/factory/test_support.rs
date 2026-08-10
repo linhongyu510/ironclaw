@@ -881,6 +881,29 @@ pub(crate) async fn open_standalone_skill_management_for_test(
     storage_root: &Path,
     owner_user_id: ironclaw_host_api::ids::UserId,
 ) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
+    open_standalone_skill_management_with_snapshot_for_test(storage_root, owner_user_id, None).await
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_standalone_skill_management_after_adoption_for_test(
+    storage_root: &Path,
+    owner_user_id: ironclaw_host_api::ids::UserId,
+    source: crate::LegacySkillSnapshotSource,
+) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
+    open_standalone_skill_management_with_snapshot_for_test(
+        storage_root,
+        owner_user_id,
+        Some(source),
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+async fn open_standalone_skill_management_with_snapshot_for_test(
+    storage_root: &Path,
+    owner_user_id: ironclaw_host_api::ids::UserId,
+    source: Option<crate::LegacySkillSnapshotSource>,
+) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
     let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
     let bundle = build_filesystem(
         paths.state_root(),
@@ -890,6 +913,14 @@ pub(crate) async fn open_standalone_skill_management_for_test(
         DurableStorageInput::EmbeddedLibsql,
     )
     .await?;
+    if let Some(source) = source {
+        crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(
+            &source.snapshot_root(&paths),
+            &owner_user_id,
+            &bundle.filesystem,
+        )
+        .await?;
+    }
     Ok(Arc::new(
         ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
             owner_user_id,

@@ -90,6 +90,19 @@ publishes `layout.toml` only after the canonical store and secret resolver
 verify. It never automatically deletes the source snapshot, adoption journal,
 or an external workspace source.
 
+For embedded libSQL, verification reopens the adopted database and encrypted
+secret resolver. For hosted PostgreSQL, the command opens the configured pool,
+runs the production filesystem migrations, and constructs the encrypted secret
+store with the configured master key before making any filesystem mutation.
+Connection, migration, or key failures leave the legacy source in place and do
+not publish `layout.toml`.
+
+Released tenant/user skill trees under
+`tenants/<tenant>/users/<user>/skills/` remain in the retained adoption
+snapshot and are imported through the normal boot importer into the canonical
+database. Any other content under a legacy `tenants/` tree is rejected rather
+than guessed or broadened to another owner.
+
 If adoption is interrupted, leave the home in place, keep services stopped,
 and rerun the same explicit command. It resumes only the exact journaled phase
 and snapshot; it refuses unexplained partial layouts, unsupported journal or
@@ -134,6 +147,7 @@ path and transition contract is covered by
 ```bash
 cargo test -p ironclaw_config --test profile_contract
 cargo test -p ironclaw storage_layout
+cargo test -p ironclaw --test storage_adoption
 cargo test -p ironclaw_composition --test profile_acceptance
 IRONCLAW_REQUIRE_DOCKER_TESTS=1 \
   cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture

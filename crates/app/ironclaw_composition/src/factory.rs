@@ -128,7 +128,9 @@ use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendKind, ContentKind, DiskFilesystem, IndexPolicy, StorageClass,
 };
-use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem, RootFilesystem};
+use ironclaw_filesystem::{
+    CompositeRootFilesystem, LibSqlRootFilesystem, PostgresRootFilesystem, RootFilesystem,
+};
 use ironclaw_host_api::runtime_policy::{
     DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     SecretMode,
@@ -785,6 +787,39 @@ pub async fn open_standalone_secret_store(
     let scoped = crate::wrap_scoped(filesystem);
     let (store, _crypto) = build_secret_store(root, scoped, None).await?;
     Ok(store as Arc<dyn SecretStorePort>)
+}
+
+/// Verify the configured hosted PostgreSQL store and secrets master key before
+/// an offline filesystem adoption is allowed to commit its ready manifest.
+///
+/// This deliberately builds only the authoritative database root and secret
+/// resolver. It does not seed host content, start workers, or construct a
+/// runtime, and therefore cannot admit traffic before layout adoption commits.
+pub async fn verify_hosted_postgres_store_for_adoption(
+    input: RebornHostBindings,
+) -> Result<(), RebornBuildError> {
+    let RebornStorageInput::HostedSingleTenantPostgres {
+        pool_source,
+        secret_master_key,
+        ..
+    } = input.storage
+    else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "storage adoption verifier requires hosted single-tenant PostgreSQL bindings"
+                .to_string(),
+        });
+    };
+    let pool = open_postgres_pool_from_source(pool_source)?;
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    filesystem.run_migrations().await?;
+    let scoped = crate::wrap_scoped(filesystem);
+    let _ = build_secret_store(
+        Path::new("external-postgres"),
+        scoped,
+        Some(secret_master_key),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Where a resolved standalone master key came from, used to name the source in

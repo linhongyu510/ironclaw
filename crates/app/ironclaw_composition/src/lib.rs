@@ -93,6 +93,8 @@ pub use factory::open_standalone_secret_store;
 /// public so integration tests build the same policy the binary composes.
 // consumer: composition's own contract tests · pinned by: `composition/tests/support/first_party.rs`
 pub use factory::production_first_party_trust_policy;
+// consumer: `ironclaw_cli storage adopt` · pinned by: `ironclaw_cli/tests/storage_adoption.rs`
+pub use factory::verify_hosted_postgres_store_for_adoption;
 // consumer: `ironclaw_cli` onboard/master_key · pinned by: `ironclaw_cli` build (the outcome is the fn's return type; `factory` is private)
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
 // consumer: `ironclaw_cli` status + runtime · pinned by: `ironclaw_cli` build

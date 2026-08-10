@@ -28,7 +28,7 @@ const SNAPSHOT_DIR: &str = "snapshot";
 const STAGING_DIR: &str = "staging";
 const STAGING_OWNER_FILE: &str = ".adoption-owner";
 const ADOPTION_LOCK_FILE: &str = "adoption.lock";
-const JOURNAL_SCHEMA_VERSION: u32 = 3;
+const JOURNAL_SCHEMA_VERSION: u32 = 4;
 const DB_FILE: &str = "reborn-local-dev.db";
 const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
 const LIBSQL_DB_UNIT: &[&str] = &[
@@ -56,6 +56,14 @@ pub(crate) struct WorkspaceImportOptions {
     pub(crate) tenant: TenantId,
     pub(crate) user: UserId,
     pub(crate) confirmed: bool,
+}
+
+/// Proof supplied by the caller that the target authoritative store was
+/// verified through its production opener before adoption can commit Ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalStoreVerification {
+    EmbeddedLibSql,
+    ExternalPostgresVerified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,11 +150,12 @@ struct LegacyCandidate {
     db_files: Vec<String>,
     has_master_key: bool,
     has_system_content: bool,
+    has_legacy_skills: bool,
 }
 
 impl LegacyCandidate {
     fn is_embedded(&self) -> bool {
-        !self.db_files.is_empty() || self.has_master_key
+        self.kind.requirement().durable_state == DurableStateKind::EmbeddedLibSql
     }
 
     fn snapshot_root(&self, adoption_root: &Path) -> PathBuf {
@@ -160,6 +169,7 @@ struct AdoptionInventory {
     db_files: Vec<String>,
     has_master_key: bool,
     has_system_content: bool,
+    has_legacy_skills: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +258,7 @@ impl AdoptionJournal {
                 db_files: candidate.db_files.clone(),
                 has_master_key: candidate.has_master_key,
                 has_system_content: candidate.has_system_content,
+                has_legacy_skills: candidate.has_legacy_skills,
             },
             workspace,
         }
@@ -264,6 +275,7 @@ impl AdoptionJournal {
             db_files: self.inventory.db_files.clone(),
             has_master_key: self.inventory.has_master_key,
             has_system_content: self.inventory.has_system_content,
+            has_legacy_skills: self.inventory.has_legacy_skills,
         }
     }
 
@@ -398,15 +410,30 @@ pub(crate) fn ready_legacy_skill_snapshot_source(
     }
     Ok(journal
         .inventory
-        .has_system_content
+        .has_legacy_skills
         .then(|| journal.source.skill_snapshot_source()))
 }
 
 /// Run or resume the one bounded offline adoption state machine.
+#[cfg(test)]
 pub(crate) fn adopt_layout(
     home: &RebornHome,
     requirement: LayoutRequirement,
     options: AdoptOptions,
+) -> anyhow::Result<()> {
+    adopt_layout_with_store_verification(
+        home,
+        requirement,
+        options,
+        CanonicalStoreVerification::EmbeddedLibSql,
+    )
+}
+
+pub(crate) fn adopt_layout_with_store_verification(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+    options: AdoptOptions,
+    store_verification: CanonicalStoreVerification,
 ) -> anyhow::Result<()> {
     require_operator_confirmations(&options)?;
     let home_path = home.path();
@@ -476,6 +503,7 @@ pub(crate) fn adopt_layout(
         &adoption_root,
         &journal_path,
         &mut journal,
+        store_verification,
     )?;
     Ok(())
 }
@@ -498,6 +526,7 @@ fn resume_adoption(
     adoption_root: &Path,
     journal_path: &Path,
     journal: &mut AdoptionJournal,
+    store_verification: CanonicalStoreVerification,
 ) -> anyhow::Result<()> {
     let candidate = journal.candidate(home);
     let snapshot = candidate.snapshot_root(adoption_root);
@@ -545,9 +574,13 @@ fn resume_adoption(
     }
 
     if journal.phase == AdoptionPhase::MigrationPending {
-        verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
-        verify_canonical_store(paths, candidate.is_embedded())?;
-        verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
+        verify_post_migration_canonical_shape(paths, &candidate, &snapshot, false)?;
+        verify_canonical_store(
+            paths,
+            candidate.kind.requirement().durable_state,
+            store_verification,
+        )?;
+        verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
         journal.phase = AdoptionPhase::StoreVerified;
         write_journal(journal_path, journal)?;
     }
@@ -555,9 +588,13 @@ fn resume_adoption(
     // StoreVerified is durable progress, not a proof that the canonical tree
     // still exists. Never compare post-migration libSQL bytes to the immutable
     // snapshot; validate the post-migration shape and reopen the real store.
-    verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
-    verify_canonical_store(paths, candidate.is_embedded())?;
-    verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
+    verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
+    verify_canonical_store(
+        paths,
+        candidate.kind.requirement().durable_state,
+        store_verification,
+    )?;
+    verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
 
     let manifest = LayoutManifest::new(journal.target_requirement);
     write_manifest_last(home, &manifest)?;
@@ -1021,17 +1058,35 @@ fn install_staged(
     Ok(())
 }
 
-fn verify_canonical_store(paths: &RebornStoragePaths, embedded_state: bool) -> anyhow::Result<()> {
-    if !embedded_state {
-        return Ok(());
+fn verify_canonical_store(
+    paths: &RebornStoragePaths,
+    durable_state: DurableStateKind,
+    verification: CanonicalStoreVerification,
+) -> anyhow::Result<()> {
+    match (durable_state, verification) {
+        (DurableStateKind::EmbeddedLibSql, CanonicalStoreVerification::EmbeddedLibSql) => {
+            let state_root = paths.state_root().to_path_buf();
+            crate::runtime::block_on_cli(async move {
+                ironclaw_composition::open_standalone_secret_store(&state_root)
+                    .await
+                    .map(|_| ())
+            })
+            .context("open canonical embedded store and construct the canonical secret resolver")
+        }
+        (
+            DurableStateKind::ExternalPostgres,
+            CanonicalStoreVerification::ExternalPostgresVerified,
+        ) => Ok(()),
+        (DurableStateKind::ExternalPostgres, CanonicalStoreVerification::EmbeddedLibSql) => {
+            bail!(
+                "canonical external PostgreSQL store and secret resolver were not verified; refusing to commit StoreVerified or layout.toml"
+            )
+        }
+        (
+            DurableStateKind::EmbeddedLibSql,
+            CanonicalStoreVerification::ExternalPostgresVerified,
+        ) => bail!("external-store verification cannot admit an embedded libSQL layout"),
     }
-    let state_root = paths.state_root().to_path_buf();
-    crate::runtime::block_on_cli(async move {
-        ironclaw_composition::open_standalone_secret_store(&state_root)
-            .await
-            .map(|_| ())
-    })
-    .context("open canonical embedded store and construct the canonical secret resolver")
 }
 
 fn verify_canonical_inventory(
@@ -1052,9 +1107,10 @@ fn verify_post_migration_canonical_shape(
     paths: &RebornStoragePaths,
     candidate: &LegacyCandidate,
     snapshot: &Path,
+    require_embedded_database: bool,
 ) -> anyhow::Result<()> {
     require_ordinary_directory(paths.state_root())?;
-    if candidate.is_embedded() {
+    if candidate.is_embedded() && require_embedded_database {
         require_ordinary_file(&paths.state_root().join(DB_FILE))?;
     }
     if candidate.has_master_key {
@@ -1391,6 +1447,7 @@ fn inspect_profile_root(
     let mut db_files = Vec::new();
     let mut has_master_key = false;
     let mut has_system_content = false;
+    let mut has_legacy_skills = false;
     for entry in
         fs::read_dir(&root).with_context(|| format!("read legacy root {}", root.display()))?
     {
@@ -1409,6 +1466,13 @@ fn inspect_profile_root(
             require_ordinary_directory(&path)?;
             has_system_content = system_tree_has_content(&path)?;
             validate_system_tree(&path)?;
+        } else if name == "skills" {
+            require_ordinary_directory(&path)?;
+            validate_ordinary_tree(&path)?;
+            has_legacy_skills |= directory_has_content(&path)?;
+        } else if name == "tenants" {
+            require_ordinary_directory(&path)?;
+            has_legacy_skills |= validate_legacy_tenant_skill_tree(&path)?;
         } else if path.is_dir() && directory_is_empty(&path)? {
             // Empty directory entries are not state and cannot be inferred as
             // workspaces or ownership. Leave them in the preserved snapshot.
@@ -1427,7 +1491,8 @@ fn inspect_profile_root(
             root.display()
         );
     }
-    let populated = !db_files.is_empty() || has_master_key || has_system_content;
+    let populated =
+        !db_files.is_empty() || has_master_key || has_system_content || has_legacy_skills;
     if !populated {
         return Ok(None);
     }
@@ -1451,6 +1516,7 @@ fn inspect_profile_root(
         db_files,
         has_master_key,
         has_system_content,
+        has_legacy_skills,
     }))
 }
 
@@ -1490,6 +1556,7 @@ fn inspect_bare_home(home: &Path) -> anyhow::Result<Option<LegacyCandidate>> {
         db_files,
         has_master_key,
         has_system_content: false,
+        has_legacy_skills: false,
     }))
 }
 
@@ -1743,6 +1810,74 @@ fn validate_system_tree(root: &Path) -> anyhow::Result<()> {
         validate_ordinary_tree(&entry.path())?;
     }
     Ok(())
+}
+
+/// Validate the one released host-disk user-skill grammar without accepting
+/// arbitrary tenant content as a migration source.
+fn validate_legacy_tenant_skill_tree(tenants_root: &Path) -> anyhow::Result<bool> {
+    let mut has_content = false;
+    for tenant in fs::read_dir(tenants_root)
+        .with_context(|| format!("read legacy tenants tree {}", tenants_root.display()))?
+    {
+        let tenant = tenant
+            .with_context(|| format!("read tenant entry under {}", tenants_root.display()))?;
+        let tenant_path = tenant.path();
+        require_ordinary_directory(&tenant_path)?;
+        let tenant_name = tenant.file_name().to_string_lossy().into_owned();
+        TenantId::new(tenant_name.clone())
+            .map_err(|error| anyhow!("invalid legacy skill tenant `{tenant_name}`: {error}"))?;
+        let users_root = tenant_path.join("users");
+        for entry in fs::read_dir(&tenant_path)
+            .with_context(|| format!("read legacy tenant {}", tenant_path.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("read entry under legacy tenant {}", tenant_path.display())
+            })?;
+            if entry.file_name() != "users" {
+                bail!(
+                    "unknown entry `{}` under legacy tenant {}; only users/<user>/skills is adoptable",
+                    entry.file_name().to_string_lossy(),
+                    tenant_path.display()
+                );
+            }
+            require_ordinary_directory(&entry.path())?;
+        }
+        if !users_root.exists() {
+            continue;
+        }
+        for user in fs::read_dir(&users_root)
+            .with_context(|| format!("read legacy users tree {}", users_root.display()))?
+        {
+            let user =
+                user.with_context(|| format!("read user entry under {}", users_root.display()))?;
+            let user_path = user.path();
+            require_ordinary_directory(&user_path)?;
+            let user_name = user.file_name().to_string_lossy().into_owned();
+            UserId::new(user_name.clone())
+                .map_err(|error| anyhow!("invalid legacy skill user `{user_name}`: {error}"))?;
+            let skills_root = user_path.join("skills");
+            for entry in fs::read_dir(&user_path)
+                .with_context(|| format!("read legacy user {}", user_path.display()))?
+            {
+                let entry = entry.with_context(|| {
+                    format!("read entry under legacy user {}", user_path.display())
+                })?;
+                if entry.file_name() != "skills" {
+                    bail!(
+                        "unknown entry `{}` under legacy user {}; only the skills tree is adoptable",
+                        entry.file_name().to_string_lossy(),
+                        user_path.display()
+                    );
+                }
+                require_ordinary_directory(&entry.path())?;
+            }
+            if skills_root.exists() {
+                validate_ordinary_tree(&skills_root)?;
+                has_content |= directory_has_content(&skills_root)?;
+            }
+        }
+    }
+    Ok(has_content)
 }
 
 fn system_tree_has_content(root: &Path) -> anyhow::Result<bool> {
@@ -2234,9 +2369,10 @@ mod tests {
     };
 
     use super::{
-        ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, LegacySourceKind,
-        RebornStoragePaths, STAGING_OWNER_FILE, TestAdoptionFaultGuard, TestAdoptionFaultPoint,
-        WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock, adopt_layout,
+        ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, CanonicalStoreVerification,
+        LegacySourceKind, RebornStoragePaths, STAGING_OWNER_FILE, TestAdoptionFaultGuard,
+        TestAdoptionFaultPoint, WorkspaceImportDecision, WorkspaceImportOptions,
+        acquire_adoption_lock, adopt_layout, adopt_layout_with_store_verification,
         ensure_ready_layout, inspect_legacy_candidates, inspect_ready_layout, install_staged,
         ready_legacy_skill_snapshot_source, snapshot_source, stage_snapshot,
         verify_canonical_store, write_journal,
@@ -2498,8 +2634,74 @@ mod tests {
         assert!(temp.path().join("system/extensions/example.toml").is_file());
         assert_eq!(
             ready_legacy_skill_snapshot_source(&home).expect("ready snapshot source"),
-            Some(LegacySkillSnapshotSource::LocalDev),
-            "only the completed adoption journal may nominate a legacy snapshot"
+            None,
+            "copied system content does not require the database skill importer"
+        );
+    }
+
+    #[test]
+    fn adoption_preserves_a_legacy_user_skill_tree_and_nominates_its_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let legacy = temp.path().join("local-dev");
+        let skill = legacy.join("tenants/tenant-a/users/user-a/skills/preserved/SKILL.md");
+        fs::create_dir_all(skill.parent().expect("skill parent")).expect("skill tree");
+        fs::write(&skill, b"---\nname: preserved\n---\n").expect("legacy skill");
+        let key = legacy.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH);
+        fs::write(&key, ironclaw_secrets::keychain::generate_master_key_hex())
+            .expect("legacy cached key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
+                .expect("owner-only legacy key");
+        }
+
+        adopt_layout(
+            &home,
+            embedded_single_user_requirement(),
+            confirmed_options(),
+        )
+        .expect("skill-bearing legacy root is adopted");
+
+        let snapshot_skill = temp
+            .path()
+            .join("runtime/layout-adoption/snapshot/local-dev")
+            .join("tenants/tenant-a/users/user-a/skills/preserved/SKILL.md");
+        assert_eq!(
+            fs::read(snapshot_skill).expect("preserved snapshot skill"),
+            b"---\nname: preserved\n---\n"
+        );
+        assert_eq!(
+            ready_legacy_skill_snapshot_source(&home).expect("ready snapshot source"),
+            Some(LegacySkillSnapshotSource::LocalDev)
+        );
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+    }
+
+    #[test]
+    fn adoption_rejects_non_skill_content_under_a_legacy_tenants_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let legacy = temp.path().join("local-dev");
+        let unknown = legacy.join("tenants/tenant-a/users/user-a/private.txt");
+        fs::create_dir_all(unknown.parent().expect("unknown parent")).expect("tenant tree");
+        fs::write(&unknown, b"must not be reinterpreted").expect("unknown legacy file");
+
+        let error = adopt_layout(
+            &home,
+            embedded_single_user_requirement(),
+            confirmed_options(),
+        )
+        .expect_err("only the released tenant/user skill grammar is adoptable");
+
+        assert!(error.to_string().contains("tenants"), "{error:#}");
+        assert!(unknown.is_file(), "rejected source remains untouched");
+        assert!(
+            !temp
+                .path()
+                .join("runtime/layout-adoption/journal.toml")
+                .exists()
         );
     }
 
@@ -2643,19 +2845,30 @@ mod tests {
     }
 
     #[test]
-    fn hosted_postgres_legacy_root_adopts_only_recognized_system_content() {
+    fn hosted_postgres_adoption_requires_verified_store_before_manifest_commit() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
         let legacy = temp.path().join("hosted-single-tenant/system/prompts");
         fs::create_dir_all(&legacy).expect("legacy system content");
         fs::write(legacy.join("operator.md"), b"prompt").expect("system prompt");
 
-        adopt_layout(
+        let error = adopt_layout(
             &home,
             external_single_user_requirement(),
             confirmed_options(),
         )
-        .expect("PostgreSQL system-content adoption succeeds");
+        .expect_err("an unverified external store cannot commit readiness");
+
+        assert!(error.to_string().contains("were not verified"), "{error:#}");
+        assert!(!temp.path().join("layout.toml").exists());
+
+        adopt_layout_with_store_verification(
+            &home,
+            external_single_user_requirement(),
+            confirmed_options(),
+            CanonicalStoreVerification::ExternalPostgresVerified,
+        )
+        .expect("verified PostgreSQL system-content adoption resumes and succeeds");
 
         assert!(temp.path().join("system/prompts/operator.md").is_file());
         assert!(!temp.path().join("state/reborn-local-dev.db").exists());
@@ -2898,7 +3111,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("runtime/layout-adoption")).expect("adoption root");
         fs::write(
             temp.path().join("runtime/layout-adoption/journal.toml"),
-            "schema_version = 4\noperation_id = \"00000000-0000-4000-8000-000000000001\"\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[source_requirement]\ndurable_state = \"embedded-libsql\"\n\n[source_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[target_requirement]\ndurable_state = \"embedded-libsql\"\n\n[target_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\n",
+            "schema_version = 5\noperation_id = \"00000000-0000-4000-8000-000000000001\"\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[source_requirement]\ndurable_state = \"embedded-libsql\"\n\n[source_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[target_requirement]\ndurable_state = \"embedded-libsql\"\n\n[target_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\nhas_legacy_skills = false\n",
         )
         .expect("unsupported journal");
 
@@ -3341,7 +3554,12 @@ mod tests {
             )
             .expect("stage snapshot");
             install_staged(&paths, &adoption_root, None).expect("install staged content");
-            verify_canonical_store(&paths, true).expect("verify canonical store");
+            verify_canonical_store(
+                &paths,
+                DurableStateKind::EmbeddedLibSql,
+                CanonicalStoreVerification::EmbeddedLibSql,
+            )
+            .expect("verify canonical store");
             journal.phase = AdoptionPhase::StoreVerified;
             write_journal(&adoption_root.join("journal.toml"), &journal).expect("store verified");
 
@@ -3802,7 +4020,12 @@ mod tests {
                 journal.phase = AdoptionPhase::CanonicalInstalled;
             }
             if phase == AdoptionPhase::StoreVerified {
-                verify_canonical_store(&paths, true).expect("verify canonical store");
+                verify_canonical_store(
+                    &paths,
+                    DurableStateKind::EmbeddedLibSql,
+                    CanonicalStoreVerification::EmbeddedLibSql,
+                )
+                .expect("verify canonical store");
                 journal.phase = AdoptionPhase::StoreVerified;
             }
             write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal phase");

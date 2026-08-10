@@ -167,7 +167,13 @@ observed_date = "2026-08-07"
 # for the complete production delta rather than consuming the gate's tolerance.
 # Measured with `bash scripts/ci/check-composition-budget.sh --print`; set to
 # current rather than padded.
-loc_ceiling = 42290
+# Raised 42290 -> 42407 on 2026-08-10 after review of the adoption boundary:
+# composition now provides one narrow pre-mutation PostgreSQL verifier and
+# reuses the production legacy-skill importer for retained adoption snapshots.
+# Both are assembly responsibilities; source selection, journaling, and
+# transition policy remain in the CLI. Measured with the command above and
+# ratcheted to the exact current production count.
+loc_ceiling = 42407
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -178,7 +184,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42290
+loc_observed = 42407
 loc_observed_date = "2026-08-10"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

@@ -1403,7 +1403,36 @@ pub(crate) fn adopt_storage_layout(
     if profile == RebornProfile::MigrationDryRun {
         return ensure_ready_layout_for_profile(config, profile).map(|_| ());
     }
-    storage_layout::adopt_layout(
+    let store_verification = match requirement.durable_state {
+        ironclaw_config::DurableStateKind::EmbeddedLibSql => {
+            storage_layout::CanonicalStoreVerification::EmbeddedLibSql
+        }
+        ironclaw_config::DurableStateKind::ExternalPostgres => {
+            if profile != RebornProfile::HostedSingleTenant {
+                anyhow::bail!(
+                    "external PostgreSQL layout adoption is supported only for the hosted-single-tenant profile"
+                );
+            }
+            let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
+            let bindings = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
+                composition_profile(profile),
+                default_owner_id(config_file.as_ref()),
+                paths,
+                config_file.as_ref(),
+            )
+            .context(
+                "verify canonical external PostgreSQL store and secret resolver before adoption",
+            )?;
+            block_on_cli(
+                ironclaw_composition::verify_hosted_postgres_store_for_adoption(bindings),
+            )
+            .context(
+                "verify canonical external PostgreSQL store and secret resolver before adoption",
+            )?;
+            storage_layout::CanonicalStoreVerification::ExternalPostgresVerified
+        }
+    };
+    storage_layout::adopt_layout_with_store_verification(
         config.home(),
         requirement,
         storage_layout::AdoptOptions {
@@ -1411,6 +1440,7 @@ pub(crate) fn adopt_storage_layout(
             confirm_backup_snapshot,
             workspace_import,
         },
+        store_verification,
     )?;
     // The adoption command does not start a runtime. Validate the manifest
     // through the same normal-boot prerequisite before reporting completion.
@@ -3071,6 +3101,61 @@ regex_activation_enabled = false
             layout_tree_snapshot(context.boot_config().home().path()),
             before,
             "admitting an already-ready sandboxed layout must not rewrite it"
+        );
+    }
+
+    #[test]
+    fn storage_adopt_external_store_failure_precedes_filesystem_mutation() {
+        let _lock = lock_runtime_env();
+        let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "not-a-postgres-url");
+        let _master_key = EnvGuard::set(
+            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+            &ironclaw_secrets::keychain::generate_master_key_hex(),
+        );
+        let (_temp, config) = boot_config_with_config_toml(
+            "hosted-single-tenant",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+        let legacy_prompt = config
+            .home()
+            .path()
+            .join("hosted-single-tenant/system/prompts/operator.md");
+        std::fs::create_dir_all(legacy_prompt.parent().expect("prompt parent"))
+            .expect("legacy system tree");
+        std::fs::write(&legacy_prompt, b"operator prompt").expect("legacy prompt");
+
+        let context = crate::context::RebornCliContext::from_boot_config(config);
+        let error = super::adopt_storage_layout(&context, true, true, None)
+            .expect_err("unreachable PostgreSQL must fail before adoption starts");
+
+        assert!(
+            error
+                .to_string()
+                .contains("verify canonical external PostgreSQL store"),
+            "{error:#}"
+        );
+        assert!(legacy_prompt.is_file(), "legacy source remains in place");
+        assert!(
+            !context
+                .boot_config()
+                .home()
+                .path()
+                .join("layout.toml")
+                .exists()
+        );
+        assert!(
+            !context
+                .boot_config()
+                .home()
+                .path()
+                .join("runtime/layout-adoption/journal.toml")
+                .exists(),
+            "external verification precedes every adoption mutation"
         );
     }
 
