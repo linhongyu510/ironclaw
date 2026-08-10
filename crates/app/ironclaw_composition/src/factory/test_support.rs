@@ -834,10 +834,11 @@ pub(crate) async fn mount_default_database_roots(
 pub(crate) async fn open_standalone_root_filesystem_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn RootFilesystem>, RebornBuildError> {
-    let workspace_root = storage_root.join("workspace");
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
     let bundle = build_filesystem(
-        storage_root,
-        &workspace_root,
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
         None,
         DurableStorageInput::EmbeddedLibsql,
     )
@@ -862,10 +863,11 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>, RebornBuildError>
 {
-    let workspace_root = storage_root.join("workspace");
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
     let bundle = build_filesystem(
-        storage_root,
-        &workspace_root,
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
         None,
         DurableStorageInput::EmbeddedLibsql,
     )

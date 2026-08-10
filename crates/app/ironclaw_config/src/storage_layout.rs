@@ -105,8 +105,9 @@ pub struct LayoutRequirement {
 }
 
 /// Canonical durable paths below one validated [`RebornHome`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornStoragePaths {
+    installation_root: PathBuf,
     state_root: PathBuf,
     system_root: PathBuf,
     workspace_root: PathBuf,
@@ -116,13 +117,28 @@ pub struct RebornStoragePaths {
 impl RebornStoragePaths {
     /// Derive canonical paths without inspecting or mutating the filesystem.
     pub fn from_home(home: &RebornHome) -> Self {
-        let root = home.path();
+        Self::from_installation_root(home.path())
+    }
+
+    /// Derive the complete canonical namespace set from one installation root.
+    ///
+    /// Production callers receive this root from [`RebornHome`]. This
+    /// constructor intentionally does not accept independent state, system, or
+    /// workspace paths, so test-support composition inputs cannot construct an
+    /// arbitrary namespace layout either.
+    pub fn from_installation_root(installation_root: impl AsRef<Path>) -> Self {
+        let root = installation_root.as_ref();
         Self {
+            installation_root: root.to_path_buf(),
             state_root: root.join("state"),
             system_root: root.join("system"),
             workspace_root: root.join("workspaces"),
             runtime_root: root.join("runtime"),
         }
+    }
+
+    pub fn installation_root(&self) -> &Path {
+        &self.installation_root
     }
 
     pub fn state_root(&self) -> &Path {

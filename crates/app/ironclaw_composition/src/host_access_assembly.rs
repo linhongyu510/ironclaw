@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ironclaw_config::RebornStoragePaths;
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::mount::MountPermissions;
 use ironclaw_host_api::runtime_policy::{
@@ -42,7 +43,8 @@ impl HostHomeRoot {
 }
 
 pub(crate) struct HostAccessAssembly {
-    pub(crate) storage_root: PathBuf,
+    pub(crate) state_root: PathBuf,
+    pub(crate) system_root: PathBuf,
     pub(crate) workspace_root: PathBuf,
     pub(crate) host_home_root: Option<HostHomeRoot>,
     pub(crate) process_port: Option<HostProcessPort>,
@@ -102,23 +104,35 @@ impl HostAccessAssembly {
 
 /// Materializes host filesystem/process access from resolved policy data.
 pub(crate) fn build_host_access(
-    storage_root: PathBuf,
-    workspace_root: Option<PathBuf>,
+    paths: RebornStoragePaths,
+    workspace_root_for_test: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     workspace_scoped_per_caller: bool,
 ) -> Result<HostAccessAssembly, RebornBuildError> {
-    initialize_directory(&storage_root, "storage root")?;
+    initialize_directory(paths.state_root(), "state root")?;
     initialize_directory(
-        &storage_root.join("system/extensions"),
+        &paths.system_root().join("extensions"),
         "system extensions root",
     )?;
-    let workspace_root = workspace_root.unwrap_or_else(|| storage_root.join("workspace"));
-    initialize_directory(&workspace_root, "workspace root")?;
+    initialize_directory(&paths.system_root().join("prompts"), "system prompts root")?;
+    initialize_directory(&paths.system_root().join("skills"), "system skills root")?;
+    let configured_workspace_root = workspace_root_for_test
+        .as_deref()
+        .unwrap_or_else(|| paths.workspace_root());
+    initialize_directory(configured_workspace_root, "workspace root")?;
 
-    let storage_root = canonicalize_path(&storage_root, "storage root")?;
-    let workspace_root = canonicalize_path(&workspace_root, "workspace root")?;
-    validate_workspace_skill_isolation(&storage_root, &workspace_root)?;
+    let installation_root = canonicalize_path(paths.installation_root(), "installation root")?;
+    let state_root = canonicalize_path(paths.state_root(), "state root")?;
+    let system_root = canonicalize_path(paths.system_root(), "system root")?;
+    let workspace_root = canonicalize_path(configured_workspace_root, "workspace root")?;
+    validate_canonical_storage_paths(
+        &installation_root,
+        &state_root,
+        &system_root,
+        &workspace_root,
+    )?;
+    validate_workspace_skill_isolation(&system_root, &workspace_root)?;
 
     let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
@@ -147,7 +161,8 @@ pub(crate) fn build_host_access(
     );
 
     Ok(HostAccessAssembly {
-        storage_root,
+        state_root,
+        system_root,
         workspace_root,
         host_home_root,
         process_port,
@@ -190,18 +205,43 @@ fn canonicalize_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError>
     Ok(path)
 }
 
+fn validate_canonical_storage_paths(
+    installation_root: &Path,
+    state_root: &Path,
+    system_root: &Path,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let roots = [
+        ("state root", state_root),
+        ("system root", system_root),
+        ("workspace root", workspace_root),
+    ];
+    for (label, root) in roots {
+        if root == installation_root || !root.starts_with(installation_root) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{label} must be beneath the selected installation root"),
+            });
+        }
+    }
+    for (index, (left_label, left)) in roots.iter().enumerate() {
+        for (right_label, right) in roots.iter().skip(index + 1) {
+            if paths_overlap(left, right) {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{left_label} must not overlap {right_label}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_workspace_skill_isolation(
-    storage_root: &Path,
+    system_root: &Path,
     workspace_root: &Path,
 ) -> Result<(), RebornBuildError> {
     for (label, skill_root) in [
-        ("/skills", storage_root.join("skills")),
-        (
-            "/tenant-shared/skills",
-            storage_root.join("tenant-shared/skills"),
-        ),
-        ("/system/skills", storage_root.join("system/skills")),
-        ("/system/extensions", storage_root.join("system/extensions")),
+        ("/system/skills", system_root.join("skills")),
+        ("/system/extensions", system_root.join("extensions")),
     ] {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
@@ -247,4 +287,37 @@ fn process_port_for_policy(
         }
     }
     Some(process_port)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::build_host_access;
+    use ironclaw_config::RebornStoragePaths;
+
+    #[test]
+    fn host_access_rejects_canonical_namespace_aliases() {
+        let temp = tempfile::tempdir().expect("temporary installation root");
+        let home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(home.join("system")).expect("create system root");
+        std::os::unix::fs::symlink(home.join("system"), home.join("state"))
+            .expect("alias state to system");
+
+        let error = match build_host_access(
+            RebornStoragePaths::from_installation_root(&home),
+            None,
+            None,
+            None,
+            false,
+        ) {
+            Ok(_) => panic!("state and system must not resolve to the same canonical directory"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("state root must not overlap system root"),
+            "unexpected path-validation error: {error}"
+        );
+    }
 }

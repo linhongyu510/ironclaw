@@ -83,7 +83,7 @@ impl LlmCredentialProvisionOutcome {
 /// supply a store whose `put` fails, proving the store-before-config write
 /// ordering without touching the real standalone libsql-backed store.
 pub(crate) trait LlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
+    fn open(&self, state_root: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 }
 
 /// Production [`LlmKeyStoreOpener`]: opens the real standalone encrypted
@@ -93,10 +93,10 @@ pub(crate) trait LlmKeyStoreOpener {
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
 impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
-        let home_path = home_path.to_path_buf();
+    fn open(&self, state_root: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
+        let state_root = state_root.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(
@@ -199,7 +199,7 @@ pub(crate) fn provision_llm_credentials(
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     let admin = ironclaw_operator::RebornProviderAdmin::new(boot.clone());
     // Secret-store root MUST match what `serve` opens at boot
-    // (`local_runtime_storage_root`, i.e. the canonical `<home>`), so
+    // (`local_runtime_storage_root`, i.e. the canonical `<home>/state`), so
     // onboarding and `serve` share one durable secret-store location.
     // NOTE: the directory itself is only created lazily, right before a store
     // is actually opened (see `open_llm_key_store`) — a headless/no-op
@@ -869,7 +869,7 @@ mod tests {
     struct FailingLlmKeyStoreOpener;
 
     impl LlmKeyStoreOpener for FailingLlmKeyStoreOpener {
-        fn open(&self, _home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
+        fn open(&self, _state_root: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             let backend = Arc::new(
                 ironclaw_filesystem::FaultInjecting::new(
                     ironclaw_filesystem::InMemoryBackend::new(),
@@ -894,10 +894,11 @@ mod tests {
     /// `ironclaw_composition::factory`'s
     /// `open_standalone_secret_store_opens_a_working_store_over_the_bare_root`
     /// for the same seeding pattern.
-    fn seed_cached_master_key(home: &RebornHome) {
+    fn seed_cached_master_key(boot: &ironclaw_config::RebornBootConfig) {
+        let state_root = crate::runtime::local_runtime_storage_root(boot);
+        std::fs::create_dir_all(&state_root).expect("create canonical state root");
         std::fs::write(
-            home.path()
-                .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+            state_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
             ironclaw_secrets::keychain::generate_master_key_hex(),
         )
         .expect("seed cached master key");
@@ -1008,7 +1009,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = FakePromptSource {
             provider: "openai",
@@ -1034,9 +1035,9 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1096,7 +1097,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = FakePromptSource {
             provider: "nearai",
@@ -1122,9 +1123,9 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1174,7 +1175,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         admin
@@ -1317,7 +1318,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = FakePromptSource {
             provider: "openai",
@@ -1389,7 +1390,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = FakePromptSource {
             provider: "openai",
@@ -1522,7 +1523,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = ConfirmingPromptSource {
             confirm_answer: true,
@@ -1557,9 +1558,9 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1591,7 +1592,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = ConfirmingPromptSource {
             confirm_answer: false,
@@ -1634,7 +1635,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = HeadlessPromptSource;
         let outcome = provision_llm_credentials(
@@ -1664,9 +1665,9 @@ mod tests {
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence
         // for the headless env-seed path too.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1740,7 +1741,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
         assert!(
             !home.config_file_path().exists(),
             "must start from a genuinely fresh home with no pre-existing config.toml"
@@ -1796,7 +1797,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = ScriptedKeyPromptSource {
             provider: "openai",
@@ -1827,9 +1828,9 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1874,7 +1875,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = ScriptedKeyPromptSource {
             provider: "openai",
@@ -1926,7 +1927,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = ScriptedKeyPromptSource {
             provider: "openai",
@@ -1958,9 +1959,9 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home.path().to_path_buf();
+        let state_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         let stored = crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_operator::LlmKeyStore::new(
@@ -1996,7 +1997,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
-        seed_cached_master_key(home);
+        seed_cached_master_key(context.boot_config());
 
         let mut prompts = FakePromptSource {
             provider: "openai",

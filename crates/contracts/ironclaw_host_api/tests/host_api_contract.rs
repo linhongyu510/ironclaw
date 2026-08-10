@@ -664,6 +664,7 @@ fn virtual_path_accepts_all_frozen_v1_roots() {
         "/engine",
         "/system/settings",
         "/system/extensions",
+        "/system/prompts",
         "/system/skills",
         "/users",
         "/projects",

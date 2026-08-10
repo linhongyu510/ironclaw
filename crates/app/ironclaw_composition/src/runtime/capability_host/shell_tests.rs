@@ -65,7 +65,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         crate::local_runtime_build_input_with_options(
             crate::RebornCompositionProfile::StandaloneUnrestricted,
             "standalone-shell-owner",
-            storage_root,
+            ironclaw_config::RebornStoragePaths::from_installation_root(storage_root),
             crate::RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },

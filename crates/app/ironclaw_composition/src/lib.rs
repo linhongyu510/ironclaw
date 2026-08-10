@@ -101,7 +101,8 @@ pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 // consumer: `ironclaw_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
-    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, LegacySkillSnapshotSource, OAuthClientConfig, RebornHostBindings,
+    RebornRuntimeProcessBinding,
 };
 // WS1.4 deleted the `extension_contracts::channel_adapter` second import path; WS6 did
 // the same for the `auth`/`host_api`/`host_runtime`/`product_contracts`/`failure_lane`/

@@ -26,6 +26,7 @@ use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
 
+#[cfg(any(test, feature = "test-support"))]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -701,12 +702,12 @@ pub(crate) fn deployment_config_for_profile(
 pub fn local_runtime_build_input(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
-    root: PathBuf,
+    paths: ironclaw_config::RebornStoragePaths,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     local_runtime_build_input_with_options(
         profile,
         owner_id,
-        root,
+        paths,
         RebornRuntimeProfileOptions::default(),
     )
 }
@@ -716,16 +717,16 @@ pub fn local_runtime_build_input(
 pub fn local_runtime_build_input_with_options(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
-    root: PathBuf,
+    paths: ironclaw_config::RebornStoragePaths,
     options: RebornRuntimeProfileOptions,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     match profile {
         RebornCompositionProfile::HostedSingleTenantVolume => {
-            return hosted_single_tenant_volume_build_input(owner_id, root);
+            return hosted_single_tenant_volume_build_input(owner_id, paths);
         }
         RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
         | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            return hosted_single_tenant_volume_sandboxed_build_input(profile, owner_id, root);
+            return hosted_single_tenant_volume_sandboxed_build_input(profile, owner_id, paths);
         }
         _ => {}
     }
@@ -738,7 +739,7 @@ pub fn local_runtime_build_input_with_options(
         .resolve()?
         .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })?;
     Ok(
-        RebornHostBindings::local_filesystem_from_deployment(deployment, owner_id, root)
+        RebornHostBindings::local_filesystem_from_deployment(deployment, owner_id, paths)
             .with_runtime_policy(policy),
     )
 }
@@ -747,14 +748,14 @@ pub fn local_runtime_build_input_with_options(
 /// secure hosted runtime policy.
 pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
-    root: PathBuf,
+    paths: ironclaw_config::RebornStoragePaths,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
     Ok(RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
         owner_id,
-        root,
+        paths,
     )
     .with_runtime_policy(policy))
 }
@@ -765,14 +766,14 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
 pub(crate) fn hosted_single_tenant_volume_sandboxed_build_input(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
-    root: PathBuf,
+    paths: ironclaw_config::RebornStoragePaths,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
         .map_err(RebornRuntimeProfileError::Policy)?;
     Ok(RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(profile, false),
         owner_id,
-        root,
+        paths,
     )
     .with_runtime_policy(policy))
 }
@@ -789,7 +790,7 @@ pub fn local_filesystem_build_input(
     let bindings = RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::standalone(),
         owner_id,
-        root,
+        ironclaw_config::RebornStoragePaths::from_installation_root(root),
     );
     // Composition's own unit tests expect the first-party extension surface
     // (catalog + capability handlers) the production binary injects; mirror that
@@ -814,7 +815,7 @@ pub fn local_filesystem_build_input_with_profile(
     let bindings = RebornHostBindings::local_filesystem_from_deployment(
         DeploymentConfig::for_profile(profile, false),
         owner_id,
-        root,
+        ironclaw_config::RebornStoragePaths::from_installation_root(root),
     );
     // See `local_filesystem_build_input`: inject the production first-party surface for
     // composition's own unit tests (dev-dependency), absent in `test-support`.
@@ -1202,9 +1203,30 @@ mod tests {
 
 #[cfg(test)]
 mod local_runtime_profile_tests {
+    use crate::input::RebornStorageInput;
     use ironclaw_host_api::runtime_policy::{ApprovalPolicy, RuntimeProfile};
 
     use super::*;
+
+    #[test]
+    fn local_runtime_input_carries_one_canonical_state_system_and_workspace_layout() {
+        let temp = tempfile::tempdir().expect("temporary installation root");
+        let paths = ironclaw_config::RebornStoragePaths::from_installation_root(temp.path());
+        let input = local_runtime_build_input(
+            RebornCompositionProfile::Standalone,
+            "layout-owner",
+            paths.clone(),
+        )
+        .expect("local runtime input");
+
+        let RebornStorageInput::LocalFilesystem { paths: actual, .. } = input.storage else {
+            panic!("standalone must carry local filesystem storage");
+        };
+        assert_eq!(actual.installation_root(), temp.path());
+        assert_eq!(actual.state_root(), temp.path().join("state"));
+        assert_eq!(actual.system_root(), temp.path().join("system"));
+        assert_eq!(actual.workspace_root(), temp.path().join("workspaces"));
+    }
 
     #[test]
     fn yolo_disclosure_reaches_both_the_carried_deployment_and_the_resolved_policy() {
@@ -1218,7 +1240,7 @@ mod local_runtime_profile_tests {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::StandaloneUnrestricted,
             "yolo-owner",
-            dir,
+            ironclaw_config::RebornStoragePaths::from_installation_root(dir),
             RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },
@@ -1249,7 +1271,7 @@ mod local_runtime_profile_tests {
         let error = local_runtime_build_input_with_options(
             RebornCompositionProfile::StandaloneUnrestricted,
             "yolo-owner",
-            dir,
+            ironclaw_config::RebornStoragePaths::from_installation_root(dir),
             RebornRuntimeProfileOptions {
                 confirm_host_access: false,
             },

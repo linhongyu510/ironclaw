@@ -555,7 +555,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("standalone"),
+        ironclaw_config::RebornStoragePaths::from_installation_root(root.path().join("standalone")),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
@@ -587,7 +587,7 @@ async fn build_runtime_with_slack_delivery(
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("standalone"),
+        ironclaw_config::RebornStoragePaths::from_installation_root(root.path().join("standalone")),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
@@ -867,7 +867,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("standalone"),
+        ironclaw_config::RebornStoragePaths::from_installation_root(root.path().join("standalone")),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },

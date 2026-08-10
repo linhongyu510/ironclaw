@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context as _, anyhow, bail};
 #[cfg(unix)]
 use fs2::FileExt as _;
+use ironclaw_composition::LegacySkillSnapshotSource;
 use ironclaw_composition::host_api::{TenantId, UserId};
 use ironclaw_config::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
@@ -93,6 +94,15 @@ impl LegacySourceKind {
             Self::HostedSingleTenant => Some("hosted-single-tenant"),
             Self::HostedSingleTenantVolume => Some("hosted-single-tenant-volume"),
             Self::BareHome => None,
+        }
+    }
+
+    const fn skill_snapshot_source(self) -> LegacySkillSnapshotSource {
+        match self {
+            Self::LocalDev => LegacySkillSnapshotSource::LocalDev,
+            Self::HostedSingleTenant => LegacySkillSnapshotSource::HostedSingleTenant,
+            Self::HostedSingleTenantVolume => LegacySkillSnapshotSource::HostedSingleTenantVolume,
+            Self::BareHome => LegacySkillSnapshotSource::BareHome,
         }
     }
 
@@ -332,6 +342,62 @@ pub(crate) fn ensure_ready_layout(
         "canonical durable layout is incomplete or unrecognized at {}; refusing to open stores without a valid layout.toml. Inspect it and use `{OFFLINE_ADOPT_COMMAND}` only for one supported legacy source",
         home_path.display()
     );
+}
+
+/// Validate a ready canonical layout without creating any directories,
+/// snapshots, journals, or manifests. This is the migration-dry-run admission
+/// path: it may report an unsafe deployment, but it must not change it.
+pub(crate) fn inspect_ready_layout(
+    home: &RebornHome,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<RebornStoragePaths> {
+    let paths = RebornStoragePaths::from_home(home);
+    let manifest_path = home.path().join(LAYOUT_MANIFEST_FILE);
+    let journal_path = paths.runtime_root().join(ADOPTION_DIR).join(JOURNAL_FILE);
+    if !manifest_path.exists() {
+        bail!(
+            "canonical durable layout is not ready at {}; migration dry-run will not initialize it",
+            home.path().display()
+        );
+    }
+    let manifest = read_manifest(&manifest_path)?;
+    if journal_path.exists() {
+        let journal = read_journal(&journal_path)?;
+        if journal.phase != AdoptionPhase::StoreVerified
+            || journal.target_requirement != manifest.requirement()
+        {
+            bail!(
+                "ready layout manifest and adoption journal disagree at {}; refusing to open durable state",
+                journal_path.display()
+            );
+        }
+    }
+    admit_manifest(&manifest, requirement)?;
+    Ok(paths)
+}
+
+/// Return the fixed legacy snapshot source after normal layout admission has
+/// verified a completed journal. Composition receives this enum, never a
+/// caller-selected host path, and derives the snapshot location itself.
+pub(crate) fn ready_legacy_skill_snapshot_source(
+    home: &RebornHome,
+) -> anyhow::Result<Option<LegacySkillSnapshotSource>> {
+    let paths = RebornStoragePaths::from_home(home);
+    let journal_path = paths.runtime_root().join(ADOPTION_DIR).join(JOURNAL_FILE);
+    if !journal_path.exists() {
+        return Ok(None);
+    }
+    let journal = read_journal(&journal_path)?;
+    if journal.phase != AdoptionPhase::StoreVerified {
+        bail!(
+            "durable layout adoption is incomplete at {}; refusing to select a legacy skill snapshot",
+            journal_path.display()
+        );
+    }
+    Ok(journal
+        .inventory
+        .has_system_content
+        .then(|| journal.source.skill_snapshot_source()))
 }
 
 /// Run or resume the one bounded offline adoption state machine.
@@ -2180,10 +2246,14 @@ mod tests {
         ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, LegacySourceKind,
         RebornStoragePaths, STAGING_OWNER_FILE, TestAdoptionFaultGuard, TestAdoptionFaultPoint,
         WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock, adopt_layout,
-        ensure_ready_layout, inspect_legacy_candidates, install_staged, snapshot_source,
-        stage_snapshot, tenant_user_workspace_digest, verify_canonical_store, write_journal,
+        ensure_ready_layout, inspect_legacy_candidates, inspect_ready_layout, install_staged,
+        ready_legacy_skill_snapshot_source, snapshot_source, stage_snapshot,
+        tenant_user_workspace_digest, verify_canonical_store, write_journal,
     };
-    use ironclaw_composition::host_api::{TenantId, UserId};
+    use ironclaw_composition::{
+        LegacySkillSnapshotSource,
+        host_api::{TenantId, UserId},
+    };
 
     fn embedded_single_user_requirement() -> LayoutRequirement {
         LayoutRequirement {
@@ -2348,6 +2418,22 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_layout_admission_refuses_a_fresh_home_without_creating_namespaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+
+        let error = inspect_ready_layout(&home, embedded_single_user_requirement())
+            .expect_err("dry-run admission must not initialize a fresh layout");
+
+        assert!(error.to_string().contains("not ready"));
+        assert!(!temp.path().join("layout.toml").exists());
+        assert!(!temp.path().join("state").exists());
+        assert!(!temp.path().join("system").exists());
+        assert!(!temp.path().join("workspaces").exists());
+        assert!(!temp.path().join("runtime").exists());
+    }
+
+    #[test]
     fn normal_boot_refuses_legacy_root_without_mutating_it() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -2421,6 +2507,11 @@ mod tests {
                 .is_file()
         );
         assert!(temp.path().join("system/extensions/example.toml").is_file());
+        assert_eq!(
+            ready_legacy_skill_snapshot_source(&home).expect("ready snapshot source"),
+            Some(LegacySkillSnapshotSource::LocalDev),
+            "only the completed adoption journal may nominate a legacy snapshot"
+        );
     }
 
     #[cfg(unix)]

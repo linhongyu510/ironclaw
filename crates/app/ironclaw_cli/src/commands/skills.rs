@@ -96,9 +96,10 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
             "ironclaw skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, profile=hosted-single-tenant-volume, profile=hosted-single-tenant-volume-sandboxed, or profile=hosted-single-tenant-volume-sandboxed-railway; got profile={profile}"
         );
     }
+    let paths = crate::runtime::ensure_ready_layout_for_profile(config, profile)?;
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        standalone_root: crate::runtime::local_runtime_storage_root(config),
+        standalone_root: paths.state_root().to_path_buf(),
         profile,
     })
 }

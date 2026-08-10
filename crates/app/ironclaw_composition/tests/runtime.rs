@@ -129,7 +129,9 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
         local_runtime_build_input_with_options(
             RebornCompositionProfile::HostedSingleTenantVolume,
             "runtime-hosted-volume-owner",
-            root.path().join("hosted-volume"),
+            ironclaw_config::RebornStoragePaths::from_installation_root(
+                root.path().join("hosted-volume"),
+            ),
             Default::default(),
         )
         .unwrap(),

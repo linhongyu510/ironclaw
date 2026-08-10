@@ -451,7 +451,7 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::HostedSingleTenantVolume,
         "readiness-contract-owner",
-        dir.path().to_path_buf(),
+        ironclaw_config::RebornStoragePaths::from_installation_root(dir.path()),
         Default::default(),
     )
     .unwrap();
@@ -479,7 +479,7 @@ async fn standalone_factory_readiness_includes_non_production_diagnostic() {
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::Standalone,
         "readiness-contract-owner",
-        dir.path().to_path_buf(),
+        ironclaw_config::RebornStoragePaths::from_installation_root(dir.path()),
         Default::default(),
     )
     .unwrap();
@@ -501,7 +501,7 @@ async fn standalone_yolo_factory_readiness_includes_non_production_diagnostic() 
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         "readiness-yolo-owner",
-        dir.path().to_path_buf(),
+        ironclaw_config::RebornStoragePaths::from_installation_root(dir.path()),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },

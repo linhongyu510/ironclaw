@@ -636,7 +636,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // sandbox transport now exposes graceful lifecycle release. This is
         // contract vocabulary; execution and provider cleanup remain in the
         // sandbox runtime lane.
-        ("ironclaw_host_api", 18_799),
+        // Raised 18_799 -> 18_800 (2026-08-10, profile-stable state): the
+        // `/system/prompts` virtual-root declaration is neutral mount
+        // vocabulary. Mount assembly and filesystem access control remain in
+        // composition and ironclaw_filesystem.
+        ("ironclaw_host_api", 18_800),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

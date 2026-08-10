@@ -134,6 +134,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/projects` | local/object/project file backend | filesystem | optional project indexer | Project source files and user-authored project artifacts. |
 | `/system/settings` | typed settings repository | typed API + optional file projection | no, unless projection says otherwise | Settings source of truth is not memory. |
 | `/system/extensions` | extension package/registry repositories | extension API + filesystem package reads/projections | no semantic memory indexing | Installed packages, manifests, registry state. |
+| `/system/prompts` | host-managed prompt templates and prompt metadata | prompt/bootstrap APIs + filesystem reads | no semantic memory indexing | Prompt templates supplied by the host operator. |
 | `/system/skills` | skill package/registry repositories | skill API + optional file projection | no semantic memory indexing | Skill manifests and installed skill state. |
 | `/engine/runtime` | typed run/thread/process/turn repositories, or NotIndexed `/engine` DB filesystem for file-shaped runtime blobs | typed APIs primarily | no | High-churn runtime state must not pollute memory indexes. |
 | `/artifacts` | artifact/object/local backend | artifact APIs + filesystem refs | no semantic memory indexing by default | Large/binary/process output refs live here. |

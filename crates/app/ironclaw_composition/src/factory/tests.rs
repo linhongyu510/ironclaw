@@ -890,9 +890,11 @@ async fn standalone_default_product_auth_preserves_manual_token_across_rebuilds(
         .expect("manual-token account should survive standalone rebuild");
     assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
 
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(&standalone_root);
     let rebuilt_filesystem = build_filesystem(
-        &standalone_root,
-        &standalone_root.join("workspace"),
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
         None,
         DurableStorageInput::EmbeddedLibsql,
     )
@@ -900,7 +902,7 @@ async fn standalone_default_product_auth_preserves_manual_token_across_rebuilds(
     .expect("standalone filesystem rebuild")
     .filesystem;
     let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_secret_store(
-        &standalone_root,
+        paths.state_root(),
         crate::wrap_scoped(rebuilt_filesystem),
         None,
     )

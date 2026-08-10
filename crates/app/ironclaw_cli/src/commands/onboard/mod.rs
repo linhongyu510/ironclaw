@@ -55,6 +55,11 @@ impl OnboardCommand {
             return Ok(());
         }
 
+        // Onboarding may create a master-key cache and an encrypted secret
+        // store. Admit the active profile's durable layout before it writes
+        // any operator state.
+        crate::runtime::ensure_ready_layout_for_active_profile(context.boot_config())?;
+
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
         // Independent of `--force`: a valid existing token is never regenerated
         // (see `ensure_webui_token_file`), so repeated `onboard --force` can't

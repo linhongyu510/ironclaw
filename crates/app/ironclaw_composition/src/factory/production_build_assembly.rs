@@ -39,11 +39,11 @@ pub(super) async fn build_production_shaped(
     let resolved_memory_provider = {
         let mut memory_provider_connection = memory_provider_connection;
         if memory_provider_connection.app_id.is_none()
-            && let crate::input::RebornStorageInput::LocalFilesystem { root, .. } = &storage
+            && let crate::input::RebornStorageInput::LocalFilesystem { paths, .. } = &storage
         {
             use std::hash::{DefaultHasher, Hash, Hasher};
             let mut hasher = DefaultHasher::new();
-            root.hash(&mut hasher);
+            paths.installation_root().hash(&mut hasher);
             memory_provider_connection.app_id = Some(format!("ws-{:016x}", hasher.finish()));
         }
         crate::resolve_memory_provider(
@@ -103,10 +103,14 @@ pub(super) async fn build_production_shaped(
             ),
         }),
         RebornStorageInput::LocalFilesystem {
-            root,
-            workspace_root,
+            paths,
+            legacy_skill_snapshot_source,
+            #[cfg(any(test, feature = "test-support"))]
+            workspace_root_for_test,
             host_home_root,
         } => {
+            #[cfg(not(any(test, feature = "test-support")))]
+            let workspace_root_for_test = None;
             let scheduler_wake_wiring =
                 ironclaw_turn_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
@@ -118,11 +122,14 @@ pub(super) async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let context = build_context(production_wiring, scheduler_wake_wiring);
+            let legacy_skill_snapshot =
+                legacy_skill_snapshot_source.map(|source| source.snapshot_root(&paths));
             build_local_storage_production_shaped(
                 context,
                 LocalStorageProductionInput {
-                    root,
-                    workspace_root,
+                    paths,
+                    workspace_root_for_test,
+                    legacy_skill_snapshot,
                     host_home_root,
                     storage_backend_input: DurableStorageInput::EmbeddedLibsql,
                     explicit_secret_master_key: None,
@@ -133,13 +140,17 @@ pub(super) async fn build_production_shaped(
             .await
         }
         RebornStorageInput::HostedSingleTenantPostgres {
-            root,
-            workspace_root,
+            paths,
+            legacy_skill_snapshot_source,
+            #[cfg(any(test, feature = "test-support"))]
+            workspace_root_for_test,
             host_home_root,
             pool_source,
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
+            #[cfg(not(any(test, feature = "test-support")))]
+            let workspace_root_for_test = None;
             let pool = open_postgres_pool_from_source(pool_source)?;
             let scheduler_wake_wiring =
                 ironclaw_turn_runner::runtime::SchedulerWakeWiring::channel();
@@ -152,11 +163,14 @@ pub(super) async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let context = build_context(production_wiring, scheduler_wake_wiring);
+            let legacy_skill_snapshot =
+                legacy_skill_snapshot_source.map(|source| source.snapshot_root(&paths));
             build_local_storage_production_shaped(
                 context,
                 LocalStorageProductionInput {
-                    root,
-                    workspace_root,
+                    paths,
+                    workspace_root_for_test,
+                    legacy_skill_snapshot,
                     host_home_root,
                     storage_backend_input: DurableStorageInput::Postgres(pool),
                     explicit_secret_master_key: Some(secret_master_key),
@@ -232,8 +246,12 @@ async fn resolve_secret_master_key(
 }
 
 struct LocalStorageProductionInput {
-    root: PathBuf,
-    workspace_root: Option<PathBuf>,
+    paths: ironclaw_config::RebornStoragePaths,
+    workspace_root_for_test: Option<PathBuf>,
+    /// A completed layout adoption may supply its immutable legacy snapshot
+    /// for one-time disk-skill import. Active state/system paths are never an
+    /// importer source.
+    legacy_skill_snapshot: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     storage_backend_input: DurableStorageInput,
     explicit_secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -246,8 +264,9 @@ async fn build_local_storage_production_shaped(
     input: LocalStorageProductionInput,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let LocalStorageProductionInput {
-        root,
-        workspace_root,
+        paths,
+        workspace_root_for_test,
+        legacy_skill_snapshot,
         host_home_root,
         storage_backend_input,
         explicit_secret_master_key,
@@ -255,25 +274,32 @@ async fn build_local_storage_production_shaped(
         postgres_resource_governor_singleton,
     } = input;
     let host_access = build_host_access(
-        root,
-        workspace_root,
+        paths,
+        workspace_root_for_test,
         host_home_root,
         runtime_policy_for_local_process,
         // The shell must scope `/workspace` exactly as the file tools do, or one alias names two
         // directories and a file written by one is invisible to the other.
         context.workspace_scoped_per_caller,
     )?;
-    let root = &host_access.storage_root;
+    let state_root = &host_access.state_root;
+    let system_root = &host_access.system_root;
     let workspace_root = &host_access.workspace_root;
     let host_home_root = host_access.host_home_root.as_ref();
     let owner_user_id =
         UserId::new(context.owner_id.clone()).map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let default_system_prompt_path = bootstrap_standalone_host(root, &owner_user_id).await?;
+    let default_system_prompt_path = bootstrap_standalone_host(system_root, &owner_user_id).await?;
 
-    let filesystem_bundle =
-        build_filesystem(root, workspace_root, host_home_root, storage_backend_input).await?;
+    let filesystem_bundle = build_filesystem(
+        state_root,
+        system_root,
+        workspace_root,
+        host_home_root,
+        storage_backend_input,
+    )
+    .await?;
     let trigger_repository =
         trigger_repository_for_durable_backend(&filesystem_bundle.durable_backend).await?;
     let refresh_lock_pool = match &filesystem_bundle.durable_backend {
@@ -284,7 +310,9 @@ async fn build_local_storage_production_shaped(
         DurableBackend::LibSql { filesystem, .. } => {
             ironclaw_event_store::RebornEventStoreConfig::LibsqlFilesystem {
                 filesystem: Arc::clone(filesystem),
-                path_or_url: standalone_db_path(root).to_string_lossy().into_owned(),
+                path_or_url: standalone_db_path(state_root)
+                    .to_string_lossy()
+                    .into_owned(),
             }
         }
         DurableBackend::Postgres(pool) => {
@@ -294,20 +322,25 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    if let Some(snapshot_root) = legacy_skill_snapshot.as_deref() {
+        crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(
+            snapshot_root,
+            &filesystem,
+        )
+        .await?;
+    }
     // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
     // agent install) left on the host disk has to be brought across or it is silently lost.
-    crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(root, &filesystem)
-        .await?;
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
     )?);
     context.local_process_port = host_access.process_port;
-    context.standalone_storage_root = Some(root.clone());
+    context.standalone_storage_root = Some(state_root.clone());
     context.default_system_prompt_path = Some(default_system_prompt_path);
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let (_secret_store, crypto) = build_secret_store(
-        root,
+        state_root,
         Arc::clone(&scoped_filesystem),
         explicit_secret_master_key,
     )

@@ -648,7 +648,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     let input = ironclaw_composition::local_runtime_build_input_with_options(
         RebornCompositionProfile::HostedSingleTenantVolume,
         "hosted-volume-owner",
-        dir.path().to_path_buf(),
+        ironclaw_config::RebornStoragePaths::from_installation_root(dir.path()),
         Default::default(),
     )
     .unwrap();

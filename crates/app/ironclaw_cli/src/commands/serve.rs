@@ -1864,7 +1864,7 @@ slack_user_id = "U123"
             ironclaw_composition::local_runtime_build_input(
                 ironclaw_composition::RebornCompositionProfile::Standalone,
                 "serve-owner",
-                root.path().to_path_buf(),
+                ironclaw_config::RebornStoragePaths::from_installation_root(root.path()),
             )
             .expect("standalone build input"),
         );
