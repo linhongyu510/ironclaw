@@ -1794,8 +1794,11 @@ fn product_command_operation(
         }
         ProductCommand::Model { action } => Ok((
             command_operation_id(PRODUCT_MODEL_COMMAND_OPERATION_ID)?,
-            serde_json::to_value(ProductModelCommandInput { action })
-                .map_err(product_command_internal_error)?,
+            serde_json::to_value(ProductModelCommandInput {
+                thread_id: binding.thread_id.to_string(),
+                action,
+            })
+            .map_err(product_command_internal_error)?,
             "model".to_string(),
         )),
         ProductCommand::New => Ok((

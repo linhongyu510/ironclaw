@@ -15,8 +15,10 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    ThreadMessageRangeRequest, ThreadModelPreference, ThreadModelPreferenceRequest, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateThreadModelPreferenceRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -83,6 +85,76 @@ fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
         SessionThreadError::UnknownThread { thread_id: actual } => assert_eq!(actual, *thread_id),
         other => panic!("expected UnknownThread for {thread_id}, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn model_preference_is_thread_and_scope_isolated() {
+    let service = InMemorySessionThreadService::default();
+    let owned_scope = scope("model-owned");
+    let wrong_scope = scope("model-wrong");
+    let first = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-model-first").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-model-second").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let preference = ThreadModelPreference::new("model-b").unwrap();
+
+    assert_eq!(
+        service
+            .update_thread_model_preference(UpdateThreadModelPreferenceRequest {
+                scope: owned_scope.clone(),
+                thread_id: first.thread_id.clone(),
+                preference: Some(preference.clone()),
+            })
+            .await
+            .unwrap(),
+        Some(preference.clone())
+    );
+    assert_eq!(
+        service
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: owned_scope.clone(),
+                thread_id: first.thread_id.clone(),
+            })
+            .await
+            .unwrap(),
+        Some(preference)
+    );
+    assert_eq!(
+        service
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: owned_scope,
+                thread_id: second.thread_id,
+            })
+            .await
+            .unwrap(),
+        None
+    );
+    assert_unknown_thread(
+        service
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: wrong_scope,
+                thread_id: first.thread_id,
+            })
+            .await
+            .expect_err("wrong scope must hide thread existence"),
+        &ThreadId::new("thread-model-first").unwrap(),
+    );
 }
 
 #[tokio::test]

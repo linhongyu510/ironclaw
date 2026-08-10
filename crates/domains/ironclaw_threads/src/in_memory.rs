@@ -48,6 +48,7 @@ struct InMemoryState {
 #[derive(Debug, Clone)]
 struct StoredThread {
     record: SessionThreadRecord,
+    model_preference: Option<crate::ThreadModelPreference>,
     messages: Vec<ThreadMessageRecord>,
     summary_artifacts: Vec<SummaryArtifact>,
     tool_result_records: HashMap<String, Vec<u8>>,
@@ -110,6 +111,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             thread_id,
             StoredThread {
                 record: record.clone(),
+                model_preference: None,
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
                 tool_result_records: HashMap::new(),
@@ -1250,6 +1252,37 @@ impl SessionThreadService for InMemorySessionThreadService {
                 })?;
         thread.record.goal = Some(request.goal.clone());
         Ok(request.goal)
+    }
+
+    async fn thread_model_preference(
+        &self,
+        request: crate::ThreadModelPreferenceRequest,
+    ) -> Result<Option<crate::ThreadModelPreference>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = state
+            .threads
+            .get(&request.thread_id)
+            .filter(|thread| thread.record.scope == request.scope)
+            .ok_or(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })?;
+        Ok(thread.model_preference.clone())
+    }
+
+    async fn update_thread_model_preference(
+        &self,
+        request: crate::UpdateThreadModelPreferenceRequest,
+    ) -> Result<Option<crate::ThreadModelPreference>, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread = state
+            .threads
+            .get_mut(&request.thread_id)
+            .filter(|thread| thread.record.scope == request.scope)
+            .ok_or(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })?;
+        thread.model_preference = request.preference;
+        Ok(thread.model_preference.clone())
     }
 }
 

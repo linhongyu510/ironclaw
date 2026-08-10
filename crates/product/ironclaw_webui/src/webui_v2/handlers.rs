@@ -112,11 +112,13 @@ use ironclaw_product_contracts::product_wire::{
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornProductCommandListResponse,
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    SettingsToolPermissionState,
+    RebornSetNotificationChannelsRequest, RebornSetThreadModelPreferenceRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSubmitTurnResponse,
+    RebornThreadModelPreferenceRequest, RebornThreadModelPreferenceResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
+    THREAD_MODEL_PREFERENCE_SET_CAPABILITY, THREAD_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
@@ -314,6 +316,66 @@ pub async fn delete_thread(
         deleted: true,
     };
     Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/model`
+pub async fn get_thread_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+) -> Result<Json<RebornThreadModelPreferenceResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    Ok(Json(
+        THREAD_MODEL_PREFERENCE_VIEW
+            .query_on(
+                &surface,
+                RebornThreadModelPreferenceRequest { thread_id },
+                None,
+            )
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetThreadModelPreferenceBody {
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// `PUT /api/webchat/v2/threads/{thread_id}/model`
+pub async fn set_thread_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+    Json(body): Json<SetThreadModelPreferenceBody>,
+) -> Result<Json<RebornThreadModelPreferenceResponse>, WebUiV2HttpError> {
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        THREAD_MODEL_PREFERENCE_SET_CAPABILITY,
+        RebornSetThreadModelPreferenceRequest {
+            thread_id: thread_id.clone(),
+            model: body.model,
+        },
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "thread model preference",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
+    let surface = state.bind_services(caller);
+    Ok(Json(
+        THREAD_MODEL_PREFERENCE_VIEW
+            .query_on(
+                &surface,
+                RebornThreadModelPreferenceRequest { thread_id },
+                None,
+            )
+            .await?,
+    ))
 }
 
 // --- Admin user management ---------------------------------------------------

@@ -341,6 +341,41 @@ pub struct ThreadGoal {
     pub refinement_count: u32,
 }
 
+pub const THREAD_MODEL_ID_MAX_BYTES: usize = 256;
+
+/// One provider-local model id selected for a conversation thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ThreadModelPreference(String);
+
+impl ThreadModelPreference {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > THREAD_MODEL_ID_MAX_BYTES
+            || trimmed.chars().any(char::is_control)
+        {
+            return Err("thread model preference is invalid".to_string());
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ThreadModelPreference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -744,6 +779,20 @@ pub struct UpdateThreadGoalRequest {
     pub goal: ThreadGoal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadModelPreferenceRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateThreadModelPreferenceRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    /// `None` restores inheritance from the workspace default.
+    pub preference: Option<ThreadModelPreference>,
+}
+
 /// Whether `append_assistant_draft` / `append_finalized_assistant_message`
 /// should reuse an existing assistant row for the same run instead of starting
 /// a sibling. Retries of the same draft/final content reuse the record (and
@@ -997,6 +1046,19 @@ mod tests {
         assert_eq!(record.created_at, None);
         assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
+
+    #[test]
+    fn thread_model_preference_deserialization_preserves_validation_invariants() {
+        assert_eq!(
+            serde_json::from_str::<ThreadModelPreference>(r#"" model-a ""#)
+                .unwrap()
+                .as_str(),
+            "model-a"
+        );
+        assert!(serde_json::from_str::<ThreadModelPreference>(r#""bad\nmodel""#).is_err());
+        let oversized = serde_json::to_string(&"x".repeat(THREAD_MODEL_ID_MAX_BYTES + 1)).unwrap();
+        assert!(serde_json::from_str::<ThreadModelPreference>(&oversized).is_err());
     }
 }
 

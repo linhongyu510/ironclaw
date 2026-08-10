@@ -4,10 +4,10 @@
 //!
 //! WebUI, the OpenAI-compatible adapter, and the operator surface all speak
 //! these; none of them should compile `ironclaw_assistant` to name a response
-//! body. The *inventory* of concrete commands, capabilities, and views that
-//! produce them stays in product as its frozen surface — this module is the
-//! payload vocabulary only, and holds no service, handler, or projection
-//! reducer.
+//! body. Concrete operations generally stay in product as its frozen surface;
+//! descriptors consumed directly by transports are colocated with their wire
+//! payloads here so transports do not depend on the product implementation.
+//! This module holds no service, handler, or projection reducer.
 //!
 //! Nine of this family's members could not follow it here and stay in
 //! `ironclaw_assistant::reborn_services::types`, each because its fields name a
@@ -34,6 +34,7 @@ use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+use crate::descriptors::{ProductCapabilityDescriptor, ProductView};
 use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use crate::package_lifecycle::{
     ChannelConnectionRequirement, LifecyclePackageRef, LifecycleProductPayload,
@@ -350,6 +351,35 @@ pub struct RebornDeleteThreadResponse {
     pub thread_id: ThreadId,
     pub deleted: bool,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornThreadModelPreferenceRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSetThreadModelPreferenceRequest {
+    pub thread_id: String,
+    /// `None` restores inheritance from the workspace default.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornThreadModelPreferenceResponse {
+    pub thread_id: ThreadId,
+    /// The explicit per-thread preference. `None` means workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+pub const THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID: &str = "builtin.thread_model_preference_set";
+pub const THREAD_MODEL_PREFERENCE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID);
+pub const THREAD_MODEL_PREFERENCE_VIEW: ProductView<
+    RebornThreadModelPreferenceRequest,
+    RebornThreadModelPreferenceResponse,
+> = ProductView::unpaginated("thread_model_preference");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGlobalAutoApproveRequest {}

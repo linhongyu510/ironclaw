@@ -210,7 +210,9 @@ where
 
         match command {
             ProductCommand::Model { action } => {
-                let result = self.execute_product_model_command(caller, action).await?;
+                let result = self
+                    .execute_product_model_command(caller, request.thread_id, action)
+                    .await?;
                 Ok(RebornExecuteProductCommandResponse {
                     command: command_name,
                     result: Some(result),

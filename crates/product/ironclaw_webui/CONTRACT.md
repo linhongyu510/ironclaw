@@ -130,7 +130,7 @@ candidate module.
 | Sub-owner | Owns | Never contains | Items |
 |---|---|---|---|
 | `session` | The session-bootstrap response and the feature flags it carries | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `get_session`, `global_auto_approve_enabled` |
-| `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `send_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
+| `threads` | Thread lifecycle, message send, model preference, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `get_thread_model_preference`, `SetThreadModelPreferenceBody`, `set_thread_model_preference`, `send_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
 | `admin-users` | Admin user CRUD, role/status, and per-user secrets; parsing `{user_id}`/`{handle}` into domain types at the edge | Authorization logic — the service enforces admin authorization and last-admin protection | `parse_admin_user_id`, `parse_admin_secret_handle`, `read_admin_user_secret`, `admin_list_users`, `admin_create_user`, `admin_get_user`, `admin_update_user`, `admin_delete_user`, `admin_set_user_status`, `admin_set_user_role`, `admin_list_user_secrets`, `admin_put_user_secret`, `admin_delete_user_secret` |
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
@@ -184,6 +184,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
+| `webui.v2.get_thread_model_preference` / `set_thread_model_preference` | GET/PUT | `/api/webchat/v2/threads/{thread_id}/model` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |

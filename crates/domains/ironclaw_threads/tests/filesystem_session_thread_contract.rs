@@ -43,8 +43,9 @@ use ironclaw_threads::{
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadModelPreference,
+    ThreadModelPreferenceRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateThreadModelPreferenceRequest,
     UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
@@ -63,6 +64,55 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
         reasoning: None,
         signature: None,
     }
+}
+
+#[tokio::test]
+async fn filesystem_model_preference_survives_restart_and_hides_cross_scope_threads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-model", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owned_scope = scope("fs-model-owned");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-model").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let preference = ThreadModelPreference::new("model-b").unwrap();
+    service
+        .update_thread_model_preference(UpdateThreadModelPreferenceRequest {
+            scope: owned_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            preference: Some(preference.clone()),
+        })
+        .await
+        .unwrap();
+
+    let scoped = scoped_threads_fs_at(backend, "tenant-model", "alice");
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    assert_eq!(
+        reopened
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: owned_scope,
+                thread_id: thread.thread_id.clone(),
+            })
+            .await
+            .unwrap(),
+        Some(preference)
+    );
+    assert!(matches!(
+        reopened
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: scope("fs-model-wrong"),
+                thread_id: thread.thread_id,
+            })
+            .await,
+        Err(SessionThreadError::UnknownThread { .. })
+    ));
 }
 
 #[tokio::test]

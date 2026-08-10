@@ -117,7 +117,7 @@ impl ProductCommandHandler {
                 let request: ProductModelCommandInput = product_command_input(input)?;
                 command_output(
                     services
-                        .execute_product_model_command(caller, request.action)
+                        .execute_product_model_command(caller, request.thread_id, request.action)
                         .await?,
                 )
             }
@@ -336,6 +336,7 @@ pub(super) enum ProductCapabilityHandler {
     ProjectMemberUpdate,
     ProjectMemberRemove,
     ThreadDelete,
+    ThreadModelPreferenceSet,
     AutomationPause,
     AutomationResume,
     AutomationRename,
@@ -365,6 +366,7 @@ impl ProductCapabilityHandler {
             PROJECT_MEMBER_UPDATE_CAPABILITY_ID => Some(Self::ProjectMemberUpdate),
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID => Some(Self::ProjectMemberRemove),
             THREAD_DELETE_CAPABILITY_ID => Some(Self::ThreadDelete),
+            THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID => Some(Self::ThreadModelPreferenceSet),
             AUTOMATION_PAUSE_CAPABILITY_ID => Some(Self::AutomationPause),
             AUTOMATION_RESUME_CAPABILITY_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_CAPABILITY_ID => Some(Self::AutomationRename),
@@ -395,6 +397,7 @@ impl ProductCapabilityHandler {
             Self::ProjectMemberUpdate => "project member updated",
             Self::ProjectMemberRemove => "project member removed",
             Self::ThreadDelete => "thread deleted",
+            Self::ThreadModelPreferenceSet => "thread model preference updated",
             Self::AutomationPause => "automation paused",
             Self::AutomationResume => "automation resumed",
             Self::AutomationRename => "automation renamed",
@@ -504,6 +507,13 @@ impl ProductCapabilityHandler {
             Self::ThreadDelete => {
                 let request = product_command_input(input)?;
                 services.delete_thread(caller, request).await?;
+                Ok(())
+            }
+            Self::ThreadModelPreferenceSet => {
+                let request = product_command_input(input)?;
+                services
+                    .set_thread_model_preference(caller, request)
+                    .await?;
                 Ok(())
             }
             Self::AutomationPause => {
@@ -629,6 +639,7 @@ mod tests {
             PROJECT_MEMBER_UPDATE_CAPABILITY_ID,
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
             THREAD_DELETE_CAPABILITY_ID,
+            THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID,
             AUTOMATION_PAUSE_CAPABILITY_ID,
             AUTOMATION_RESUME_CAPABILITY_ID,
             AUTOMATION_RENAME_CAPABILITY_ID,

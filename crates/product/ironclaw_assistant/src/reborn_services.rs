@@ -25,7 +25,7 @@ use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
     NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
-    UpsertLlmProviderRequest,
+    UpsertLlmProviderRequest, UserModelCatalog,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -37,6 +37,9 @@ use ironclaw_product_contracts::operator_tools::{
 pub use ironclaw_product_contracts::product_wire::{
     RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
     RebornAdminThreadScrapeRunArtifactRequest,
+};
+use ironclaw_product_contracts::product_wire::{
+    THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID, THREAD_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
@@ -76,7 +79,9 @@ use ironclaw_product_contracts::surface::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadModelPreference, ThreadModelPreferenceRequest, ThreadScope,
+    UpdateThreadModelPreferenceRequest,
 };
 use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
@@ -231,11 +236,12 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornSetNotificationChannelsRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
-    SettingsToolPermissionState,
+    RebornSetThreadModelPreferenceRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornThreadModelPreferenceRequest, RebornThreadModelPreferenceResponse, RebornTimelineRequest,
+    RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -653,6 +659,42 @@ fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResul
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    CommandResultView {
+        title: title.to_string(),
+        fields,
+        lines,
+    }
+}
+
+fn thread_model_command_view(
+    title: &str,
+    preference: Option<&ThreadModelPreference>,
+    catalog: &UserModelCatalog,
+) -> CommandResultView {
+    let mut fields = Vec::new();
+    let mut lines = Vec::new();
+    if !catalog.selection_enabled {
+        lines
+            .push("Conversation model selection is not configured for this workspace.".to_string());
+    } else {
+        let workspace_default = catalog
+            .workspace_default
+            .as_deref()
+            .unwrap_or("provider default");
+        fields.push(command_result_field(
+            "Preference",
+            preference
+                .map(|model| model.as_str())
+                .unwrap_or("workspace default"),
+        ));
+        fields.push(command_result_field(
+            "Effective model",
+            preference
+                .map(|model| model.as_str())
+                .unwrap_or(workspace_default),
+        ));
+        lines.push(format!("Approved models: {}", catalog.models.join(", ")));
     }
     CommandResultView {
         title: title.to_string(),
@@ -2981,12 +3023,68 @@ where
     async fn execute_product_model_command(
         &self,
         caller: ProductSurfaceCaller,
+        thread_id: String,
         action: ProductModelCommand,
     ) -> Result<CommandResultView, ProductSurfaceError> {
         match action {
             ProductModelCommand::Status => {
-                let snapshot = self.build_llm_config_view(caller).await?;
-                Ok(model_command_view("Model", &snapshot))
+                let preference = self
+                    .get_thread_model_preference(
+                        caller.clone(),
+                        RebornThreadModelPreferenceRequest { thread_id },
+                    )
+                    .await?;
+                let preference = preference
+                    .model
+                    .map(ThreadModelPreference::new)
+                    .transpose()
+                    .map_err(|_| ProductSurfaceError::internal_invariant())?;
+                let catalog = self.build_user_model_catalog_view(caller).await?;
+                Ok(thread_model_command_view(
+                    "Conversation model",
+                    preference.as_ref(),
+                    &catalog,
+                ))
+            }
+            ProductModelCommand::Use { model } => {
+                let preference = self
+                    .set_thread_model_preference(
+                        caller.clone(),
+                        RebornSetThreadModelPreferenceRequest {
+                            thread_id,
+                            model: Some(model),
+                        },
+                    )
+                    .await?;
+                let preference = preference
+                    .model
+                    .map(ThreadModelPreference::new)
+                    .transpose()
+                    .map_err(|_| ProductSurfaceError::internal_invariant())?;
+                let catalog = self.build_user_model_catalog_view(caller).await?;
+                Ok(thread_model_command_view(
+                    "Conversation model updated",
+                    preference.as_ref(),
+                    &catalog,
+                ))
+            }
+            ProductModelCommand::Default => {
+                let preference = self
+                    .set_thread_model_preference(
+                        caller.clone(),
+                        RebornSetThreadModelPreferenceRequest {
+                            thread_id,
+                            model: None,
+                        },
+                    )
+                    .await?;
+                let catalog = self.build_user_model_catalog_view(caller).await?;
+                debug_assert!(preference.model.is_none());
+                Ok(thread_model_command_view(
+                    "Conversation model updated",
+                    None,
+                    &catalog,
+                ))
             }
             ProductModelCommand::Set { model } => {
                 let snapshot = self.build_llm_config_view(caller.clone()).await?;
@@ -3018,6 +3116,87 @@ where
                 Ok(model_command_view("Model updated", &snapshot))
             }
         }
+    }
+
+    pub async fn get_thread_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornThreadModelPreferenceRequest,
+    ) -> Result<RebornThreadModelPreferenceResponse, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        let scope = caller.turn_scope(thread_id.clone());
+        let (_, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let preference = self
+            .thread_service
+            .thread_model_preference(ThreadModelPreferenceRequest {
+                scope: thread_scope,
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_ownership_probe_error)?;
+        Ok(RebornThreadModelPreferenceResponse {
+            thread_id,
+            model: preference.map(|model| model.as_str().to_string()),
+        })
+    }
+
+    pub async fn set_thread_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornSetThreadModelPreferenceRequest,
+    ) -> Result<RebornThreadModelPreferenceResponse, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        let scope = caller.turn_scope(thread_id.clone());
+        let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let _thread_operation_guard = self.lock_thread_operation(&scope).await;
+        let preference = match request.model {
+            Some(model) => {
+                let preference = ThreadModelPreference::new(model).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "model",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                if !catalog.selection_enabled
+                    || !catalog
+                        .models
+                        .iter()
+                        .any(|item| item == preference.as_str())
+                {
+                    return Err(ProductSurfaceError::validation(
+                        "model",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    ));
+                }
+                let resolved = self
+                    .resolve_user_model(caller, Some(preference.as_str().to_string()))
+                    .await?;
+                let model = resolved.ok_or_else(ProductSurfaceError::internal_invariant)?;
+                Some(ThreadModelPreference::new(model).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "model",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let preference = self
+            .thread_service
+            .update_thread_model_preference(UpdateThreadModelPreferenceRequest {
+                scope: thread_scope,
+                thread_id: thread_id.clone(),
+                preference,
+            })
+            .await
+            .map_err(map_ownership_probe_error)?;
+        Ok(RebornThreadModelPreferenceResponse {
+            thread_id,
+            model: preference.map(|model| model.as_str().to_string()),
+        })
     }
 
     async fn execute_product_status_command(
@@ -3820,6 +3999,17 @@ where
             // Resolve tenant policy before any new message or attachment side
             // effect. Existing idempotent replays above retain their original
             // turn outcome even if an administrator later changes the policy.
+            if requested_model.is_none() {
+                requested_model = self
+                    .thread_service
+                    .thread_model_preference(ThreadModelPreferenceRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: scope.thread_id.clone(),
+                    })
+                    .await
+                    .map_err(map_ownership_probe_error)?
+                    .map(|model| model.as_str().to_string());
+            }
             requested_model = self
                 .resolve_user_model(caller.clone(), requested_model)
                 .await?;
@@ -4127,6 +4317,13 @@ where
                 let response = self.build_threads_view(caller, request).await?;
                 let next_cursor = response.next_cursor.clone();
                 views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == THREAD_MODEL_PREFERENCE_VIEW.id => {
+                let request: RebornThreadModelPreferenceRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                let response = self.get_thread_model_preference(caller, request).await?;
+                views::view_page(response)
             }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)

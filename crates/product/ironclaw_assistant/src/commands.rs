@@ -38,6 +38,8 @@ pub struct ProductLifecycleCommandInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductModelCommandInput {
+    /// Filled from the resolved conversation binding, never external command text.
+    pub thread_id: String,
     pub action: ProductModelCommand,
 }
 
@@ -106,8 +108,8 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
             name: "model",
             audience: CommandAudience::User,
             title: "Model",
-            description: "Show or switch the active LLM provider and model",
-            usage: "/model [<model> | set-provider <provider> [--model <model>]]",
+            description: "Show or change this conversation's model preference",
+            usage: "/model [use <model> | default | <admin-model> | set-provider <provider> [--model <model>]]",
         },
         parse: parse_model_command,
     },
@@ -269,6 +271,10 @@ impl ProductStopInvocation {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProductModelCommand {
     Status,
+    Use {
+        model: String,
+    },
+    Default,
     Set {
         model: String,
     },
@@ -316,6 +322,9 @@ pub fn required_audience(command: &ProductCommand) -> CommandAudience {
     match command {
         ProductCommand::Model {
             action: ProductModelCommand::Status,
+        }
+        | ProductCommand::Model {
+            action: ProductModelCommand::Use { .. } | ProductModelCommand::Default,
         } => CommandAudience::User,
         ProductCommand::Model { .. } => CommandAudience::Admin,
         ProductCommand::New => CommandAudience::User,
@@ -339,6 +348,27 @@ fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseRe
             action: ProductModelCommand::Status,
         });
     };
+    if first == "use" {
+        let Some(model) = args.next() else {
+            return invalid_lifecycle_command("model use requires a model name");
+        };
+        if args.next().is_some() {
+            return invalid_lifecycle_command("model use accepts exactly one model name");
+        }
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Use {
+                model: model.to_string(),
+            },
+        });
+    }
+    if first == "default" {
+        if args.next().is_some() {
+            return invalid_lifecycle_command("model default does not accept arguments");
+        }
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Default,
+        });
+    }
     match ModelCommandHead::parse(first)? {
         ModelCommandHead::SetProvider => {
             let Some(provider) = args.next() else {

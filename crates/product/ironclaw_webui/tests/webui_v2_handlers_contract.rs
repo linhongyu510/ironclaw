@@ -131,7 +131,10 @@ use ironclaw_product_contracts::outbound::{
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-use ironclaw_product_contracts::product_wire::{RebornLogQueryRequest, RebornLogQueryResponse};
+use ironclaw_product_contracts::product_wire::{
+    RebornLogQueryRequest, RebornLogQueryResponse, THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID,
+    THREAD_MODEL_PREFERENCE_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
@@ -964,6 +967,20 @@ impl StubServices {
                 .expect("user model catalog payload"),
                 next_cursor: None,
             }),
+            id if id == THREAD_MODEL_PREFERENCE_VIEW.id => {
+                let request: ironclaw_assistant::RebornThreadModelPreferenceRequest =
+                    serde_json::from_value(query.params).expect("thread model params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(
+                        ironclaw_assistant::RebornThreadModelPreferenceResponse {
+                            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
+                            model: Some("model-b".to_string()),
+                        },
+                    )
+                    .expect("thread model payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params).expect("thread list params");
@@ -2267,6 +2284,63 @@ async fn delete_thread_path_dispatches_through_service() {
     assert_eq!(
         calls[0].1,
         serde_json::json!({ "thread_id": "thread-delete" })
+    );
+}
+
+#[tokio::test]
+async fn thread_model_preference_routes_bind_the_path_and_use_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-model/model")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(read_json(get_response).await["model"], "model-b");
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/threads/thread-model/model")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"model-a"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let view_queries = services.view_queries.lock().expect("lock");
+    assert_eq!(view_queries.len(), 2);
+    assert!(
+        view_queries
+            .iter()
+            .all(|query| query.view_id == THREAD_MODEL_PREFERENCE_VIEW.id)
+    );
+    assert!(
+        view_queries
+            .iter()
+            .all(|query| { query.params == serde_json::json!({ "thread_id": "thread-model" }) })
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        THREAD_MODEL_PREFERENCE_SET_CAPABILITY_ID
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "thread_id": "thread-model", "model": "model-a" })
     );
 }
 

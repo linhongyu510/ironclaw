@@ -47,11 +47,12 @@ pub use contract::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
-    effective_tool_result_read_max_bytes,
+    SummaryModelContextPolicy, THREAD_MODEL_ID_MAX_BYTES, TOOL_RESULT_RECORD_READ_MAX_BYTES,
+    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadModelPreference, ThreadModelPreferenceRequest, ThreadScope,
+    ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateThreadModelPreferenceRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest, effective_tool_result_read_max_bytes,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};

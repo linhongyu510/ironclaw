@@ -128,6 +128,8 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_preference: Option<crate::ThreadModelPreference>,
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so a
@@ -1425,6 +1427,7 @@ where
                         let stored = StoredThreadRecord {
                             record: record.clone(),
                             next_sequence: 1,
+                            model_preference: None,
                         };
                         Ok(CasApply::new(stored, (record, true)))
                     }
@@ -2685,6 +2688,62 @@ where
             })?
             .0;
         self.thread_record_with_index_overlay(thread).await
+    }
+
+    async fn thread_model_preference(
+        &self,
+        request: crate::ThreadModelPreferenceRequest,
+    ) -> Result<Option<crate::ThreadModelPreference>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .map(|(thread, _)| thread.model_preference)
+            .ok_or(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })
+    }
+
+    async fn update_thread_model_preference(
+        &self,
+        request: crate::UpdateThreadModelPreferenceRequest,
+    ) -> Result<Option<crate::ThreadModelPreference>, SessionThreadError> {
+        let path = thread_record_path(&request.scope, &request.thread_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        let expected_scope = request.scope;
+        let expected_thread_id = request.thread_id;
+        let preference = request.preference;
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<StoredThreadRecord>(bytes),
+            |stored: &StoredThreadRecord| Self::thread_entry(stored),
+            move |current| {
+                let expected_scope = expected_scope.clone();
+                let expected_thread_id = expected_thread_id.clone();
+                let preference = preference.clone();
+                async move {
+                    let Some(mut stored) = current else {
+                        return Err(SessionThreadError::UnknownThread {
+                            thread_id: expected_thread_id,
+                        });
+                    };
+                    if stored.record.scope != expected_scope
+                        || stored.record.thread_id != expected_thread_id
+                    {
+                        return Err(SessionThreadError::UnknownThread {
+                            thread_id: expected_thread_id,
+                        });
+                    }
+                    if stored.model_preference == preference {
+                        return Ok(CasApply::no_op(stored, preference));
+                    }
+                    stored.model_preference = preference.clone();
+                    Ok(CasApply::new(stored, preference))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 
     async fn delete_thread(

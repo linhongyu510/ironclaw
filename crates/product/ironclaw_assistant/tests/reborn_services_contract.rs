@@ -86,17 +86,19 @@ use ironclaw_assistant::{
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
     RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServices,
-    RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSetNotificationChannelsRequest, RebornSetThreadModelPreferenceRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SkillsProductService, StaticOperatorStatusService,
-    THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornThreadModelPreferenceRequest,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SkillsProductService, StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES,
+    THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
     TriggerRunThreadScope, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_assistant::{
@@ -165,7 +167,7 @@ use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest, UserModelCatalog,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -3748,6 +3750,63 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
 }
 
 #[tokio::test]
+async fn submit_turn_uses_thread_preference_and_idempotent_replay_keeps_original_model() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.use_user_model_catalog("model-a", &["model-a", "model-b"]);
+    let services =
+        RebornServices::new(threads, coordinator.clone()).with_llm_config_service(policy);
+    create_thread_for(&services, caller(), "thread-model-preference").await;
+    services
+        .set_thread_model_preference(
+            caller(),
+            RebornSetThreadModelPreferenceRequest {
+                thread_id: "thread-model-preference".to_string(),
+                model: Some("model-b".to_string()),
+            },
+        )
+        .await
+        .expect("set preference");
+
+    let request = serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+        "client_action_id": "send-thread-model",
+        "thread_id": "thread-model-preference",
+        "content": "hello from preferred model"
+    }))
+    .expect("request");
+    services
+        .submit_turn(caller(), request.clone())
+        .await
+        .expect("submit succeeds");
+    assert_eq!(
+        coordinator.last_requested_model().as_deref(),
+        Some("model-b")
+    );
+
+    services
+        .set_thread_model_preference(
+            caller(),
+            RebornSetThreadModelPreferenceRequest {
+                thread_id: "thread-model-preference".to_string(),
+                model: Some("model-a".to_string()),
+            },
+        )
+        .await
+        .expect("change preference after first submit");
+    services
+        .submit_turn(caller(), request)
+        .await
+        .expect("idempotent replay succeeds");
+    assert_eq!(coordinator.submission_count(), 1);
+    assert_eq!(
+        coordinator.last_requested_model().as_deref(),
+        Some("model-b"),
+        "replay must retain the already-submitted run's model"
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
@@ -5481,13 +5540,24 @@ async fn retry_run_rejects_cross_user_access() {
 }
 
 #[tokio::test]
-async fn approved_gate_resolution_resumes_turn() {
+async fn approved_gate_resolution_resumes_turn_without_reresolving_thread_model() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        coordinator.clone(),
-    );
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::Internal));
+    let services = RebornServices::new(threads.clone(), coordinator.clone())
+        .with_llm_config_service(policy.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
+    threads
+        .update_thread_model_preference(ironclaw_threads::UpdateThreadModelPreferenceRequest {
+            scope: thread_scope_for(&caller()),
+            thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+            preference: Some(
+                ironclaw_threads::ThreadModelPreference::new("model-b").expect("model"),
+            ),
+        })
+        .await
+        .expect("seed preference");
 
     let response = services
         .resolve_gate(
@@ -5505,6 +5575,10 @@ async fn approved_gate_resolution_resumes_turn() {
         .expect("gate resolution succeeds");
 
     assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert!(
+        policy.has_pending_model_resolution(),
+        "resuming an existing run must retain its route snapshot without resolving the thread preference again"
+    );
     assert_eq!(coordinator.resumption_count(), 1);
     assert_eq!(
         coordinator.last_resumption_precondition(),
@@ -10458,6 +10532,7 @@ struct SetupRecordingLlmConfigService {
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
     next_model_resolution: Mutex<Option<Result<Option<String>, LlmConfigServiceError>>>,
+    user_model_catalog: Mutex<UserModelCatalog>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10476,6 +10551,7 @@ impl Default for SetupRecordingLlmConfigService {
             next_set_active_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
             next_model_resolution: Mutex::new(None),
+            user_model_catalog: Mutex::new(UserModelCatalog::disabled()),
         }
     }
 }
@@ -10539,6 +10615,18 @@ impl SetupRecordingLlmConfigService {
 
     fn resolve_next_model_as(&self, result: Result<Option<String>, LlmConfigServiceError>) {
         *self.next_model_resolution.lock().expect("lock") = Some(result);
+    }
+
+    fn has_pending_model_resolution(&self) -> bool {
+        self.next_model_resolution.lock().expect("lock").is_some()
+    }
+
+    fn use_user_model_catalog(&self, default: &str, models: &[&str]) {
+        *self.user_model_catalog.lock().expect("lock") = UserModelCatalog {
+            selection_enabled: true,
+            workspace_default: Some(default.to_string()),
+            models: models.iter().map(|model| (*model).to_string()).collect(),
+        };
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -10676,6 +10764,13 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
             .expect("lock")
             .take()
             .unwrap_or(Ok(requested_model))
+    }
+
+    async fn user_model_catalog(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        Ok(self.user_model_catalog.lock().expect("lock").clone())
     }
 
     // The three vendor logins answer with `next_login_error` when one is armed.
@@ -16427,11 +16522,11 @@ async fn member_command_list_excludes_admin_audience() {
     assert_eq!(model.title, "Model");
     assert_eq!(
         model.description,
-        "Show or switch the active LLM provider and model"
+        "Show or change this conversation's model preference"
     );
     assert_eq!(
         model.usage,
-        "/model [<model> | set-provider <provider> [--model <model>]]"
+        "/model [use <model> | default | <admin-model> | set-provider <provider> [--model <model>]]"
     );
     let status = response
         .commands
@@ -16528,6 +16623,7 @@ async fn member_execute_model_set_is_access_denied_without_llm_invoke() {
 #[tokio::test]
 async fn member_execute_model_read_returns_view() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_user_model_catalog("model-a", &["model-a", "model-b"]);
     let services = command_palette_services(
         FakeAdminUsers::with([admin_record(
             "user-alpha",
@@ -16536,6 +16632,7 @@ async fn member_execute_model_read_returns_view() {
         )]),
         llm_config,
     );
+    setup_owned_thread(&services, caller(), "thread-command-palette").await;
 
     let response =
         execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/model")
@@ -16544,7 +16641,122 @@ async fn member_execute_model_read_returns_view() {
 
     assert!(response.rejection.is_none());
     let result = response.result.expect("model read must return a view");
-    assert_eq!(result.title, "Model");
+    assert_eq!(result.title, "Conversation model");
+}
+
+#[tokio::test]
+async fn member_model_commands_persist_only_the_selected_thread_preference() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_user_model_catalog("model-a", &["model-a", "model-b"]);
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config,
+    );
+    setup_owned_thread(&services, caller(), "thread-model-first").await;
+    setup_owned_thread(&services, caller(), "thread-model-second").await;
+
+    let use_response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-model-first",
+        "/model use model-b",
+    )
+    .await
+    .expect("member may select an approved model");
+    assert!(use_response.rejection.is_none());
+    assert_eq!(
+        services
+            .get_thread_model_preference(
+                caller(),
+                RebornThreadModelPreferenceRequest {
+                    thread_id: "thread-model-first".to_string(),
+                },
+            )
+            .await
+            .expect("first preference")
+            .model
+            .as_deref(),
+        Some("model-b")
+    );
+    assert_eq!(
+        services
+            .get_thread_model_preference(
+                caller(),
+                RebornThreadModelPreferenceRequest {
+                    thread_id: "thread-model-second".to_string(),
+                },
+            )
+            .await
+            .expect("second preference")
+            .model,
+        None
+    );
+
+    let default_response = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-model-first",
+        "/model default",
+    )
+    .await
+    .expect("member may restore workspace default");
+    assert!(default_response.rejection.is_none());
+    assert_eq!(
+        services
+            .get_thread_model_preference(
+                caller(),
+                RebornThreadModelPreferenceRequest {
+                    thread_id: "thread-model-first".to_string(),
+                },
+            )
+            .await
+            .expect("restored preference")
+            .model,
+        None
+    );
+}
+
+#[tokio::test]
+async fn member_model_use_rejects_unapproved_model_before_persistence() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_user_model_catalog("model-a", &["model-a"]);
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config,
+    );
+    setup_owned_thread(&services, caller(), "thread-model-rejected").await;
+
+    let error = execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-model-rejected",
+        "/model use model-b",
+    )
+    .await
+    .expect_err("unapproved model is rejected");
+    assert_eq!(error.status_code, 400);
+    assert_eq!(error.field.as_deref(), Some("model"));
+    assert_eq!(
+        services
+            .get_thread_model_preference(
+                caller(),
+                RebornThreadModelPreferenceRequest {
+                    thread_id: "thread-model-rejected".to_string(),
+                },
+            )
+            .await
+            .expect("preference remains unset")
+            .model,
+        None
+    );
 }
 
 #[tokio::test]
@@ -17139,6 +17351,7 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_llm_config_service(Arc::new(SetupRecordingLlmConfigService::default()));
+    setup_owned_thread(&services, caller(), "thread-command-palette").await;
 
     let status_response = execute_product_command_via_invoke(
         &services,
@@ -17167,7 +17380,7 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
             .result
             .expect("model read must return a view")
             .title,
-        "Model"
+        "Conversation model"
     );
 
     let admin_audience_error = execute_product_command_via_invoke(

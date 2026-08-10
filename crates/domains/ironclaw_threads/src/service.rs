@@ -14,8 +14,9 @@ use crate::{
     MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
-    UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultRecordRequest,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadModelPreference,
+    ThreadModelPreferenceRequest, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateThreadModelPreferenceRequest, UpdateToolResultRecordRequest,
     UpdateToolResultReferenceRequest,
 };
 
@@ -340,6 +341,23 @@ pub trait SessionThreadService: Send + Sync {
         ))
     }
 
+    async fn thread_model_preference(
+        &self,
+        _request: ThreadModelPreferenceRequest,
+    ) -> Result<Option<ThreadModelPreference>, SessionThreadError> {
+        Ok(None)
+    }
+
+    async fn update_thread_model_preference(
+        &self,
+        _request: UpdateThreadModelPreferenceRequest,
+    ) -> Result<Option<ThreadModelPreference>, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "update_thread_model_preference is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
     async fn read_thread_by_id(
         &self,
         _thread_id: ThreadId,
@@ -624,6 +642,20 @@ where
         request: UpdateThreadGoalRequest,
     ) -> Result<ThreadGoal, SessionThreadError> {
         self.as_ref().update_thread_goal(request).await
+    }
+
+    async fn thread_model_preference(
+        &self,
+        request: ThreadModelPreferenceRequest,
+    ) -> Result<Option<ThreadModelPreference>, SessionThreadError> {
+        self.as_ref().thread_model_preference(request).await
+    }
+
+    async fn update_thread_model_preference(
+        &self,
+        request: UpdateThreadModelPreferenceRequest,
+    ) -> Result<Option<ThreadModelPreference>, SessionThreadError> {
+        self.as_ref().update_thread_model_preference(request).await
     }
 
     async fn read_thread_by_id(
