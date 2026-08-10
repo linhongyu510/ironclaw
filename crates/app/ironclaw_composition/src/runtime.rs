@@ -3755,35 +3755,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_context_source,
         input_queue: Some(host_input_queue_reader),
         input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
-        identity_context_source: match (
+        identity_context_source: build_default_identity_context_source(
             services.system_content_root.clone(),
             services.default_system_prompt_path.clone(),
-        ) {
-            (Some(system_content_root), Some(default_system_prompt_path)) => {
-                Arc::new(
-                    // Standalone seeding validates the prompt path first, so non-file prompt paths fail
-                    // as build errors before this runtime-level identity-source guard is reached.
-                    DefaultSystemPromptIdentitySource::try_new(
-                        system_content_root,
-                        default_system_prompt_path,
-                        resolved_tool_disclosure.is_bridged(),
-                        bool_env_flag("BENCHMARKING_MODE"),
-                    )
-                    .map_err(|error| RebornRuntimeError::InvalidArgument {
-                        reason: error.to_string(),
-                    })?,
-                ) as Arc<dyn HostIdentityContextSource>
-            }
-            (None, None) => {
-                Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
-            }
-            _ => {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason: "assembled runtime must provide system content root and default system prompt path together"
-                        .to_string(),
-                });
-            }
-        },
+            resolved_tool_disclosure.is_bridged(),
+            bool_env_flag("BENCHMARKING_MODE"),
+        )?,
         // Resolve the per-user agent-context profile (timezone/locale/location) from
         // `context/profile.json` via the workspace filesystem. When a standalone workspace
         // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
@@ -4488,6 +4465,42 @@ struct ComposedSkillContextSource {
 }
 
 const MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+/// Builds the default prompt identity source from the system-content namespace selected by
+/// composition. Keeping this seam explicit keeps a `system/prompts` path paired with its
+/// system-content root rather than the unrelated `state` root.
+fn build_default_identity_context_source(
+    system_content_root: Option<PathBuf>,
+    default_system_prompt_path: Option<PathBuf>,
+    disclosure_protocol_active: bool,
+    benchmarking_mode_active: bool,
+) -> Result<Arc<dyn HostIdentityContextSource>, RebornRuntimeError> {
+    let source = match (system_content_root, default_system_prompt_path) {
+        (Some(system_content_root), Some(default_system_prompt_path)) => {
+            Arc::new(
+                // Standalone seeding validates the prompt path first, so non-file prompt paths fail
+                // as build errors before this runtime-level identity-source guard is reached.
+                DefaultSystemPromptIdentitySource::try_new(
+                    system_content_root,
+                    default_system_prompt_path,
+                    disclosure_protocol_active,
+                    benchmarking_mode_active,
+                )
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: error.to_string(),
+                })?,
+            ) as Arc<dyn HostIdentityContextSource>
+        }
+        (None, None) => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
+        _ => {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "assembled runtime must provide system content root and default system prompt path together"
+                    .to_string(),
+            });
+        }
+    };
+    Ok(source)
+}
 
 /// Reads a boolean feature flag from the environment. Absent or unrecognized
 /// values are treated as off — this gates an opt-in prompt addendum for

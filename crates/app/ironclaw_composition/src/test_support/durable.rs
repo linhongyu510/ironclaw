@@ -27,8 +27,14 @@ pub async fn open_standalone_extension_installation_store_for_test(
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_thread_service_for_test(
     storage_root: &std::path::Path,
-) -> Result<std::sync::Arc<ironclaw_threads::FilesystemSessionThreadService>, crate::RebornBuildError>
-{
+) -> Result<
+    std::sync::Arc<
+        ironclaw_threads::FilesystemSessionThreadService<
+            ironclaw_filesystem::CompositeRootFilesystem,
+        >,
+    >,
+    crate::RebornBuildError,
+> {
     crate::factory::test_support::open_standalone_thread_service_for_test(storage_root).await
 }
 

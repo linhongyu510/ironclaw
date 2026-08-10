@@ -853,7 +853,10 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_thread_service_for_test(
     storage_root: &Path,
-) -> Result<Arc<ironclaw_threads::FilesystemSessionThreadService>, RebornBuildError> {
+) -> Result<
+    Arc<ironclaw_threads::FilesystemSessionThreadService<CompositeRootFilesystem>>,
+    RebornBuildError,
+> {
     let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
     let bundle = build_filesystem(
         paths.state_root(),
