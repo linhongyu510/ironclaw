@@ -80,6 +80,7 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
+toml = "1.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
@@ -120,7 +121,6 @@ ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version =
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
-toml = "1.1"
 
 [[bin]]
 name = "ironclaw"

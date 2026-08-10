@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::RebornCliContext;
 
 mod native_extensions;
+pub(crate) mod storage_layout;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
 // the same mutex — all unit tests link into one binary, so a second, separate
@@ -1304,6 +1305,44 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
 
 pub(crate) fn local_runtime_storage_root(config: &RebornBootConfig) -> PathBuf {
     config.home().path().to_path_buf()
+}
+
+/// Resolve the existing composition-owned storage requirement for a CLI
+/// command without introducing a second profile-to-policy table in this crate.
+pub(crate) fn storage_layout_requirement(
+    config: &RebornBootConfig,
+) -> anyhow::Result<ironclaw_config::LayoutRequirement> {
+    let deployment = ironclaw_composition::deployment::DeploymentConfig::for_profile(
+        composition_profile(config.profile()),
+        false,
+    );
+    deployment.storage_layout_requirement().ok_or_else(|| {
+        anyhow::anyhow!(
+            "profile {} has no durable filesystem layout to adopt",
+            config.profile()
+        )
+    })
+}
+
+pub(crate) fn adopt_storage_layout(
+    context: &RebornCliContext,
+    confirm_processes_stopped: bool,
+    confirm_backup_snapshot: bool,
+    workspace_import: Option<storage_layout::WorkspaceImportOptions>,
+) -> anyhow::Result<()> {
+    let requirement = storage_layout_requirement(context.boot_config())?;
+    storage_layout::adopt_layout(
+        context.boot_config().home(),
+        requirement,
+        storage_layout::AdoptOptions {
+            confirm_processes_stopped,
+            confirm_backup_snapshot,
+            workspace_import,
+        },
+    )?;
+    // The adoption command does not start a runtime. Validate the manifest
+    // through the same normal-boot prerequisite before reporting completion.
+    storage_layout::ensure_ready_layout(context.boot_config().home(), requirement).map(|_| ())
 }
 
 pub(crate) async fn initialize_local_runtime_storage_root(
