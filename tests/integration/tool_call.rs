@@ -605,8 +605,15 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 /// report the durable record's true `total_bytes`. Page one's chunk contains a
 /// credential marker, so its inline preview is suppressed; the continuation
 /// identity and offset must survive independently of preview content.
-#[tokio::test]
-async fn result_read_continues_a_durable_result_byte_exactly() {
+#[test]
+fn result_read_continues_a_durable_result_byte_exactly() {
+    run_async_test_with_stack(
+        "result_read_continues_a_durable_result_byte_exactly",
+        result_read_continues_a_durable_result_byte_exactly_impl,
+    );
+}
+
+async fn result_read_continues_a_durable_result_byte_exactly_impl() {
     let h = RebornIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
