@@ -1,10 +1,11 @@
 # 1.0.0-rc.1 to 1.1.0-rc.1 startup migration
 
-This runbook covers only the exact release pair `ironclaw-v1.0.0-rc.1` to
-`ironclaw-v1.1.0-rc.1`. The database v33/v34 migrations are necessary to make
-the 1.1 storage substrate readable, but they are not sufficient: most affected
-state is encoded as versioned records inside `RootFilesystem`, not as SQL
-columns.
+This runbook defines the retained migration contract introduced for the exact
+release pair `ironclaw-v1.0.0-rc.1` to `ironclaw-v1.1.0-rc.1`. The same
+contract is exercised when a stable 1.0.0 deployment upgrades directly to
+1.1.1. The database v33/v34 migrations are necessary to make the 1.1 storage
+substrate readable, but they are not sufficient: most affected state is
+encoded as versioned records inside `RootFilesystem`, not as SQL columns.
 
 `ironclaw_release_migration` owns the bounded release-pair lease, ordered
 cross-domain transforms, read-back checks, and redacted completion evidence.
@@ -97,16 +98,17 @@ while `0` or `false` run it.
 ## Release artifact gate
 
 The tag publisher must pass `scripts/ci/release-upgrade-canary.py` before its
-privileged `host` job may upload artifacts or create the GitHub Release. The
-gate downloads and checksum-verifies the published
-`ironclaw-v1.0.0-rc.1` Linux x86_64 archive, then exercises that binary and the
-exact cargo-dist candidate archive against one retained libSQL home and
-workspace snapshot. It creates two threads and four messages through the
-shipping WebChat API using a local deterministic OpenAI-compatible server,
-then proves first upgrade, candidate restart, rc1 rollback, and candidate
-re-upgrade preserve exact thread/message identities, roles, order, and
-content. Every candidate boot also reads the migrated workspace sentinel
-through the authenticated filesystem surface.
+privileged `host` job may upload artifacts or create the GitHub Release. For
+1.1.1, the gate downloads and checksum-verifies the published stable
+`ironclaw-v1.0.0` and `ironclaw-v1.1.0` Linux x86_64 archives in separate
+matrix legs, then exercises each binary and the exact cargo-dist candidate
+archive against one retained libSQL home and workspace snapshot per leg. It
+creates two threads and four messages through the shipping WebChat API using a
+local deterministic OpenAI-compatible server, then proves first upgrade,
+candidate restart, predecessor rollback, and candidate re-upgrade preserve
+exact thread/message identities, roles, order, and content. Every candidate
+boot also reads the migrated workspace sentinel through the authenticated
+filesystem surface.
 
 This gate deliberately does not call a live model or third-party provider.
 The owning crate contracts remain responsible for malformed inputs, backend

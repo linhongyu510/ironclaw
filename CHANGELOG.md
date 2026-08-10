@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1-rc.1] - 2026-08-10
+
+Urgent patch candidate for the 1.1 line. This release concentrates on channel
+delivery and pairing, IronHub/custom MCP compatibility, WebUI streaming
+stability, durable retrieval, and safe upgrades from both supported stable
+predecessors.
+
+**Upgrading from 1.0.0.** Stop all writers and take a database-native snapshot
+before starting 1.1.1. Container deployments must also copy the old shared
+`/workspace` to durable storage and set
+`IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT` to that retained snapshot. Startup
+applies the additive database migrations and the bounded record migration,
+imports workspace files create-only, verifies the result, and retains the old
+authorities for rollback. Slack and Telegram state is skipped by default and
+must be reconfigured; set
+`IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION=false` to opt into its
+verified import.
+
+**Upgrading from 1.1.0.** No offline data transform is required. Stop all
+writers, take the normal database/volume snapshot, and start 1.1.1 against the
+same durable state. Startup re-verifies any retained release-pair migration
+record. The Slack/Telegram skip only affects installations that still have
+legacy channel state awaiting that migration.
+
+For containers, keep both `IRONCLAW_REBORN_HOME` and
+`IRONCLAW_REBORN_WORKSPACE_ROOT` on durable storage. A database alone does not
+retain project files, generated artifacts, materialized extension packages, or
+filesystem-backed skills when a container is replaced.
+
+### Fixed
+
+- **Channels:** retain provisioned Slack personal-DM delivery targets and
+  accept Telegram `/pair` as a pairing-code alias.
+- **Channel upgrade safety:** skip malformed legacy Slack/Telegram state by
+  default without deleting its source rows, while keeping an explicit opt-in
+  path for verified import.
+- **IronHub and custom MCP:** install signed IronHub prompt assets using the
+  1.1 extension asset contract, and fix the chat “connect account” dead end for
+  already-connected extensions.
+- **WebUI:** stop SSE reload retry storms and scope active-run bookkeeping to
+  the thread that owns the run.
+- **Retrieval:** avoid repeated libSQL FTS backfills, make natural-language FTS
+  queries safe, and preserve pageable `result_read` continuation references.
+- **Runtime credentials:** make WASM `secret_exists` see credentials staged
+  during extension setup.
+
+### Documentation
+
+- Document how to place the Reborn home and workspace root on durable storage
+  so container replacement does not discard filesystem artifacts.
+
 ## [1.1.0] - 2026-08-06
 
 First stable release since 1.0.0, promoting `1.1.0-rc.1` plus the fixes listed
@@ -17,10 +68,12 @@ commands — plus a broad pass on making failures legible: to the model, which
 now gets told what to do next instead of an opaque stop, and to the user, who
 gets localized, actionable errors instead of silent dead ends.
 
-**Upgrading from 1.0.0.** No migration steps. Extension lifecycle state moved
-to a normalized on-disk shape; rows written by 1.0.0 keep deserializing. The
-one behavioral removal is the `/webhooks/slack/events` compatibility alias
-(see Removed).
+**Upgrading from 1.0.0.** Extension lifecycle state moved to a normalized
+on-disk shape; rows written by 1.0.0 keep deserializing. Container operators
+must preserve the shared workspace separately from the database; the 1.1.1
+upgrade instructions above describe the durable snapshot handoff. The one
+behavioral removal is the `/webhooks/slack/events` compatibility alias (see
+Removed).
 
 ### Added
 

@@ -253,7 +253,7 @@ jobs:
             ${{ env.BUILD_MANIFEST_NAME }}
 
   release-upgrade-canary:
-    name: Release upgrade canary
+    name: Release upgrade canary (${{ matrix.label }})
     permissions:
       contents: read
     needs:
@@ -261,11 +261,19 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-local-artifacts.result == 'success' && needs.build-global-artifacts.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: from-1.0.0
+            previous_tag: ironclaw-v1.0.0
+          - label: from-1.1.0
+            previous_tag: ironclaw-v1.1.0
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1
+      PREVIOUS_RELEASE_TAG: ${{ matrix.previous_tag }}
       CANARY_TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -323,7 +331,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: release-upgrade-canary-evidence
+          name: release-upgrade-canary-evidence-${{ matrix.label }}
           path: ${{ steps.upgrade-evidence.outputs.path }}
           if-no-files-found: error
           retention-days: 30

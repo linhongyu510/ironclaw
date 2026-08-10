@@ -497,7 +497,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         .expect("release host job");
     assert!(
         release_upgrade_position < release_host_position
-            && release_workflow.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_workflow.contains("previous_tag: ironclaw-v1.0.0")
+            && release_workflow.contains("previous_tag: ironclaw-v1.1.0")
+            && release_workflow.contains("PREVIOUS_RELEASE_TAG: ${{ matrix.previous_tag }}")
+            && release_workflow.contains("fail-fast: false")
             && release_workflow.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
             && release_workflow.contains("scripts/ci/release-upgrade-canary.py")
             && release_workflow.contains("--previous-checksum")
@@ -7128,10 +7131,13 @@ fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths()
         release_upgrade_job.contains("permissions:\n      contents: read")
             && release_upgrade_job.contains("- build-local-artifacts")
             && release_upgrade_job.contains("- build-global-artifacts")
-            && release_upgrade_job.contains("PREVIOUS_RELEASE_TAG: ironclaw-v1.0.0-rc.1")
+            && release_upgrade_job.contains("previous_tag: ironclaw-v1.0.0")
+            && release_upgrade_job.contains("previous_tag: ironclaw-v1.1.0")
+            && release_upgrade_job.contains("PREVIOUS_RELEASE_TAG: ${{ matrix.previous_tag }}")
+            && release_upgrade_job.contains("fail-fast: false")
             && release_upgrade_job.contains("CANARY_TARGET: x86_64-unknown-linux-gnu")
             && release_upgrade_job.contains("scripts/ci/release-upgrade-canary.py")
-            && release_upgrade_job.contains("release-upgrade-canary-evidence")
+            && release_upgrade_job.contains("release-upgrade-canary-evidence-${{ matrix.label }}")
             && release_upgrade_job.contains("scripts/live-canary/scrub-artifacts.sh"),
         "release publishing must run the checksummed artifact upgrade and retain scrubbed evidence"
     );

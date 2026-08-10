@@ -203,14 +203,14 @@ that Reborn home on the mounted volume and does not require
 the runtime workspace root is the persistent
 `IRONCLAW_REBORN_WORKSPACE_ROOT` above.
 
-For the exact `ironclaw-v1.0.0-rc.1` to `ironclaw-v1.1.0-rc.1` upgrade, copy
-the stopped rc1 container's `/workspace` into a snapshot directory on the
-volume before redeploying, then set
+When upgrading a 1.0.0 deployment to 1.1.1, copy the stopped old container's
+`/workspace` into a snapshot directory on the volume before redeploying, then set
 `IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT` to that directory. Startup copies
 the snapshot create-only into the configured tenant/default-owner workspace,
 verifies file hashes, retains the source, and fails rather than guessing on
 conflicts or shared-workspace ownership. See
-`docs/internal/rc1-to-1.1-startup-migration.md` for the exact handoff.
+`docs/internal/rc1-to-1.1-startup-migration.md` for the underlying migration
+contract and exact handoff.
 
 The 1.1.1 upgrade skips rc1 Slack/Telegram extension state by default and
 retains the source rows; operators should expect to reconfigure those channels.
