@@ -58,8 +58,9 @@ use ironclaw_host_api::{
 };
 
 use super::{
-    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, MAX_FIRST_PARTY_INPUT_BYTES,
-    MAX_WRITE_FILE_INPUT_BYTES, builtin_first_party_package,
+    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MAX_FIRST_PARTY_INPUT_BYTES, MAX_WRITE_FILE_INPUT_BYTES, READ_FILE_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -175,10 +176,15 @@ const OMP_CAPABILITIES: &[OmpCapabilityMetadata] = &[
 /// Starts from the ordinary builtin package, applies the process-backend
 /// restriction, and swaps the two overlapping ids (`builtin.glob`/
 /// `builtin.grep`) for their omp counterparts while appending the three new
-/// ids (`builtin.read`/`builtin.write`/`builtin.edit`). Everything else —
-/// `read_file`, `write_file`, `list_dir`, `apply_patch`, echo, time, shell,
-/// … — is untouched, so the benchmark arm's model surface is the stock
-/// surface plus the five omp tools.
+/// ids (`builtin.read`/`builtin.write`/`builtin.edit`). The four old coding
+/// tools (`read_file`, `write_file`, `list_dir`, `apply_patch`) are REMOVED
+/// so the benchmark arm's model surface is omp-only for coding tools —
+/// otherwise models keep calling the familiar old names and the A/B measures
+/// tool preference instead of tool quality.
+///
+/// ⚠️ TEMPORARY benchmark override (issue #7392 bench arm): this removal is
+/// part of the flip and is exactly the atomic cutover's end-state; revert the
+/// whole override at cutover.
 pub fn omp_coding_package(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
@@ -186,7 +192,13 @@ pub fn omp_coding_package(
     super::restrict_package_for_process_backend(&mut package, process_backend)?;
     let mut manifest = package.manifest;
     manifest.capabilities.retain(|capability| {
-        capability.id.as_str() != GLOB_CAPABILITY_ID && capability.id.as_str() != GREP_CAPABILITY_ID
+        let id = capability.id.as_str();
+        id != GLOB_CAPABILITY_ID
+            && id != GREP_CAPABILITY_ID
+            && id != READ_FILE_CAPABILITY_ID
+            && id != WRITE_FILE_CAPABILITY_ID
+            && id != LIST_DIR_CAPABILITY_ID
+            && id != APPLY_PATCH_CAPABILITY_ID
     });
     manifest.capabilities.extend(omp_coding_manifests()?);
     ExtensionPackage::from_manifest(manifest, VirtualPath::new("/system/extensions/builtin")?)
