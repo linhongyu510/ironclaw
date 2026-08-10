@@ -699,7 +699,7 @@ impl RunDeliveryObserver {
                         .is_some_and(|notice| notice.progressive)
                     && let Some(notice) = working_notice.clone()
                 {
-                    *forwarder = Some(super::streaming::spawn_preview_forwarder(
+                    *forwarder = super::streaming::spawn_preview_forwarder(
                         Arc::new(self.services.clone()),
                         scope.clone(),
                         actor.clone(),
@@ -711,7 +711,8 @@ impl RunDeliveryObserver {
                             conversation: envelope.external_conversation_ref().clone(),
                             actor_ref: envelope.external_actor_ref().clone(),
                         },
-                    ));
+                    )
+                    .await;
                 }
             }
             tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
