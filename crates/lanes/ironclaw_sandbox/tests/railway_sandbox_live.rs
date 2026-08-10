@@ -6,13 +6,11 @@
 use std::{collections::HashMap, process::Command};
 
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, TenantId, UserId},
+    ids::{AgentId, InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
     process::{CommandExecutionRequest, SandboxCommandTransport},
     resource::ResourceScope,
 };
-use ironclaw_sandbox::{
-    RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport, RebornSandboxUserKey,
-};
+use ironclaw_sandbox::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for the Railway canary"))
@@ -30,10 +28,12 @@ fn request(scope: &ResourceScope, command: impl Into<String>) -> CommandExecutio
 }
 
 fn checkpoint_name(scope: &ResourceScope) -> String {
-    format!(
-        "{}-checkpoint",
-        RebornSandboxUserKey::from_scope(scope).container_name()
-    )
+    let key = TenantUserWorkspaceKey::from_scope(scope);
+    let prefix = key
+        .digest_segment()
+        .get(..24)
+        .unwrap_or(key.digest_segment());
+    format!("ironclaw-reborn-sandbox-user-{prefix}-checkpoint")
 }
 
 struct CheckpointCleanup {

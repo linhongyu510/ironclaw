@@ -49,7 +49,7 @@ pub use sandbox_process::{
     DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RailwayPreviewSandboxConfig,
     RailwayPreviewSandboxTransport, RebornSandboxConfig, RebornSandboxContainerIdentity,
     RebornSandboxNetworkBroker, RebornSandboxScopeKey, RebornSandboxSecretBroker,
-    RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
     SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry,
     SandboxDockerReadiness, connect_docker_with_retry, sandbox_allowed_domains,
     sandbox_docker_readiness, sandbox_extra_allowed_domains, sandbox_max_egress_bytes,

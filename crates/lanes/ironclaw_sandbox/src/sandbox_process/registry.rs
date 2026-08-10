@@ -21,9 +21,7 @@ use std::{
 
 use bollard::models::ContainerSummary;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::ids::{TenantId, UserId};
-
-use crate::sandbox_process::user_key::RebornSandboxUserKey;
+use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 
 pub(crate) fn label_tenant(prefix: &str) -> String {
     format!("{prefix}.tenant")
@@ -118,7 +116,7 @@ impl UserContainerCandidate {
 }
 
 /// Push-based in-memory map of per-user last-activity timestamps, keyed on
-/// [`RebornSandboxUserKey`]. Cross-crate consumers (e.g. the reborn runtime
+/// [`TenantUserWorkspaceKey`]. Cross-crate consumers (e.g. the reborn runtime
 /// composition wiring that owns the reaper loop) need to construct and pass
 /// this registry, so it is `pub` and re-exported at the crate root — unlike
 /// the label helpers and candidate type above, which stay internal to this
@@ -132,7 +130,7 @@ impl UserContainerCandidate {
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub struct SandboxActivityRegistry {
-    last_activity: Mutex<HashMap<RebornSandboxUserKey, Instant>>,
+    last_activity: Mutex<HashMap<TenantUserWorkspaceKey, Instant>>,
 }
 
 #[allow(dead_code)]
@@ -141,7 +139,7 @@ impl SandboxActivityRegistry {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Instant>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<TenantUserWorkspaceKey, Instant>> {
         // Recover from poisoning rather than panic: a background reaper
         // must never crash the whole process over a prior panic elsewhere
         // that poisoned this unrelated mutex.
@@ -150,19 +148,19 @@ impl SandboxActivityRegistry {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    pub(crate) fn touch(&self, key: &RebornSandboxUserKey) {
+    pub(crate) fn touch(&self, key: &TenantUserWorkspaceKey) {
         self.lock().insert(key.clone(), Instant::now());
     }
 
-    pub(crate) fn last_activity(&self, key: &RebornSandboxUserKey) -> Option<Instant> {
+    pub(crate) fn last_activity(&self, key: &TenantUserWorkspaceKey) -> Option<Instant> {
         self.lock().get(key).copied()
     }
 
-    pub(crate) fn forget(&self, key: &RebornSandboxUserKey) {
+    pub(crate) fn forget(&self, key: &TenantUserWorkspaceKey) {
         self.lock().remove(key);
     }
 
-    pub(crate) fn idle_for(&self, key: &RebornSandboxUserKey, now: Instant) -> Option<Duration> {
+    pub(crate) fn idle_for(&self, key: &TenantUserWorkspaceKey, now: Instant) -> Option<Duration> {
         self.last_activity(key)
             .map(|activity| now.saturating_duration_since(activity))
     }
@@ -182,7 +180,7 @@ pub(crate) struct BackgroundJob {
 }
 
 /// Push-based in-memory map of per-user background job launches, keyed on
-/// [`RebornSandboxUserKey`] the same way [`SandboxActivityRegistry`] is.
+/// [`TenantUserWorkspaceKey`] the same way [`SandboxActivityRegistry`] is.
 /// Kept as a sibling registry (single responsibility) rather than folded
 /// into the activity map.
 ///
@@ -200,7 +198,7 @@ pub(crate) struct BackgroundJob {
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub(crate) struct BackgroundJobRegistry {
-    jobs: Mutex<HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>>,
+    jobs: Mutex<HashMap<TenantUserWorkspaceKey, Vec<BackgroundJob>>>,
 }
 
 #[allow(dead_code)]
@@ -209,13 +207,15 @@ impl BackgroundJobRegistry {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>> {
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<TenantUserWorkspaceKey, Vec<BackgroundJob>>> {
         self.jobs
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    pub(crate) fn record(&self, key: &RebornSandboxUserKey, pid: u32, command_preview: String) {
+    pub(crate) fn record(&self, key: &TenantUserWorkspaceKey, pid: u32, command_preview: String) {
         self.lock()
             .entry(key.clone())
             .or_default()
@@ -225,11 +225,11 @@ impl BackgroundJobRegistry {
             });
     }
 
-    pub(crate) fn jobs_for(&self, key: &RebornSandboxUserKey) -> Vec<BackgroundJob> {
+    pub(crate) fn jobs_for(&self, key: &TenantUserWorkspaceKey) -> Vec<BackgroundJob> {
         self.lock().get(key).cloned().unwrap_or_default()
     }
 
-    pub(crate) fn drop_dead(&self, key: &RebornSandboxUserKey, alive_pids: &[u32]) {
+    pub(crate) fn drop_dead(&self, key: &TenantUserWorkspaceKey, alive_pids: &[u32]) {
         // Build the membership set once per call rather than doing an O(A)
         // linear scan of `alive_pids` per retained job (O(J x A) overall) —
         // with many tracked background jobs this reaper-driven prune runs
@@ -313,7 +313,7 @@ mod tests {
         assert!(UserContainerCandidate::from_summary(&container, "ironclaw").is_none());
     }
 
-    fn test_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
+    fn test_key(tenant: &str, user: &str) -> TenantUserWorkspaceKey {
         let scope = ironclaw_host_api::resource::ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),
@@ -323,7 +323,7 @@ mod tests {
             thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
-        RebornSandboxUserKey::from_scope(&scope)
+        TenantUserWorkspaceKey::from_scope(&scope)
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
         use std::thread;
 
         let registry = Arc::new(BackgroundJobRegistry::new());
-        let keys: Vec<RebornSandboxUserKey> = (0..8)
+        let keys: Vec<TenantUserWorkspaceKey> = (0..8)
             .map(|index| test_key("t", &format!("user-{index}")))
             .collect();
 
@@ -462,7 +462,7 @@ mod tests {
             thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
-        let key = RebornSandboxUserKey::from_scope(&scope);
+        let key = TenantUserWorkspaceKey::from_scope(&scope);
 
         assert!(registry.last_activity(&key).is_none());
         registry.touch(&key);
@@ -482,7 +482,7 @@ mod tests {
             thread_id: None,
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
-        let key = RebornSandboxUserKey::from_scope(&scope);
+        let key = TenantUserWorkspaceKey::from_scope(&scope);
         registry.touch(&key);
 
         registry.forget(&key);
@@ -504,7 +504,7 @@ mod tests {
         use std::thread;
 
         let registry = Arc::new(SandboxActivityRegistry::new());
-        let keys: Vec<RebornSandboxUserKey> = (0..8)
+        let keys: Vec<TenantUserWorkspaceKey> = (0..8)
             .map(|index| test_key("t", &format!("user-{index}")))
             .collect();
 

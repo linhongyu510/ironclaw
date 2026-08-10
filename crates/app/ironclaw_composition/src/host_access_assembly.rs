@@ -405,7 +405,7 @@ fn process_port_for_policy(
     }
     .with_workdir_alias("/workspace", workspace_root)
     // Same scoping the file tools apply. Without it `/workspace` names `<root>` here and
-    // `<root>/tenants/<t>/users/<u>` there, so a file written by one is unreachable by the other.
+    // `<root>/users/<tenant-user-digest>` there, so a file written by one is unreachable by the other.
     .with_workspace_scoped_per_caller(workspace_scoped_per_caller);
     if let Some(host_home_root) = host_home_root {
         process_port =

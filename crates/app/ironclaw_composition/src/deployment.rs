@@ -250,7 +250,7 @@ pub struct DeploymentConfig {
     /// The ONE decision every workspace write lane reads: capability grant
     /// minting, approval lease terms, the WebUI attachment/upload handle, and
     /// the channel-inbound attachment lander. `true` maps `/workspace` to
-    /// `/projects/workspace/tenants/{tenant}/users/{user}`, so a multi-user
+    /// `/projects/workspace/users/<tenant-user-digest>`, so a multi-user
     /// deployment's agent writes land in the caller's own subtree -- the same
     /// subtree the WebUI workspace browser reads. `false` keeps the ambient
     /// shared view, including the raw host aliases local coding profiles

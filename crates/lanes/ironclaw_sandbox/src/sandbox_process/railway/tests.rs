@@ -264,8 +264,8 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
     }
 }
 
-fn user_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
-    RebornSandboxUserKey::from_scope(&request(tenant, user, "true").scope)
+fn user_key(tenant: &str, user: &str) -> ironclaw_host_api::ids::TenantUserWorkspaceKey {
+    ironclaw_host_api::ids::TenantUserWorkspaceKey::from_scope(&request(tenant, user, "true").scope)
 }
 
 #[tokio::test]

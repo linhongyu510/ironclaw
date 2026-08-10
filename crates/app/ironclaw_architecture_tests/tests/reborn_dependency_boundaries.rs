@@ -640,7 +640,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `/system/prompts` virtual-root declaration is neutral mount
         // vocabulary. Mount assembly and filesystem access control remain in
         // composition and ironclaw_filesystem.
-        ("ironclaw_host_api", 18_800),
+        // Raised 18_800 -> 18_906 (2026-08-10, profile-stable state Task 5):
+        // `TenantUserWorkspaceKey` preserves the released opaque tenant/user
+        // workspace identity as neutral host-api vocabulary. Host path
+        // construction, bind admission, and provider execution remain in
+        // composition and ironclaw_sandbox.
+        ("ironclaw_host_api", 18_906),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

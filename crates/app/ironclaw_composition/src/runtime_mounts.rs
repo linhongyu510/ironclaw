@@ -5,6 +5,7 @@ use std::{collections::HashSet, path::Path, sync::Arc};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     error::HostApiError,
+    ids::TenantUserWorkspaceKey,
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
@@ -154,7 +155,7 @@ pub(crate) const BROWSE_MEMORY_ALIAS: &str = MEMORY_ALIAS;
 
 /// Per-caller workspace mount view for agent read/write filesystem access.
 /// Maps `WORKSPACE_ALIAS` to the caller's own subtree under
-/// `/projects/workspace/tenants/{tenant}/users/{user}`, mirroring memory's
+/// `/projects/workspace/users/<tenant-user-digest>`, mirroring memory's
 /// per-caller scoping, so agent tool/attachment writes land in the caller's
 /// private subtree and the WebUI browser (which reads the same subtree) can
 /// surface them. A missing subtree renders empty on read rather than falling
@@ -163,15 +164,8 @@ pub(crate) fn scoped_workspace_mount_view(
     scope: &ResourceScope,
     permissions: MountPermissions,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![grant(
-        WORKSPACE_ALIAS,
-        &format!(
-            "{WORKSPACE_TARGET}/tenants/{}/users/{}",
-            scope.tenant_id.as_str(),
-            scope.user_id.as_str()
-        ),
-        permissions,
-    )?])
+    let target = scoped_workspace_target(scope)?;
+    MountView::new(vec![grant(WORKSPACE_ALIAS, target.as_str(), permissions)?])
 }
 
 /// How a deployment keys the workspace mount, resolved once at composition
@@ -190,7 +184,7 @@ pub(crate) enum WorkspaceMountPolicy {
     /// profiles depend on those aliases, so this view is never scoped.
     Shared(MountView),
     /// Workspace mounts key the caller's own subtree under
-    /// `/projects/workspace/tenants/{tenant}/users/{user}`.
+    /// `/projects/workspace/users/<tenant-user-digest>`.
     PerCaller,
 }
 
@@ -250,7 +244,7 @@ pub(crate) fn read_write_workspace_filesystem(
     let permissions = MountPermissions::read_write_list_delete();
     match policy {
         // Per-caller: the resolver runs on every call, so each authenticated
-        // caller keys its own `tenants/{tenant}/users/{user}` subtree and the
+        // caller keys its own `users/<tenant-user-digest>` subtree and the
         // shared `/projects/workspace` root is never exposed for writes.
         WorkspaceMountPolicy::PerCaller => Some(Arc::new(ScopedFilesystem::new(
             Arc::clone(extension_filesystem),
@@ -270,10 +264,11 @@ pub(crate) fn read_write_workspace_filesystem(
 
 pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
     let memory_target = scoped_memory_target(scope)?;
+    let workspace_target = scoped_workspace_target(scope)?;
     MountView::new(vec![
         grant(
             WORKSPACE_ALIAS,
-            WORKSPACE_TARGET,
+            workspace_target.as_str(),
             MountPermissions::read_only(),
         )?,
         grant(
@@ -282,6 +277,14 @@ pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountVie
             MountPermissions::read_only(),
         )?,
     ])
+}
+
+fn scoped_workspace_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
+    let workspace_key = TenantUserWorkspaceKey::from_scope(scope);
+    VirtualPath::new(format!(
+        "{WORKSPACE_TARGET}/users/{}",
+        workspace_key.digest_segment()
+    ))
 }
 
 fn scoped_memory_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
@@ -382,7 +385,7 @@ mod tests {
                 .resolve(&scope, &path)
                 .expect("per-caller resolve")
                 .as_str(),
-            "/projects/workspace/tenants/acme/users/alice/landed.txt"
+            "/projects/workspace/users/c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22/landed.txt"
         );
         assert_eq!(
             shared
@@ -390,6 +393,39 @@ mod tests {
                 .expect("shared resolve")
                 .as_str(),
             "/projects/workspace/landed.txt"
+        );
+    }
+
+    #[test]
+    fn scoped_browser_and_workspace_writer_resolve_the_same_caller_leaf() {
+        use ironclaw_host_api::{
+            ids::{InvocationId, TenantId, UserId},
+            path::ScopedPath,
+        };
+
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            user_id: UserId::new("alice").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let writer = scoped_workspace_mount_view(&scope, MountPermissions::read_write())
+            .expect("writer mount view");
+        let browser = scoped_browse_mount_view(&scope).expect("browser mount view");
+        let writer_target = writer
+            .resolve(&ScopedPath::new("/workspace/landed.txt").expect("workspace path"))
+            .expect("writer workspace resolve");
+        let browser_target = browser
+            .resolve(&ScopedPath::new("/workspace/landed.txt").expect("workspace path"))
+            .expect("browser workspace resolve");
+
+        assert_eq!(writer_target, browser_target);
+        assert_eq!(
+            writer_target.as_str(),
+            "/projects/workspace/users/c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22/landed.txt"
         );
     }
 

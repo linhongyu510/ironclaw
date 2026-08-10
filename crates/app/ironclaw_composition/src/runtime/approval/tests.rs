@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     ids::{
         ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, SecretHandle,
-        TenantId, ThreadId, UserId,
+        TenantId, TenantUserWorkspaceKey, ThreadId, UserId,
     },
     resource::{ResourceEstimate, ResourceScope},
 };
@@ -361,7 +361,14 @@ async fn per_caller_workspace_policy_leases_only_the_gates_own_subtree() {
             .expect("workspace mount in lease");
         assert_eq!(
             mount.target.as_str(),
-            format!("/projects/workspace/tenants/tenant/users/{user}"),
+            format!(
+                "/projects/workspace/users/{}",
+                TenantUserWorkspaceKey::from_tenant_user(
+                    &TenantId::new("tenant").expect("tenant id"),
+                    &UserId::new(user).expect("user id"),
+                )
+                .digest_segment()
+            ),
             "lease for {user} must key {user}'s own subtree"
         );
         targets.push(mount.target.as_str().to_string());

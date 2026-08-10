@@ -12,11 +12,11 @@ use anyhow::{Context as _, anyhow, bail};
 #[cfg(unix)]
 use fs2::FileExt as _;
 use ironclaw_composition::LegacySkillSnapshotSource;
-use ironclaw_composition::host_api::{TenantId, UserId};
 use ironclaw_config::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
     ProfileTransitionAdmission, RebornHome, RebornStoragePaths, TenancyModel, WorkspaceAccessFloor,
 };
+use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -208,7 +208,9 @@ impl WorkspaceImportDecision {
             .map_err(|error| anyhow!("invalid workspace journal tenant identity: {error}"))?;
         let user = UserId::new(self.user.clone())
             .map_err(|error| anyhow!("invalid workspace journal user identity: {error}"))?;
-        let digest = tenant_user_workspace_digest(&tenant, &user);
+        let digest = TenantUserWorkspaceKey::from_tenant_user(&tenant, &user)
+            .digest_segment()
+            .to_string();
         if !is_single_path_segment(&self.digest) {
             bail!(
                 "workspace journal digest must be one normal path segment; refusing to derive a workspace destination from {}",
@@ -1643,7 +1645,9 @@ fn prepare_workspace_import(
         source: options.source.clone(),
         tenant: options.tenant.as_str().to_string(),
         user: options.user.as_str().to_string(),
-        digest: tenant_user_workspace_digest(&options.tenant, &options.user),
+        digest: TenantUserWorkspaceKey::from_tenant_user(&options.tenant, &options.user)
+            .digest_segment()
+            .to_string(),
     };
     let destination = workspace_leaf_path(paths, &decision.validate()?);
     if destination.exists() {
@@ -1662,19 +1666,6 @@ fn prepare_workspace_import(
         );
     }
     Ok(Some(decision))
-}
-
-fn tenant_user_workspace_digest(tenant: &TenantId, user: &UserId) -> String {
-    let encoded = format!(
-        "{}:tenant={}:{};{}:user={}:{};",
-        "tenant".len(),
-        tenant.as_str().len(),
-        tenant.as_str(),
-        "user".len(),
-        user.as_str().len(),
-        user.as_str(),
-    );
-    hex::encode(Sha256::digest(encoded.as_bytes()))
 }
 
 fn is_single_path_segment(value: &str) -> bool {
@@ -2248,12 +2239,10 @@ mod tests {
         WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock, adopt_layout,
         ensure_ready_layout, inspect_legacy_candidates, inspect_ready_layout, install_staged,
         ready_legacy_skill_snapshot_source, snapshot_source, stage_snapshot,
-        tenant_user_workspace_digest, verify_canonical_store, write_journal,
+        verify_canonical_store, write_journal,
     };
-    use ironclaw_composition::{
-        LegacySkillSnapshotSource,
-        host_api::{TenantId, UserId},
-    };
+    use ironclaw_composition::LegacySkillSnapshotSource;
+    use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 
     fn embedded_single_user_requirement() -> LayoutRequirement {
         LayoutRequirement {
@@ -3184,10 +3173,12 @@ mod tests {
         )
         .expect("confirmed external workspace import");
 
-        let expected_digest = tenant_user_workspace_digest(
+        let expected_digest = TenantUserWorkspaceKey::from_tenant_user(
             &TenantId::new("tenant-a").expect("tenant id"),
             &UserId::new("user-a").expect("user id"),
-        );
+        )
+        .digest_segment()
+        .to_string();
         assert!(
             temp.path()
                 .join("workspaces/users")
@@ -3262,7 +3253,9 @@ mod tests {
                 source: std::path::PathBuf::from("relative-workspace"),
                 tenant: tenant.as_str().to_string(),
                 user: user.as_str().to_string(),
-                digest: tenant_user_workspace_digest(&tenant, &user),
+                digest: TenantUserWorkspaceKey::from_tenant_user(&tenant, &user)
+                    .digest_segment()
+                    .to_string(),
             }),
         );
         write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
@@ -3304,7 +3297,9 @@ mod tests {
                 source: linked_workspace,
                 tenant: tenant.as_str().to_string(),
                 user: user.as_str().to_string(),
-                digest: tenant_user_workspace_digest(&tenant, &user),
+                digest: TenantUserWorkspaceKey::from_tenant_user(&tenant, &user)
+                    .digest_segment()
+                    .to_string(),
             }),
         );
         write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");

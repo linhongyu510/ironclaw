@@ -7,6 +7,7 @@
 //! smuggled into manifests, mount paths, approvals, or audit records.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::HostApiError;
@@ -207,6 +208,45 @@ macro_rules! uuid_id {
 
 string_id!(TenantId, "tenant", validate_scope_id);
 string_id!(UserId, "user", validate_scope_id);
+
+/// Stable opaque identity for one tenant/user workspace leaf.
+///
+/// This preserves the released length-prefixed SHA-256 codec used by the
+/// Docker and Railway sandbox backends while keeping host-path construction
+/// outside the neutral host API contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TenantUserWorkspaceKey {
+    digest: String,
+}
+
+impl TenantUserWorkspaceKey {
+    pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
+        let encoded = format!(
+            "{}:tenant={}:{};{}:user={}:{};",
+            "tenant".len(),
+            tenant_id.as_str().len(),
+            tenant_id.as_str(),
+            "user".len(),
+            user_id.as_str().len(),
+            user_id.as_str(),
+        );
+        let digest = Sha256::digest(encoded.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self { digest }
+    }
+
+    pub fn from_scope(scope: &crate::resource::ResourceScope) -> Self {
+        Self::from_tenant_user(&scope.tenant_id, &scope.user_id)
+    }
+
+    /// A validated, single-segment digest suitable for neutral naming.
+    pub fn digest_segment(&self) -> &str {
+        &self.digest
+    }
+}
+
 string_id!(AgentId, "agent", validate_scope_id);
 string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
@@ -461,6 +501,72 @@ uuid_id!(ActivityId);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_user_workspace_key_preserves_the_released_digest_codec() {
+        let vectors = [
+            (
+                "acme",
+                "alice",
+                "c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22",
+            ),
+            (
+                "a",
+                "b:c",
+                "087ad01b349cc39435f08dd47e949dfbb5da0e4e264f962902932b7e23ca10ea",
+            ),
+            (
+                "a:b",
+                "c",
+                "d73913a30c9eef7c5f84d8f56a10bb2769a2fd4408dc5eeac30825b380dd06d8",
+            ),
+        ];
+
+        for (tenant, user, expected_digest) in vectors {
+            let key = TenantUserWorkspaceKey::from_tenant_user(
+                &TenantId::new(tenant).expect("valid tenant"),
+                &UserId::new(user).expect("valid user"),
+            );
+            assert_eq!(key.digest_segment(), expected_digest, "{tenant}/{user}");
+        }
+    }
+
+    #[test]
+    fn tenant_user_workspace_key_uses_only_tenant_and_user_from_a_scope() {
+        let tenant = TenantId::new("acme").expect("valid tenant");
+        let user = UserId::new("alice").expect("valid user");
+        let scope = crate::resource::ResourceScope {
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            agent_id: Some(AgentId::new("agent").expect("valid agent")),
+            project_id: Some(ProjectId::new("project").expect("valid project")),
+            mission_id: Some(MissionId::new("mission").expect("valid mission")),
+            thread_id: Some(ThreadId::new("thread").expect("valid thread")),
+            invocation_id: InvocationId::new(),
+        };
+
+        assert_eq!(
+            TenantUserWorkspaceKey::from_scope(&scope),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+        );
+
+        assert_ne!(
+            TenantUserWorkspaceKey::from_tenant_user(
+                &TenantId::new("other-tenant").expect("valid tenant"),
+                &user,
+            ),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+            "tenant identity must contribute to the workspace key"
+        );
+        assert_ne!(
+            TenantUserWorkspaceKey::from_tenant_user(
+                &tenant,
+                &UserId::new("other-user").expect("valid user"),
+            ),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+            "user identity must contribute to the workspace key"
+        );
+    }
 
     #[test]
     fn approval_gate_record_ref_is_the_request_uuid_and_round_trips() {

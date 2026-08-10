@@ -20,7 +20,7 @@ use bollard::{
     models::{HostConfig, HostConfigLogConfig},
 };
 use futures_util::StreamExt;
-use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::{ids::TenantUserWorkspaceKey, resource::ResourceScope};
 
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -39,12 +39,11 @@ mod scope_key;
 pub(crate) mod shell_limits;
 mod worker_spec;
 
-// `user_key` is the production per-user workspace identity shared by local
-// Docker and Railway. `registry` and `attribution` remain future egress/lifecycle
-// primitives and stay crate-private.
+// `TenantUserWorkspaceKey` is the production per-user workspace identity shared
+// by local Docker and Railway. `registry` and `attribution` remain future
+// egress/lifecycle primitives and stay crate-private.
 mod attribution;
 mod registry;
-mod user_key;
 
 use mounts::RebornSandboxMountSources;
 
@@ -59,7 +58,6 @@ pub use network_allowlist::{
 pub use railway::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
-pub use user_key::RebornSandboxUserKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
@@ -239,6 +237,80 @@ impl RebornSandboxConfig {
     }
 }
 
+async fn prepare_workspace_root(path: &Path) -> Result<PathBuf, RuntimeProcessError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => validate_workspace_directory(&metadata, "root")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::create_dir_all(path).await.map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace root could not be initialized: {error}"
+                ))
+            })?;
+            let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace root could not be inspected after initialization: {error}"
+                ))
+            })?;
+            validate_workspace_directory(&metadata, "root")?;
+        }
+        Err(error) => {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace root could not be inspected: {error}"
+            )));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+async fn ensure_workspace_directory(path: &Path) -> Result<(), RuntimeProcessError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => validate_workspace_directory(&metadata, "directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match tokio::fs::create_dir(path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace directory could not be initialized: {error}"
+                    )));
+                }
+            }
+            let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace directory could not be inspected after initialization: {error}"
+                ))
+            })?;
+            validate_workspace_directory(&metadata, "directory")
+        }
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace directory could not be inspected: {error}"
+        ))),
+    }
+}
+
+fn validate_workspace_directory(
+    metadata: &std::fs::Metadata,
+    label: &str,
+) -> Result<(), RuntimeProcessError> {
+    if metadata.file_type().is_symlink() {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace {label} must not be a symlink"
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace {label} must be a directory"
+        )));
+    }
+    Ok(())
+}
+
+fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
+    let digest = key.digest_segment();
+    let prefix = digest.get(..24).unwrap_or(digest);
+    format!("ironclaw-reborn-sandbox-user-{prefix}")
+}
+
 #[derive(Clone)]
 pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
@@ -279,15 +351,12 @@ impl RebornScopedSandboxCommandTransport {
         &self,
         scope: &ResourceScope,
     ) -> Result<PathBuf, RuntimeProcessError> {
-        let key = RebornSandboxUserKey::from_scope(scope);
-        let workspace = key.workspace_path(&self.config.workspace_root);
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace could not be initialized: {error}"
-                ))
-            })?;
+        let key = TenantUserWorkspaceKey::from_scope(scope);
+        let workspace_root = prepare_workspace_root(&self.config.workspace_root).await?;
+        let users_root = workspace_root.join("users");
+        ensure_workspace_directory(&users_root).await?;
+        let workspace = users_root.join(key.digest_segment());
+        ensure_workspace_directory(&workspace).await?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -302,11 +371,37 @@ impl RebornScopedSandboxCommandTransport {
                 ))
             })?;
         }
-        tokio::fs::canonicalize(&workspace).await.map_err(|error| {
+        let canonical_workspace_root =
+            tokio::fs::canonicalize(&workspace_root)
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace root could not be resolved: {error}"
+                    ))
+                })?;
+        let canonical_users_root = tokio::fs::canonicalize(&users_root)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace users root could not be resolved: {error}"
+                ))
+            })?;
+        if canonical_users_root.parent() != Some(canonical_workspace_root.as_path()) {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox workspace users root escapes the configured workspace root".to_string(),
+            ));
+        }
+        let canonical_workspace = tokio::fs::canonicalize(&workspace).await.map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox workspace could not be resolved: {error}"
             ))
-        })
+        })?;
+        if canonical_workspace.parent() != Some(canonical_users_root.as_path()) {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox workspace leaf escapes the configured users root".to_string(),
+            ));
+        }
+        Ok(canonical_workspace)
     }
 
     fn resolve_container_workdir(
@@ -343,8 +438,12 @@ impl RebornScopedSandboxCommandTransport {
         workdir: ContainerWorkdir,
         timeout: Duration,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let user_key = RebornSandboxUserKey::from_scope(&request.scope);
-        let container_name = format!("{}-{}", user_key.container_name(), uuid::Uuid::new_v4());
+        let user_key = TenantUserWorkspaceKey::from_scope(&request.scope);
+        let container_name = format!(
+            "{}-{}",
+            sandbox_user_container_name(&user_key),
+            uuid::Uuid::new_v4()
+        );
         let launch = self
             .container_launch_config(request, workspace, workdir)
             .await?;
@@ -427,7 +526,12 @@ impl RebornScopedSandboxCommandTransport {
         let mut binds = self
             .config
             .mount_sources
-            .prepare_container_binds(workspace, request.mounts.as_ref())
+            .prepare_container_binds(
+                &self.config.workspace_root,
+                workspace,
+                &request.scope,
+                request.mounts.as_ref(),
+            )
             .await?
             .into_iter()
             .map(|bind| bind.into_docker_bind())
@@ -636,9 +740,93 @@ mod tests {
     use super::*;
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
+        ids::{InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+
+    fn caller_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("acme").expect("tenant"),
+            user_id: UserId::new("alice").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn workspace_transport(workspace_root: &Path) -> RebornScopedSandboxCommandTransport {
+        RebornScopedSandboxCommandTransport::new(
+            Docker::connect_with_local_defaults().expect("docker client configuration"),
+            RebornSandboxConfig::new(workspace_root),
+        )
+    }
+
+    #[tokio::test]
+    async fn workspace_preparation_returns_only_the_current_caller_leaf() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let transport = workspace_transport(&workspace_root);
+
+        let prepared = transport
+            .prepare_workspace(&scope)
+            .await
+            .expect("prepare caller workspace");
+
+        let expected = tokio::fs::canonicalize(
+            workspace_root
+                .join("users")
+                .join(TenantUserWorkspaceKey::from_scope(&scope).digest_segment()),
+        )
+        .await
+        .expect("canonical caller leaf");
+        assert_eq!(prepared, expected);
+        assert_eq!(prepared.parent(), expected.parent());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_preparation_rejects_symlinked_users_root_or_leaf() {
+        use std::os::unix::fs::symlink;
+
+        for symlink_kind in ["users", "leaf"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let scope = caller_scope();
+            let workspace_root = temp.path().join("workspaces");
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&workspace_root).expect("workspace root");
+            std::fs::create_dir(&outside).expect("outside root");
+            let key = TenantUserWorkspaceKey::from_scope(&scope);
+            if symlink_kind == "users" {
+                symlink(&outside, workspace_root.join("users")).expect("users symlink");
+            } else {
+                std::fs::create_dir(workspace_root.join("users")).expect("users root");
+                symlink(
+                    &outside,
+                    workspace_root.join("users").join(key.digest_segment()),
+                )
+                .expect("leaf symlink");
+            }
+            let transport = workspace_transport(&workspace_root);
+
+            let error = transport
+                .prepare_workspace(&scope)
+                .await
+                .expect_err("symlinked caller workspace path must be rejected");
+
+            assert!(
+                format!("{error}").contains("symlink"),
+                "{symlink_kind}: {error}"
+            );
+            assert!(
+                !outside.join(key.digest_segment()).exists(),
+                "{symlink_kind} must not create an outside caller leaf"
+            );
+        }
+    }
 
     #[test]
     fn transport_constructor_uses_canonical_bounded_docker_connector() {
@@ -874,11 +1062,14 @@ mod tests {
     #[tokio::test]
     async fn container_launch_config_applies_unix_socket_broker_env_binds_and_none_network() {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
+        let workspace_root = temp.path().join("workspaces");
+        let workspace = workspace_root
+            .join("users")
+            .join(TenantUserWorkspaceKey::from_scope(&ResourceScope::system()).digest_segment());
         std::fs::create_dir_all(&workspace).unwrap();
         let network_socket = temp.path().join("network-broker.sock");
         let secret_socket = temp.path().join("secret-broker.sock");
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+        let config = RebornSandboxConfig::new(&workspace_root)
             .with_network_broker_unix_socket(&network_socket)
             .unwrap()
             .with_secret_broker_unix_socket(&secret_socket)
@@ -944,7 +1135,10 @@ mod tests {
         assert!(env.contains(
             &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
         ));
-        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
+        assert!(binds.contains(&format!(
+            "{}:/workspace:rw",
+            std::fs::canonicalize(&workspace).unwrap().display()
+        )));
         assert!(binds.contains(&format!(
             "{}:/tmp/ironclaw-http-broker.sock:rw",
             network_socket.display()
@@ -958,9 +1152,12 @@ mod tests {
     #[tokio::test]
     async fn container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
+        let workspace_root = temp.path().join("workspaces");
+        let workspace = workspace_root
+            .join("users")
+            .join(TenantUserWorkspaceKey::from_scope(&ResourceScope::system()).digest_segment());
         std::fs::create_dir_all(&workspace).unwrap();
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+        let config = RebornSandboxConfig::new(&workspace_root)
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
         let transport = RebornScopedSandboxCommandTransport::new(
@@ -990,7 +1187,10 @@ mod tests {
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
         assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
-        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
+        assert!(binds.contains(&format!(
+            "{}:/workspace:rw",
+            std::fs::canonicalize(&workspace).unwrap().display()
+        )));
         assert!(
             binds
                 .iter()
@@ -999,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
+    async fn run_command_rejects_unconfigured_trusted_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
         let docker = Docker::connect_with_local_defaults().unwrap();
         let transport = RebornScopedSandboxCommandTransport::new(
@@ -1007,7 +1207,7 @@ mod tests {
             RebornSandboxConfig::new(temp.path().join("workspaces")),
         );
         let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/workspace").unwrap(),
+            MountAlias::new("/project").unwrap(),
             VirtualPath::new("/projects/app").unwrap(),
             process_read_only_permissions(),
         )])
