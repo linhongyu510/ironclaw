@@ -10,6 +10,44 @@
 
 This contract freezes where durable state lives in Reborn.
 
+### Installation boundary and physical namespaces
+
+`IRONCLAW_REBORN_HOME` names exactly one installation boundary. A
+`RebornStoragePaths` value derives the only filesystem-backed durable
+namespaces directly beneath it:
+
+```text
+<IRONCLAW_REBORN_HOME>/
+├── config.toml and providers.json       # operator bootstrap/configuration
+├── layout.toml                          # versioned durable-layout admission record
+├── state/                               # authoritative libSQL state and local key material
+├── system/                              # host-managed extensions, prompts, and skills
+├── workspaces/users/<tenant-user-digest>/
+│                                      # persistent per-tenant-plus-user workspace leaf
+└── runtime/                             # provider bookkeeping and layout-adoption recovery
+```
+
+There is no deployment-id layer and no profile-named storage directory. A
+profile selects runtime policy and a process backend; it cannot select a
+different physical state, system, workspace, or runtime root. The persisted
+`layout.toml` records durable-state kind plus the tenancy and workspace-access
+security envelope. A profile change is restart-only and operator-controlled;
+startup admits it only when it preserves that envelope, before opening stores
+or activating runtimes. Changing the physical database backend is an explicit
+storage migration, never profile switching.
+
+`state/` is host-only. The cached local secrets master key and provider
+credentials never enter a sandbox, including transiently. `system/` is
+host-managed content, not a user workspace. A sandbox receives only its exact
+`workspaces/users/<tenant-user-digest>` leaf as `/workspace`; it cannot receive
+the home, `state/`, `system/`, `runtime/`, the workspace parent, or a sibling
+leaf. `runtime/` is durable provider/process bookkeeping, while cache and
+temporary invocation data remain disposable and must never be treated as
+authoritative state.
+
+For bounded adoption, interruption recovery, retained snapshots, and old-binary
+rollback, see [the storage-layout operator runbook](../storage-layout-adoption.md).
+
 The rule is hybrid:
 
 ```text

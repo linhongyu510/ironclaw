@@ -44,6 +44,24 @@ The bundled Docker config selects NearAI in `[llm.default]`; set
 `NEARAI_API_KEY` for that provider. To change provider or model, mount a custom
 config and point `IRONCLAW_REBORN_DEFAULT_CONFIG` at it for the first start.
 
+## Durable storage boundary
+
+Set `IRONCLAW_REBORN_HOME` to one mounted installation directory. Its direct
+namespaces are `state/` (authoritative application state and the local cached
+master key), `system/` (host-managed extensions, prompts, and skills),
+`workspaces/` (tenant-plus-user leaves), and `runtime/` (provider/runtime
+bookkeeping). Do not add a deployment ID or the selected profile to this path.
+
+Profiles choose policy and a process backend, not a physical storage root. A
+profile change is an operator-controlled restart: startup checks the persisted
+security envelope and rejects an incompatible backend, tenancy, or workspace
+isolation transition before runtime construction. Docker sandboxes receive only
+`workspaces/users/<tenant-user-digest>` as `/workspace`; never mount the Reborn
+home, `state/`, `system/`, `runtime/`, a workspace parent, sibling leaf, Docker
+socket, provider credentials, or the cached master key. See the
+[storage-layout adoption runbook](storage-layout-adoption.md) before changing
+an existing installation.
+
 Google product-auth setup:
 
 ```bash
@@ -170,6 +188,13 @@ hosted single-tenant volume profile stores runtime/control-plane state under
 that Reborn home on the mounted volume and does not require
 `IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
 workspace root stays separate from Reborn's state and skill roots.
+
+Railway sandbox workspace checkpoints are provider-specific and are not a
+portable substitute for the canonical local `workspaces/` namespace. Do not
+claim that switching a profile, backend, Railway environment, or provider moves
+workspace contents; perform and verify a separate operator migration instead.
+Railway and provider credentials remain in the control service and never enter
+the inner worker.
 
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for

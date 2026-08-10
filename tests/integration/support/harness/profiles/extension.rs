@@ -269,7 +269,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         post_construct_asset_copy: Some((
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/extension_visibility"),
-            std::path::PathBuf::from("local-dev/system/extensions/visprobe"),
+            std::path::PathBuf::from("system/extensions/visprobe"),
         )),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
@@ -454,7 +454,7 @@ pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> Harnes
         post_construct_asset_copy: Some((
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/extension_prompt_trust"),
-            std::path::PathBuf::from("local-dev/system/extensions"),
+            std::path::PathBuf::from("system/extensions"),
         )),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(

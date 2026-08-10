@@ -74,11 +74,21 @@ Configure the Railway service with all of the following:
   [the Docker deployment guide](deploy-reborn-cli-docker.md); do not invent or
   bake values into this runbook.
 
-The volume is the durable IronClaw state boundary. It keeps the Reborn home,
-libSQL-backed runtime/control-plane state, and process checkpoints across a
+The volume is the durable IronClaw installation boundary. It holds the Reborn
+home's direct `state/`, `system/`, `workspaces/`, and `runtime/` namespaces,
+without a profile-named or deployment-id storage directory. It keeps
+libSQL-backed runtime/control-plane state and provider bookkeeping across a
 control-service restart. A Railway Sandbox checkpoint is only a snapshot of
-that sandbox's own filesystem; it does not replace the IronClaw durable
-checkpoint or the Railway volume.
+that sandbox's own filesystem; it does not replace authoritative IronClaw
+state or the Railway volume.
+
+Railway checkpoint contents are provider-specific and deliberately deferred
+from workspace portability. A profile switch, a move to Docker, or a move to a
+different Railway environment must not copy, merge, or claim portability of a
+checkpoint; plan a separate operator migration. Profiles are restart-only and
+operator-controlled, and startup admits them against the persisted durable
+security envelope. The Railway token remains in the control service; it, the
+Reborn master key, and all other credentials are absent from the inner worker.
 
 ## Worker network boundary
 
@@ -114,6 +124,24 @@ any worker that requires a deny-by-default guarantee.
 7. On failure, stop creating new sandboxes first. Preserve the volume and
    checkpoint evidence, reduce the control service to one replica, and inspect
    the host-side logs without printing tokens.
+
+## Regression evidence
+
+The hermetic Railway token/mount contract is exercised by the sandbox crate;
+run `cargo test -p ironclaw_sandbox --lib railway` locally. The provider canary
+is intentionally opt-in and is the only evidence for live Railway behavior:
+
+```bash
+cargo test -p ironclaw_sandbox --test railway_sandbox_live -- --ignored --nocapture
+```
+
+Run the Docker leaf-isolation regression separately; it does not establish
+Railway checkpoint portability:
+
+```bash
+IRONCLAW_REQUIRE_DOCKER_TESTS=1 \
+  cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
+```
 
 For current Railway token semantics, see the
 [Railway CLI authentication documentation](https://docs.railway.com/cli/login).

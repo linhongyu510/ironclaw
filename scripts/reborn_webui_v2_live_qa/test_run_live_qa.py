@@ -2839,7 +2839,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         prompt = "Read the exact Slack fixture for CURRENT_TURN_123."
 
         def create_store(reborn_home: Path) -> Path:
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path = reborn_home / "state" / "reborn-local-dev.db"
             db_path.parent.mkdir(parents=True)
             with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
@@ -3083,7 +3083,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_current_turn_capability_evidence_reports_sqlite_read_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reborn_home = Path(tmpdir)
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path = reborn_home / "state" / "reborn-local-dev.db"
             db_path.parent.mkdir(parents=True)
             db_path.touch()
 
@@ -4814,12 +4814,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_personal_dm_seed_satisfies_delivery_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            (home / "local-dev").mkdir(parents=True)
+            (home / "state").mkdir(parents=True)
             run_live_qa._root_filesystem_create_table(
-                home / "local-dev" / "reborn-local-dev.db"
+                home / "state" / "reborn-local-dev.db"
             )
             run_live_qa._put_root_filesystem_json(
-                home / "local-dev" / "reborn-local-dev.db",
+                home / "state" / "reborn-local-dev.db",
                 "/tenants/reborn-cli/shared/slack-setup/installation.json",
                 {
                     "installation_id": "install-alpha",
@@ -4848,7 +4848,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web"),
                 "D0QA",
             )
-            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path = home / "state" / "reborn-local-dev.db"
             with closing(sqlite3.connect(db_path)) as db:
                 dm_row = db.execute(
                     """
@@ -4896,12 +4896,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_personal_dm_lookup_requires_exact_user_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            (home / "local-dev").mkdir(parents=True)
+            (home / "state").mkdir(parents=True)
             run_live_qa._root_filesystem_create_table(
-                home / "local-dev" / "reborn-local-dev.db"
+                home / "state" / "reborn-local-dev.db"
             )
             run_live_qa._put_root_filesystem_json(
-                home / "local-dev" / "reborn-local-dev.db",
+                home / "state" / "reborn-local-dev.db",
                 "/tenants/reborn-cli/shared/slack-setup/installation.json",
                 {
                     "installation_id": "install-alpha",
@@ -5194,7 +5194,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_event_run_id_reads_idempotency_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path = home / "state" / "reborn-local-dev.db"
             db_path.parent.mkdir(parents=True)
             with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
@@ -5358,8 +5358,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue(account["refresh_secret_present"])
             self.assertEqual(account["refresh_probe"]["reason"], "disabled_by_env")
 
-            db_path = home / "local-dev" / "reborn-local-dev.db"
-            master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            db_path = home / "state" / "reborn-local-dev.db"
+            master_key_path = home / "state" / ".reborn-local-dev-secrets-master-key"
             self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
             master_key = master_key_path.read_text(encoding="utf-8")
             with closing(sqlite3.connect(db_path)) as db:
@@ -5449,8 +5449,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue(preflight["ready"])
             self.assertEqual(preflight["configured_account_count"], 1)
 
-            db_path = home / "local-dev" / "reborn-local-dev.db"
-            master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            db_path = home / "state" / "reborn-local-dev.db"
+            master_key_path = home / "state" / ".reborn-local-dev-secrets-master-key"
             self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
             master_key = master_key_path.read_text(encoding="utf-8")
             with closing(sqlite3.connect(db_path)) as db:
@@ -5540,8 +5540,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(len(FakeHttpx.calls), 2)
 
-            db_path = home / "local-dev" / "reborn-local-dev.db"
-            master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            db_path = home / "state" / "reborn-local-dev.db"
+            master_key_path = home / "state" / ".reborn-local-dev-secrets-master-key"
             self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
             master_key = master_key_path.read_text(encoding="utf-8")
             with closing(sqlite3.connect(db_path)) as db:
@@ -5640,7 +5640,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_setup_payload_uses_persisted_oauth_client_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reborn_home = Path(tmpdir) / "reborn-home"
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path = reborn_home / "state" / "reborn-local-dev.db"
             run_live_qa._root_filesystem_create_table(db_path)
             run_live_qa._put_root_filesystem_json(
                 db_path,
@@ -5677,7 +5677,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_setup_payload_prefers_env_oauth_client_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reborn_home = Path(tmpdir) / "reborn-home"
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path = reborn_home / "state" / "reborn-local-dev.db"
             run_live_qa._root_filesystem_create_table(db_path)
             run_live_qa._put_root_filesystem_json(
                 db_path,
@@ -5711,7 +5711,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_setup_payload_requires_oauth_client_material(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reborn_home = Path(tmpdir) / "reborn-home"
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path = reborn_home / "state" / "reborn-local-dev.db"
             run_live_qa._root_filesystem_create_table(db_path)
             run_live_qa._put_root_filesystem_json(
                 db_path,
@@ -5751,7 +5751,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_personal_auth_preflight_rejects_account_without_user_scope(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path = home / "state" / "reborn-local-dev.db"
             run_live_qa._root_filesystem_create_table(db_path)
             run_live_qa._put_root_filesystem_json(
                 db_path,
@@ -6307,9 +6307,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source_home = root / "source-home"
-            (source_home / "local-dev").mkdir(parents=True)
+            (source_home / "state").mkdir(parents=True)
             run_live_qa._root_filesystem_create_table(
-                source_home / "local-dev" / "reborn-local-dev.db"
+                source_home / "state" / "reborn-local-dev.db"
             )
             args = argparse.Namespace(
                 output_dir=root / "out",
@@ -6469,7 +6469,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            db_dir = home / "local-dev"
+            db_dir = home / "state"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with sqlite3_module.connect(db_path) as db:
@@ -6562,7 +6562,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            db_dir = home / "local-dev"
+            db_dir = home / "state"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with sqlite3_module.connect(db_path) as db:
@@ -6597,7 +6597,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            db_dir = home / "local-dev"
+            db_dir = home / "state"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with sqlite3_module.connect(db_path) as db:
@@ -8614,7 +8614,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_delivered_gate_routes_for_run_reads_trigger_gate_records(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            db_dir = home / "local-dev"
+            db_dir = home / "state"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with closing(sqlite3.connect(db_path)) as db:
@@ -8677,7 +8677,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_github_auth_preflight_detects_configured_product_auth_account(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            db_dir = home / "local-dev"
+            db_dir = home / "state"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
             with closing(sqlite3.connect(db_path)) as db:
@@ -8717,7 +8717,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_github_auth_preflight_blocks_without_configured_account(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            (home / "local-dev").mkdir(parents=True)
+            (home / "state").mkdir(parents=True)
 
             preflight = run_live_qa._github_auth_preflight(
                 home,
@@ -8819,7 +8819,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_trigger_run_slack_send_evidence_is_exact_run_scoped_and_sanitized(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
-            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path = home / "state" / "reborn-local-dev.db"
             run_live_qa._root_filesystem_create_table(db_path)
             expected_channel = "D_EXPECTED_PRIVATE_CHANNEL"
             marker = "PRIVATE_QA_DELIVERY_MARKER"
@@ -8990,7 +8990,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             home = root / "reborn-home"
-            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path = home / "state" / "reborn-local-dev.db"
             output_dir = root / "out"
             run_live_qa._root_filesystem_create_table(db_path)
             message_path = (
@@ -10323,7 +10323,7 @@ class TwoLaneDeliveryContractTests(unittest.TestCase):
     def _create_store(reborn_home: Path) -> Path:
         # The production schema helper, so this fixture cannot drift from the
         # columns the readers filter on (is_dir, content_type).
-        db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+        db_path = reborn_home / "state" / "reborn-local-dev.db"
         run_live_qa._root_filesystem_create_table(db_path)
         return db_path
 

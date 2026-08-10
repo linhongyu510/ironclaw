@@ -237,7 +237,7 @@ async fn sandbox_profile_allows_public_https_egress() {
 
     let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("Docker-visible egress canary workspace");
-    let workspace_root = temp.path().join("sandbox-workspaces");
+    let workspace_root = temp.path().join("workspace-root");
     std::fs::create_dir(&workspace_root).expect("host-managed workspace root");
     let transport = RebornScopedSandboxCommandTransport::connect(
         RebornSandboxConfig::new(workspace_root).with_network_enabled(),
