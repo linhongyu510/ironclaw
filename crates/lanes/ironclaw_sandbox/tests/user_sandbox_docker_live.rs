@@ -52,8 +52,10 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     // see; a worktree-local tempdir exercises the real bind contract instead.
     let temp =
         tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("Docker-visible workspace tempdir");
+    let workspace_root = temp.path().join("sandbox-workspaces");
+    std::fs::create_dir(&workspace_root).expect("host-managed workspace root");
     let transport = RebornScopedSandboxCommandTransport::connect(
-        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
+        RebornSandboxConfig::new(workspace_root).with_network_enabled(),
     )
     .await
     .expect("Docker transport connects");
@@ -159,8 +161,10 @@ async fn sandbox_profile_allows_public_https_egress() {
 
     let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("Docker-visible egress canary workspace");
+    let workspace_root = temp.path().join("sandbox-workspaces");
+    std::fs::create_dir(&workspace_root).expect("host-managed workspace root");
     let transport = RebornScopedSandboxCommandTransport::connect(
-        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
+        RebornSandboxConfig::new(workspace_root).with_network_enabled(),
     )
     .await
     .expect("Docker transport connects");

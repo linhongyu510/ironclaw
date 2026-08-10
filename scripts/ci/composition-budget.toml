@@ -168,7 +168,13 @@ observed_date = "2026-08-07"
 # to its owned leaf. This remains composition assembly, while adoption policy
 # stays in the CLI and filesystem implementation stays in ironclaw_filesystem.
 # Measured with --print; set to current rather than padded.
-loc_ceiling = 41581
+# Raised 41581 -> 41997 on 2026-08-10 for Task 5's neutral tenant/user workspace
+# key migration. The Task 5 diff itself adds 44 counted composition LOC for exact
+# workspace-leaf wiring and caller coverage; this explicit measured re-seed takes
+# responsibility for the resulting merged-tree count rather than consuming the
+# gate's tolerance. Measured with `bash scripts/ci/check-composition-budget.sh
+# --print`; set to current rather than padded.
+loc_ceiling = 41997
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -179,7 +185,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41581
+loc_observed = 41997
 loc_observed_date = "2026-08-10"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

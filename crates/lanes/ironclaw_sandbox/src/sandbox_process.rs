@@ -66,6 +66,56 @@ const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
 
+#[cfg(test)]
+mod workspace_prepare_test_hook {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, Hook>>> = OnceLock::new();
+
+    pub(super) struct HookGuard {
+        workspace_root: PathBuf,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut hooks = hooks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            hooks.remove(&self.workspace_root);
+        }
+    }
+
+    pub(super) fn install(workspace_root: PathBuf, hook: Hook) -> HookGuard {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut hooks = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            hooks.insert(workspace_root.clone(), hook).is_none(),
+            "only one deterministic workspace preparation hook per root"
+        );
+        HookGuard { workspace_root }
+    }
+
+    pub(super) fn run(workspace_root: &Path) {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let hook = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(workspace_root);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
 
@@ -237,72 +287,167 @@ impl RebornSandboxConfig {
     }
 }
 
-async fn prepare_workspace_root(path: &Path) -> Result<PathBuf, RuntimeProcessError> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => validate_workspace_directory(&metadata, "root")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tokio::fs::create_dir_all(path).await.map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace root could not be initialized: {error}"
-                ))
-            })?;
-            let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace root could not be inspected after initialization: {error}"
-                ))
-            })?;
-            validate_workspace_directory(&metadata, "root")?;
-        }
-        Err(error) => {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace root could not be inspected: {error}"
-            )));
-        }
-    }
-    Ok(path.to_path_buf())
+#[cfg(unix)]
+async fn prepare_workspace_leaf_no_follow(
+    workspace_root: PathBuf,
+    key: TenantUserWorkspaceKey,
+    workspace_mode: u32,
+) -> Result<PathBuf, RuntimeProcessError> {
+    tokio::task::spawn_blocking(move || {
+        prepare_workspace_leaf_no_follow_blocking(&workspace_root, &key, workspace_mode)
+    })
+    .await
+    .map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace preparation task failed: {error}"
+        ))
+    })?
 }
 
-async fn ensure_workspace_directory(path: &Path) -> Result<(), RuntimeProcessError> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => validate_workspace_directory(&metadata, "directory"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match tokio::fs::create_dir(path).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
+#[cfg(not(unix))]
+async fn prepare_workspace_leaf_no_follow(
+    _workspace_root: PathBuf,
+    _key: TenantUserWorkspaceKey,
+    _workspace_mode: u32,
+) -> Result<PathBuf, RuntimeProcessError> {
+    Err(RuntimeProcessError::ExecutionFailed(
+        "sandbox workspace preparation requires Unix no-follow directory handles".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn prepare_workspace_leaf_no_follow_blocking(
+    workspace_root: &Path,
+    key: &TenantUserWorkspaceKey,
+    workspace_mode: u32,
+) -> Result<PathBuf, RuntimeProcessError> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+            unix::ffi::OsStrExt as _,
+        },
+    };
+
+    const DIRECTORY_OPEN_FLAGS: libc::c_int =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+
+    fn path_c_string(path: &Path) -> Result<CString, RuntimeProcessError> {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox workspace root contains an unsupported NUL byte".to_string(),
+            )
+        })
+    }
+
+    fn segment_c_string(segment: &str, label: &str) -> Result<CString, RuntimeProcessError> {
+        CString::new(segment).map_err(|_| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace {label} contains an unsupported NUL byte"
+            ))
+        })
+    }
+
+    fn take_owned_fd(fd: libc::c_int) -> std::io::Result<OwnedFd> {
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a non-negative descriptor returned by `open`/`openat` is
+        // owned by this call and has not been wrapped elsewhere.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn open_directory(path: &Path) -> std::io::Result<OwnedFd> {
+        let path = path_c_string(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+        // SAFETY: `path` is NUL-terminated for the duration of this syscall;
+        // flags request a directory and prohibit following its final symlink.
+        let fd = unsafe { libc::open(path.as_ptr(), DIRECTORY_OPEN_FLAGS) };
+        take_owned_fd(fd)
+    }
+
+    fn open_directory_at(parent: RawFd, name: &std::ffi::CStr) -> std::io::Result<OwnedFd> {
+        // SAFETY: `parent` is an owned open directory descriptor, `name` is
+        // NUL-terminated, and flags prohibit following the component symlink.
+        let fd = unsafe { libc::openat(parent, name.as_ptr(), DIRECTORY_OPEN_FLAGS) };
+        take_owned_fd(fd)
+    }
+
+    fn mkdir_directory_at(
+        parent: RawFd,
+        name: &std::ffi::CStr,
+        mode: libc::mode_t,
+    ) -> std::io::Result<()> {
+        // SAFETY: `parent` is an owned open directory descriptor and `name`
+        // is NUL-terminated for the duration of this descriptor-relative call.
+        let result = unsafe { libc::mkdirat(parent, name.as_ptr(), mode) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn open_or_create_directory_at(
+        parent: RawFd,
+        name: &std::ffi::CStr,
+        label: &str,
+    ) -> Result<OwnedFd, RuntimeProcessError> {
+        match open_directory_at(parent, name) {
+            Ok(directory) => Ok(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(error) = mkdir_directory_at(parent, name, 0o700)
+                    && error.kind() != std::io::ErrorKind::AlreadyExists
+                {
                     return Err(RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace directory could not be initialized: {error}"
+                        "sandbox workspace {label} could not be created without following links: {error}"
                     )));
                 }
+                open_directory_at(parent, name)
+                    .map_err(|error| workspace_directory_handle_error(label, error))
             }
-            let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace directory could not be inspected after initialization: {error}"
-                ))
-            })?;
-            validate_workspace_directory(&metadata, "directory")
+            Err(error) => Err(workspace_directory_handle_error(label, error)),
         }
-        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox workspace directory could not be inspected: {error}"
-        ))),
     }
-}
 
-fn validate_workspace_directory(
-    metadata: &std::fs::Metadata,
-    label: &str,
-) -> Result<(), RuntimeProcessError> {
-    if metadata.file_type().is_symlink() {
-        return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox workspace {label} must not be a symlink"
-        )));
+    fn workspace_directory_handle_error(label: &str, error: std::io::Error) -> RuntimeProcessError {
+        if matches!(
+            error.raw_os_error(),
+            Some(value) if value == libc::ELOOP || value == libc::ENOTDIR
+        ) {
+            return RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace {label} must be a non-symlink directory"
+            ));
+        }
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace {label} could not be opened without following links: {error}"
+        ))
     }
-    if !metadata.is_dir() {
-        return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox workspace {label} must be a directory"
-        )));
+
+    fn set_directory_mode(directory: &OwnedFd, mode: u32) -> Result<(), RuntimeProcessError> {
+        // SAFETY: `directory` is an owned open directory descriptor. `fchmod`
+        // changes that descriptor's inode directly, never a path re-resolution.
+        let result = unsafe { libc::fchmod(directory.as_raw_fd(), mode as libc::mode_t) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let error = std::io::Error::last_os_error();
+            Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace permissions could not be set through its directory handle: {error}"
+            )))
+        }
     }
-    Ok(())
+
+    let root = open_directory(workspace_root)
+        .map_err(|error| workspace_directory_handle_error("root", error))?;
+    let users_name = segment_c_string("users", "users root")?;
+    let users = open_or_create_directory_at(root.as_raw_fd(), &users_name, "users root")?;
+    #[cfg(test)]
+    workspace_prepare_test_hook::run(workspace_root);
+    let leaf_name = segment_c_string(key.digest_segment(), "leaf")?;
+    let leaf = open_or_create_directory_at(users.as_raw_fd(), &leaf_name, "leaf")?;
+    set_directory_mode(&leaf, workspace_mode)?;
+
+    Ok(workspace_root.join("users").join(key.digest_segment()))
 }
 
 fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
@@ -352,25 +497,14 @@ impl RebornScopedSandboxCommandTransport {
         scope: &ResourceScope,
     ) -> Result<PathBuf, RuntimeProcessError> {
         let key = TenantUserWorkspaceKey::from_scope(scope);
-        let workspace_root = prepare_workspace_root(&self.config.workspace_root).await?;
+        let workspace_root = self.config.workspace_root.clone();
         let users_root = workspace_root.join("users");
-        ensure_workspace_directory(&users_root).await?;
-        let workspace = users_root.join(key.digest_segment());
-        ensure_workspace_directory(&workspace).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(
-                &workspace,
-                std::fs::Permissions::from_mode(self.config.container_identity.workspace_mode()),
-            )
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace permissions could not be set: {error}"
-                ))
-            })?;
-        }
+        let workspace = prepare_workspace_leaf_no_follow(
+            workspace_root.clone(),
+            key,
+            self.config.container_identity.workspace_mode(),
+        )
+        .await?;
         let canonical_workspace_root =
             tokio::fs::canonicalize(&workspace_root)
                 .await
@@ -759,7 +893,8 @@ mod tests {
 
     fn workspace_transport(workspace_root: &Path) -> RebornScopedSandboxCommandTransport {
         RebornScopedSandboxCommandTransport::new(
-            Docker::connect_with_local_defaults().expect("docker client configuration"),
+            Docker::connect_with_http("http://127.0.0.1:2375", 1, bollard::API_DEFAULT_VERSION)
+                .expect("inert docker client configuration"),
             RebornSandboxConfig::new(workspace_root),
         )
     }
@@ -769,6 +904,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let scope = caller_scope();
         let workspace_root = temp.path().join("workspaces");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
         let transport = workspace_transport(&workspace_root);
 
         let prepared = transport
@@ -785,6 +921,24 @@ mod tests {
         .expect("canonical caller leaf");
         assert_eq!(prepared, expected);
         assert_eq!(prepared.parent(), expected.parent());
+    }
+
+    #[tokio::test]
+    async fn workspace_preparation_requires_a_host_initialized_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+
+        let error = workspace_transport(&workspace_root)
+            .prepare_workspace(&scope)
+            .await
+            .expect_err("sandbox must not initialize the configured root through a path lookup");
+
+        assert!(
+            format!("{error}").contains("workspace root"),
+            "missing root must fail closed: {error}"
+        );
+        assert!(!workspace_root.exists());
     }
 
     #[cfg(unix)]
@@ -826,6 +980,97 @@ mod tests {
                 "{symlink_kind} must not create an outside caller leaf"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_preparation_users_swap_cannot_create_an_outside_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let users_root = workspace_root.join("users");
+        let parked_users_root = workspace_root.join("users-before-swap");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
+        std::fs::create_dir(&users_root).expect("users root");
+        std::fs::create_dir(&outside).expect("outside root");
+        let key = TenantUserWorkspaceKey::from_scope(&scope);
+        let users_root_for_hook = users_root.clone();
+        let outside_for_hook = outside.clone();
+        let hook = workspace_prepare_test_hook::install(
+            workspace_root.clone(),
+            Box::new(move || {
+                std::fs::rename(&users_root_for_hook, &parked_users_root).expect("park users root");
+                symlink(&outside_for_hook, &users_root_for_hook).expect("swap users root");
+            }),
+        );
+
+        let error = workspace_transport(&workspace_root)
+            .prepare_workspace(&scope)
+            .await
+            .expect_err("swapped users root must fail closed");
+
+        drop(hook);
+        assert!(
+            format!("{error}").contains("escapes"),
+            "swapped users root must be rejected during containment validation: {error}"
+        );
+        assert!(
+            !outside.join(key.digest_segment()).exists(),
+            "workspace preparation must not create a leaf through a swapped users symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_preparation_users_swap_cannot_chmod_an_outside_leaf() {
+        use std::os::unix::{fs::PermissionsExt as _, fs::symlink};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let users_root = workspace_root.join("users");
+        let parked_users_root = workspace_root.join("users-before-swap");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
+        std::fs::create_dir(&users_root).expect("users root");
+        std::fs::create_dir(&outside).expect("outside root");
+        let key = TenantUserWorkspaceKey::from_scope(&scope);
+        let outside_leaf = outside.join(key.digest_segment());
+        std::fs::create_dir(&outside_leaf).expect("outside leaf");
+        std::fs::set_permissions(&outside_leaf, std::fs::Permissions::from_mode(0o755))
+            .expect("outside leaf mode");
+        let users_root_for_hook = users_root.clone();
+        let outside_for_hook = outside.clone();
+        let hook = workspace_prepare_test_hook::install(
+            workspace_root.clone(),
+            Box::new(move || {
+                std::fs::rename(&users_root_for_hook, &parked_users_root).expect("park users root");
+                symlink(&outside_for_hook, &users_root_for_hook).expect("swap users root");
+            }),
+        );
+
+        let error = workspace_transport(&workspace_root)
+            .prepare_workspace(&scope)
+            .await
+            .expect_err("swapped users root must fail closed");
+
+        drop(hook);
+        assert!(
+            format!("{error}").contains("escapes"),
+            "swapped users root must be rejected during containment validation: {error}"
+        );
+        assert_eq!(
+            std::fs::metadata(&outside_leaf)
+                .expect("outside leaf metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "workspace preparation must not chmod a leaf through a swapped users symlink"
+        );
     }
 
     #[test]
@@ -1201,11 +1446,11 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_unconfigured_trusted_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
-            docker,
-            RebornSandboxConfig::new(temp.path().join("workspaces")),
-        );
+        let workspace_root = temp.path().join("workspaces");
+        tokio::fs::create_dir(&workspace_root)
+            .await
+            .expect("host-managed workspace root");
+        let transport = workspace_transport(&workspace_root);
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/project").unwrap(),
             VirtualPath::new("/projects/app").unwrap(),
