@@ -2183,6 +2183,15 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
     ))
     .await
     .expect("first standalone services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let default_system_prompt_path = runtime_surfaces
+        .default_system_prompt_path_for_test()
+        .clone();
+    let default_system_prompt =
+        std::fs::read_to_string(&default_system_prompt_path).expect("read seeded system prompt");
+    let system_skill_path = root.join("system/skills/code-review/SKILL.md");
+    let system_skill =
+        std::fs::read_to_string(&system_skill_path).expect("read seeded system skill");
     services
         .local_runtime_for_test()
         .expect("local runtime")
@@ -2196,6 +2205,21 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
         })
         .await
         .expect("persist thread");
+    services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .thread_service
+        .accept_inbound_message(ironclaw_threads::AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "persist-owner".to_string(),
+            source_binding_id: Some("profile-stable-reopen".to_string()),
+            reply_target_binding_id: None,
+            external_event_id: Some("profile-stable-reopen-message".to_string()),
+            content: ironclaw_threads::MessageContent::text("persisted message"),
+        })
+        .await
+        .expect("persist transcript message");
     drop(services);
 
     let rebuilt = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
@@ -2209,13 +2233,42 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
         .expect("rebuilt local runtime")
         .thread_service
         .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
-            scope,
+            scope: scope.clone(),
             thread_id: thread_id.clone(),
         })
         .await
         .expect("read persisted thread");
 
     assert_eq!(history.thread.thread_id, thread_id);
+    assert_eq!(history.thread.scope, scope);
+    assert_eq!(history.thread.created_by_actor_id, "persist-owner");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .map(|message| message.content.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("persisted message")],
+        "the rebuilt composition must read a persisted transcript message"
+    );
+    assert_eq!(
+        rebuilt
+            .local_runtime_for_test()
+            .expect("rebuilt local runtime")
+            .default_system_prompt_path_for_test(),
+        &default_system_prompt_path,
+        "a canonical restart must reuse the host-managed system prompt path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&default_system_prompt_path).expect("read reopened system prompt"),
+        default_system_prompt,
+        "a canonical restart must preserve the host-managed system prompt"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&system_skill_path).expect("read reopened system skill"),
+        system_skill,
+        "a canonical restart must preserve the host-managed system skill"
+    );
     assert!(
         root.join("reborn-local-dev.db").exists(),
         "standalone should use a libSQL database under the standalone root"
@@ -2308,6 +2361,14 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
             .exists(),
         "nothing may be left on the host disk: a skill written there is invisible to discovery"
     );
+
+    drop(services);
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+        "standalone-skill-tools-owner",
+        storage_root.clone(),
+    ))
+    .await
+    .expect("rebuilt standalone services");
 
     let list_output = invoke_json(
         &services,

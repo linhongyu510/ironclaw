@@ -1379,6 +1379,22 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Assert an installed extension's caller membership survives an
+    /// independent reopen of the capability composite.
+    pub async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+    ) -> HarnessResult<()> {
+        self._shared
+            .capability
+            .assert_extension_install_membership_persists_after_reopen(
+                extension_id,
+                expected_member,
+            )
+            .await
+    }
+
     /// Assert the named capability was invoked through the real capability path
     /// (proves the scripted tool call actually ran the tool).
     ///

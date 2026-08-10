@@ -439,6 +439,48 @@ impl GroupCapability {
                 .into(),
         )
     }
+
+    /// E-DURABLE membership: the independently reopened installation must
+    /// retain the installing user's membership as well as the extension id.
+    pub(crate) async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+    ) -> HarnessResult<()> {
+        let harness = match self {
+            Self::HostRuntime(arc) => arc,
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                return Err("no host-runtime capability backend for durable reopen".into());
+            }
+        };
+        let store =
+            ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+                &harness.storage_root_for_test(),
+            )
+            .await?;
+        let installations = store.list_installations().await?;
+        let Some(installation) = installations
+            .iter()
+            .find(|installation| installation.extension_id().as_str() == extension_id)
+        else {
+            let seen: Vec<&str> = installations
+                .iter()
+                .map(|installation| installation.extension_id().as_str())
+                .collect();
+            return Err(format!(
+                "extension {extension_id:?} not found after independent reopen; saw {seen:?}"
+            )
+            .into());
+        };
+        if installation.owner().visible_to(expected_member) {
+            return Ok(());
+        }
+        Err(format!(
+            "extension {extension_id:?} lost membership for user {:?} after independent reopen",
+            expected_member.as_str()
+        )
+        .into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +750,22 @@ impl RebornIntegrationGroup {
         self.shared
             .capability
             .assert_extension_install_persists_after_reopen(extension_id)
+            .await
+    }
+
+    /// Group-level twin of
+    /// [`GroupCapability::assert_extension_install_membership_persists_after_reopen`].
+    pub async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+    ) -> HarnessResult<()> {
+        self.shared
+            .capability
+            .assert_extension_install_membership_persists_after_reopen(
+                extension_id,
+                expected_member,
+            )
             .await
     }
 

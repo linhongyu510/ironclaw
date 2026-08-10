@@ -56,9 +56,12 @@ async fn extension_install_survives_independent_reopen_async() {
         .expect("install reported success");
 
     harness
-        .assert_extension_install_persists_after_reopen("github")
+        .assert_extension_install_membership_persists_after_reopen(
+            "github",
+            &harness.binding.actor_user_id,
+        )
         .await
-        .expect("installed extension survives an independent reopen");
+        .expect("installed extension membership survives an independent reopen");
 }
 
 fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
