@@ -120,9 +120,9 @@ the environment. The manual steps below are equivalent.
 ### Quick start
 
 ```bash
-# 1. For serve/run/repl the Reborn home must live OUTSIDE your current working
-#    directory: these commands use the cwd as the local-dev workspace root and
-#    reject overlap with it (see gotchas). Other commands have no such rule.
+# 1. Choose the installation boundary. Durable state, system content,
+#    tenant/user workspaces, and runtime bookkeeping live directly below it;
+#    the current working directory is not used as durable workspace storage.
 export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 
 # 2. Configure a model route. NEAR AI shown here; swap the provider id and key
