@@ -6,12 +6,15 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
+#[cfg(unix)]
+use fs2::FileExt as _;
 use ironclaw_composition::host_api::{TenantId, UserId};
 use ironclaw_config::{
-    LayoutManifest, LayoutRequirement, ProfileTransitionAdmission, RebornHome, RebornStoragePaths,
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
+    ProfileTransitionAdmission, RebornHome, RebornStoragePaths, TenancyModel, WorkspaceAccessFloor,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -22,7 +25,7 @@ const JOURNAL_FILE: &str = "journal.toml";
 const SNAPSHOT_DIR: &str = "snapshot";
 const STAGING_DIR: &str = "staging";
 const ADOPTION_LOCK_FILE: &str = "adoption.lock";
-const JOURNAL_SCHEMA_VERSION: u32 = 1;
+const JOURNAL_SCHEMA_VERSION: u32 = 2;
 const DB_FILE: &str = "reborn-local-dev.db";
 const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
 const LIBSQL_DB_UNIT: &[&str] = &[
@@ -89,6 +92,34 @@ impl LegacySourceKind {
             Self::BareHome => None,
         }
     }
+
+    /// The historical source envelope is fixed and never inferred from the
+    /// requested target profile.
+    const fn requirement(self) -> LayoutRequirement {
+        match self {
+            Self::LocalDev | Self::BareHome => LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            Self::HostedSingleTenant => LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            Self::HostedSingleTenantVolume => LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +155,8 @@ struct AdoptionJournal {
     schema_version: u32,
     source: LegacySourceKind,
     phase: AdoptionPhase,
-    requirement: LayoutRequirement,
+    source_requirement: LayoutRequirement,
+    target_requirement: LayoutRequirement,
     inventory: AdoptionInventory,
     workspace: Option<WorkspaceImportDecision>,
 }
@@ -138,17 +170,53 @@ struct WorkspaceImportDecision {
     digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedWorkspaceImportDecision {
+    source: PathBuf,
+    tenant: TenantId,
+    user: UserId,
+    digest: String,
+}
+
+impl WorkspaceImportDecision {
+    fn validate(&self) -> anyhow::Result<ValidatedWorkspaceImportDecision> {
+        let tenant = TenantId::new(self.tenant.clone())
+            .map_err(|error| anyhow!("invalid workspace journal tenant identity: {error}"))?;
+        let user = UserId::new(self.user.clone())
+            .map_err(|error| anyhow!("invalid workspace journal user identity: {error}"))?;
+        let digest = tenant_user_workspace_digest(&tenant, &user);
+        if !is_single_path_segment(&self.digest) {
+            bail!(
+                "workspace journal digest must be one normal path segment; refusing to derive a workspace destination from {}",
+                self.digest
+            );
+        }
+        if self.digest != digest {
+            bail!(
+                "workspace journal digest does not match its tenant/user identities; refusing to derive a workspace destination"
+            );
+        }
+        Ok(ValidatedWorkspaceImportDecision {
+            source: self.source.clone(),
+            tenant,
+            user,
+            digest,
+        })
+    }
+}
+
 impl AdoptionJournal {
     fn new(
         candidate: &LegacyCandidate,
-        requirement: LayoutRequirement,
+        target_requirement: LayoutRequirement,
         workspace: Option<WorkspaceImportDecision>,
     ) -> Self {
         Self {
             schema_version: JOURNAL_SCHEMA_VERSION,
             source: candidate.kind,
             phase: AdoptionPhase::Prepare,
-            requirement,
+            source_requirement: candidate.kind.requirement(),
+            target_requirement,
             inventory: AdoptionInventory {
                 db_files: candidate.db_files.clone(),
                 has_master_key: candidate.has_master_key,
@@ -171,6 +239,22 @@ impl AdoptionJournal {
             has_system_content: self.inventory.has_system_content,
         }
     }
+
+    fn validate_source_requirement(&self) -> anyhow::Result<()> {
+        if self.source_requirement != self.source.requirement() {
+            bail!(
+                "adoption journal source security requirement does not match its fixed legacy source kind; refusing to resume"
+            );
+        }
+        Ok(())
+    }
+
+    fn validated_workspace(&self) -> anyhow::Result<Option<ValidatedWorkspaceImportDecision>> {
+        self.workspace
+            .as_ref()
+            .map(WorkspaceImportDecision::validate)
+            .transpose()
+    }
 }
 
 /// Validate a ready layout, initialize a genuinely fresh home, or fail closed.
@@ -190,7 +274,7 @@ pub(crate) fn ensure_ready_layout(
         if adoption_journal.exists() {
             let journal = read_journal(&adoption_journal)?;
             if journal.phase != AdoptionPhase::StoreVerified
-                || journal.requirement != manifest.requirement()
+                || journal.target_requirement != manifest.requirement()
             {
                 bail!(
                     "ready layout manifest and adoption journal disagree at {}; refusing to open durable state",
@@ -208,7 +292,7 @@ pub(crate) fn ensure_ready_layout(
         );
     }
 
-    let candidates = inspect_legacy_candidates(home_path, requirement)?;
+    let candidates = inspect_legacy_candidates(home_path)?;
     if candidates.is_empty() && canonical_layout_is_empty(&paths)? {
         initialize_fresh_layout(home_path, &paths, requirement)?;
         return Ok(paths);
@@ -251,12 +335,14 @@ pub(crate) fn adopt_layout(
 
     let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
     let journal_path = adoption_root.join(JOURNAL_FILE);
+    validate_adoption_ancestors(home_path, &paths, &adoption_root)?;
 
     let (mut journal, _lock) = if journal_path.exists() {
+        validate_journal_owned_runtime(&paths, &adoption_root)?;
         let lock = acquire_existing_adoption_lock(&adoption_root)?;
         (read_journal(&journal_path)?, lock)
     } else {
-        let candidates = inspect_legacy_candidates(home_path, requirement)?;
+        let candidates = inspect_legacy_candidates(home_path)?;
         if candidates.len() != 1 {
             if candidates.is_empty() {
                 bail!(
@@ -269,21 +355,31 @@ pub(crate) fn adopt_layout(
                 candidate_paths(&candidates)
             );
         }
-        ensure_canonical_install_targets_empty(&paths)?;
+        let candidate = &candidates[0];
+        admit_manifest(
+            &LayoutManifest::new(candidate.kind.requirement()),
+            requirement,
+        )?;
+        ensure_initial_adoption_namespaces_empty(&paths)?;
         let workspace = prepare_workspace_import(options.workspace_import.as_ref(), &paths)?;
-        fs::create_dir_all(&adoption_root)
-            .with_context(|| format!("create adoption root {}", adoption_root.display()))?;
+        create_adoption_root(home_path, &paths, &adoption_root)?;
         let lock = acquire_adoption_lock(&adoption_root)?;
         if journal_path.exists() {
             (read_journal(&journal_path)?, lock)
         } else {
-            let journal = AdoptionJournal::new(&candidates[0], requirement, workspace);
+            let journal = AdoptionJournal::new(candidate, requirement, workspace);
             write_journal(&journal_path, &journal)?;
             (journal, lock)
         }
     };
 
-    if journal.requirement != requirement {
+    journal.validate_source_requirement()?;
+    admit_manifest(
+        &LayoutManifest::new(journal.source_requirement),
+        requirement,
+    )?;
+
+    if journal.target_requirement != requirement {
         bail!(
             "adoption journal security requirement does not match this restart; inspect the preserved snapshot and resume with the original compatible profile"
         );
@@ -320,6 +416,7 @@ fn resume_adoption(
 ) -> anyhow::Result<()> {
     let candidate = journal.candidate(home);
     let snapshot = candidate.snapshot_root(adoption_root);
+    let workspace = journal.validated_workspace()?;
 
     if journal.phase == AdoptionPhase::Prepare {
         reconcile_prepare_shape(&candidate, &snapshot)?;
@@ -329,28 +426,54 @@ fn resume_adoption(
 
     require_snapshot_shape(&candidate, &snapshot)?;
 
-    if journal.phase != AdoptionPhase::StoreVerified {
-        remove_interrupted_owned_artifacts(paths, adoption_root, journal.phase)?;
-        stage_snapshot(
-            &candidate,
-            &snapshot,
-            adoption_root,
-            journal.workspace.as_ref(),
-        )?;
+    if journal.phase == AdoptionPhase::SnapshotOwned {
+        stage_snapshot(&candidate, &snapshot, adoption_root, workspace.as_ref())?;
         journal.phase = AdoptionPhase::Staged;
         write_journal(journal_path, journal)?;
+    }
 
-        install_staged(paths, adoption_root, journal.workspace.as_ref())?;
+    if journal.phase == AdoptionPhase::Staged {
+        require_staged_inventory(&candidate, &snapshot, adoption_root, workspace.as_ref())?;
+        install_staged(paths, adoption_root, workspace.as_ref())?;
         journal.phase = AdoptionPhase::CanonicalInstalled;
         write_journal(journal_path, journal)?;
+    }
 
+    if journal.phase == AdoptionPhase::CanonicalInstalled {
+        verify_canonical_inventory(paths, &candidate, &snapshot)?;
         verify_canonical_store(paths, candidate.is_embedded())?;
         journal.phase = AdoptionPhase::StoreVerified;
         write_journal(journal_path, journal)?;
     }
 
-    let manifest = LayoutManifest::new(journal.requirement);
+    // StoreVerified is durable progress, not a proof that the canonical tree
+    // still exists. Re-check the exact copied inventory and reopen the real
+    // store on every replay before the manifest makes the layout bootable.
+    verify_canonical_inventory(paths, &candidate, &snapshot)?;
+    verify_canonical_store(paths, candidate.is_embedded())?;
+
+    let manifest = LayoutManifest::new(journal.target_requirement);
     write_manifest_last(home, &manifest)?;
+    Ok(())
+}
+
+fn require_staged_inventory(
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    adoption_root: &Path,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
+) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    verify_inventory_roots(
+        &staging.join("state"),
+        &staging.join("system"),
+        candidate,
+        snapshot,
+        "staged",
+    )?;
+    if workspace.is_some() {
+        validate_ordinary_tree(&staging.join("workspace-leaf"))?;
+    }
     Ok(())
 }
 
@@ -378,8 +501,15 @@ fn snapshot_source(candidate: &LegacyCandidate, snapshot: &Path) -> anyhow::Resu
     let snapshot_parent = snapshot
         .parent()
         .ok_or_else(|| anyhow!("snapshot has no parent: {}", snapshot.display()))?;
-    fs::create_dir_all(snapshot_parent)
-        .with_context(|| format!("create snapshot parent {}", snapshot_parent.display()))?;
+    create_or_validate_direct_child(
+        snapshot_parent.parent().ok_or_else(|| {
+            anyhow!(
+                "snapshot parent has no parent: {}",
+                snapshot_parent.display()
+            )
+        })?,
+        snapshot_parent,
+    )?;
 
     if candidate.kind.profile_directory().is_some() {
         fs::rename(&candidate.source_root, snapshot).with_context(|| {
@@ -453,6 +583,7 @@ fn validate_snapshot_inventory(candidate: &LegacyCandidate, snapshot: &Path) -> 
     }
     if candidate.has_master_key {
         require_ordinary_file(&snapshot.join(MASTER_KEY_FILE))?;
+        validate_master_key_source(&snapshot.join(MASTER_KEY_FILE))?;
     }
     if candidate.has_system_content {
         validate_system_tree(&snapshot.join("system"))?;
@@ -464,7 +595,7 @@ fn stage_snapshot(
     candidate: &LegacyCandidate,
     snapshot: &Path,
     adoption_root: &Path,
-    workspace: Option<&WorkspaceImportDecision>,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
 ) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
     if staging.exists() {
@@ -485,7 +616,7 @@ fn stage_snapshot(
         copy_ordinary_file(&snapshot.join(file), &staging_state.join(file))?;
     }
     if candidate.has_master_key {
-        copy_ordinary_file(
+        copy_master_key(
             &snapshot.join(MASTER_KEY_FILE),
             &staging_state.join(MASTER_KEY_FILE),
         )?;
@@ -505,7 +636,7 @@ fn stage_snapshot(
 fn install_staged(
     paths: &RebornStoragePaths,
     adoption_root: &Path,
-    workspace: Option<&WorkspaceImportDecision>,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
 ) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
     let staging_state = staging.join("state");
@@ -549,42 +680,162 @@ fn verify_canonical_store(paths: &RebornStoragePaths, embedded_state: bool) -> a
     .context("open canonical embedded store and construct the canonical secret resolver")
 }
 
-fn remove_interrupted_owned_artifacts(
+fn verify_canonical_inventory(
     paths: &RebornStoragePaths,
-    adoption_root: &Path,
-    phase: AdoptionPhase,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
 ) -> anyhow::Result<()> {
-    let staging = adoption_root.join(STAGING_DIR);
-    if staging.exists() {
-        remove_owned_tree(&staging, adoption_root)?;
+    verify_inventory_roots(
+        paths.state_root(),
+        paths.system_root(),
+        candidate,
+        snapshot,
+        "canonical",
+    )
+}
+
+fn verify_inventory_roots(
+    state_root: &Path,
+    system_root: &Path,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
+    let mut expected_state_files = candidate.db_files.clone();
+    if candidate.has_master_key {
+        expected_state_files.push(MASTER_KEY_FILE.to_string());
     }
-    if matches!(
-        phase,
-        AdoptionPhase::CanonicalInstalled | AdoptionPhase::Staged
-    ) {
-        for path in [paths.state_root(), paths.system_root()] {
-            if path.exists() {
-                remove_owned_tree(
-                    path,
-                    path.parent()
-                        .ok_or_else(|| anyhow!("canonical path has no parent"))?,
-                )?;
-            }
-        }
+    expected_state_files.sort();
+    require_exact_file_inventory(state_root, &expected_state_files, &format!("{label} state"))?;
+    for file in &candidate.db_files {
+        require_matching_file(
+            &snapshot.join(file),
+            &state_root.join(file),
+            &format!("{label} database"),
+        )?;
+    }
+    if candidate.has_master_key {
+        let source_key = snapshot.join(MASTER_KEY_FILE);
+        validate_master_key_source(&source_key)?;
+        validate_master_key_source(&state_root.join(MASTER_KEY_FILE))?;
+        require_matching_file(
+            &source_key,
+            &state_root.join(MASTER_KEY_FILE),
+            &format!("{label} master key"),
+        )?;
+    }
+
+    if candidate.has_system_content {
+        require_matching_tree(
+            &snapshot.join("system"),
+            system_root,
+            &format!("{label} system content"),
+        )?;
+    } else {
+        require_exact_file_inventory(system_root, &[], &format!("{label} system"))?;
     }
     Ok(())
 }
 
-fn remove_owned_tree(path: &Path, expected_parent: &Path) -> anyhow::Result<()> {
-    if path.parent() != Some(expected_parent) {
+fn require_exact_file_inventory(
+    directory: &Path,
+    expected: &[String],
+    label: &str,
+) -> anyhow::Result<()> {
+    require_ordinary_directory(directory)?;
+    let directory_handle = open_directory_no_follow(directory)?;
+    let mut actual = Vec::new();
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read {label} directory {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
+        let path = entry.path();
+        require_ordinary_file(&path)?;
+        actual.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    actual.sort();
+    if actual != expected {
         bail!(
-            "refusing to remove non-direct journal-owned path {}",
-            path.display()
+            "{label} inventory at {} does not exactly match the recorded adoption snapshot",
+            directory.display()
         );
     }
-    fs::remove_dir_all(path)
-        .with_context(|| format!("remove interrupted journal-owned tree {}", path.display()))?;
-    sync_directory(expected_parent)
+    ensure_directory_path_matches_handle(directory, &directory_handle)
+}
+
+fn require_matching_tree(source: &Path, destination: &Path, label: &str) -> anyhow::Result<()> {
+    require_ordinary_directory(source)?;
+    require_ordinary_directory(destination)?;
+    let source_handle = open_directory_no_follow(source)?;
+    let destination_handle = open_directory_no_follow(destination)?;
+    let mut source_entries = fs::read_dir(source)
+        .with_context(|| format!("read {label} source {}", source.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("enumerate {label} source {}", source.display()))?;
+    let mut destination_entries = fs::read_dir(destination)
+        .with_context(|| format!("read {label} destination {}", destination.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("enumerate {label} destination {}", destination.display()))?;
+    source_entries.sort_by_key(|entry| entry.file_name());
+    destination_entries.sort_by_key(|entry| entry.file_name());
+    let source_names = source_entries
+        .iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    let destination_names = destination_entries
+        .iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    if source_names != destination_names {
+        bail!(
+            "{label} inventory at {} does not exactly match snapshot {}",
+            destination.display(),
+            source.display()
+        );
+    }
+    for source_entry in source_entries {
+        let source_path = source_entry.path();
+        let destination_path = destination.join(source_entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)
+            .with_context(|| format!("inspect {label} source entry {}", source_path.display()))?;
+        if metadata.is_dir() {
+            require_matching_tree(&source_path, &destination_path, label)?;
+        } else {
+            require_matching_file(&source_path, &destination_path, label)?;
+        }
+    }
+    ensure_directory_path_matches_handle(source, &source_handle)?;
+    ensure_directory_path_matches_handle(destination, &destination_handle)
+}
+
+fn require_matching_file(source: &Path, destination: &Path, label: &str) -> anyhow::Result<()> {
+    let source_digest = digest_ordinary_file(source)?;
+    let destination_digest = digest_ordinary_file(destination)?;
+    if source_digest != destination_digest {
+        bail!(
+            "{label} at {} does not match adoption snapshot {}",
+            destination.display(),
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+fn digest_ordinary_file(path: &Path) -> anyhow::Result<String> {
+    require_ordinary_file(path)?;
+    let mut file = open_file_no_follow(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read file while hashing {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn initialize_fresh_layout(
@@ -648,6 +899,8 @@ fn read_journal(path: &Path) -> anyhow::Result<AdoptionJournal> {
             JOURNAL_SCHEMA_VERSION
         );
     }
+    journal.validate_source_requirement()?;
+    let _ = journal.validated_workspace()?;
     Ok(journal)
 }
 
@@ -660,6 +913,7 @@ fn write_atomic_synced(path: &Path, contents: &str, replace: bool) -> anyhow::Re
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    require_ordinary_directory(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary file beside {}", path.display()))?;
     temp.write_all(contents.as_bytes())
@@ -689,10 +943,7 @@ fn write_atomic_synced(path: &Path, contents: &str, replace: bool) -> anyhow::Re
     sync_directory(parent)
 }
 
-fn inspect_legacy_candidates(
-    home: &Path,
-    requirement: LayoutRequirement,
-) -> anyhow::Result<Vec<LegacyCandidate>> {
+fn inspect_legacy_candidates(home: &Path) -> anyhow::Result<Vec<LegacyCandidate>> {
     let sandbox_root = home.join("hosted-single-tenant-volume-sandboxed");
     if unreleased_sandbox_is_populated(&sandbox_root)? {
         bail!(
@@ -707,7 +958,7 @@ fn inspect_legacy_candidates(
         LegacySourceKind::HostedSingleTenant,
         LegacySourceKind::HostedSingleTenantVolume,
     ] {
-        let candidate = inspect_profile_root(home, kind, requirement)?;
+        let candidate = inspect_profile_root(home, kind)?;
         if let Some(candidate) = candidate {
             candidates.push(candidate);
         }
@@ -721,7 +972,6 @@ fn inspect_legacy_candidates(
 fn inspect_profile_root(
     home: &Path,
     kind: LegacySourceKind,
-    requirement: LayoutRequirement,
 ) -> anyhow::Result<Option<LegacyCandidate>> {
     let directory = kind
         .profile_directory()
@@ -746,6 +996,7 @@ fn inspect_profile_root(
             db_files.push(name.into_owned());
         } else if name == MASTER_KEY_FILE {
             require_ordinary_file(&path)?;
+            validate_master_key_source(&path)?;
             has_master_key = true;
         } else if name == "system" {
             require_ordinary_directory(&path)?;
@@ -774,12 +1025,6 @@ fn inspect_profile_root(
         return Ok(None);
     }
     if kind == LegacySourceKind::HostedSingleTenant {
-        if requirement.durable_state != ironclaw_config::DurableStateKind::ExternalPostgres {
-            bail!(
-                "{} is a PostgreSQL/system-content legacy source and cannot be adopted into embedded libSQL state",
-                root.display()
-            );
-        }
         if !db_files.is_empty() || has_master_key {
             bail!(
                 "{} is a PostgreSQL/system-content legacy source but contains embedded DB/key files; inspect it manually",
@@ -815,6 +1060,7 @@ fn inspect_bare_home(home: &Path) -> anyhow::Result<Option<LegacyCandidate>> {
     let has_master_key = key_path.exists();
     if has_master_key {
         require_ordinary_file(&key_path)?;
+        validate_master_key_source(&key_path)?;
     }
     if db_files.is_empty() && !has_master_key {
         return Ok(None);
@@ -879,6 +1125,101 @@ fn ensure_canonical_install_targets_empty(paths: &RebornStoragePaths) -> anyhow:
     Ok(())
 }
 
+fn ensure_initial_adoption_namespaces_empty(paths: &RebornStoragePaths) -> anyhow::Result<()> {
+    ensure_canonical_install_targets_empty(paths)?;
+    for path in [paths.workspace_root(), paths.runtime_root()] {
+        if path.exists() && !directory_is_empty(path)? {
+            bail!(
+                "canonical namespace {} contains unexplained data; initial adoption only permits an empty workspace/runtime namespace and never infers ownership or runtime provenance",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_adoption_ancestors(
+    home: &Path,
+    paths: &RebornStoragePaths,
+    adoption_root: &Path,
+) -> anyhow::Result<()> {
+    require_ordinary_directory(home)?;
+    if paths.runtime_root().exists() {
+        require_ordinary_directory(paths.runtime_root())?;
+    }
+    if adoption_root.exists() {
+        require_ordinary_directory(adoption_root)?;
+    }
+    Ok(())
+}
+
+fn create_adoption_root(
+    home: &Path,
+    paths: &RebornStoragePaths,
+    adoption_root: &Path,
+) -> anyhow::Result<()> {
+    create_or_validate_direct_child(home, paths.runtime_root())?;
+    create_or_validate_direct_child(paths.runtime_root(), adoption_root)
+}
+
+fn validate_journal_owned_runtime(
+    paths: &RebornStoragePaths,
+    adoption_root: &Path,
+) -> anyhow::Result<()> {
+    require_ordinary_directory(paths.runtime_root())?;
+    let runtime_entries = fs::read_dir(paths.runtime_root())
+        .with_context(|| format!("read runtime namespace {}", paths.runtime_root().display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!(
+                "enumerate runtime namespace {}",
+                paths.runtime_root().display()
+            )
+        })?;
+    if runtime_entries.len() != 1 || runtime_entries[0].file_name() != ADOPTION_DIR {
+        bail!(
+            "runtime namespace {} contains unexplained data; recovery permits only the journal-owned layout-adoption directory",
+            paths.runtime_root().display()
+        );
+    }
+    require_ordinary_directory(adoption_root)?;
+    for entry in fs::read_dir(adoption_root)
+        .with_context(|| format!("read adoption root {}", adoption_root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("read entry under {}", adoption_root.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        match name.as_ref() {
+            JOURNAL_FILE | ADOPTION_LOCK_FILE => require_ordinary_file(&path)?,
+            SNAPSHOT_DIR | STAGING_DIR => require_ordinary_directory(&path)?,
+            _ => bail!(
+                "adoption root {} contains unexplained recovery artifact `{name}`",
+                adoption_root.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn create_or_validate_direct_child(parent: &Path, child: &Path) -> anyhow::Result<()> {
+    if child.parent() != Some(parent) {
+        bail!(
+            "refusing to create non-direct child {} beneath {}",
+            child.display(),
+            parent.display()
+        );
+    }
+    require_ordinary_directory(parent)?;
+    if child.exists() {
+        return require_ordinary_directory(child);
+    }
+    fs::create_dir(child)
+        .with_context(|| format!("create adoption directory {}", child.display()))?;
+    sync_directory(parent)
+}
+
 fn prepare_workspace_import(
     options: Option<&WorkspaceImportOptions>,
     paths: &RebornStoragePaths,
@@ -899,7 +1240,7 @@ fn prepare_workspace_import(
         user: options.user.as_str().to_string(),
         digest: tenant_user_workspace_digest(&options.tenant, &options.user),
     };
-    let destination = workspace_leaf_path(paths, &decision);
+    let destination = workspace_leaf_path(paths, &decision.validate()?);
     if destination.exists() {
         bail!(
             "workspace import destination {} already exists; refusing to merge or overwrite a tenant/user workspace leaf",
@@ -931,13 +1272,21 @@ fn tenant_user_workspace_digest(tenant: &TenantId, user: &UserId) -> String {
     hex::encode(Sha256::digest(encoded.as_bytes()))
 }
 
-fn workspace_leaf_path(paths: &RebornStoragePaths, workspace: &WorkspaceImportDecision) -> PathBuf {
+fn is_single_path_segment(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn workspace_leaf_path(
+    paths: &RebornStoragePaths,
+    workspace: &ValidatedWorkspaceImportDecision,
+) -> PathBuf {
     paths.workspace_root().join("users").join(&workspace.digest)
 }
 
 fn install_workspace_leaf(
     paths: &RebornStoragePaths,
-    workspace: &WorkspaceImportDecision,
+    workspace: &ValidatedWorkspaceImportDecision,
     staged_leaf: &Path,
 ) -> anyhow::Result<()> {
     let workspace_root = paths.workspace_root();
@@ -1013,6 +1362,7 @@ fn system_tree_has_content(root: &Path) -> anyhow::Result<bool> {
 }
 
 fn copy_system_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let source_handle = open_directory_no_follow(source)?;
     for entry in
         fs::read_dir(source).with_context(|| format!("read system source {}", source.display()))?
     {
@@ -1021,6 +1371,7 @@ fn copy_system_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
         let destination = destination.join(entry.file_name());
         copy_ordinary_tree(&entry.path(), &destination)?;
     }
+    ensure_directory_path_matches_handle(source, &source_handle)?;
     Ok(())
 }
 
@@ -1039,6 +1390,11 @@ fn copy_ordinary_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
     if !metadata.is_dir() {
         bail!("refusing non-ordinary source entry: {}", source.display());
     }
+    let source_handle = open_directory_no_follow(source)?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("destination has no parent: {}", destination.display()))?;
+    require_ordinary_directory(destination_parent)?;
     fs::create_dir(destination)
         .with_context(|| format!("create destination directory {}", destination.display()))?;
     for entry in fs::read_dir(source)
@@ -1048,12 +1404,17 @@ fn copy_ordinary_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
             entry.with_context(|| format!("read source entry under {}", source.display()))?;
         copy_ordinary_tree(&entry.path(), &destination.join(entry.file_name()))?;
     }
+    ensure_directory_path_matches_handle(source, &source_handle)?;
     sync_directory(destination)
 }
 
 fn copy_ordinary_file(source: &Path, destination: &Path) -> anyhow::Result<()> {
     require_ordinary_file(source)?;
     let mut input = open_file_no_follow(source)?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("destination has no parent: {}", destination.display()))?;
+    require_ordinary_directory(destination_parent)?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1077,6 +1438,88 @@ fn copy_ordinary_file(source: &Path, destination: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Copy the cached secrets master key under the owner-only policy. The output
+/// is created with mode 0600 before any bytes are written and that policy is
+/// re-established and verified after the synced copy. On Unix the mode is the
+/// POSIX ACL mask, so it denies group and other access for the entire copy.
+fn copy_master_key(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let mut input = validate_master_key_source(source)?;
+    let destination_parent = destination.parent().ok_or_else(|| {
+        anyhow!(
+            "master key destination has no parent: {}",
+            destination.display()
+        )
+    })?;
+    require_ordinary_directory(destination_parent)?;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut output = options
+        .open(destination)
+        .with_context(|| format!("create owner-only master key {}", destination.display()))?;
+    std::io::copy(&mut input, &mut output).with_context(|| {
+        format!(
+            "copy master key {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    output
+        .sync_all()
+        .with_context(|| format!("sync copied master key {}", destination.display()))?;
+    establish_and_verify_master_key_policy(destination)
+}
+
+fn validate_master_key_source(path: &Path) -> anyhow::Result<File> {
+    require_ordinary_file(path)?;
+    let file = open_file_no_follow(path)?;
+    verify_master_key_policy(&file, path, "source")?;
+    Ok(file)
+}
+
+fn establish_and_verify_master_key_policy(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "re-establish owner-only master key mode at {}",
+                path.display()
+            )
+        })?;
+    }
+    let file = open_file_no_follow(path)?;
+    verify_master_key_policy(&file, path, "destination")
+}
+
+fn verify_master_key_policy(file: &File, path: &Path, location: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let mode = file
+            .metadata()
+            .with_context(|| format!("read {location} master key metadata at {}", path.display()))?
+            .mode()
+            & 0o777;
+        if mode != 0o600 {
+            bail!(
+                "{location} master key at {} must have owner-only mode 0600; found {mode:03o}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path, location);
+    }
+    Ok(())
+}
+
 fn open_file_no_follow(path: &Path) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -1091,6 +1534,47 @@ fn open_file_no_follow(path: &Path) -> anyhow::Result<File> {
             path.display()
         )
     })
+}
+
+fn open_directory_no_follow(path: &Path) -> anyhow::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    options.open(path).with_context(|| {
+        format!(
+            "open ordinary directory without following links {}",
+            path.display()
+        )
+    })
+}
+
+fn ensure_directory_path_matches_handle(path: &Path, handle: &File) -> anyhow::Result<()> {
+    let reopened = open_directory_no_follow(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let original = handle
+            .metadata()
+            .with_context(|| format!("read opened directory metadata {}", path.display()))?;
+        let current = reopened
+            .metadata()
+            .with_context(|| format!("read reopened directory metadata {}", path.display()))?;
+        if original.dev() != current.dev() || original.ino() != current.ino() {
+            bail!(
+                "directory {} changed while adoption was traversing it; refusing to continue with a raced path",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (handle, reopened);
+    }
+    Ok(())
 }
 
 fn read_utf8_file_no_follow(path: &Path) -> anyhow::Result<String> {
@@ -1117,13 +1601,14 @@ fn validate_ordinary_tree(path: &Path) -> anyhow::Result<()> {
     if !metadata.is_dir() {
         bail!("refusing non-ordinary source entry: {}", path.display());
     }
+    let directory_handle = open_directory_no_follow(path)?;
     for entry in
         fs::read_dir(path).with_context(|| format!("read source directory {}", path.display()))?
     {
         let entry = entry.with_context(|| format!("read source entry under {}", path.display()))?;
         validate_ordinary_tree(&entry.path())?;
     }
-    Ok(())
+    ensure_directory_path_matches_handle(path, &directory_handle)
 }
 
 fn require_ordinary_file(path: &Path) -> anyhow::Result<()> {
@@ -1142,6 +1627,17 @@ fn require_ordinary_directory(path: &Path) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect directory {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "expected an ordinary non-symlink directory at {}",
+            path.display()
+        );
+    }
+    let handle = open_directory_no_follow(path)?;
+    if !handle
+        .metadata()
+        .with_context(|| format!("read opened directory metadata {}", path.display()))?
+        .is_dir()
+    {
         bail!(
             "expected an ordinary non-symlink directory at {}",
             path.display()
@@ -1188,8 +1684,7 @@ fn directory_has_content(path: &Path) -> anyhow::Result<bool> {
 fn sync_directory(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        File::open(path)
-            .with_context(|| format!("open directory for sync {}", path.display()))?
+        open_directory_no_follow(path)?
             .sync_all()
             .with_context(|| format!("sync directory {}", path.display()))?;
     }
@@ -1199,9 +1694,13 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
 }
 
 struct AdoptionLock {
+    #[cfg(unix)]
+    _file: File,
+    #[cfg(not(unix))]
     path: PathBuf,
 }
 
+#[cfg(not(unix))]
 impl Drop for AdoptionLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -1210,6 +1709,10 @@ impl Drop for AdoptionLock {
 
 fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
     let path = adoption_root.join(ADOPTION_LOCK_FILE);
+    require_ordinary_directory(adoption_root)?;
+    #[cfg(unix)]
+    let mut file = open_adoption_lock_file(&path)?;
+    #[cfg(not(unix))]
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1220,12 +1723,45 @@ fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
                 path.display()
             )
         })?;
+    #[cfg(unix)]
+    file.try_lock_exclusive().with_context(|| {
+        format!(
+            "another storage adoption is holding advisory lock {}; wait for it to finish before retrying",
+            path.display()
+        )
+    })?;
+    file.set_len(0)
+        .with_context(|| format!("clear advisory lock {}", path.display()))?;
     writeln!(file, "pid={}", std::process::id())
         .with_context(|| format!("write advisory lock {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("sync advisory lock {}", path.display()))?;
     sync_directory(adoption_root)?;
-    Ok(AdoptionLock { path })
+    Ok(AdoptionLock {
+        #[cfg(unix)]
+        _file: file,
+        #[cfg(not(unix))]
+        path,
+    })
+}
+
+#[cfg(unix)]
+fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
+    if path.exists() {
+        require_ordinary_file(path)?;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path).with_context(|| {
+        format!(
+            "open advisory lock without following links {}",
+            path.display()
+        )
+    })
 }
 
 fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
@@ -1241,6 +1777,12 @@ fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<Adopti
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
 
     use ironclaw_config::{
         DeploymentSecurityEnvelope, DurableStateKind, LayoutRequirement, RebornHome, TenancyModel,
@@ -1248,10 +1790,11 @@ mod tests {
     };
 
     use super::{
-        ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, RebornStoragePaths,
-        WorkspaceImportOptions, adopt_layout, ensure_ready_layout, inspect_legacy_candidates,
-        install_staged, snapshot_source, stage_snapshot, tenant_user_workspace_digest,
-        verify_canonical_store, write_journal,
+        ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, LegacySourceKind,
+        RebornStoragePaths, WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock,
+        adopt_layout, ensure_ready_layout, inspect_legacy_candidates, install_staged,
+        snapshot_source, stage_snapshot, tenant_user_workspace_digest, verify_canonical_store,
+        write_journal,
     };
     use ironclaw_composition::host_api::{TenantId, UserId};
 
@@ -1293,6 +1836,53 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn advisory_lock_holder_subprocess() {
+        let Ok(adoption_root) = std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_ROOT") else {
+            return;
+        };
+        let ready =
+            std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_READY").expect("lock holder ready path");
+        let _lock = acquire_adoption_lock(std::path::Path::new(&adoption_root))
+            .expect("subprocess holds adoption lock");
+        fs::write(ready, b"ready").expect("signal held lock");
+        std::process::exit(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn advisory_lock_recovers_after_a_crashed_process_without_reusing_a_stale_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let adoption_root = temp.path().join("layout-adoption");
+        fs::create_dir(&adoption_root).expect("adoption root");
+        let ready = temp.path().join("lock-ready");
+        let test_binary = std::env::current_exe().expect("test binary");
+        let mut child = Command::new(test_binary)
+            .args([
+                "--exact",
+                "runtime::storage_layout::tests::advisory_lock_holder_subprocess",
+                "--nocapture",
+            ])
+            .env("IRONCLAW_TEST_ADOPTION_LOCK_ROOT", &adoption_root)
+            .env("IRONCLAW_TEST_ADOPTION_LOCK_READY", &ready)
+            .spawn()
+            .expect("spawn lock holder");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.is_file(), "lock holder reached its critical section");
+        let status = child.wait().expect("wait for crashed lock holder");
+        assert!(
+            status.success(),
+            "lock holder exited after retaining lock file"
+        );
+
+        let _lock = acquire_adoption_lock(&adoption_root)
+            .expect("OS advisory lock is released when the holder process exits");
+    }
+
     fn workspace_import(source: std::path::PathBuf, confirmed: bool) -> WorkspaceImportOptions {
         WorkspaceImportOptions {
             source,
@@ -1315,6 +1905,15 @@ mod tests {
             key,
         )
         .expect("legacy key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(
+                root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("owner-only legacy key");
+        }
         crate::runtime::block_on_cli({
             let root = root.to_path_buf();
             async move {
@@ -1415,6 +2014,64 @@ mod tests {
                 .is_file()
         );
         assert!(temp.path().join("system/extensions/example.toml").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adoption_rejects_an_insecure_legacy_master_key_before_journal_mutation() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let key = legacy.join(".reborn-local-dev-secrets-master-key");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).expect("insecure key mode");
+
+        let error = adopt_layout(
+            &home,
+            embedded_single_user_requirement(),
+            confirmed_options(),
+        )
+        .expect_err("a group-readable key must never be copied");
+
+        assert!(error.to_string().contains("master key"));
+        assert!(key.is_file(), "source remains untouched");
+        assert!(
+            !temp
+                .path()
+                .join("runtime/layout-adoption/journal.toml")
+                .exists(),
+            "key security is checked before a journal is written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn master_key_copy_reestablishes_and_verifies_owner_only_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let key = legacy.join(".reborn-local-dev-secrets-master-key");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("secure key mode");
+        let source_owner = fs::metadata(&key).expect("source metadata").uid();
+
+        adopt_layout(
+            &home,
+            embedded_single_user_requirement(),
+            confirmed_options(),
+        )
+        .expect("adoption succeeds with an owner-only source key");
+
+        let destination = temp
+            .path()
+            .join("state/.reborn-local-dev-secrets-master-key");
+        let metadata = fs::metadata(&destination).expect("destination metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), source_owner);
     }
 
     #[test]
@@ -1518,6 +2175,115 @@ mod tests {
     }
 
     #[test]
+    fn every_legacy_source_envelope_is_admitted_before_journal_or_mutation() {
+        let cases = [
+            ("local-dev", embedded_multi_user_requirement()),
+            ("bare-home", embedded_multi_user_requirement()),
+            ("hosted-single-tenant", embedded_single_user_requirement()),
+            (
+                "hosted-single-tenant-volume",
+                embedded_single_user_requirement(),
+            ),
+        ];
+
+        for (source, target) in cases {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = reborn_home(temp.path());
+            match source {
+                "local-dev" => seed_legacy_embedded_store(&temp.path().join(source)),
+                "bare-home" => seed_legacy_embedded_store(temp.path()),
+                "hosted-single-tenant" => {
+                    let system = temp.path().join(source).join("system/prompts");
+                    fs::create_dir_all(&system).expect("hosted system root");
+                    fs::write(system.join("operator.md"), b"prompt").expect("system prompt");
+                }
+                "hosted-single-tenant-volume" => {
+                    seed_legacy_embedded_store(&temp.path().join(source));
+                }
+                _ => unreachable!("exhaustive source test case"),
+            }
+
+            let error = adopt_layout(&home, target, confirmed_options())
+                .expect_err("incompatible fixed source envelope must be rejected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("stored durable layout rejects this profile transition"),
+                "{source}: {error:#}"
+            );
+            assert!(
+                !temp
+                    .path()
+                    .join("runtime/layout-adoption/journal.toml")
+                    .exists(),
+                "{source}: incompatible target must not create a journal"
+            );
+            assert!(
+                !temp.path().join("state").exists(),
+                "{source}: incompatible target must not install canonical state"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_source_envelopes_are_exhaustive_and_allow_only_compatible_targets() {
+        assert_eq!(
+            LegacySourceKind::LocalDev.requirement(),
+            embedded_single_user_requirement()
+        );
+        assert_eq!(
+            LegacySourceKind::BareHome.requirement(),
+            embedded_single_user_requirement()
+        );
+        assert_eq!(
+            LegacySourceKind::HostedSingleTenant.requirement(),
+            external_single_user_requirement()
+        );
+        assert_eq!(
+            LegacySourceKind::HostedSingleTenantVolume.requirement(),
+            embedded_multi_user_requirement()
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        seed_legacy_embedded_store(&temp.path().join("hosted-single-tenant-volume"));
+
+        adopt_layout(
+            &home,
+            embedded_multi_user_requirement(),
+            confirmed_options(),
+        )
+        .expect("the volume source retains its multi-user isolated envelope");
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
+    fn journal_source_envelope_must_match_its_fixed_legacy_source_kind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        journal.source_requirement = embedded_multi_user_requirement();
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("tampered journal");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("source envelope is an immutable source fact");
+
+        assert!(error.to_string().contains("source security requirement"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(!temp.path().join("state").exists());
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
+    #[test]
     fn unknown_legacy_entries_fail_before_journal_or_snapshot_mutation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -1573,6 +2339,44 @@ mod tests {
     }
 
     #[test]
+    fn initial_adoption_rejects_unexplained_populated_workspace_or_runtime_namespaces() {
+        for namespace in ["workspaces", "runtime"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = reborn_home(temp.path());
+            let legacy = temp.path().join("local-dev");
+            seed_legacy_embedded_store(&legacy);
+            let sentinel = temp.path().join(namespace).join("operator-sentinel");
+            fs::create_dir_all(sentinel.parent().expect("sentinel has a namespace parent"))
+                .expect("canonical namespace");
+            fs::write(&sentinel, b"do not infer ownership").expect("sentinel");
+
+            let error = adopt_layout(
+                &home,
+                embedded_single_user_requirement(),
+                confirmed_options(),
+            )
+            .expect_err("initial adoption must not merge unexplained canonical namespaces");
+
+            assert!(
+                error.to_string().contains("unexplained"),
+                "{namespace}: {error:#}"
+            );
+            assert!(legacy.join("reborn-local-dev.db").is_file());
+            assert_eq!(
+                fs::read(&sentinel).expect("sentinel retained"),
+                b"do not infer ownership"
+            );
+            assert!(
+                !temp
+                    .path()
+                    .join("runtime/layout-adoption/journal.toml")
+                    .exists(),
+                "{namespace}: initial rejection must precede journal creation"
+            );
+        }
+    }
+
+    #[test]
     fn ready_manifest_rejects_an_incompatible_security_envelope_without_writes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -1607,7 +2411,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("runtime/layout-adoption")).expect("adoption root");
         fs::write(
             temp.path().join("runtime/layout-adoption/journal.toml"),
-            "schema_version = 2\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[requirement]\ndurable_state = \"embedded-libsql\"\n\n[requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\n",
+            "schema_version = 3\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[source_requirement]\ndurable_state = \"embedded-libsql\"\n\n[source_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[target_requirement]\ndurable_state = \"embedded-libsql\"\n\n[target_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\n",
         )
         .expect("unsupported journal");
 
@@ -1680,6 +2484,114 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn adoption_rejects_a_symlinked_runtime_ancestor_before_any_write() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let outside = temp.path().join("outside-runtime");
+        fs::create_dir(&outside).expect("outside runtime");
+        symlink(&outside, temp.path().join("runtime")).expect("runtime symlink");
+
+        let error = adopt_layout(
+            &home,
+            embedded_single_user_requirement(),
+            confirmed_options(),
+        )
+        .expect_err("runtime symlink must not be followed");
+
+        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(
+            fs::read_dir(&outside)
+                .expect("outside remains readable")
+                .next()
+                .is_none(),
+            "adoption must not create runtime artifacts through a symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_a_symlinked_snapshot_ancestor_before_source_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let journal = AdoptionJournal::new(candidate, requirement, None);
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+        let outside = temp.path().join("outside-snapshots");
+        fs::create_dir(&outside).expect("outside snapshots");
+        symlink(&outside, adoption_root.join("snapshot")).expect("snapshot symlink");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("snapshot symlink must not be followed during recovery");
+
+        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(
+            fs::read_dir(&outside)
+                .expect("outside remains readable")
+                .next()
+                .is_none(),
+            "recovery must not snapshot through a symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_rejects_a_swapped_symlinked_staging_child_before_install() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        let staging = adoption_root.join("staging");
+        fs::create_dir(&staging).expect("staging root");
+        let outside = temp.path().join("outside-state");
+        fs::create_dir(&outside).expect("outside state");
+        symlink(&outside, staging.join("state")).expect("swapped staging state");
+        fs::create_dir(staging.join("system")).expect("staging system");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        journal.phase = AdoptionPhase::Staged;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("replay must reject a swapped symlink before rename");
+
+        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(
+            fs::read_dir(&outside)
+                .expect("outside remains readable")
+                .next()
+                .is_none(),
+            "staged replay must not write through a swapped child"
+        );
+        assert!(!temp.path().join("state").exists());
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
     #[test]
     fn external_workspace_requires_preview_confirmation_and_preserves_the_source() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1738,6 +2650,123 @@ mod tests {
     }
 
     #[test]
+    fn tampered_workspace_journal_identity_is_rejected_before_snapshot_or_install() {
+        for journal_digest in ["not-the-canonical-digest", "../escape"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = reborn_home(temp.path());
+            let requirement = embedded_single_user_requirement();
+            let legacy = temp.path().join("local-dev");
+            seed_legacy_embedded_store(&legacy);
+            let workspace_source = temp.path().join("workspace-source");
+            fs::create_dir_all(&workspace_source).expect("workspace source");
+            fs::write(workspace_source.join("keep.txt"), b"workspace data")
+                .expect("workspace file");
+            let paths = RebornStoragePaths::from_home(&home);
+            let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+            fs::create_dir_all(&adoption_root).expect("adoption root");
+            let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+            let candidate = candidates.first().expect("one candidate");
+            let journal = AdoptionJournal::new(
+                candidate,
+                requirement,
+                Some(WorkspaceImportDecision {
+                    source: workspace_source.clone(),
+                    tenant: "tenant-a".into(),
+                    user: "user-a".into(),
+                    digest: journal_digest.into(),
+                }),
+            );
+            write_journal(&adoption_root.join("journal.toml"), &journal).expect("tampered journal");
+
+            let error = adopt_layout(&home, requirement, confirmed_options())
+                .expect_err("journal workspace identity must not be trusted");
+
+            assert!(error.to_string().contains("workspace journal"));
+            assert!(legacy.join("reborn-local-dev.db").is_file());
+            assert!(workspace_source.join("keep.txt").is_file());
+            assert!(!temp.path().join("state").exists());
+            assert!(!temp.path().join("layout.toml").exists());
+        }
+    }
+
+    #[test]
+    fn store_verified_replay_revalidates_exact_canonical_inventory_before_manifest() {
+        for mutation in ["delete-db", "substitute-db"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = reborn_home(temp.path());
+            let requirement = embedded_single_user_requirement();
+            let legacy = temp.path().join("local-dev");
+            seed_legacy_embedded_store(&legacy);
+            let paths = RebornStoragePaths::from_home(&home);
+            let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+            fs::create_dir_all(&adoption_root).expect("adoption root");
+            let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+            let candidate = candidates.first().expect("one candidate");
+            let snapshot = candidate.snapshot_root(&adoption_root);
+            let mut journal = AdoptionJournal::new(candidate, requirement, None);
+            snapshot_source(candidate, &snapshot).expect("snapshot source");
+            stage_snapshot(candidate, &snapshot, &adoption_root, None).expect("stage snapshot");
+            install_staged(&paths, &adoption_root, None).expect("install staged content");
+            verify_canonical_store(&paths, true).expect("verify canonical store");
+            journal.phase = AdoptionPhase::StoreVerified;
+            write_journal(&adoption_root.join("journal.toml"), &journal).expect("store verified");
+
+            let database = temp.path().join("state/reborn-local-dev.db");
+            match mutation {
+                "delete-db" => fs::remove_file(&database).expect("delete canonical database"),
+                "substitute-db" => fs::write(&database, b"substituted database")
+                    .expect("substitute canonical database"),
+                _ => unreachable!("exhaustive mutation"),
+            }
+
+            let error = adopt_layout(&home, requirement, confirmed_options())
+                .expect_err("a StoreVerified replay must not publish a stale manifest");
+
+            assert!(
+                error.to_string().contains("canonical"),
+                "{mutation}: {error:#}"
+            );
+            assert!(
+                !temp.path().join("layout.toml").exists(),
+                "{mutation}: manifest remains unpublished"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_never_deletes_unproven_canonical_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        stage_snapshot(candidate, &snapshot, &adoption_root, None).expect("stage snapshot");
+        install_staged(&paths, &adoption_root, None).expect("install staged content");
+        journal.phase = AdoptionPhase::CanonicalInstalled;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal phase");
+        let sentinel = temp.path().join("state/operator-sentinel");
+        fs::write(&sentinel, b"never delete this").expect("sentinel");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("recovery must fail closed instead of deleting canonical content");
+
+        assert!(error.to_string().contains("canonical"));
+        assert_eq!(
+            fs::read(&sentinel).expect("sentinel retained"),
+            b"never delete this"
+        );
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
+    #[test]
     fn offline_adopt_resumes_every_persisted_phase_and_commits_manifest_last() {
         for phase in [
             AdoptionPhase::Prepare,
@@ -1754,8 +2783,7 @@ mod tests {
             let paths = RebornStoragePaths::from_home(&home);
             let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
             fs::create_dir_all(&adoption_root).expect("adoption root");
-            let candidates =
-                inspect_legacy_candidates(temp.path(), requirement).expect("inspect source");
+            let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
             let candidate = candidates.first().expect("one candidate");
             let snapshot = candidate.snapshot_root(&adoption_root);
             let mut journal = AdoptionJournal::new(candidate, requirement, None);

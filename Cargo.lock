@@ -3464,6 +3464,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dotenvy",
+ "fs2",
  "hex",
  "ironclaw_auth",
  "ironclaw_common",
