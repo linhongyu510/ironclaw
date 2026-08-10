@@ -5,7 +5,7 @@
 //! or serve as a generic migration framework.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
@@ -504,6 +504,17 @@ fn reconcile_staged_install(
     operation_id: &str,
 ) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
+    match fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            verify_completed_staged_install(paths, candidate, snapshot, workspace)?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect staging root {}", staging.display()));
+        }
+        Ok(_) => {}
+    }
     require_proven_staging(&staging, operation_id)?;
     reconcile_staged_state(
         candidate,
@@ -521,13 +532,44 @@ fn reconcile_staged_install(
     remove_staging_owner_marker(&staging, operation_id)?;
     fs::remove_dir(&staging)
         .with_context(|| format!("remove empty staging root {}", staging.display()))?;
-    sync_directory(adoption_root)
+    sync_directory(adoption_root)?;
+    #[cfg(test)]
+    fail_at_test_adoption_fault(TestAdoptionFaultPoint::StagingRemovedBeforeCanonicalPhase)?;
+    Ok(())
 }
 
 fn discard_proven_partial_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
-    if !staging.exists() {
-        return Ok(());
+    match fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect staging root {}", staging.display()));
+        }
+        Ok(_) => {}
+    }
+    let marker = staging.join(STAGING_OWNER_FILE);
+    match fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if !directory_is_empty(&staging)? {
+                bail!(
+                    "staging tree at {} has mutable content but no ownership marker; refusing to discard it",
+                    staging.display()
+                );
+            }
+            fs::remove_dir(&staging).with_context(|| {
+                format!(
+                    "discard empty pre-marker staging root {}",
+                    staging.display()
+                )
+            })?;
+            return sync_directory(adoption_root);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect staging ownership marker {}", marker.display()));
+        }
+        Ok(_) => {}
     }
     require_proven_staging(&staging, operation_id)?;
     validate_ordinary_tree(&staging)?;
@@ -538,6 +580,19 @@ fn discard_proven_partial_staging(adoption_root: &Path, operation_id: &str) -> a
         )
     })?;
     sync_directory(adoption_root)
+}
+
+fn verify_completed_staged_install(
+    paths: &RebornStoragePaths,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
+) -> anyhow::Result<()> {
+    verify_canonical_inventory(paths, candidate, snapshot)?;
+    if let Some(workspace) = workspace {
+        validate_ordinary_tree(&workspace_leaf_path(paths, workspace))?;
+    }
+    Ok(())
 }
 
 fn require_proven_staging(staging: &Path, operation_id: &str) -> anyhow::Result<()> {
@@ -579,7 +634,7 @@ fn reconcile_staged_state(
             )?;
             #[cfg(test)]
             {
-                fail_at_test_adoption_fault(TestAdoptionFaultPoint::AfterStateRename)?;
+                fail_at_test_adoption_fault(TestAdoptionFaultPoint::StateRename)?;
             }
             Ok(())
         }
@@ -777,20 +832,22 @@ fn stage_snapshot(
         );
     }
     fs::create_dir(&staging).with_context(|| format!("create staging {}", staging.display()))?;
+    write_atomic_synced(&staging.join(STAGING_OWNER_FILE), operation_id, false)?;
     let staging_state = staging.join("state");
     let staging_system = staging.join("system");
     fs::create_dir(&staging_state)
         .with_context(|| format!("create {}", staging_state.display()))?;
     fs::create_dir(&staging_system)
         .with_context(|| format!("create {}", staging_system.display()))?;
-    write_atomic_synced(&staging.join(STAGING_OWNER_FILE), operation_id, false)?;
+    #[cfg(test)]
+    fail_at_test_adoption_fault(TestAdoptionFaultPoint::StagingChildrenCreated)?;
 
     for (index, file) in candidate.db_files.iter().enumerate() {
         copy_ordinary_file(&snapshot.join(file), &staging_state.join(file))?;
         let is_first_file = index == 0;
         #[cfg(test)]
         if is_first_file {
-            fail_at_test_adoption_fault(TestAdoptionFaultPoint::AfterFirstStateCopy)?;
+            fail_at_test_adoption_fault(TestAdoptionFaultPoint::FirstStateCopy)?;
         }
         #[cfg(not(test))]
         let _ = is_first_file;
@@ -887,8 +944,8 @@ fn verify_post_migration_canonical_shape(
     snapshot: &Path,
 ) -> anyhow::Result<()> {
     require_ordinary_directory(paths.state_root())?;
-    for file in &candidate.db_files {
-        require_ordinary_file(&paths.state_root().join(file))?;
+    if candidate.is_embedded() {
+        require_ordinary_file(&paths.state_root().join(DB_FILE))?;
     }
     if candidate.has_master_key {
         validate_master_key_source(&paths.state_root().join(MASTER_KEY_FILE))?;
@@ -2017,8 +2074,10 @@ fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<Adopti
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestAdoptionFaultPoint {
-    AfterFirstStateCopy,
-    AfterStateRename,
+    StagingChildrenCreated,
+    FirstStateCopy,
+    StateRename,
+    StagingRemovedBeforeCanonicalPhase,
 }
 
 #[cfg(test)]
@@ -3244,6 +3303,45 @@ mod tests {
     }
 
     #[test]
+    fn migration_pending_recovery_allows_a_pre_copy_sidecar_to_disappear() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let sidecar = legacy.join("reborn-local-dev.db-wal");
+        fs::write(&sidecar, b"legacy sidecar").expect("legacy sidecar");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        stage_snapshot(
+            candidate,
+            &snapshot,
+            &adoption_root,
+            None,
+            &journal.operation_id,
+        )
+        .expect("stage snapshot");
+        install_staged(&paths, &adoption_root, None).expect("install staged content");
+        fs::remove_file(paths.state_root().join("reborn-local-dev.db-wal"))
+            .expect("simulate checkpoint removing sidecar");
+        journal.phase = AdoptionPhase::MigrationPending;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("migration journal");
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("post-migration validation permits an optional sidecar to disappear");
+
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+        assert!(!temp.path().join("state/reborn-local-dev.db-wal").exists());
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
     fn recovery_never_deletes_unproven_canonical_content() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -3373,6 +3471,31 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_owned_recovery_discards_only_an_empty_premark_staging_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        fs::create_dir(adoption_root.join("staging")).expect("empty pre-marker staging root");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        journal.phase = AdoptionPhase::SnapshotOwned;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("empty pre-marker staging root is safe to discard and recopy");
+
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
     fn enospc_style_copy_failure_recovers_from_journal_proven_partial_staging() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -3380,7 +3503,7 @@ mod tests {
         let legacy = temp.path().join("local-dev");
         seed_legacy_embedded_store(&legacy);
 
-        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::AfterFirstStateCopy);
+        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::FirstStateCopy);
         let error = adopt_layout(&home, requirement, confirmed_options())
             .expect_err("injected ENOSPC-style copy failure");
         drop(fault);
@@ -3399,6 +3522,72 @@ mod tests {
     }
 
     #[test]
+    fn fault_after_staging_children_recovers_with_preexisting_owner_proof() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+
+        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::StagingChildrenCreated);
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("injected crash after staging child creation");
+        drop(fault);
+
+        assert!(format!("{error:#}").contains("StagingChildrenCreated"));
+        assert!(
+            temp.path()
+                .join("runtime/layout-adoption/staging/.adoption-owner")
+                .is_file(),
+            "ownership proof is durable before staging children exist"
+        );
+        assert!(
+            temp.path()
+                .join("runtime/layout-adoption/staging/state")
+                .is_dir()
+        );
+        assert!(
+            temp.path()
+                .join("runtime/layout-adoption/staging/system")
+                .is_dir()
+        );
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("SnapshotOwned recovery discards the proven partial staging tree");
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
+    fn fault_after_staging_cleanup_recovers_by_validating_complete_canonical_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+
+        let fault =
+            TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::StagingRemovedBeforeCanonicalPhase);
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("injected crash after staging cleanup before phase advance");
+        drop(fault);
+
+        assert!(format!("{error:#}").contains("StagingRemovedBeforeCanonicalPhase"));
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+        assert!(temp.path().join("system").is_dir());
+        assert!(!temp.path().join("runtime/layout-adoption/staging").exists());
+        assert!(
+            fs::read_to_string(temp.path().join("runtime/layout-adoption/journal.toml"))
+                .expect("staged journal")
+                .contains("phase = \"staged\""),
+            "phase advancement has not yet been journaled"
+        );
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("Staged recovery accepts only the exact fully installed canonical shape");
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
     fn fault_after_state_rename_resumes_the_remaining_install_boundary() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
@@ -3406,12 +3595,12 @@ mod tests {
         let legacy = temp.path().join("local-dev");
         seed_legacy_embedded_store(&legacy);
 
-        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::AfterStateRename);
+        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::StateRename);
         let error = adopt_layout(&home, requirement, confirmed_options())
             .expect_err("injected crash after state rename");
         drop(fault);
 
-        assert!(format!("{error:#}").contains("AfterStateRename"));
+        assert!(format!("{error:#}").contains("StateRename"));
         assert!(temp.path().join("state/reborn-local-dev.db").is_file());
         assert!(
             temp.path()
