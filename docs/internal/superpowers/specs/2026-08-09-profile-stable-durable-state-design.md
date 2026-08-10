@@ -40,17 +40,46 @@ The sandbox profiles have not been released and the profile-specific sandbox sta
 
 ## Core invariants
 
-### Durable state follows deployment identity and storage topology
+### The Reborn home is the deployment storage boundary
 
-Profiles that represent the same deployment and use the same durable storage topology must resolve to the same application-state root. Runtime policy and process backend selection must not alter that root.
+The configured `IRONCLAW_REBORN_HOME` is the physical storage boundary for one IronClaw installation. When it is unset, the local default is `$HOME/.ironclaw/reborn`. A profile name must not add another namespace layer beneath that home.
 
-For the current hosted-volume family, the canonical durable root should remain:
+There is intentionally no `<deployment-id>` directory. The selected home or mounted volume already identifies the deployment. Multiple independent IronClaw installations must use different homes or storage backends rather than sharing one home and depending on an additional path segment for isolation.
+
+The target shape is:
 
 ```text
-<IRONCLAW_REBORN_HOME>/hosted-single-tenant-volume
+<IRONCLAW_REBORN_HOME>/
+|-- layout.toml
+|-- config.toml
+|-- providers.json
+|-- state/
+|   |-- reborn.db
+|   `-- secrets-master-key
+|-- system/
+|   |-- extensions/
+|   |-- prompts/
+|   `-- skills/
+|-- workspaces/
+|   `-- users/
+|       `-- <tenant-user-digest>/
+|-- runtime/
+|   |-- docker/
+|   `-- railway/
+|-- logs/
+|-- cache/
+`-- tmp/
 ```
 
-The base, Docker-sandboxed, and Railway-sandboxed hosted-volume presets should all use that root.
+The exact filenames remain subject to compatibility design, but the ownership boundaries are decided:
+
+- `state/` is authoritative application state and is profile-agnostic.
+- `system/` is host-managed product content and is profile-agnostic.
+- `workspaces/` is persistent user-created content, keyed by typed tenant plus user identity.
+- `runtime/` contains provider-specific bookkeeping, never authoritative conversations, extensions, or secrets.
+- `cache/` and `tmp/` are disposable.
+
+Profiles that use the same home must not produce directories such as `local-dev/`, `hosted-single-tenant-volume/`, or `hosted-single-tenant-volume-sandboxed/` in the target layout. Runtime policy and process backend selection must not alter storage paths.
 
 ### Runtime policy is recomputed at every boot
 
@@ -82,6 +111,34 @@ Provider-specific workspace or checkpoint metadata must not be placed where chan
 
 Sharing one deployment state root does not collapse tenant or user isolation. Tenant IDs and user IDs remain the authority for records and workspace selection. A profile name, display name, or Railway sandbox ID must never be used to re-derive actor scope.
 
+The host may resolve the complete physical workspace path, but a user sandbox receives only its leaf workspace mounted as `/workspace`:
+
+```text
+Host: <IRONCLAW_REBORN_HOME>/workspaces/users/<tenant-user-digest>/
+                                      |
+                                      | one scoped bind/checkpoint view
+                                      v
+Sandbox:                         /workspace/
+```
+
+The sandbox must not receive the Reborn home, `state/`, `system/`, another user's workspace, the secrets master key, or provider credentials.
+
+### Common storage does not make profiles freely swappable
+
+Removing profile names from paths solves state fragmentation; it does not establish that every profile transition is safe. A profile can change the security assumptions under which users and workspaces were admitted. For example, enabling an unrestricted host shell in a multi-user installation could let one user inspect or modify sibling workspace directories even though application records remain correctly scoped.
+
+Profile selection remains restart-only and operator-controlled. Startup must compare the requested profile against a persisted deployment security envelope and reject incompatible transitions unless a separately designed administrative migration has occurred.
+
+The envelope should describe stable assumptions rather than the profile name itself, for example:
+
+```toml
+state_layout_version = 1
+tenancy_model = "multi-user"
+workspace_isolation = "per-user-sandbox"
+```
+
+This manifest must not persist transient execution authority or become a user-controlled policy source. Trusted boot configuration still selects the current runtime policy; the manifest prevents that policy from violating the storage installation's established tenancy and isolation assumptions.
+
 ## Recommended model
 
 Keep `RebornProfile` as the external operator-facing preset, but resolve it once into a structured deployment plan with independent axes:
@@ -91,16 +148,19 @@ RebornProfile
     |
     v
 ResolvedDeploymentPlan
-    |-- durable_state: DurableStateSelection
-    |     |-- topology/backend
-    |     `-- stable namespace/root
+    |-- storage: DeploymentStorage
+    |     |-- reborn_home
+    |     |-- durable backend
+    |     |-- state layout version
+    |     `-- workspace backing
+    |-- security_envelope: DeploymentSecurityEnvelope
     |-- runtime_policy: RuntimePolicyPreset
     |-- process_backend: Host | Docker | Railway
     |-- product/listener configuration
     `-- readiness requirements
 ```
 
-The exact names are illustrative. The important contract is that durable-state selection is explicit and cannot accidentally vary because a new execution backend profile was added.
+The exact names are illustrative. The important contracts are that storage paths cannot accidentally vary because a new execution profile was added, and a shared path cannot accidentally authorize an unsafe profile transition.
 
 The first implementation does not need a trait for each box. Strong enums and value objects in `ironclaw_config`, followed by exhaustive profile resolution, are likely sufficient. A trait is justified only when there are multiple behavior-bearing implementations that need substitution or testing behind a stable port.
 
@@ -138,11 +198,11 @@ A profile is an operator-selected boot preset, not an object-internal lifecycle 
 
 ### Option A: stable state identity plus structured profile resolution
 
-Map all hosted-volume presets to one canonical durable-state identity and represent durable state, runtime policy, and process backend as independent fields in a resolved plan.
+Remove profile-named storage roots, resolve one Reborn-home layout, and represent storage, the deployment security envelope, runtime policy, and process backend as independent fields in a resolved plan.
 
 Advantages:
 
-- Fixes the immediate history-disappearance problem.
+- Fixes the immediate history-disappearance problem and prevents equivalent fragmentation between other profiles.
 - Establishes the invariant that prevents the same bug when another backend is added.
 - Keeps operator UX as a single profile selector.
 - Supports focused compatibility and rollback tests.
@@ -150,14 +210,15 @@ Advantages:
 
 Cost:
 
-- Requires auditing code that reads profile-specific paths and deciding whether each path is application state or provider workspace state.
+- Requires auditing code that reads profile-specific paths and deciding whether each path is application state, system content, user workspace, provider runtime state, or disposable data.
+- Requires a compatibility plan for existing populated `local-dev/` and hosted-volume roots.
 - May require small type/API changes beyond changing one string mapping.
 
 Recommendation: choose this option.
 
 ### Option B: change only the profile-to-directory string mapping
 
-Return `hosted-single-tenant-volume` for all three hosted-volume profile variants without introducing an explicit durable-state concept.
+Return one existing profile directory for several variants without removing profile-derived storage from the model.
 
 Advantages:
 
@@ -189,37 +250,44 @@ Risks:
 
 Recommendation: reject for this scope.
 
-## Profile-swap behavior
+## Profile-transition admission
 
-| Change | Durable application state | Runtime action | Migration behavior |
+| Change | Same application state? | Default admission | Additional behavior |
 |---|---|---|---|
-| Hosted volume -> Docker sandbox | Reuse canonical hosted-volume state | Validate Docker and require sandbox routing | None |
-| Hosted volume -> Railway sandbox | Reuse canonical hosted-volume state | Validate Railway configuration and require sandbox routing | None |
-| Docker sandbox -> Railway sandbox | Reuse canonical hosted-volume state | Change process backend; preserve user/tenant scope | No application DB migration; sandbox workspace portability is separate |
-| Sandboxed -> unsandboxed hosted volume | Reuse canonical hosted-volume state | Explicit operator change; recompute authority and warn/audit | None |
-| Profile rollback | Reuse canonical hosted-volume state | Revalidate the selected backend and policy | None |
-| Embedded volume -> Postgres | Different storage topology | Explicit deployment migration | Versioned, separately designed migration |
-| Change `IRONCLAW_REBORN_HOME` or mounted volume | Different deployment storage location | Operator-controlled move or restore | Explicit operational procedure |
-| Change tenant/deployment identity | Do not implicitly share | Build separately scoped services | Explicit import/export if desired |
+| Docker sandbox -> Railway sandbox | Yes | Allow only when tenancy and per-user isolation requirements remain satisfied | Change process backend; workspace portability is a separate contract |
+| Railway sandbox -> Docker sandbox | Yes | Allow only when tenancy and per-user isolation requirements remain satisfied | Change process backend; do not imply automatic Railway checkpoint import |
+| Unsandboxed single-user -> sandboxed single-user | Yes | Allow as a security-tightening restart | Validate backend and require sandbox routing |
+| Sandboxed multi-user -> unrestricted host shell | Yes physically | Reject | Requires an explicit administrative security-model migration, not a profile edit |
+| Single-user -> multi-user | Potentially | Reject | Requires ownership, authentication, workspace, and isolation migration |
+| Multi-user -> single-user | Potentially | Reject | Requires explicit ownership conversion |
+| Embedded volume -> Postgres | Logical state may migrate | Reject as profile swap | Use a versioned storage migration |
+| Change `IRONCLAW_REBORN_HOME` or mounted volume | No implicit sharing | Reject as profile swap | Use an operator-controlled move or restore |
+| Compatible profile rollback | Yes | Allow only if the prior policy still satisfies the envelope | Revalidate backend and fail closed on unavailable sandboxing |
+
+The admission result should be a typed boot validation outcome with a useful operator diagnostic. It must not silently choose another profile, create another state root, or fall back from sandbox execution to host execution.
 
 ## Compatibility and adoption policy
 
-For the initial sandbox release, the sandbox-specific root is unreleased and has no production state that must be migrated. Therefore:
+The sandbox-specific root is unreleased and has no production state that must be preserved, but existing local and hosted installations can have populated profile roots such as `local-dev/` and `hosted-single-tenant-volume/`. Removing all profile directories therefore requires compatibility design rather than a blind path change.
 
-1. Use the existing `hosted-single-tenant-volume` root as canonical.
-2. Do not automatically merge, rename, or delete `hosted-single-tenant-volume-sandboxed`.
-3. Treat cleanup of known throwaway roots as a separate operator action after inspection.
+For the initial sandbox correction:
+
+1. Do not merge or prefer the unreleased `hosted-single-tenant-volume-sandboxed` root automatically.
+2. Identify which existing profile roots can contain released user state.
+3. Specify a one-time adoption path from each supported legacy root into the profile-agnostic layout.
+4. Treat cleanup of known throwaway sandbox roots as a separate operator action after inspection.
+5. Do not ship the physical layout change until interruption, conflict, and rollback behavior is agreed and tested.
 
 Future released layout changes need a stricter adoption protocol:
 
-1. Resolve a canonical layout and layout version before opening stores.
+1. Resolve the profile-agnostic canonical layout and layout version before opening stores.
 2. Acquire exclusive boot/migration ownership.
 3. Detect candidate legacy roots without mutating them.
 4. If no legacy root is populated, initialize normally.
 5. If exactly one supported legacy root is populated, snapshot it, adopt or migrate it atomically where possible, and write a durable completion marker.
 6. Verify authoritative records can be read before reporting success.
 7. Make restart after interruption idempotent.
-8. If multiple candidate roots are populated, fail closed with a diagnostic and require an explicit administrator decision. Never guess or merge automatically.
+8. If multiple candidate roots are populated, fail closed with a diagnostic and require an explicit administrator decision. Never guess, silently choose the newest, or merge automatically.
 
 Migration execution should live with the bootstrap/storage owner that can coordinate filesystem and database operations. `ironclaw_config` may describe layout identity and compatibility versions, but it must remain side-effect-light and must not perform state writes.
 
@@ -231,20 +299,21 @@ Migration execution should live with the bootstrap/storage owner that can coordi
 - A shared application database must continue enforcing tenant and user scope at typed service boundaries.
 - Profile changes must not create a new route around authorization, approvals, host mediation, network policy, or redaction.
 - Runtime policy is derived from current trusted boot configuration, never persisted user-controlled state.
-- Logs and readiness diagnostics should identify the selected profile, durable-state identity, and process backend without printing secret values or sensitive physical paths.
+- Logs and readiness diagnostics should identify the selected profile, state-layout version, security-envelope class, and process backend without printing secret values or sensitive physical paths.
 
 ## Validation strategy
 
 ### Contract tests
 
-- Assert that all hosted-volume profile presets resolve to the same durable-state identity and canonical root.
+- Assert that no profile contributes a physical state subdirectory and all local filesystem-backed presets resolve the same layout beneath the selected Reborn home.
 - Assert that Docker and Railway profiles resolve to different process backends while requiring sandbox execution.
 - Assert that a missing selected sandbox backend cannot fall back to host execution.
-- Keep local-development profiles' existing compatibility behavior unless separately changed.
+- Assert that incompatible tenancy/isolation profile transitions fail before stores and capability runtimes become available.
+- Assert that compatible profile changes do not move or duplicate state.
 
 ### Restart and profile-swap integration tests
 
-Seed state under the base hosted-volume profile, then restart with Docker and Railway sandbox profiles and verify:
+Seed state under each supported legacy layout, adopt it into the profile-agnostic layout, then restart with compatible Docker and Railway sandbox profiles and verify:
 
 - the same thread and messages are visible;
 - an encrypted secret can still be resolved host-side;
@@ -269,27 +338,32 @@ Only when migration machinery is introduced, test:
 
 ## Rollout and rollback
 
-Before the first sandbox release:
+Before releasing the profile-agnostic layout:
 
-1. Resolve all hosted-volume presets to the canonical existing state root.
-2. Deploy a sandbox profile with the same `IRONCLAW_REBORN_HOME` and mounted volume used by the base profile.
-3. Verify readiness reports the selected profile and sandbox backend.
-4. Verify pre-existing conversation, extension, skill, setting, and secret state.
-5. Verify shell calls report `sandboxed: true` and fail closed if the backend is unavailable.
-6. Exercise a profile-only rollback and confirm the same durable state remains visible.
+1. Inventory released profile roots and define supported source-layout versions.
+2. Implement and test bounded, idempotent adoption into the canonical Reborn-home layout.
+3. Deploy with the same `IRONCLAW_REBORN_HOME` and mounted volume used previously.
+4. Verify readiness reports the selected profile, state-layout version, security envelope, and sandbox backend.
+5. Verify pre-existing conversation, extension, skill, setting, and secret state.
+6. Verify each sandbox sees only its tenant/user leaf workspace.
+7. Verify shell calls report `sandboxed: true` and fail closed if the backend is unavailable.
+8. Exercise a compatible profile rollback and confirm the same durable state remains visible.
 
-Rollback is a profile/configuration rollback, not a database rollback, because compatible profiles share one durable state identity. Any future schema migration must define its own rollback contract.
+After adoption, a compatible profile rollback is a configuration rollback, not a database rollback. The initial physical-layout adoption must separately define whether rollback can reopen the legacy layout, restore a snapshot, or is intentionally one-way.
 
-## Questions to settle before implementation
+## Decisions and remaining questions before implementation
 
 These questions have recommended defaults so a new session can continue the discussion without inventing assumptions:
 
-1. **What names the deployment's durable state?** Recommended: a strong storage-topology/state-layout identity resolved from trusted boot configuration, not a profile string.
-2. **Where does local Docker per-user workspace state live?** Recommended: under a clearly provider/runtime-owned namespace outside the application database namespace, while preserving current data until compatibility is decided.
-3. **How is Railway workspace portability represented?** Recommended: provider-owned checkpoint identity keyed by typed tenant/user scope; do not imply that changing to Docker migrates Railway workspace contents.
-4. **Can profiles be changed without restart?** Recommended: no. Profile resolution, authority, backend validation, and store construction happen at boot.
-5. **Should hosted Postgres profiles share the same logical state identity?** Recommended: define the same conceptual deployment identity, but treat switching physical backend as an explicit data migration rather than path aliasing.
-6. **What happens to an existing populated unreleased sandbox root?** Recommended for current deployments: inspect and archive or delete operationally; do not add automatic merge logic to product code.
+1. **What names the deployment's durable state?** Decided: the selected `IRONCLAW_REBORN_HOME` plus a versioned state layout, never the profile name and never a Railway deployment ID.
+2. **Is there a `<deployment-id>` directory?** Decided: no. Separate deployments use separate Reborn homes or storage backends.
+3. **Where does local Docker per-user workspace state live?** Decided target: `<IRONCLAW_REBORN_HOME>/workspaces/users/<tenant-user-digest>`, mounted one leaf at a time. The migration of existing workspace paths remains to be designed.
+4. **How is Railway workspace portability represented?** Recommended: provider-owned checkpoint identity keyed by typed tenant/user scope; do not imply that changing to Docker migrates Railway workspace contents.
+5. **Can profiles be changed without restart?** Decided: no. Profile resolution, transition admission, authority, backend validation, and store construction happen at boot.
+6. **Which profile transitions are safe?** Decided principle: only transitions satisfying the persisted tenancy and workspace-isolation envelope are admitted automatically. The exact typed compatibility matrix remains to be proposed and reviewed.
+7. **Should hosted Postgres profiles share the same logical state identity?** Recommended: use the same conceptual installation identity, but treat switching the physical backend as an explicit data migration rather than path aliasing.
+8. **What happens to an existing populated unreleased sandbox root?** Recommended for current deployments: inspect and archive or delete operationally; do not add automatic merge logic to product code.
+9. **How are existing populated `local-dev/` and hosted-volume roots adopted?** Open: inventory released layouts, define conflict behavior, and select an atomic or snapshot-backed migration mechanism before implementation.
 
 ## New-session handoff
 
@@ -313,8 +387,8 @@ Before editing code, the next agent should:
 1. Read the root `AGENTS.md`, `crates/AGENTS.md`, and the guidance for `ironclaw_config`, CLI/bootstrap, composition, filesystem, and host runtime.
 2. Fetch and compare against current `origin/main`; do not assume the base SHA above remains current.
 3. Reconfirm the live path flow from profile resolution to `IRONCLAW_REBORN_HOME`, the embedded database, encrypted secrets, extension state, and sandbox workspace selection.
-4. Classify every profile-derived path as application state, host workspace, sandbox workspace, cache, or provider metadata before changing it.
-5. Produce a concrete type/API proposal and compatibility matrix for review. Do not begin implementation until Henry approves the design.
+4. Inventory every currently released profile-derived root and classify its contents as application state, system content, host workspace, sandbox workspace, cache, or provider metadata before changing it.
+5. Produce a concrete target layout, adoption state machine, typed security-envelope proposal, and profile-transition compatibility matrix for review. Do not begin implementation until Henry approves that design.
 6. Prefer strong enums/value objects and existing ports. Do not add a trait, factory, migration registry, or composition-root branch without a demonstrated second implementation or boundary need.
 7. Keep the correction scoped. Do not modify generated `openwiki` content, commit secrets, or bundle verbose unrelated design artifacts.
 8. Do not push or open a PR without explicit instruction.
@@ -322,6 +396,7 @@ Before editing code, the next agent should:
 Useful live-code anchors at the time of writing:
 
 - `crates/app/ironclaw_config/src/profile.rs`: profile-to-storage-subdirectory resolution.
+- `crates/app/ironclaw_config/src/home.rs`: default `$HOME/.ironclaw/reborn` resolution and `IRONCLAW_REBORN_HOME` validation.
 - `crates/app/ironclaw_cli/src/runtime/mod.rs`: construction of the local runtime storage root.
 - `crates/app/ironclaw_composition/src/filesystem_assembly.rs`: embedded database placement.
 - `crates/app/ironclaw_composition/src/factory/production_build_assembly.rs`: filesystem and event-store assembly.
