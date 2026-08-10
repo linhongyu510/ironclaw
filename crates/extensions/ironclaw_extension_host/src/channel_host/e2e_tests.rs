@@ -2614,21 +2614,24 @@ async fn slack_dm_edits_a_preview_then_posts_the_complete_answer() {
     let run_id = harness.coordinator.active_run_id().expect("run id");
     let live_body = "Hello world — ".repeat(18);
     harness.push_live_text(run_id, "text:r:0", &live_body);
-    // Completion may race the first-update debounce. Shutting down the
-    // forwarder must flush the latest cumulative text instead of silently
-    // collapsing the preview into the final message.
+    for _ in 0..80 {
+        if !harness.slack_updates().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let updates = harness.slack_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["channel"], CHANNEL);
+    assert_eq!(updates[0]["ts"], preview_ts);
+    assert_eq!(updates[0]["markdown_text"], live_body);
+
     harness
         .coordinator
         .complete_active_run(&live_body)
         .await
         .expect("complete running turn");
     harness.drain().await;
-
-    let updates = harness.slack_updates();
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0]["channel"], CHANNEL);
-    assert_eq!(updates[0]["ts"], preview_ts);
-    assert_eq!(updates[0]["markdown_text"], live_body);
 
     let deletes = harness.slack_deletes();
     assert_eq!(deletes.len(), 1);
@@ -4084,26 +4087,6 @@ impl RecordingEgress {
                     "ok": true,
                     "channel": channel,
                     "ts": ts_seed,
-                })
-                .to_string()
-                .as_bytes(),
-            );
-        }
-        if path == "/api/chat.update" {
-            let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
-                Ok(body) => body,
-                Err(_) => return response(br#"{"ok":false,"error":"invalid_json"}"#),
-            };
-            if body["as_user"] != true {
-                return response(br#"{"ok":false,"error":"cant_update_message"}"#);
-            }
-            let channel = body["channel"].as_str().unwrap_or("DTEST");
-            let ts = body["ts"].as_str().unwrap_or("1710000000.000100");
-            return response(
-                serde_json::json!({
-                    "ok": true,
-                    "channel": channel,
-                    "ts": ts,
                 })
                 .to_string()
                 .as_bytes(),

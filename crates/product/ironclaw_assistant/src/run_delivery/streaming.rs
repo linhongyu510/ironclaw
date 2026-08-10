@@ -129,22 +129,7 @@ async fn forward_loop(
             tokio::time::sleep_until(next_update_at.unwrap_or_else(tokio::time::Instant::now));
         tokio::pin!(update_timer);
         tokio::select! {
-            _ = &mut shutdown => {
-                if current != accepted
-                    && !current.is_empty()
-                    && current.chars().count() <= forwarder.notice.max_chars as usize
-                {
-                    sequence = sequence.saturating_add(1);
-                    let _ = deliver_preview_update(
-                        &forwarder,
-                        &accepted,
-                        &current,
-                        sequence,
-                    )
-                    .await;
-                }
-                break;
-            },
+            _ = &mut shutdown => break,
             item = subscription.next() => match item {
                 Some(Ok(envelope)) => {
                     if let Some(text) = live_cumulative_text(&envelope, forwarder.run_id, &mut bodies) {
@@ -278,38 +263,11 @@ async fn deliver_preview_update(
             },
         )
         .await;
-    match outcome {
-        Ok(
-            CoordinatedDeliveryOutcome::Delivered { .. }
-            | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. },
-        ) => true,
-        Ok(CoordinatedDeliveryOutcome::Failed { failure_kind, .. }) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                ?failure_kind,
-                "progressive preview update rejected"
-            );
-            false
-        }
-        Ok(_) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                "progressive preview update not delivered"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                %error,
-                "progressive preview update failed"
-            );
-            false
-        }
-    }
+    matches!(
+        outcome,
+        Ok(CoordinatedDeliveryOutcome::Delivered { .. }
+            | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. })
+    )
 }
 
 fn live_cumulative_text(

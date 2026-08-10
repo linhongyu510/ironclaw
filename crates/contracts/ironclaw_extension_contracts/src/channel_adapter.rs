@@ -317,8 +317,9 @@ pub enum ProgressivePreviewPart {
         accepted_text: String,
         current_text: String,
     },
-    /// End Ironclaw's ownership. The adapter removes the preview or relies on
-    /// declared native expiry. This never represents final delivery.
+    /// End Ironclaw's ownership of the preview. The adapter removes it when
+    /// the provider supports removal; otherwise it may rely on declared native
+    /// expiry. This never represents final delivery.
     Stop { vendor_message_ref: String },
 }
 
