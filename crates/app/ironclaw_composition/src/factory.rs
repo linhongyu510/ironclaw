@@ -28,7 +28,7 @@ use crate::filesystem_assembly::{
     production_database_root_filesystem, standalone_db_path,
 };
 #[cfg(test)]
-use crate::host_access_assembly::validate_workspace_skill_isolation;
+use crate::host_access_assembly::{resolve_local_runtime_workspace_root, validate_workspace_skill_isolation};
 use crate::host_access_assembly::{WorkspaceFilesystems, build_host_access};
 use crate::input::{
     OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,

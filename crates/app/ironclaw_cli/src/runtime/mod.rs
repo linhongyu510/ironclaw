@@ -1,6 +1,6 @@
 // arch-exempt: large_file, Google OAuth resolution hardening remains at the existing runtime config seam, plan #4088
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{future::Future, thread};
 
@@ -921,6 +921,28 @@ fn build_sandboxed_local_runtime_services_input(
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
+/// The workspace root for a cwd-launched local runtime: the caller's cwd when
+/// it is safely isolated from the storage root's skill/extension roots, else
+/// the default `<storage_root>/workspace` (the same workspace the installed
+/// service mounts). Without the fallback, a fresh `ironclaw onboard` +
+/// shell session — cwd=`$HOME`, which contains the default Reborn home —
+/// tripped composition's isolation check and every CLI runtime command died
+/// with "workspace root must not overlap default skill root" (issue #7431).
+fn resolved_local_runtime_workspace_root(storage_root: &Path) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to resolve current directory for local runtime workspace")?;
+    let workspace_root =
+        ironclaw_composition::resolve_local_runtime_workspace_root(storage_root, &cwd);
+    if workspace_root != cwd {
+        tracing::warn!(
+            cwd = %cwd.display(),
+            workspace = %workspace_root.display(),
+            "current directory overlaps the storage root's skill roots; using the default \
+             workspace instead"
+        );
+    }
+    Ok(workspace_root)
+}
+
 fn build_standalone_local_runtime_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -928,8 +950,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let workspace_root = resolved_local_runtime_workspace_root(&local_runtime_root)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -957,8 +978,10 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let workspace_root = resolved_local_runtime_workspace_root(&local_runtime_storage_root(
+        config,
+        profile,
+    ))?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(

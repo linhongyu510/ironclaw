@@ -82,6 +82,8 @@ pub use factory::ChannelHostAssemblyTestWiring;
 // consumer: root integration harness · pinned by: `tests/integration/support/harness/mod.rs`
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+// consumer: `ironclaw_cli` runtime (workspace-root fallback for cwd-launched local runtimes) · pinned by: `ironclaw_cli/tests/smoke.rs`
+pub use host_access_assembly::resolve_local_runtime_workspace_root;
 // consumer: `ironclaw_cli` onboard + runtime + status · pinned by: `ironclaw_cli/tests/smoke.rs`
 pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
 /// Crate-root alias for composition's own `#[cfg(test)]` trust-policy builders.

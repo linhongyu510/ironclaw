@@ -190,11 +190,12 @@ fn canonicalize_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError>
     Ok(path)
 }
 
-pub(crate) fn validate_workspace_skill_isolation(
-    storage_root: &Path,
-    workspace_root: &Path,
-) -> Result<(), RebornBuildError> {
-    for (label, skill_root) in [
+/// The storage-root-relative roots that must never be reachable through the
+/// workspace mount: the default skill roots and the system extension root.
+/// Single source of truth for the isolation check and for the CLI's
+/// workspace-root fallback decision.
+fn protected_storage_roots(storage_root: &Path) -> [(&'static str, PathBuf); 4] {
+    [
         ("/skills", storage_root.join("skills")),
         (
             "/tenant-shared/skills",
@@ -202,7 +203,14 @@ pub(crate) fn validate_workspace_skill_isolation(
         ),
         ("/system/skills", storage_root.join("system/skills")),
         ("/system/extensions", storage_root.join("system/extensions")),
-    ] {
+    ]
+}
+
+pub(crate) fn validate_workspace_skill_isolation(
+    storage_root: &Path,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    for (label, skill_root) in protected_storage_roots(storage_root) {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!("workspace root must not overlap default skill root {label}"),
@@ -210,6 +218,65 @@ pub(crate) fn validate_workspace_skill_isolation(
         }
     }
     Ok(())
+}
+
+/// Canonicalize `path`, or — when it does not exist yet — canonicalize its
+/// nearest existing ancestor and re-append the missing suffix. Yields the
+/// canonical spelling a path will have once created, so a comparison against
+/// another canonicalized path cannot miss an overlap through a symlinked
+/// component (macOS `/var` -> `/private/var`). `None` only when no ancestor
+/// resolves (the path has no rooted parent to canonicalize).
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut probe = path;
+    loop {
+        match std::fs::canonicalize(probe) {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Some(resolved);
+            }
+            Err(_) => {
+                let name = probe.file_name()?;
+                missing.push(name.to_os_string());
+                probe = probe.parent()?;
+            }
+        }
+    }
+}
+
+/// Resolve the workspace root a local runtime should mount for the CLI's
+/// current directory (`candidate`).
+///
+/// Local runtimes mount the caller's cwd as the workspace so a REPL acts on
+/// the project it was launched from. A cwd that contains — or sits inside —
+/// one of the storage root's protected roots would expose those roots through
+/// the workspace mount (the same hazard [`validate_workspace_skill_isolation`]
+/// rejects), so it falls back to the composition default
+/// `<storage_root>/workspace`, the same workspace the installed service
+/// mounts. The fresh-onboard case is running `ironclaw repl` from `$HOME`,
+/// which contains the default Reborn home (issue #7431).
+pub fn resolve_local_runtime_workspace_root(storage_root: &Path, candidate: &Path) -> PathBuf {
+    let default = storage_root.join("workspace");
+    // Mirror `build_host_access`'s comparison: canonicalize both sides so a
+    // symlink alias cannot hide an overlap. A storage root that does not
+    // exist yet (first boot, before composition materializes it) is spelled
+    // canonically via its nearest existing ancestor.
+    let Some(storage_root) = canonicalize_existing_prefix(storage_root) else {
+        return default;
+    };
+    let Ok(candidate) = std::fs::canonicalize(candidate) else {
+        // Conservative: an unresolvable candidate cannot be proven isolated.
+        return default;
+    };
+    for (_, protected_root) in protected_storage_roots(&storage_root) {
+        if paths_overlap(&candidate, &protected_root) {
+            return default;
+        }
+    }
+    candidate
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {

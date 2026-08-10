@@ -2287,13 +2287,18 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
     let _ = child.wait();
 }
 
-/// Companion regression pin: cwd=reborn_home itself (the crate's first,
-/// insufficient fix attempt) still fails, because reborn_home is an
-/// ancestor of the default standalone skill/extension roots and trips
-/// composition's `paths_overlap` check. Guards against reverting the
-/// installer back to cwd=reborn_home.
+/// Pins the CLI workspace-root fallback (issue #7431): launching `serve` with
+/// cwd=reborn_home — an ancestor of every default standalone skill root —
+/// boots by falling back to the default `<storage_root>/workspace` workspace
+/// instead of failing composition's isolation check. This is the fresh-onboard
+/// shape: `ironclaw repl`/`run`/`serve` launched from the operator's shell
+/// (cwd=`$HOME`, which contains the Reborn home) must not die with
+/// "workspace root must not overlap default skill root". Composition's own
+/// `standalone_workspace_root_overlapping_skill_root_is_rejected` pins that
+/// the isolation check itself still rejects an overlapping workspace root
+/// when one is supplied.
 #[test]
-fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
+fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
@@ -2304,7 +2309,7 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
-    let output = reborn_command()
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
         .current_dir(&reborn_home)
@@ -2315,22 +2320,19 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
         )
-        .output()
-        .expect("ironclaw-reborn serve should run and exit");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr_text = wait_for_serve_banner(&mut child);
 
     assert!(
-        !output.status.success(),
-        "serve launched with cwd=reborn_home must fail closed on the skill-root overlap, \
-         not silently boot: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        stderr_text.contains("using the default workspace instead"),
+        "expected the workspace fallback warning for cwd=<reborn_home>: stderr={stderr_text}"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("workspace root must not overlap default skill root"),
-        "expected the exact composition overlap error this fix eliminates for \
-         <reborn_home>/workspace: stderr={stderr}"
-    );
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
