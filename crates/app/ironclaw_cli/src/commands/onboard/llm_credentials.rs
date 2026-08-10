@@ -199,13 +199,12 @@ pub(crate) fn provision_llm_credentials(
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     let admin = ironclaw_operator::RebornProviderAdmin::new(boot.clone());
     // Secret-store root MUST match what `serve` opens at boot
-    // (`local_runtime_storage_root`, i.e. `<home>/<profile-subdir>`), NOT the
-    // bare home — a key written to the bare-root db is invisible to the
-    // runtime (live bug: onboarded key never reached chat turns).
+    // (`local_runtime_storage_root`, i.e. the canonical `<home>`), so
+    // onboarding and `serve` share one durable secret-store location.
     // NOTE: the directory itself is only created lazily, right before a store
     // is actually opened (see `open_llm_key_store`) — a headless/no-op
     // onboard run must not touch the filesystem.
-    let store_root = crate::runtime::local_runtime_storage_root(boot, boot.profile());
+    let store_root = crate::runtime::local_runtime_storage_root(boot);
 
     if !force && let Some(outcome) = already_configured_outcome(&admin, &store_root, store_opener)?
     {
@@ -1035,9 +1034,7 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
@@ -1125,9 +1122,7 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
@@ -1269,10 +1264,7 @@ mod tests {
             !home.config_file_path().exists(),
             "a non-interactive no-op must not write config.toml"
         );
-        let store_root = crate::runtime::local_runtime_storage_root(
-            context.boot_config(),
-            context.boot_config().profile(),
-        );
+        let store_root = crate::runtime::local_runtime_storage_root(context.boot_config());
         assert!(
             !store_root.exists(),
             "a non-interactive no-op must not create the secret-store root either"
@@ -1565,9 +1557,7 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
@@ -1674,9 +1664,7 @@ mod tests {
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence
         // for the headless env-seed path too.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
@@ -1839,9 +1827,7 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await
@@ -1972,9 +1958,7 @@ mod tests {
 
         // Verify through the compatibility RUNTIME storage root — the same db
         // `serve` opens at boot; pins the onboard-write/serve-read convergence.
-        let home_path = home
-            .path()
-            .join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir());
+        let home_path = home.path().to_path_buf();
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&home_path)
                 .await

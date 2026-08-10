@@ -208,10 +208,7 @@ fn write_llm_api_key(
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
-    let storage_root = crate::runtime::local_runtime_storage_root(
-        context.boot_config(),
-        context.boot_config().profile(),
-    );
+    let storage_root = crate::runtime::local_runtime_storage_root(context.boot_config());
     let store = store_opener.open_llm_key_store(&storage_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
@@ -227,10 +224,7 @@ fn write_google_client_secret(
     value: &str,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let storage_root = crate::runtime::local_runtime_storage_root(
-        context.boot_config(),
-        context.boot_config().profile(),
-    );
+    let storage_root = crate::runtime::local_runtime_storage_root(context.boot_config());
     let store = store_opener.open_google_oauth_secret_store(&storage_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
@@ -764,10 +758,9 @@ mod tests {
                 .expect("opened paths lock")
                 .as_slice(),
             &[crate::runtime::local_runtime_storage_root(
-                context.boot_config(),
-                context.boot_config().profile(),
+                context.boot_config()
             )],
-            "Google secrets must use the active profile's runtime storage root"
+            "Google secrets must use the canonical Reborn-home storage root"
         );
     }
 
@@ -881,10 +874,9 @@ mod tests {
                 .expect("opened paths lock")
                 .as_slice(),
             &[crate::runtime::local_runtime_storage_root(
-                context.boot_config(),
-                context.boot_config().profile(),
+                context.boot_config()
             )],
-            "LLM keys must use the active profile's runtime storage root"
+            "LLM keys must use the canonical Reborn-home storage root"
         );
     }
 

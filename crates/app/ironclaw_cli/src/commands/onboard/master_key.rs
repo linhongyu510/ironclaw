@@ -55,11 +55,11 @@ pub(crate) fn provision_master_key(
     boot: &RebornBootConfig,
 ) -> anyhow::Result<MasterKeyProvisionOutcome> {
     // Must match the root `resolve_standalone_secret_master_key_with_env`
-    // actually reads/writes (`<home>/standalone/…`, not the bare home) — see
-    // `crate::runtime::local_runtime_storage_root`. Checking the bare home
-    // here always misses the cached dotfile, so onboarding would
+    // actually reads/writes (`<home>/…`) — see
+    // `crate::runtime::local_runtime_storage_root`. Checking another path
+    // here could miss the cached dotfile, so onboarding would
     // re-attempt keychain provisioning on every rerun (PR #6174 item D).
-    let dotfile_path = crate::runtime::local_runtime_storage_root(boot, boot.profile())
+    let dotfile_path = crate::runtime::local_runtime_storage_root(boot)
         .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH);
     if dotfile_path.exists() {
         return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);

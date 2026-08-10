@@ -196,7 +196,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
 }
 
 fn standalone_runtime_root(reborn_home: &Path) -> std::path::PathBuf {
-    reborn_home.join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir())
+    reborn_home.to_path_buf()
 }
 
 fn write_extension_fixture(reborn_home: &Path, extension_id: &str) {

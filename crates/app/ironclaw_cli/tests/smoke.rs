@@ -1197,7 +1197,7 @@ fn ironhub_install_uses_reborn_state_and_rejects_insecure_catalog_url() {
         "stderr: {stderr}"
     );
     assert!(
-        reborn_home.join("local-dev").exists(),
+        reborn_home.exists(),
         "IronHub should initialize only the Reborn runtime state"
     );
     assert!(
@@ -1474,7 +1474,7 @@ fn skills_list_reports_reborn_skill_data() {
     assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
     assert!(
         !reborn_home
-            .join("standalone/system/skills/code-review/SKILL.md")
+            .join("system/skills/code-review/SKILL.md")
             .exists(),
         "skills list should report bundled skills without installing them"
     );
@@ -1871,7 +1871,7 @@ Use {name}.
 }
 
 fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
-    reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
+    reborn_home.join("tenants/default/users/reborn-cli/skills")
 }
 
 #[test]
@@ -5174,26 +5174,11 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     });
 }
 
-/// Seed the stored LLM key at the SAME secret-store root `serve` actually
-/// reads from for a `standalone` boot — `<reborn_home>/standalone/…` (see
-/// `local_runtime_storage_root` / `RebornProfile::local_runtime_storage_
-/// subdir`), NOT the bare `reborn_home` root [`seed_stored_llm_key`] (and
-/// `onboard`'s own interactive credential prompt) write to.
-///
-/// This distinction matters for these real-turn tests specifically: they
-/// pin the fix to `RebornLlmReloadAdapter::reload`, which reads through
-/// `RebornRuntime`'s own `services.secret_store()` — rooted at the
-/// `standalone` subdirectory. Seeding through the bare-root opener instead
-/// (matching `onboard`'s CLI path) would silently miss that store and fail
-/// for an unrelated reason (a pre-existing root mismatch between `onboard`'s
-/// credential prompt and the runtime's own store, out of scope here — filed
-/// as a follow-up). The webui settings-save path this fix's reload
-/// mechanism mirrors always writes through `services.secret_store()`
-/// directly, so this is the faithful root to seed for these tests.
+/// Seed the stored LLM key at the canonical Reborn-home secret-store root
+/// `serve` and `onboard` share. The named helper preserves the real-turn
+/// call sites while asserting the same fixed layout as the runtime.
 fn seed_stored_llm_key_at_runtime_root(reborn_home: &Path, provider_id: &str, key: &str) {
-    let runtime_root = reborn_home.join("local-dev");
-    std::fs::create_dir_all(&runtime_root).expect("runtime standalone root dir");
-    seed_stored_llm_key(&runtime_root, provider_id, key);
+    seed_stored_llm_key(reborn_home, provider_id, key);
 }
 
 /// A key stored via `onboard`/`models set-provider` for an
@@ -5406,10 +5391,8 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
 /// in the boot-time LLM reload (`RebornLlmReloadAdapter::reload`) or its
 /// ordering relative to config resolution would still pass it. This test
 /// seeds an encrypted NearAI credential AFTER provider selection, AT THE
-/// SAME RUNTIME STORAGE ROOT `serve` actually opens
-/// (`local_runtime_storage_root`, i.e. `<reborn_home>/standalone` —
-/// `seed_stored_llm_key_at_runtime_root`, not the bare-root
-/// `seed_stored_llm_key`, which writes to a root `serve` never reads), with
+/// SAME CANONICAL REBORN-HOME STORAGE ROOT `serve` actually opens
+/// (`local_runtime_storage_root`, i.e. `<reborn_home>`), with
 /// both NearAI env overrides removed. Asserts through the resolved-LLM
 /// boot-trace seam that the late-attached stored credential still resolves
 /// to the cloud endpoint, AND — the discriminating half, since
@@ -6059,19 +6042,15 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
 /// keychain again once a cached dotfile exists (from a prior `serve`/onboard
 /// boot) — it's a no-op that reports `cached dotfile already present`.
 ///
-/// The dotfile is seeded at the RUNTIME storage root
-/// (`<reborn_home>/standalone/…`, `local_runtime_storage_root`'s subdir for
-/// `RebornProfile::Standalone`) — the same root the real resolver
+/// The dotfile is seeded at the canonical Reborn-home runtime storage root
+/// (`<reborn_home>/…`) — the same root the real resolver
 /// (`resolve_standalone_secret_master_key_with_env`) reads/writes and
-/// `serve` actually boots against — not the bare `reborn_home` root (PR
-/// #6174 item D: `provision_master_key` used to check the bare root, so its
-/// `exists()` check was always false and it re-attempted keychain
-/// provisioning on every rerun).
+/// `serve` actually boots against.
 #[test]
 fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let runtime_root = reborn_home.join("local-dev");
+    let runtime_root = reborn_home.clone();
     std::fs::create_dir_all(&runtime_root).expect("mkdir");
     std::fs::write(
         runtime_root.join(".reborn-local-dev-secrets-master-key"),
@@ -6482,7 +6461,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
     );
     assert!(
         reborn_home
-            .join("local-dev/system/skills/code-review/SKILL.md")
+            .join("system/skills/code-review/SKILL.md")
             .is_file(),
         "runtime bootstrap should install bundled Reborn skills"
     );

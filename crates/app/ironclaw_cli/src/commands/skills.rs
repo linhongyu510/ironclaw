@@ -98,7 +98,7 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
     }
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        standalone_root: crate::runtime::local_runtime_storage_root(config, profile),
+        standalone_root: crate::runtime::local_runtime_storage_root(config),
         profile,
     })
 }

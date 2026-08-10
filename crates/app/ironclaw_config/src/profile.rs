@@ -96,11 +96,6 @@ impl RebornProfile {
         )
     }
 
-    pub fn local_runtime_storage_subdir(self) -> &'static str {
-        let _ = self;
-        ""
-    }
-
     pub fn supports_local_runtime_skill_management(self) -> bool {
         matches!(
             self,

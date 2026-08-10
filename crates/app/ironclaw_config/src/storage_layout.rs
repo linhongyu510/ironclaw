@@ -105,7 +105,7 @@ pub struct LayoutRequirement {
 }
 
 /// Canonical durable paths below one validated [`RebornHome`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RebornStoragePaths {
     state_root: PathBuf,
     system_root: PathBuf,

@@ -505,7 +505,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     };
     let provider_id = provider.clone();
-    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
+    let runtime_storage_root = local_runtime_storage_root(config);
     // The runtime storage root is only created lazily (onboarding writing a
     // key, or a prior `serve` boot). If it was never created there is
     // definitely no stored key — fail through to the original error instead
@@ -881,8 +881,7 @@ fn build_sandboxed_local_runtime_services_input(
 ) -> anyhow::Result<RebornHostBindings> {
     let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            let workspace_root =
-                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+            let workspace_root = local_runtime_storage_root(config).join(SANDBOX_WORKSPACES_SUBDIR);
             block_on_cli(
                 ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
             )
@@ -907,7 +906,7 @@ fn build_standalone_local_runtime_services_input(
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let local_runtime_root = local_runtime_storage_root(config, profile);
+    let local_runtime_root = local_runtime_storage_root(config);
     let workspace_root = std::env::current_dir()
         .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
     let mut services_input = local_runtime_build_input_with_options(
@@ -945,7 +944,7 @@ fn build_hosted_single_tenant_services_input(
         RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
             composition_profile(profile),
             owner_id,
-            local_runtime_storage_root(config, profile),
+            local_runtime_storage_root(config),
             config_file,
         )
         .map_err(anyhow::Error::from)?
@@ -1024,7 +1023,7 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
-    let storage_root = local_runtime_storage_root(config, config.profile());
+    let storage_root = local_runtime_storage_root(config);
     // Boot may open/migrate local runtime state, but it can still avoid all
     // keychain/filesystem writes when no store exists yet.
     if !ironclaw_composition::standalone_db_path(&storage_root).exists() {
@@ -1303,10 +1302,7 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .context("HOME or USERPROFILE must be set")
 }
 
-pub(crate) fn local_runtime_storage_root(
-    config: &RebornBootConfig,
-    _profile: RebornProfile,
-) -> PathBuf {
+pub(crate) fn local_runtime_storage_root(config: &RebornBootConfig) -> PathBuf {
     config.home().path().to_path_buf()
 }
 
@@ -1322,7 +1318,7 @@ pub(crate) async fn initialize_local_runtime_storage_root(
             | RebornProfile::HostedSingleTenantVolumeSandboxed
             | RebornProfile::HostedSingleTenantVolumeSandboxedRailway
     ) {
-        let root = local_runtime_storage_root(config, profile);
+        let root = local_runtime_storage_root(config);
         tokio::fs::create_dir_all(&root).await.with_context(|| {
             format!(
                 "failed to initialize Reborn runtime state at {}",
@@ -2595,13 +2591,7 @@ regex_activation_enabled = false
         );
         assert_eq!(policy.process_backend.as_str(), "none");
         assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
-        assert_eq!(
-            local_runtime_storage_root(
-                &config,
-                ironclaw_config::RebornProfile::HostedSingleTenantVolume,
-            ),
-            reborn_home.join("hosted-single-tenant-volume")
-        );
+        assert_eq!(local_runtime_storage_root(&config), reborn_home);
     }
 
     #[test]
@@ -2808,11 +2798,10 @@ regex_activation_enabled = false
     }
 
     #[tokio::test]
-    async fn local_runtime_storage_root_is_profile_independent() {
+    async fn local_runtime_storage_root_is_selected_reborn_home_for_every_profile() {
         for &profile in ironclaw_config::RebornProfile::all() {
-            let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-            let root = local_runtime_storage_root(&config, profile);
-            assert_eq!(root, config.home().path());
+            let (_temp, config) = boot_config_with_config_toml(profile.as_str(), "");
+            assert_eq!(local_runtime_storage_root(&config), config.home().path());
         }
 
         for profile in [
@@ -2823,7 +2812,7 @@ regex_activation_enabled = false
             ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
         ] {
             let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-            let root = local_runtime_storage_root(&config, profile);
+            let root = local_runtime_storage_root(&config);
             initialize_local_runtime_storage_root(&config, profile)
                 .await
                 .expect("initialize local runtime storage");
@@ -2832,7 +2821,7 @@ regex_activation_enabled = false
 
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
         let hosted = ironclaw_config::RebornProfile::HostedSingleTenant;
-        let root = local_runtime_storage_root(&config, hosted);
+        let root = local_runtime_storage_root(&config);
         initialize_local_runtime_storage_root(&config, hosted)
             .await
             .expect("hosted profile is a no-op");
@@ -2846,8 +2835,7 @@ regex_activation_enabled = false
             Some("local-dev".into()),
         )
         .expect("boot config");
-        let blocked_root =
-            local_runtime_storage_root(&config, ironclaw_config::RebornProfile::Standalone);
+        let blocked_root = local_runtime_storage_root(&config);
         std::fs::write(&blocked_root, "not a directory").expect("block runtime directory");
         let error = initialize_local_runtime_storage_root(
             &config,
@@ -4512,7 +4500,7 @@ poll_interval_secs = 15
         )
         .expect("boot config");
 
-        let storage_root = super::local_runtime_storage_root(&config, config.profile());
+        let storage_root = super::local_runtime_storage_root(&config);
         std::fs::create_dir_all(&storage_root).expect("create profile storage root");
         // Keep this a hermetic store-wiring test: without a cached key, the
         // production resolver falls through to the real OS keychain while

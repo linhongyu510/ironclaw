@@ -400,7 +400,7 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
 "#,
         )
         .expect("write Google config");
-        let storage_root = crate::runtime::local_runtime_storage_root(config, config.profile());
+        let storage_root = crate::runtime::local_runtime_storage_root(config);
         let db_path = ironclaw_composition::standalone_db_path(&storage_root);
         std::fs::create_dir_all(&db_path).expect("create database-path tripwire");
 
