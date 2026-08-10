@@ -46,17 +46,24 @@ refuses to open stores or start traffic.
 2. Take and retain a filesystem/volume snapshot or backup of the entire home.
    Do not rely on the adoption snapshot as the only backup.
 3. Perform a read-only inventory. There is no write-free `storage adopt`
-   mode: inspect the configured home and use `doctor` only as a readiness
-   check, never as a migration command.
+   mode. `doctor` checks binary/configuration readiness only; it does **not**
+   inspect `layout.toml`, adoption journals, legacy candidates, or security
+   envelope compatibility. Run the normal startup admission under the
+   validate-only profile, using the same production database/environment
+   configuration the deployment will use:
 
    ```bash
    export IRONCLAW_REBORN_HOME=/absolute/path/to/ironclaw-reborn
    find "$IRONCLAW_REBORN_HOME" -maxdepth 2 -mindepth 1 -print | sort
-   IRONCLAW_REBORN_PROFILE=migration-dry-run ironclaw doctor
+   IRONCLAW_REBORN_PROFILE=migration-dry-run ironclaw serve
    ```
 
-   The dry-run profile does not adopt or write a layout. It reports what
-   startup would admit and starts no live runtime traffic.
+   This command is expected to exit non-zero after validation with
+   `profile=migration-dry-run ... must not start live Reborn runtime traffic`.
+   An earlier layout, journal, candidate, envelope, or production-storage
+   error means admission failed and must be resolved first. The validate-only
+   profile neither adopts nor initializes a layout and never starts a listener
+   or live runtime traffic.
 
 4. Identify the single supported populated legacy source. `local-dev/` and
    `hosted-single-tenant-volume/` are released sources; the bare-home DB/key

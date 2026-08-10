@@ -201,22 +201,15 @@ single-line `Error:` and exits.
 | --- | --- | --- |
 | `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
 | `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
-| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
 
-The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
-**current working directory** as the local-dev workspace root, and boot is
-rejected if that root overlaps any default storage root Reborn manages —
-`/skills` (`<reborn-home>/system/skills`), `/tenant-shared/skills`,
-`/system/skills`, or `/system/extensions`. If the home is nested inside the cwd
-(e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), those roots fall under the
-workspace root and boot is rejected. Keep the home outside the directory you
-launch from — the default `~/.ironclaw/reborn` already satisfies this.
-
-(Resolved per-user skills remain tenant/user-scoped through the durable skill
-store. Historical filesystem skill trees are adoption-only legacy sources and
-are imported through the one-time skill importer; they are not profile-named
-target paths. The validation above guards the default virtual roots, which is
-why the error names `/skills`.)
+`serve`/`run`/`repl` do not use the current working directory as durable
+workspace storage. The host derives the workspace namespace from
+`<IRONCLAW_REBORN_HOME>/workspaces`; sandboxed callers receive only their
+`users/<tenant-user-digest>` leaf. Physical system content is limited to
+`system/skills` and `system/extensions`. The `/skills` and
+`/tenant-shared/skills` names are virtual, database-backed capability mounts,
+not host directories beside the Reborn home. Historical cwd-backed skill and
+workspace trees are adoption-only legacy sources.
 
 ### Smoke-test a turn over the API
 
