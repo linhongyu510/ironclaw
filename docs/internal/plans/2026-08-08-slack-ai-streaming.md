@@ -31,7 +31,7 @@ The coordinator exposes three channel-neutral operations:
 
 ```rust
 enum ProgressivePreviewPart {
-    Start,
+    Start(String),
     Update {
         vendor_message_ref: String,
         accepted_text: String,
@@ -55,20 +55,25 @@ it; the generic forwarder then stops sending previews for that run.
 - `Update` uses the normal outbound-policy pipeline as a `ProgressUpdate`.
   Preview text is model output and receives the same target revalidation as
   other policy-class run notifications.
-- Updates are coalesced to at most one attempt per second.
+- The first update is debounced for 150 ms. Later updates are throttled to at
+  most one attempt per second.
 - A changed prefix, provider rejection, policy rejection, or character-limit
   breach disables further preview updates. There is no retry.
-- `Stop` is best-effort cleanup. It runs before a final reply or gate prompt,
-  and on timeout/error exits through the observer safety net.
+- `Stop` is best-effort cleanup. An adapter either removes the preview or
+  relinquishes it to a declared native-expiry mechanism. It runs before a
+  final reply or gate prompt, and on timeout/error exits through the observer
+  safety net.
 - The finalized assistant message is always posted afterward through the
   existing final-reply path, even if cleanup fails.
 
 ## Slack implementation
 
-- `Start` maps to `chat.startStream`.
-- `Update` verifies `current_text.starts_with(accepted_text)` and sends only
-  the suffix through `chat.appendStream`.
-- `Stop` calls `chat.stopStream` with non-answer placeholder text, then
+- In DMs, `Start` posts a top-level placeholder with `chat.postMessage`,
+  `Update` replaces its cumulative text with `chat.update`, and `Stop` removes
+  it with `chat.delete`. The preview never moves into a thread.
+- In channels, `Start` maps to `chat.startStream`, `Update` verifies
+  `current_text.starts_with(accepted_text)` and sends only the suffix through
+  `chat.appendStream`, and `Stop` calls `chat.stopStream` followed by
   `chat.delete`.
 - Slack declares `scope = "all"` and `max_chars = 12000`.
 
@@ -94,7 +99,7 @@ Coverage pins:
 - manifest parsing, optionality, scope, and positive character limit;
 - Slack start routing and recipient/thread requirements;
 - cumulative update suffix calculation and prefix mismatch rejection;
-- stop followed by delete;
+- Slack DM post/update/delete and channel start/append/stop/delete behavior;
 - complete final post after preview success, update failure, or cleanup
   failure;
 - preview cleanup on blocked, failed, and timeout paths;

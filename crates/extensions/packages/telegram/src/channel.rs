@@ -355,6 +355,9 @@ impl ChannelAdapter for TelegramChannelAdapter {
                 OutboundPart::ProgressivePreview(ProgressivePreviewPart::Stop {
                     vendor_message_ref,
                 }) => {
+                    // Telegram exposes no explicit draft-stop operation. A
+                    // valid reference means Ironclaw can relinquish the draft;
+                    // final delivery clears it, otherwise Telegram expires it.
                     let outcome = match telegram_draft_id_from_ref(vendor_message_ref) {
                         Ok(_) => PartDeliveryOutcome::Sent {
                             vendor_message_ref: Some(vendor_message_ref.clone()),
