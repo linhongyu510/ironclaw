@@ -284,7 +284,7 @@ async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue, None)
         .await
         .expect("submit_or_replay succeeds");
 
@@ -479,6 +479,8 @@ fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
         adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
         source_channel: ProductSourceChannel::new("test_adapter").unwrap(),
         surface_type: TurnSurfaceType::Direct,
+        lane: SubmissionLane::Webhook,
+        skill_activation_text: None,
     };
 
     let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
@@ -526,6 +528,8 @@ async fn shared_user_message_records_channel_surface_type() {
         source_channel: ProductSourceChannel::new("slack").unwrap(),
         // BotMention shared route maps to Channel surface type.
         surface_type: TurnSurfaceType::Channel,
+        lane: SubmissionLane::Webhook,
+        skill_activation_text: None,
     };
 
     let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
@@ -546,7 +550,7 @@ async fn shared_user_message_records_channel_surface_type() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue, None)
         .await
         .expect("submit_or_replay succeeds");
 

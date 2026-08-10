@@ -558,6 +558,7 @@ fn chat_surface_submit_request(
     attachments: Vec<InboundAttachment>,
 ) -> ProductSubmitTurnRequest {
     ProductSubmitTurnRequest {
+        extension_id: None,
         client_action_id: Some(public_id.as_str().to_string()),
         thread_id: Some(public_id.as_str().to_string()),
         content: Some(user_message_payload.text),

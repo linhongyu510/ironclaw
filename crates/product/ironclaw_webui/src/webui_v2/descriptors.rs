@@ -31,7 +31,7 @@ use run_action_descriptors::{
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
-pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
+pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
@@ -146,7 +146,8 @@ pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
-pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
+pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
+    "/api/webchat/v2/channels/{extension_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
 pub const WEBUI_V2_PATTERN_GET_RUN_ARTIFACT: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact";
@@ -301,7 +302,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
-        send_message_descriptor(),
+        session_channel_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
         logs_descriptor(),
@@ -480,11 +481,11 @@ fn create_thread_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn send_message_descriptor() -> IngressRouteDescriptor {
+fn session_channel_message_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_SEND_MESSAGE,
+        WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_SEND_MESSAGE,
+        WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
         mutation_policy(
             // Message bodies carry user text plus optional base64-encoded inline
             // attachments. 14 MiB matches the gateway-wide body budget and covers

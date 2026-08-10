@@ -185,6 +185,11 @@ pub struct WebUiV2SessionResponse {
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
     pub attachments: AttachmentCapabilities,
+    /// The deployment's authenticated-session channel — the extension id the
+    /// browser plugs into the generic session-inbound route. Absent when the
+    /// deployment has no session channel (sends fail closed client-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_channel_extension_id: Option<String>,
 }
 
 /// Effective WebUI feature gates surfaced to the browser on `GET /session`.
@@ -250,6 +255,7 @@ pub async fn get_session(
             global_auto_approve,
         },
         attachments: attachment_capabilities(),
+        session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
 }
 
@@ -601,17 +607,21 @@ pub async fn admin_delete_user_secret(
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/threads/{thread_id}/messages`
+/// `POST /api/webchat/v2/channels/{extension_id}/messages`
 ///
-/// Body shape: [`ProductSubmitTurnRequest`] (the path `thread_id` overrides
-/// any value in the body).
-pub async fn send_message(
+/// The generic session-inbound door: one route for every
+/// authenticated-session channel, keyed by `extension_id` — no channel is
+/// named in the path table. Body shape: [`ProductSubmitTurnRequest`] with
+/// `thread_id` required in the body (the caller owns the thread); the path
+/// `extension_id` overrides any value in the body, and the product surface
+/// validates it against the deployment's session-channel directory.
+pub async fn session_channel_message(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Path(thread_id): Path<String>,
+    Path(extension_id): Path<String>,
     Json(mut body): Json<ProductSubmitTurnRequest>,
 ) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
-    body.thread_id = Some(thread_id);
+    body.extension_id = Some(extension_id);
     let response =
         invoke_product_command(state.services(), caller, SUBMIT_TURN_COMMAND, body).await?;
     Ok(Json(response))

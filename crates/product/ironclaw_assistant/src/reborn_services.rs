@@ -2240,6 +2240,8 @@ pub struct RebornServices<
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     web_push_service: Arc<dyn WebPushProductService>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
+    session_channels:
+        Option<Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2327,6 +2329,7 @@ where
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
+            session_channels: None,
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
@@ -2761,6 +2764,18 @@ where
     /// unavailable via the fail-closed [`RejectingAdminUserService`] default.
     pub fn with_admin_user_service(mut self, admin_users: Arc<dyn AdminUserService>) -> Self {
         self.admin_users = admin_users;
+        self
+    }
+
+    /// Wire the deployment's session-channel directory so channel-
+    /// parameterized session submissions can be validated. Without it, a
+    /// submission naming an extension fails closed as service-unavailable;
+    /// legacy (unparameterized) submissions are unaffected.
+    pub fn with_session_channel_directory(
+        mut self,
+        directory: Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    ) -> Self {
+        self.session_channels = Some(directory);
         self
     }
 
@@ -3711,9 +3726,25 @@ where
             client_action_id,
             content,
             requested_model,
+            extension_id,
         } = command
         else {
             return Err(ProductSurfaceError::internal_invariant());
+        };
+        // A channel-parameterized submission must name a deployment channel
+        // whose declared entrypoint is the authenticated session — fail
+        // closed (404, indistinguishable from an absent route) otherwise.
+        let session_surface = match &extension_id {
+            Some(extension_id) => {
+                let Some(directory) = &self.session_channels else {
+                    return Err(ProductSurfaceError::service_unavailable(false));
+                };
+                if !directory.is_session_channel(extension_id) {
+                    return Err(ProductSurfaceError::not_found());
+                }
+                extension_id.as_str()
+            }
+            None => SESSION_SURFACE_ADAPTER_ID,
         };
         let thread_id = scope.thread_id.clone();
         // Serialize with thread deletion (delete_thread holds the same
@@ -3727,6 +3758,7 @@ where
             scope.project_id.clone(),
         );
         let neutral = session_inbound_request(
+            session_surface,
             session_caller,
             &thread_id,
             &client_action_id,
@@ -6488,33 +6520,6 @@ fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceE
     TurnRunId::parse(value).map_err(|_| ProductSurfaceError::internal_invariant())
 }
 
-/// Map a fatal steering-admission failure into this surface's sanitized
-/// error. Classification already happened in the gateway; this is pure
-/// error-shape translation plus server-side diagnosis.
-fn steering_admission_error(
-    error: crate::steering::SteeringAdmissionError,
-    thread_id: &ThreadId,
-    message_id: ThreadMessageId,
-    run_id: TurnRunId,
-) -> ProductSurfaceError {
-    use crate::steering::SteeringAdmissionError;
-    match error {
-        SteeringAdmissionError::InvalidMessageRef(reason) => {
-            tracing::debug!(%reason, %thread_id, %message_id, %run_id, "invalid steering message ref");
-            ProductSurfaceError::internal_invariant()
-        }
-        SteeringAdmissionError::RunState(error) => map_turn_error(error),
-        SteeringAdmissionError::MarkQueued(error)
-        | SteeringAdmissionError::SettleRejected(error) => map_thread_error(error),
-        SteeringAdmissionError::Enqueue(error) => {
-            // Carry the cause to the server log; the user-facing surface stays
-            // the sanitized retryable 503 (error-handling.md).
-            tracing::debug!(%error, %thread_id, %message_id, %run_id, "steering enqueue failed for busy run");
-            ProductSurfaceError::service_unavailable(true)
-        }
-    }
-}
-
 fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
@@ -6543,16 +6548,17 @@ const SESSION_ACTOR_KIND: &str = "session_user";
 
 /// Build the neutral inbound-surface request for one session submission.
 fn session_inbound_request(
+    session_surface: &str,
     caller: ProductSurfaceCaller,
     thread_id: &ThreadId,
     client_action_id: &IdempotencyKey,
     content: String,
     requested_model: Option<String>,
 ) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
-    let adapter_id = ProductAdapterId::new(SESSION_SURFACE_ADAPTER_ID)
+    let adapter_id = ProductAdapterId::new(session_surface)
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let source_channel =
-        ironclaw_product_contracts::inbound::ProductSourceChannel::new(SESSION_SURFACE_ADAPTER_ID)
+        ironclaw_product_contracts::inbound::ProductSourceChannel::new(session_surface)
             .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
         .map_err(|_| ProductSurfaceError::internal_invariant())?;

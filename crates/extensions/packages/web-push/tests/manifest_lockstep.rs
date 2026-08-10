@@ -68,8 +68,23 @@ fn manifest_identity_matches_the_grammar_constants() {
     let channel = parsed.get("channel").expect("channel surface declared");
     assert_eq!(
         channel.get("inbound").and_then(toml::Value::as_bool),
-        Some(false),
-        "web push is outbound-only"
+        Some(true),
+        "the web app's browser chat enters through the session entrypoint"
+    );
+    let ingress = channel
+        .get("ingress")
+        .expect("inbound requires a declared entrypoint");
+    assert!(
+        ingress.get("route_suffix").is_none(),
+        "a session channel must never mount a webhook route"
+    );
+    assert_eq!(
+        ingress
+            .get("verification")
+            .and_then(|verification| verification.get("kind"))
+            .and_then(toml::Value::as_str),
+        Some("authenticated_session"),
+        "the web app's entrypoint is the authenticated session"
     );
     assert_eq!(
         channel.get("outbound").and_then(toml::Value::as_bool),

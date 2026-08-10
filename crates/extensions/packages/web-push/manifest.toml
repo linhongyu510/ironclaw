@@ -1,8 +1,10 @@
-# The web app's browser-notification channel: outbound-only Web Push
-# (RFC 8030/8291/8292) to the user's enrolled browsers. Deployment-bound like
-# Telegram — no pairing and no inbound surface; enrollment happens in the
-# authenticated WebUI session, and the VAPID key material is generated and
-# seeded by the host at boot (never typed by an operator).
+# The web app's channel: browser chat inbound over the authenticated-session
+# entrypoint (the generic session-inbound route, keyed by this extension id)
+# plus outbound Web Push (RFC 8030/8291/8292) to the user's enrolled browsers.
+# Deployment-bound like Telegram — no pairing and no webhook mount; the
+# session transport's authentication IS the trust boundary, and the VAPID key
+# material is generated and seeded by the host at boot (never typed by an
+# operator).
 schema_version = "reborn.extension_manifest.v3"
 id = "web-push"
 name = "Web UI"
@@ -38,10 +40,19 @@ fields = [
 [channel]
 id = "notifications"
 display_name = "Web UI"
-inbound = false
+inbound = true
 outbound = true
 notifications = true
-conversation_model = "continuous"
+conversation_model = "isolated"
+
+# The authenticated-session entrypoint: no webhook mount, no route_suffix —
+# a browser request can never reach the webhook namespace. Trust is the host
+# transport's session authentication (T1).
+[channel.ingress]
+method = "post"
+
+[channel.ingress.verification]
+kind = "authenticated_session"
 
 # Exact push-service hosts, in lockstep with
 # `ironclaw_web_push::SUPPORTED_PUSH_SERVICE_HOSTS` (pinned by

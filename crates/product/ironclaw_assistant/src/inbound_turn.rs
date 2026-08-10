@@ -1103,6 +1103,8 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
     }
 }
 
+// arch-exempt: too_many_args, replay tail wants a SubmissionPorts bundle once the session lane settles, plan docs/internal/design/2026-08-10-unified-channel-model.md
+#[allow(clippy::too_many_arguments)]
 async fn submit_or_replay_accepted_message<T, C>(
     thread_service: &T,
     turn_coordinator: &C,

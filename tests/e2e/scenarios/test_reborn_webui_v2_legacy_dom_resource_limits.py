@@ -339,7 +339,7 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
         handle_timeline,
     )
     await page.route(
-        f"**/api/webchat/v2/threads/{FULL_PAGE_SEND_THREAD_ID}/messages",
+        "**/api/webchat/v2/channels/*/messages",
         handle_send,
     )
 

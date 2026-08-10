@@ -570,6 +570,10 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
+            if let Some(extension_id) = runtime.session_channel_extension_id() {
+                serve_config =
+                    serve_config.with_session_channel_extension_id(extension_id.to_string());
+            }
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }

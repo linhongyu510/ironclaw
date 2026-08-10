@@ -93,7 +93,8 @@ pub(crate) fn build_product_surface_with_channel_connection(
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service())
     .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store))
-    .with_session_inbound_ledger(Arc::clone(&runtime.session_inbound_ledger));
+    .with_session_inbound_ledger(Arc::clone(&runtime.session_inbound_ledger))
+    .with_session_channel_directory(Arc::clone(&runtime.session_channel_directory));
     if let Some(ironhub_link) = runtime.ironhub_link_service() {
         api = api.with_ironhub_link_service(ironhub_link);
     }

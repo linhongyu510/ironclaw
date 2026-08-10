@@ -5483,6 +5483,7 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: None,
             client_action_id: Some("send-webui-stream-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("hello webui stream".to_string()),
@@ -6660,6 +6661,7 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         caller,
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: None,
             client_action_id: Some("send-webui-skill-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("$webui-helper please help".to_string()),
@@ -7044,6 +7046,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: None,
             client_action_id: Some("send-rejected-busy-b".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message B while thread is busy".to_string()),
@@ -7165,6 +7168,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: None,
             client_action_id: Some("send-rejected-busy-c".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message C after thread is free".to_string()),

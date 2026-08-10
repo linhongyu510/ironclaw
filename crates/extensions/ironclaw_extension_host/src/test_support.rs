@@ -261,6 +261,37 @@ pub fn mcp_manifest() -> ResolvedExtensionManifest {
     resolve(MCP_MANIFEST)
 }
 
+const SESSION_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-app"
+name = "Acme App"
+version = "0.1.0"
+description = "fixture: authenticated-session channel extension"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme-app.extension/v1"
+
+[channel]
+id = "chat"
+display_name = "Acme app"
+inbound = true
+outbound = true
+conversation_model = "isolated"
+
+[channel.ingress]
+method = "post"
+
+[channel.ingress.verification]
+kind = "authenticated_session"
+"#;
+
+/// An authenticated-session channel resolved manifest.
+pub fn session_channel_manifest() -> ResolvedExtensionManifest {
+    resolve(SESSION_CHANNEL_MANIFEST)
+}
+
 /// A channel-only resolved manifest.
 pub fn channel_only_manifest() -> ResolvedExtensionManifest {
     resolve(CHANNEL_MANIFEST)

@@ -917,6 +917,7 @@ impl ReplayCountingInboundTurnService {
             .expect("valid accepted message ref"),
             submitted_run_id: TurnRunId::new(),
             binding: fake_binding(),
+            submission: None,
         })
     }
 }
@@ -3255,6 +3256,7 @@ async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: Some(busy_run),
         binding: fake_binding(),
+        busy: None,
     });
     let envelope = sample_envelope("policy-busy-retry");
 
@@ -3476,11 +3478,13 @@ async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
             accepted_message_ref: AcceptedMessageRef::new("msg:first").expect("valid"),
             active_run_id: Some(first_run),
             binding: fake_binding(),
+            busy: None,
         },
         InboundTurnOutcome::Submitted {
             accepted_message_ref: AcceptedMessageRef::new("msg:second").expect("valid"),
             submitted_run_id: second_run,
             binding: fake_binding(),
+            submission: None,
         },
     ]);
 
@@ -6935,6 +6939,7 @@ async fn rejected_busy_is_settled_and_duplicate_on_transport_retry() {
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: Some(busy_run),
         binding: fake_binding(),
+        busy: None,
     });
 
     let envelope = sample_envelope("busy-retry");
@@ -7136,6 +7141,7 @@ async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transpo
         accepted_message_ref: accepted_message_ref.clone(),
         active_run_id: None,
         binding: fake_binding(),
+        busy: None,
     });
     let envelope = sample_envelope("busy-no-run");
 

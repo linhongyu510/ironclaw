@@ -17391,3 +17391,104 @@ async fn vendor_login_failures_project_the_sanitized_port_taxonomy() {
         .expect("a healthy backend starts the login");
     assert!(start.auth_url.contains("/v1/auth/github"));
 }
+
+// ─── Generic session-inbound channel parameter ──────────────────────────────
+//
+// The generic session route keys submissions by `extension_id`; the surface
+// validates it against the deployment's session-channel directory before
+// admitting anything under that identity. Unknown/non-session extensions and
+// missing directories fail closed; legacy (unparameterized) submissions are
+// untouched.
+
+struct StaticSessionChannelDirectory {
+    session_channels: Vec<&'static str>,
+}
+
+impl ironclaw_product_contracts::session_ingress::SessionChannelDirectory
+    for StaticSessionChannelDirectory
+{
+    fn is_session_channel(&self, extension_id: &str) -> bool {
+        self.session_channels.contains(&extension_id)
+    }
+}
+
+fn submit_request_for_extension(
+    extension_id: Option<&str>,
+    thread_id: &str,
+    action: &str,
+) -> ProductSubmitTurnRequest {
+    let mut body = json!({
+        "client_action_id": action,
+        "thread_id": thread_id,
+        "content": "hello channel"
+    });
+    if let Some(extension_id) = extension_id {
+        body["extension_id"] = json!(extension_id);
+    }
+    serde_json::from_value::<ProductSubmitTurnRequest>(body).expect("request")
+}
+
+#[tokio::test]
+async fn submit_turn_with_extension_id_requires_a_session_channel_directory() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("web-app"), "thread-alpha", "send-no-directory"),
+        )
+        .await
+        .expect_err("no directory wired must fail closed");
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_an_unknown_or_non_session_extension_as_not_found() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }));
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let error = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("slack"), "thread-alpha", "send-wrong-channel"),
+        )
+        .await
+        .expect_err("a webhook channel must never admit session submissions");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "nothing may be submitted under a rejected channel identity"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_admits_a_declared_session_channel() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }));
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            submit_request_for_extension(Some("web-app"), "thread-alpha", "send-on-channel"),
+        )
+        .await
+        .expect("session channel submission admits");
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
+}

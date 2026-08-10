@@ -60,6 +60,7 @@ pub mod product_wire;
 pub mod project_service;
 pub mod projection;
 pub mod prompt_source;
+pub mod session_ingress;
 pub mod shared_admission;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
