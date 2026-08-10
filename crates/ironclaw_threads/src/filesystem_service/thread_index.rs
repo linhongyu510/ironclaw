@@ -118,7 +118,7 @@ where
         if already_declared && !required {
             return Ok(());
         }
-        if already_declared && self.thread_index_migration_complete(scope).await? {
+        if already_declared && self.thread_index_reconciled(&scope_key) {
             return Ok(());
         }
         let _declaration_guard = self.thread_index_declaration_lock.lock().await;
@@ -130,7 +130,7 @@ where
         if already_declared && !required {
             return Ok(());
         }
-        if already_declared && self.thread_index_migration_complete(scope).await? {
+        if already_declared && self.thread_index_reconciled(&scope_key) {
             return Ok(());
         }
         // The listing projection is declared once per mount at the `/threads`
@@ -185,8 +185,25 @@ where
                     "thread index projection reconcile failed; listing continues with projected rows"
                 );
             }
+            if let Ok(mut reconciled) = self.reconciled_thread_index_scopes.lock() {
+                reconciled.insert(scope_key.clone());
+                evict_entry_over_limit(&mut reconciled, 128, &scope_key);
+            }
         }
         Ok(())
+    }
+
+    /// Whether this process has already run required-path repair for
+    /// `scope_key` at least once. Kept separate from the durable migration
+    /// marker (see the field doc on `reconciled_thread_index_scopes`): the
+    /// marker can already be complete on disk from a previous process, and
+    /// gating on it directly would let the reconcile step be skipped forever
+    /// once an optional call has declared the scope in this process.
+    fn thread_index_reconciled(&self, scope_key: &str) -> bool {
+        self.reconciled_thread_index_scopes
+            .lock()
+            .map(|reconciled| reconciled.contains(scope_key))
+            .unwrap_or(false)
     }
 
     fn thread_index_record(stored: &StoredThreadRecord) -> ThreadIndexRecord {

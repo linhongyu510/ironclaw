@@ -20,8 +20,9 @@ use crate::{FilesystemSessionThreadService, SessionThreadError, ThreadScope};
 
 use super::{
     CURRENT_THREAD_INDEX_PROJECTION_VERSION, THREAD_ACTIVITY_SORT_KEY, THREAD_ID_INDEX_KEY,
-    THREAD_INDEX_SUFFIX, THREAD_SCOPE_INDEX_KEY, ThreadIndexRecord, thread_index_cache_key,
-    thread_index_key, thread_index_name, thread_index_record_path, thread_index_root,
+    THREAD_INDEX_SUFFIX, THREAD_SCOPE_INDEX_KEY, ThreadIndexRecord, thread_activity_index_spec,
+    thread_index_cache_key, thread_index_key, thread_index_name, thread_index_record_path,
+    thread_index_root,
 };
 use crate::filesystem_service::{deserialize, invalid_path, is_not_found};
 
@@ -134,17 +135,27 @@ where
         else {
             return Ok(());
         };
-        if versioned
-            .entry
-            .indexed
-            .contains_key(&thread_index_key(THREAD_SCOPE_INDEX_KEY)?)
-        {
-            return Ok(());
-        }
         let mut record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
         // A row whose body disagrees with its own path is not ours to rewrite;
         // stale and cross-scope rows belong to the explicit migration.
         if record.record.scope != *scope || record.record.thread_id != *thread_id {
+            return Ok(());
+        }
+        // The ordered projection needs every key the spec declares
+        // (`scope_key`, `activity_sort`, `thread_id`), not just the partition
+        // key: `query_ordered` filters on `scope_key` but sorts and paginates
+        // on the other two, so a row missing either of them is just as
+        // invisible to listing as one missing `scope_key` outright. Comparing
+        // against what a fresh rebuild would set — rather than only checking
+        // presence — also catches a row whose stored value has drifted from
+        // what the current record would produce (e.g. a stale `activity_sort`
+        // left behind by a body-only write).
+        let rebuilt = Self::thread_index_entry(&record)?;
+        let projection_current = thread_activity_index_spec()?
+            .keys
+            .iter()
+            .all(|key| versioned.entry.indexed.get(key) == rebuilt.indexed.get(key));
+        if projection_current {
             return Ok(());
         }
         record.projection_schema_version = CURRENT_THREAD_INDEX_PROJECTION_VERSION;

@@ -4131,6 +4131,206 @@ async fn filesystem_list_threads_recovers_current_version_index_row_without_proj
     );
 }
 
+/// Break caught: the repair's completeness check only looked for `scope_key`.
+/// The ordered projection also sorts and paginates on `activity_sort` and
+/// `thread_id`, so a row that kept `scope_key` but lost either of those two
+/// keys took the early-return "already projected" path and was never
+/// rewritten — invisible to `list_threads` forever, same as a row missing all
+/// three keys.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_missing_only_activity_sort_key() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-partial-keys", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-partial-keys");
+
+    for id in ["projected-thread", "partial-keys-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    // Rewrite the row keeping `scope_key` (the only key the old check looked
+    // at) but dropping `activity_sort` and `thread_id` — the two keys
+    // `query_ordered` actually sorts and paginates on.
+    let index_path = thread_index_record_path_for_test(&scope, "partial-keys-thread");
+    let versioned = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("ensure_thread writes a derived index row");
+    let mut damaged = versioned.entry.clone();
+    damaged.indexed.retain(|key, _| key.as_str() == "scope_key");
+    assert_eq!(
+        damaged.indexed.len(),
+        1,
+        "test setup must strip every key except scope_key"
+    );
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            damaged,
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row missing activity_sort/thread_id");
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"partial-keys-thread"),
+        "a row retaining scope_key but missing activity_sort/thread_id must \
+         still be repaired and listable; got {ids:?}"
+    );
+}
+
+/// Break caught: `ensure_thread` (an optional, `required: false` caller of
+/// `ensure_thread_index_query`) declared the scope and cached it as "ready"
+/// without ever running repair. A later `required: true` listing call then
+/// saw the scope already declared *and* the durable migration marker already
+/// complete (written by an earlier process) and returned early before
+/// reaching the reconcile step — so in the common production ordering, where
+/// a write happens before the first list in a process, self-healing never ran
+/// at all.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_when_write_precedes_first_list() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-write-before-list", "alice");
+    let scope = scope("index-write-before-list");
+
+    // Seed durable state, including the scope's migration-complete marker,
+    // using a first process that lists before ever writing again.
+    {
+        let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        for id in ["projected-thread", "unprojected-thread"] {
+            seeding_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: scope.clone(),
+                    thread_id: Some(ThreadId::new(id).unwrap()),
+                    created_by_actor_id: "actor-a".into(),
+                    title: Some(id.into()),
+                    metadata_json: None,
+                })
+                .await
+                .unwrap();
+        }
+        seeding_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Damage one row's projection keys, same shape as the other recovery
+    // tests, so a fresh process has real repair work to do.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let mut damaged: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes a derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    damaged
+        .as_object_mut()
+        .expect("index row is a json object")
+        .remove("projection_schema_version");
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&damaged).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row without projection keys");
+
+    // Fresh process, durable migration marker already complete from seeding.
+    // Critically, perform a WRITE (`ensure_thread`) before the first list —
+    // the ordering that reproduces the bug — so the optional declaration path
+    // caches the scope as "ready" before any required call ever runs. Uses a
+    // brand-new thread id, distinct from the damaged row: `ensure_thread`
+    // would otherwise refresh the damaged row's own index entry as a side
+    // effect (because the fresh process's in-memory "known row" cache is
+    // empty too), which would repair it incidentally and defeat the test.
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("write-before-list-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("write-before-list-thread".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "a damaged row must still be repaired and listable even when a write \
+         happens before the first list in the process; got {ids:?}"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete() {
     use ironclaw_threads::ListThreadsForScopeRequest;
