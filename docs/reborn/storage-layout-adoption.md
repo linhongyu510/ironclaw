@@ -91,11 +91,14 @@ verify. It never automatically deletes the source snapshot, adoption journal,
 or an external workspace source.
 
 For embedded libSQL, verification reopens the adopted database and encrypted
-secret resolver. For hosted PostgreSQL, the command opens the configured pool,
-runs the production filesystem migrations, and constructs the encrypted secret
-store with the configured master key before making any filesystem mutation.
-Connection, migration, or key failures leave the legacy source in place and do
-not publish `layout.toml`.
+secret resolver. For hosted PostgreSQL, the command validates both operator
+acknowledgements before opening the configured pool or running production
+filesystem migrations. It then constructs the encrypted secret store and, when
+existing encrypted secret or credential-account records are present,
+authenticates one of those records with the configured master key before making
+any filesystem mutation. An empty store has no existing ciphertext against
+which a key can be checked. Connection, migration, or key-verification failures
+leave the legacy source in place and do not publish `layout.toml`.
 
 Released tenant/user skill trees under
 `tenants/<tenant>/users/<user>/skills/` remain in the retained adoption

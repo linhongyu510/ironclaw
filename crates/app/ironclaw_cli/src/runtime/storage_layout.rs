@@ -435,7 +435,7 @@ pub(crate) fn adopt_layout_with_store_verification(
     options: AdoptOptions,
     store_verification: CanonicalStoreVerification,
 ) -> anyhow::Result<()> {
-    require_operator_confirmations(&options)?;
+    validate_adopt_options(&options)?;
     let home_path = home.path();
     let paths = RebornStoragePaths::from_home(home);
     let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
@@ -506,6 +506,10 @@ pub(crate) fn adopt_layout_with_store_verification(
         store_verification,
     )?;
     Ok(())
+}
+
+pub(crate) fn validate_adopt_options(options: &AdoptOptions) -> anyhow::Result<()> {
+    require_operator_confirmations(options)
 }
 
 fn require_operator_confirmations(options: &AdoptOptions) -> anyhow::Result<()> {
@@ -635,6 +639,13 @@ fn reconcile_staged_install(
         paths.system_root(),
     )?;
     reconcile_staged_workspace(paths, workspace, &staging.join("workspace-leaf"))?;
+    let home = paths.workspace_root().parent().ok_or_else(|| {
+        anyhow!(
+            "canonical workspaces namespace has no installation parent: {}",
+            paths.workspace_root().display()
+        )
+    })?;
+    create_or_validate_direct_child(home, paths.workspace_root())?;
     Ok(())
 }
 
@@ -739,6 +750,7 @@ fn verify_completed_staged_install(
     if let Some(workspace) = workspace {
         validate_ordinary_tree(&workspace_leaf_path(paths, workspace))?;
     }
+    require_ordinary_directory(paths.workspace_root())?;
     Ok(())
 }
 
@@ -1313,8 +1325,7 @@ fn initialize_fresh_layout(
         paths.workspace_root(),
         paths.runtime_root(),
     ] {
-        fs::create_dir(path)
-            .with_context(|| format!("create canonical namespace {}", path.display()))?;
+        create_or_validate_direct_child(home, path)?;
         sync_directory(path)?;
     }
     write_manifest_last(home, &LayoutManifest::new(requirement))
@@ -2540,6 +2551,31 @@ mod tests {
         assert!(temp.path().join("system").is_dir());
         assert!(temp.path().join("workspaces").is_dir());
         assert!(temp.path().join("runtime").is_dir());
+    }
+
+    #[test]
+    fn fresh_home_initialization_resumes_after_partial_empty_namespace_creation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        fs::create_dir(temp.path().join("state")).expect("interrupted state namespace");
+        fs::create_dir(temp.path().join("system")).expect("interrupted system namespace");
+
+        let paths = ensure_ready_layout(&home, embedded_single_user_requirement())
+            .expect("fresh initialization resumes idempotently");
+
+        for path in [
+            paths.state_root(),
+            paths.system_root(),
+            paths.workspace_root(),
+            paths.runtime_root(),
+        ] {
+            assert!(
+                path.is_dir(),
+                "canonical namespace exists: {}",
+                path.display()
+            );
+        }
+        assert!(temp.path().join("layout.toml").is_file());
     }
 
     #[test]

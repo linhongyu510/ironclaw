@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead as _, BufReader};
+use std::process::{Command, Stdio};
 
 use ironclaw_approvals::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey,
 };
+use ironclaw_composition::open_standalone_secret_store;
 use ironclaw_composition::test_support::{
     open_standalone_approval_settings_stores_for_test,
     open_standalone_extension_installation_store_for_test,
-    open_standalone_skill_management_after_adoption_for_test,
-    open_standalone_thread_service_for_test,
+    open_standalone_skill_management_for_test, open_standalone_thread_service_for_test,
 };
-use ironclaw_composition::{LegacySkillSnapshotSource, open_standalone_secret_store};
 use ironclaw_config::RebornStoragePaths;
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord, ExtensionManifestRef,
@@ -45,12 +45,52 @@ fn move_children(source: &std::path::Path, destination: &std::path::Path) {
     }
 }
 
+fn wait_for_serve_banner(child: &mut std::process::Child) {
+    let stderr = child.stderr.take().expect("serve stderr is piped");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut captured = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {captured}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not bind after adoption; stderr: {captured}");
+        }
+        match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                captured.push_str(&line);
+                captured.push('\n');
+                if captured.contains("ironclaw: WebChat v2 listener") {
+                    return;
+                }
+            }
+            Ok(Err(error)) => panic!("read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before binding: {captured}");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn released_local_dev_adoption_preserves_durable_state_and_user_isolation() {
     const THREAD_MESSAGE: &str = "ADOPTED_THREAD_MESSAGE_SENTINEL";
     const HOST_SECRET: &str = "ADOPTED_HOST_SECRET_SENTINEL";
     const USER_SKILL: &str = "adopted-user-skill";
     const USER_SKILL_CONTENT: &str = "---\nname: adopted-user-skill\ndescription: adopted user skill\n---\n\nADOPTED_USER_SKILL_SENTINEL";
+    const UNSCOPED_SKILL: &str = "adopted-unscoped-skill";
+    const UNSCOPED_SKILL_CONTENT: &str = "---\nname: adopted-unscoped-skill\ndescription: adopted unscoped skill\n---\n\nADOPTED_UNSCOPED_SKILL_SENTINEL";
 
     let temp = tempfile::tempdir().expect("temporary adoption fixture");
     let seed_root = temp.path().join("seed-installation");
@@ -227,7 +267,11 @@ output_schema_ref = "schemas/read.output.json"
         .join("skills/adopted-system-skill/SKILL.md");
     fs::create_dir_all(system_skill_path.parent().expect("system skill parent"))
         .expect("create system skill directory");
-    fs::write(&system_skill_path, "ADOPTED_SYSTEM_SKILL_SENTINEL").expect("seed system skill");
+    fs::write(
+        &system_skill_path,
+        "---\nname: adopted-system-skill\ndescription: adopted system skill\n---\n\nADOPTED_SYSTEM_SKILL_SENTINEL",
+    )
+    .expect("seed system skill");
 
     drop(settings);
     drop(extensions);
@@ -248,6 +292,18 @@ output_schema_ref = "schemas/read.output.json"
     fs::create_dir_all(legacy_user_skill.parent().expect("legacy skill parent"))
         .expect("create released tenant/user skill tree");
     fs::write(&legacy_user_skill, USER_SKILL_CONTENT).expect("seed released user skill");
+    let legacy_unscoped_skill = legacy_root
+        .join("skills")
+        .join(UNSCOPED_SKILL)
+        .join("SKILL.md");
+    fs::create_dir_all(
+        legacy_unscoped_skill
+            .parent()
+            .expect("legacy unscoped skill parent"),
+    )
+    .expect("create released unscoped skill tree");
+    fs::write(&legacy_unscoped_skill, UNSCOPED_SKILL_CONTENT)
+        .expect("seed released unscoped skill");
 
     let output = Command::new(reborn_bin())
         .args([
@@ -267,11 +323,29 @@ output_schema_ref = "schemas/read.output.json"
     );
 
     let adopted_paths = RebornStoragePaths::from_installation_root(&reborn_home);
-    // A normal composition boot establishes the non-migrated empty namespaces
-    // before mounting them. The focused reopen helpers intentionally assume
-    // that bootstrap precondition and only exercise durable store wiring.
-    fs::create_dir_all(adopted_paths.workspace_root()).expect("bootstrap workspaces namespace");
-    fs::create_dir_all(adopted_paths.runtime_root()).expect("bootstrap runtime namespace");
+    let mut serve = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env_clear()
+        .env("HOME", temp.path().join("isolated-home"))
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", owner.as_str())
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "adoption-test-token-0123456789abcdef",
+        )
+        .env("LLM_USE_CODEX_AUTH", "false")
+        .env("LLM_BACKEND", "")
+        .env("LLM_MODEL", "")
+        .env("OPENAI_API_KEY", "")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("start a fresh production serve process after adoption");
+    wait_for_serve_banner(&mut serve);
+    serve.kill().expect("stop fresh serve process");
+    serve.wait().expect("reap fresh serve process");
     let reopened_threads = open_standalone_thread_service_for_test(&reborn_home)
         .await
         .expect("fresh thread-service reopen after adoption");
@@ -343,23 +417,19 @@ output_schema_ref = "schemas/read.output.json"
         .expect("read adopted prompt"),
         "ADOPTED_SYSTEM_PROMPT_SENTINEL"
     );
-    assert_eq!(
+    assert!(
         fs::read_to_string(
             adopted_paths
                 .system_root()
                 .join("skills/adopted-system-skill/SKILL.md"),
         )
-        .expect("read adopted system skill"),
-        "ADOPTED_SYSTEM_SKILL_SENTINEL"
+        .expect("read adopted system skill")
+        .contains("ADOPTED_SYSTEM_SKILL_SENTINEL")
     );
 
-    let reopened_skills = open_standalone_skill_management_after_adoption_for_test(
-        &reborn_home,
-        owner,
-        LegacySkillSnapshotSource::LocalDev,
-    )
-    .await
-    .expect("run the production boot importer and reopen skills");
+    let reopened_skills = open_standalone_skill_management_for_test(&reborn_home, owner.clone())
+        .await
+        .expect("reopen skills after the production boot importer ran");
     let user_skill = reopened_skills
         .read_content_for_scope(resource_scope, USER_SKILL)
         .await
@@ -372,4 +442,18 @@ output_schema_ref = "schemas/read.output.json"
             .is_err(),
         "a sibling user must not read the adopted tenant/user skill"
     );
+    let default_scope = ResourceScope {
+        tenant_id: TenantId::new("default").expect("released default tenant"),
+        user_id: owner,
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: Default::default(),
+    };
+    let unscoped_skill = reopened_skills
+        .read_content_for_scope(default_scope, UNSCOPED_SKILL)
+        .await
+        .expect("released unscoped skill keeps its production owner mapping");
+    assert_eq!(unscoped_skill.content, UNSCOPED_SKILL_CONTENT);
 }

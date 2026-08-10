@@ -134,11 +134,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// production wiring and inline regression coverage to the current main tree.
 /// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
 /// manifest ceiling and observed value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
+/// Union re-measured 41_582 -> 42_455 on 2026-08-10 for the profile-stable
+/// durable-layout assembly and adoption-time encrypted-state verification.
+/// The budget ceiling is pinned to this exact combined-tree count.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_455;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
-/// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 827;
+/// 830 Arc<dyn> (governed prod, excl slack/extension_host)".
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 830;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

@@ -1403,6 +1403,12 @@ pub(crate) fn adopt_storage_layout(
     if profile == RebornProfile::MigrationDryRun {
         return ensure_ready_layout_for_profile(config, profile).map(|_| ());
     }
+    let options = storage_layout::AdoptOptions {
+        confirm_processes_stopped,
+        confirm_backup_snapshot,
+        workspace_import,
+    };
+    storage_layout::validate_adopt_options(&options)?;
     let store_verification = match requirement.durable_state {
         ironclaw_config::DurableStateKind::EmbeddedLibSql => {
             storage_layout::CanonicalStoreVerification::EmbeddedLibSql
@@ -1435,11 +1441,7 @@ pub(crate) fn adopt_storage_layout(
     storage_layout::adopt_layout_with_store_verification(
         config.home(),
         requirement,
-        storage_layout::AdoptOptions {
-            confirm_processes_stopped,
-            confirm_backup_snapshot,
-            workspace_import,
-        },
+        options,
         store_verification,
     )?;
     // The adoption command does not start a runtime. Validate the manifest
@@ -3130,6 +3132,14 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         std::fs::write(&legacy_prompt, b"operator prompt").expect("legacy prompt");
 
         let context = crate::context::RebornCliContext::from_boot_config(config);
+        let confirmation_error = super::adopt_storage_layout(&context, false, false, None)
+            .expect_err("missing confirmations fail before PostgreSQL migrations");
+        assert!(
+            confirmation_error
+                .to_string()
+                .contains("--confirm-processes-stopped"),
+            "operator confirmation must precede external store access: {confirmation_error:#}"
+        );
         let error = super::adopt_storage_layout(&context, true, true, None)
             .expect_err("unreachable PostgreSQL must fail before adoption starts");
 

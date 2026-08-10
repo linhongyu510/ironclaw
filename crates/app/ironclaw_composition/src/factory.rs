@@ -812,13 +812,16 @@ pub async fn verify_hosted_postgres_store_for_adoption(
     let pool = open_postgres_pool_from_source(pool_source)?;
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
     filesystem.run_migrations().await?;
-    let scoped = crate::wrap_scoped(filesystem);
-    let _ = build_secret_store(
+    let scoped = crate::wrap_scoped(Arc::clone(&filesystem));
+    let (_store, crypto) = build_secret_store(
         Path::new("external-postgres"),
         scoped,
         Some(secret_master_key),
     )
     .await?;
+    ironclaw_secrets::verify_existing_encrypted_records(filesystem.as_ref(), crypto.as_ref())
+        .await
+        .map_err(RebornBuildError::SecretStateVerification)?;
     Ok(())
 }
 

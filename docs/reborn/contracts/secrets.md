@@ -100,8 +100,12 @@ implementations. Backend selection is now a property of the filesystem layer;
 filesystem paths, with tenant id projected as a defense-in-depth index. Store
 readiness must fail closed when the configured master key is missing or
 malformed. The earlier filesystem-stored key-check sentinel was removed with the
-tenant-aware `ScopedFilesystem` rework; master-key mismatch is verified on the
-first per-tenant decrypt operation.
+tenant-aware `ScopedFilesystem` rework. Normal runtime access verifies a
+master-key mismatch on the first per-tenant decrypt operation. The offline
+storage-adoption path additionally performs a bounded raw-store scan and
+authenticates one existing encrypted secret or credential-account record before
+it is allowed to publish the canonical layout manifest; an empty store has no
+prior ciphertext available for that check.
 
 The shared Reborn runtime HTTP egress service uses this surface to:
 

@@ -18,7 +18,7 @@ pub use placeholder::{
     CREDENTIAL_PLACEHOLDER_PREFIX, CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderOwner,
     CredentialPlaceholderRegistry, CredentialPlaceholderToken, CredentialSessionLease,
 };
-pub use secret_store::{CredentialBroker, SecretStore};
+pub use secret_store::{CredentialBroker, SecretStore, verify_existing_encrypted_records};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

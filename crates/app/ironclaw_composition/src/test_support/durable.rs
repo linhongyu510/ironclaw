@@ -53,22 +53,6 @@ pub async fn open_standalone_skill_management_for_test(
     .await
 }
 
-/// Reopen the production skill manager after a completed layout adoption and
-/// run the same one-time legacy snapshot importer as normal boot.
-#[cfg(feature = "test-support")]
-pub async fn open_standalone_skill_management_after_adoption_for_test(
-    storage_root: &std::path::Path,
-    owner_user_id: ironclaw_host_api::ids::UserId,
-    source: crate::LegacySkillSnapshotSource,
-) -> Result<std::sync::Arc<ironclaw_skills::ScopedSkillManagementPort>, crate::RebornBuildError> {
-    crate::factory::test_support::open_standalone_skill_management_after_adoption_for_test(
-        storage_root,
-        owner_user_id,
-        source,
-    )
-    .await
-}
-
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
 /// `ApprovalRequestStore` at an existing standalone `storage_root`. Mirrors
 /// [`open_standalone_extension_installation_store_for_test`] for approval-gate

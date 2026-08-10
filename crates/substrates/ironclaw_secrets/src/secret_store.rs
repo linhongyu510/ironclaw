@@ -84,6 +84,7 @@ const SECRET_RECORD_KIND: &str = "secret_record";
 const SECRET_LEASE_KIND: &str = "secret_lease";
 const CREDENTIAL_ACCOUNT_KIND: &str = "credential_account";
 const CREDENTIAL_SESSION_KIND: &str = "credential_session";
+const MASTER_KEY_VERIFICATION_RECORD_LIMIT: u64 = 100_000;
 
 // -- Serialized DTOs --------------------------------------------------------
 //
@@ -139,6 +140,70 @@ struct StoredSession {
     encrypted_payload: Vec<u8>,
     key_salt: Vec<u8>,
     uses: u64,
+}
+
+/// Verify that the configured master key authenticates existing encrypted
+/// durable state without returning any plaintext to the caller.
+///
+/// One authenticated ciphertext is sufficient because every secret and
+/// credential record derives from the same installation master key. An empty
+/// store has no prior ciphertext against which a key can be checked. The scan
+/// is bounded and fails closed if the first encrypted record cannot be found
+/// within the supported installation-size envelope.
+pub async fn verify_existing_encrypted_records<F>(
+    filesystem: &F,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretStoreError>
+where
+    F: RootFilesystem,
+{
+    let tenants_root = VirtualPath::new("/tenants").map_err(host_api_to_secret_store_error)?;
+    let mut offset = 0_u64;
+    loop {
+        if offset >= MASTER_KEY_VERIFICATION_RECORD_LIMIT {
+            return Err(SecretStoreError::StoreUnavailable {
+                reason: "encrypted-record master-key verification exceeded its bounded scan"
+                    .to_string(),
+            });
+        }
+        let remaining = MASTER_KEY_VERIFICATION_RECORD_LIMIT - offset;
+        let limit = u64::from(Page::MAX_LIMIT).min(remaining) as u32;
+        let entries = filesystem
+            .query(&tenants_root, &Filter::All, Page::new(offset, limit))
+            .await
+            .map_err(fs_to_secret_store_error)?;
+        let entry_count = entries.len();
+        for versioned in entries {
+            match versioned.entry.kind.as_ref().map(RecordKind::as_str) {
+                Some(SECRET_RECORD_KIND) => {
+                    let stored: StoredSecret = deserialize_secret(&versioned.entry.body)?;
+                    let aad = filesystem_secret_aad(&stored.scope, &stored.handle);
+                    let _ = crypto
+                        .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
+                        .map_err(secret_error_to_store_error)?;
+                    return Ok(());
+                }
+                Some(CREDENTIAL_ACCOUNT_KIND) => {
+                    let stored: StoredAccount = deserialize_credential(&versioned.entry.body)
+                        .map_err(|error| SecretStoreError::StoreUnavailable {
+                            reason: format!(
+                                "failed to inspect encrypted credential record: {error}"
+                            ),
+                        })?;
+                    let aad = credential_account_aad(&stored.scope, &stored.id);
+                    let _ = crypto
+                        .decrypt(&stored.encrypted_payload, &stored.key_salt, &aad)
+                        .map_err(secret_error_to_store_error)?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if entry_count < limit as usize {
+            return Ok(());
+        }
+        offset = offset.saturating_add(entry_count as u64);
+    }
 }
 
 // CredentialSession is intentionally not `Serialize`/`Deserialize` (its fields
@@ -1531,6 +1596,71 @@ mod tests {
             ))
             .expect("master key length is valid"),
         )
+    }
+
+    #[tokio::test]
+    async fn existing_encrypted_records_reject_a_different_valid_master_key() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        let store = SecretStore::new(scoped, test_crypto());
+        store
+            .put(
+                sample_scope("test", "test"),
+                SecretHandle::new("verification-sentinel").expect("secret handle"),
+                SecretMaterial::from("encrypted-value".to_string()),
+                None,
+            )
+            .await
+            .expect("seed encrypted record");
+
+        verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect("the original key authenticates existing ciphertext");
+        let wrong_key = SecretsCrypto::new(SecretMaterial::from(
+            "fedcba9876543210fedcba9876543210".to_string(),
+        ))
+        .expect("different valid master key");
+        let error = verify_existing_encrypted_records(backend.as_ref(), &wrong_key)
+            .await
+            .expect_err("a different valid key must fail before adoption");
+        assert!(
+            error.to_string().contains("cryptography"),
+            "error remains redacted and classed as a crypto failure: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_encrypted_credential_accounts_reject_a_different_valid_master_key() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(
+            Arc::clone(&backend),
+            "/tenants/tenant-a/users/user-a/secrets",
+        );
+        let broker = CredentialBroker::new(scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        broker
+            .put_account(sample_account(
+                scope,
+                CredentialAccountId::new("verification-account").expect("account id"),
+                SecretHandle::new("provider-key").expect("secret handle"),
+            ))
+            .await
+            .expect("seed encrypted credential account");
+
+        verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect("the original key authenticates existing credential ciphertext");
+        let wrong_key = SecretsCrypto::new(SecretMaterial::from(
+            "fedcba9876543210fedcba9876543210".to_string(),
+        ))
+        .expect("different valid master key");
+        let error = verify_existing_encrypted_records(backend.as_ref(), &wrong_key)
+            .await
+            .expect_err("a different valid key must fail before adoption");
+        assert!(
+            error.to_string().contains("cryptography"),
+            "error remains redacted and classed as a crypto failure: {error}"
+        );
     }
 
     /// Build a `ScopedFilesystem` over `backend` whose `/secrets` alias
