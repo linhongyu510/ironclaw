@@ -598,6 +598,7 @@ pub struct RebornRuntime {
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    pub(crate) session_inbound_ledger: Arc<dyn ironclaw_assistant::IdempotencyLedger>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -3930,6 +3931,25 @@ pub(crate) async fn build_runtime_with_resource_governor(
         projection_services
     };
 
+    // Durable idempotency ledger for the authenticated-session inbound lane
+    // (browser + API transports riding `submit_turn`): the session half of the
+    // same durable-admission discipline the per-extension channel ledgers
+    // provide, on the same filesystem substrate.
+    let session_inbound_ledger = ironclaw_assistant::build_session_inbound_ledger(
+        &(services.extension_filesystem.clone() as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        &validated_identity.tenant_id,
+        ironclaw_host_api::resource::ResourceScope {
+            tenant_id: validated_identity.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(validated_identity.agent_id.clone()),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        },
+    )
+    .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
+
     let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
         &services,
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
@@ -4291,6 +4311,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        session_inbound_ledger,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),

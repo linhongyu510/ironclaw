@@ -117,7 +117,7 @@ pub use automation_thread_metadata::{
 pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
-    RebornChannelWorkflowServices, channel_conversation_services,
+    RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
@@ -152,7 +152,8 @@ pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate
 // `ironclaw_product_contracts::actor_identity` (WS2.5).
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductInstallationScope, SessionLaneRejectingBindingResolver, StaticProductActorUserResolver,
+    StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
@@ -179,6 +180,7 @@ pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    SessionSkillActivationClearer, SessionSkillActivationPorts, SessionSkillActivationRecorder,
 };
 // **No foreign re-export facade.** This crate re-exports only what it
 // *declares*. The 144-symbol block that used to sit here — the channel-adapter,

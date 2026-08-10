@@ -73,14 +73,13 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceValidationCode,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    EnsureThreadRequest, SessionThreadError, SessionThreadRecord, SessionThreadService,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
     GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+    TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
@@ -150,6 +149,9 @@ mod types;
 mod views;
 mod web_push;
 
+use crate::conversation_binding::SessionLaneRejectingBindingResolver;
+use crate::inbound_turn::{DefaultInboundTurnService, SessionSkillActivationPorts};
+use crate::workflow::DefaultProductSurface;
 pub use admin_configuration::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
@@ -166,9 +168,13 @@ pub use admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 pub use ironclaw_product_contracts::surface::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+    ChannelInboundSurfaceTrust,
 };
 pub use trace_credits::{
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
@@ -2233,6 +2239,7 @@ pub struct RebornServices<
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     web_push_service: Arc<dyn WebPushProductService>,
+    session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2317,6 +2324,9 @@ where
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
             web_push_service: Arc::new(UnsupportedWebPushProductService),
+            session_inbound_ledger: Arc::new(
+                crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
+            ),
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
@@ -2754,6 +2764,17 @@ where
         self
     }
 
+    /// Swap the session-lane inbound idempotency ledger. Production wires the
+    /// durable filesystem ledger (`build_session_inbound_ledger`); the default
+    /// is process-local, for standalone/tests only.
+    pub fn with_session_inbound_ledger(
+        mut self,
+        ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
+    ) -> Self {
+        self.session_inbound_ledger = ledger;
+        self
+    }
+
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
         F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError>
@@ -2779,29 +2800,6 @@ where
         self.skill_activation_recorder = Some(Arc::new(recorder));
         self.skill_activation_clearer = Some(Arc::new(clearer));
         self
-    }
-
-    fn record_skill_activation_message(
-        &self,
-        scope: &TurnScope,
-        accepted_message_ref: &AcceptedMessageRef,
-        content: &str,
-    ) -> Result<(), ProductSurfaceError> {
-        if let Some(recorder) = &self.skill_activation_recorder {
-            recorder(scope, accepted_message_ref, content)?;
-        }
-        Ok(())
-    }
-
-    fn clear_skill_activation_message(
-        &self,
-        scope: &TurnScope,
-        accepted_message_ref: &AcceptedMessageRef,
-    ) -> Result<(), ProductSurfaceError> {
-        if let Some(clearer) = &self.skill_activation_clearer {
-            clearer(scope, accepted_message_ref)?;
-        }
-        Ok(())
     }
 
     /// Authorize the caller for admin operations. An env-bearer operator is an
@@ -3690,6 +3688,14 @@ where
         Ok(RebornCreateThreadResponse { thread })
     }
 
+    /// Submit one session user message through the unified inbound core.
+    ///
+    /// This is the authenticated-session lane of the same admission pipeline
+    /// webhook channels ride: durable idempotency ledger → owned-thread
+    /// binding → `TurnCoordinator::submit_turn`. The caller owns the thread
+    /// (never created implicitly), `client_action_id` replay is preserved —
+    /// including messages accepted under the legacy binding-id schemes — and
+    /// the response wire shape is unchanged.
     pub async fn submit_turn(
         &self,
         caller: ProductSurfaceCaller,
@@ -3709,300 +3715,176 @@ where
         else {
             return Err(ProductSurfaceError::internal_invariant());
         };
-
-        let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        let thread_id = scope.thread_id.clone();
+        // Serialize with thread deletion (delete_thread holds the same
+        // per-thread lock across its active-run probe + delete).
         let _thread_operation_guard = self.lock_thread_operation(&scope).await;
-        let source_binding_id = webui_source_binding_id(&scope, &actor);
-        let external_event_id = client_action_id.as_str().to_string();
 
-        let handoff = if let Some((replay, replay_source_binding_id)) = replay_webui_send_message(
-            &*self.thread_service,
-            &thread_scope,
-            &scope,
-            &actor,
-            &external_event_id,
-        )
-        .await?
-        {
-            if replay.thread_id != scope.thread_id {
-                return Err(ProductSurfaceError::from_status_kind(
-                    ProductSurfaceErrorCode::Conflict,
-                    ProductSurfaceErrorKind::Duplicate,
-                    409,
-                    false,
-                ));
-            }
-            match replay.status {
-                MessageStatus::Submitted => {
-                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
-                    let state = self
-                        .turn_coordinator
-                        .get_run_state(GetRunStateRequest {
-                            scope: scope.clone(),
-                            run_id,
-                        })
-                        .await
-                        .map_err(map_turn_error)?;
-                    return Ok(RebornSubmitTurnResponse::AlreadySubmitted {
-                        thread_id: replay.thread_id,
-                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
-                        run_id,
-                        status: state.status,
-                        event_cursor: state.event_cursor,
-                    });
-                }
-                MessageStatus::RejectedBusy => {
-                    // Idempotent re-rejection: the original busy rejection was
-                    // lost before it reached the client.  The blocking run may
-                    // already be finished, so we cannot recover its run-id or
-                    // cursor.  Return a RejectedBusy with None run metadata so
-                    // the client knows to resend rather than treating this as
-                    // a new submission.  Fabricating a run-id or status here
-                    // would give the client a reference it cannot query.
-                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                        thread_id: replay.thread_id,
-                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
-                        active_run_id: None,
-                        status: None,
-                        event_cursor: None,
-                        notice: NOTICE_BUSY_GENERIC.to_string(),
-                    });
-                }
-                MessageStatus::Queued => {
-                    // Crash-orphan recovery: re-enqueue idempotently before
-                    // replaying `DeferredBusy` (see `steering.rs`); a queued
-                    // replay whose run is gone settles as `RejectedBusy`.
-                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
-                    let accepted_ref = accepted_message_ref(replay.message_id.to_string())?;
-                    match crate::steering::readmit_queued_steering(
-                        &*self.turn_coordinator,
-                        self.input_enqueue.as_ref(),
-                        &*self.thread_service,
-                        crate::steering::SteeringAdmissionRequest {
-                            turn_scope: scope.clone(),
-                            thread_scope: thread_scope.clone(),
-                            message_id: replay.message_id,
-                            accepted_message_ref: accepted_ref.clone(),
-                            active_run_id: run_id,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
-                            return Ok(RebornSubmitTurnResponse::DeferredBusy {
-                                thread_id: replay.thread_id,
-                                accepted_message_ref: accepted_ref,
-                                active_run_id: run_id,
-                                status: run.status,
-                                event_cursor: run.event_cursor,
-                                notice: rejected_busy_notice(run.status),
-                            });
-                        }
-                        Ok(crate::steering::SteeringAdmission::Rejected) => {
-                            return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                                thread_id: replay.thread_id,
-                                accepted_message_ref: accepted_ref,
-                                active_run_id: Some(run_id),
-                                status: None,
-                                event_cursor: None,
-                                notice: NOTICE_BUSY_GENERIC.to_string(),
-                            });
-                        }
-                        Err(error) => {
-                            return Err(steering_admission_error(
-                                error,
-                                &replay.thread_id,
-                                replay.message_id,
-                                run_id,
-                            ));
-                        }
-                    }
-                }
-                MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
-                    thread_id: replay.thread_id,
-                    message_id: replay.message_id,
-                    actor_id: actor.user_id.as_str().to_string(),
-                    source_binding_id: replay
-                        .source_binding_id
-                        .unwrap_or_else(|| replay_source_binding_id.clone()),
-                    reply_target_binding_id: replay
-                        .reply_target_binding_id
-                        .unwrap_or(replay_source_binding_id),
-                },
-                _ => {
-                    return Err(ProductSurfaceError::from_status(
-                        ProductSurfaceErrorCode::Conflict,
-                        409,
-                        false,
-                    ));
-                }
-            }
-        } else {
-            // Land attachment bytes (if any) into project storage before the
-            // message is accepted, recording each as a transcript reference.
-            // The stable per-message external_event_id is the path's message
-            // segment, so a same-day retry re-lands at the same path; the lander
-            // also partitions by UTC day, so a retry that crosses midnight UTC
-            // lands under the new day's directory (the earlier bytes are left
-            // addressable but unreferenced). Idempotency is enforced at message
-            // acceptance, not by the storage path.
-            let message_content = if attachments.is_empty() {
-                MessageContent::text(content.clone())
-            } else {
-                let lander = self
-                    .inbound_attachments
-                    .as_ref()
-                    .ok_or_else(|| ProductSurfaceError::service_unavailable(false))?;
-                let refs = lander
-                    .land(&thread_scope, &external_event_id, attachments)
-                    .await?;
-                MessageContent::with_attachments(content.clone(), refs)
-            };
-            let accepted = self
-                .thread_service
-                .accept_inbound_message(AcceptInboundMessageRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: scope.thread_id.clone(),
-                    actor_id: actor.user_id.as_str().to_string(),
-                    source_binding_id: Some(source_binding_id.clone()),
-                    reply_target_binding_id: Some(source_binding_id.clone()),
-                    external_event_id: Some(external_event_id),
-                    content: message_content,
-                })
-                .await
-                .map_err(map_thread_error)?;
-            AcceptedWebUiMessage {
-                thread_id: accepted.thread_id,
-                message_id: accepted.message_id,
-                actor_id: actor.user_id.as_str().to_string(),
-                source_binding_id: source_binding_id.clone(),
-                reply_target_binding_id: source_binding_id.clone(),
-            }
-        };
-
-        let accepted_message_ref = accepted_message_ref(handoff.message_id.to_string())?;
-        let source_binding_ref =
-            webui_source_binding_ref_from_raw("webui-src", &handoff.source_binding_id)?;
-        let reply_target_binding_ref = webui_reply_target_binding_ref_from_raw(
-            "webui-reply",
-            &handoff.reply_target_binding_id,
-        )?;
-        let product_context =
-            ironclaw_turns::product_context::resolve_web_ui(scope.product_owner(&actor));
-        let submit = SubmitTurnRequest {
+        let session_caller = ProductSurfaceCaller::new(
+            scope.tenant_id.clone(),
+            actor.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+        );
+        let neutral = session_inbound_request(
+            session_caller,
+            &thread_id,
+            &client_action_id,
+            content,
             requested_model,
-            scope: scope.clone(),
-            actor,
-            accepted_message_ref: accepted_message_ref.clone(),
-            source_binding_ref,
-            reply_target_binding_ref,
-            requested_run_profile: None,
-            idempotency_key: client_action_id.clone(),
-            received_at: Utc::now(),
-            requested_run_id: None,
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: Some(product_context),
+        )?;
+        let core = self.session_inbound_core();
+        let outcome = if attachments.is_empty() {
+            core.admit_channel_inbound(neutral).await
+        } else {
+            core.admit_channel_inbound_with_inline_attachments(neutral, attachments)
+                .await
         };
+        self.session_submit_response(&scope, &thread_id, outcome)
+            .await
+    }
 
-        self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
-        match self.turn_coordinator.submit_turn(submit).await {
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id,
-                run_id,
-                status,
-                resolved_run_profile_id,
-                resolved_run_profile_version,
-                event_cursor,
+    /// The session-lane inbound core: the same `DefaultProductSurface`
+    /// implementation webhook channels run, constructed over this service's
+    /// own ports plus the durable session idempotency ledger. Built per call
+    /// from `Arc` handles (cheap), so builder-wired ports are always current.
+    fn session_inbound_core(&self) -> DefaultProductSurface {
+        let mut inbound = DefaultInboundTurnService::new(
+            SessionLaneRejectingBindingResolver,
+            Arc::clone(&self.thread_service),
+            Arc::clone(&self.turn_coordinator),
+            Arc::clone(&self.input_enqueue),
+        );
+        if let Some(lander) = &self.inbound_attachments {
+            inbound = inbound.with_inbound_attachments(Arc::clone(lander));
+        }
+        if let Some(recorder) = &self.skill_activation_recorder {
+            let clearer: Arc<SkillActivationClearer> = match &self.skill_activation_clearer {
+                Some(clearer) => Arc::clone(clearer),
+                None => Arc::new(|_: &TurnScope, _: &AcceptedMessageRef| Ok(())),
+            };
+            inbound = inbound.with_session_skill_activation(SessionSkillActivationPorts {
+                recorder: Arc::clone(recorder),
+                clearer,
+            });
+        }
+        DefaultProductSurface::new(
+            Arc::new(inbound),
+            Arc::clone(&self.session_inbound_ledger),
+            Arc::new(SessionLaneRejectingBindingResolver),
+        )
+    }
+
+    async fn session_submit_response(
+        &self,
+        scope: &TurnScope,
+        thread_id: &ThreadId,
+        outcome: ChannelInboundSurfaceOutcome,
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
+        let ack = match outcome {
+            ChannelInboundSurfaceOutcome::Admitted(admission) => admission.ack,
+            ChannelInboundSurfaceOutcome::Invalid(error) => return Err(map_adapter_error(error)),
+            ChannelInboundSurfaceOutcome::Rejected(rejected) => {
+                return Err(map_adapter_error(rejected.error));
+            }
+        };
+        // A ledger replay wraps the settled outcome; unwrap to the prior ack
+        // and render it AS a replay — never as a fresh submission, whatever
+        // metadata the stored ack carries.
+        let mut ack = ack;
+        let mut replayed = false;
+        while let ProductInboundAck::Duplicate { prior } = ack {
+            ack = *prior;
+            replayed = true;
+        }
+        match ack {
+            ProductInboundAck::Accepted {
+                accepted_message_ref,
+                submitted_run_id,
+                submission: Some(submission),
+            } if !replayed => Ok(RebornSubmitTurnResponse::Submitted {
+                thread_id: thread_id.clone(),
+                accepted_message_ref,
+                turn_id: submission.turn_id,
+                run_id: submitted_run_id,
+                status: submission.status,
+                resolved_run_profile_id: submission.resolved_run_profile_id,
+                resolved_run_profile_version: submission.resolved_run_profile_version,
+                event_cursor: submission.event_cursor,
+            }),
+            ProductInboundAck::Accepted {
+                accepted_message_ref,
+                submitted_run_id,
                 ..
-            }) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    run_id = %run_id,
-                    "webui submit_turn accepted: turn run enqueued"
-                );
-                mark_message_submitted_or_replay(
-                    &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
-                    turn_id.to_string(),
-                    run_id.to_string(),
-                )
-                .await?;
-
-                Ok(RebornSubmitTurnResponse::Submitted {
-                    thread_id: handoff.thread_id,
+            } => {
+                // A replayed submission reports the run's CURRENT state, the
+                // same read the dedicated browser path always performed.
+                let state = self
+                    .turn_coordinator
+                    .get_run_state(GetRunStateRequest {
+                        scope: scope.clone(),
+                        run_id: submitted_run_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornSubmitTurnResponse::AlreadySubmitted {
+                    thread_id: thread_id.clone(),
                     accepted_message_ref,
-                    turn_id: turn_id.to_string(),
-                    run_id,
-                    status,
-                    resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
-                    resolved_run_profile_version: resolved_run_profile_version.as_u64(),
-                    event_cursor,
+                    run_id: submitted_run_id,
+                    status: state.status,
+                    event_cursor: state.event_cursor,
                 })
             }
-            Err(TurnError::ThreadBusy(busy)) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    active_run_id = ?busy.active_run_id,
-                    "webui submit_turn deferred: thread busy with an active run"
-                );
-                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                match crate::steering::admit_busy_steering(
-                    &*self.turn_coordinator,
-                    self.input_enqueue.as_ref(),
-                    &*self.thread_service,
-                    crate::steering::SteeringAdmissionRequest {
-                        turn_scope: scope.clone(),
-                        thread_scope: thread_scope.clone(),
-                        message_id: handoff.message_id,
-                        accepted_message_ref: accepted_message_ref.clone(),
-                        active_run_id: busy.active_run_id,
-                    },
-                )
-                .await
-                {
-                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
-                        let notice = rejected_busy_notice(run.status);
-                        Ok(RebornSubmitTurnResponse::DeferredBusy {
-                            thread_id: handoff.thread_id,
-                            accepted_message_ref,
-                            active_run_id: busy.active_run_id,
-                            status: run.status,
-                            event_cursor: run.event_cursor,
-                            notice,
-                        })
-                    }
-                    Ok(crate::steering::SteeringAdmission::Rejected) => {
-                        let notice = rejected_busy_notice(busy.status);
-                        Ok(RebornSubmitTurnResponse::RejectedBusy {
-                            thread_id: handoff.thread_id,
-                            accepted_message_ref,
-                            active_run_id: Some(busy.active_run_id),
-                            status: Some(busy.status),
-                            event_cursor: Some(busy.event_cursor),
-                            notice,
-                        })
-                    }
-                    Err(error) => Err(steering_admission_error(
-                        error,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                        busy.active_run_id,
-                    )),
-                }
+            ProductInboundAck::RejectedBusy {
+                accepted_message_ref,
+                active_run_id,
+                busy,
+            } => {
+                // A ledger-replayed busy rejection reports no run metadata:
+                // the original blocking run may already be gone, and handing
+                // the client a stale reference invites dead lookups. Fresh
+                // rejections keep the decision-time snapshot.
+                let (active_run_id, busy) = if replayed {
+                    (None, None)
+                } else {
+                    (active_run_id, busy)
+                };
+                let notice = busy
+                    .as_deref()
+                    .map(|snapshot| rejected_busy_notice(snapshot.status))
+                    .unwrap_or_else(|| NOTICE_BUSY_GENERIC.to_string());
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
+                    thread_id: thread_id.clone(),
+                    accepted_message_ref,
+                    active_run_id,
+                    status: busy.as_deref().map(|snapshot| snapshot.status),
+                    event_cursor: busy.as_deref().map(|snapshot| snapshot.event_cursor),
+                    notice,
+                })
             }
-            Err(error) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    error = ?error,
-                    "webui submit_turn rejected by coordinator; no run enqueued"
-                );
-                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                Err(map_turn_error(error))
+            ProductInboundAck::DeferredBusy {
+                accepted_message_ref,
+                active_run_id,
+                busy,
+            } => {
+                let Some(busy) = busy else {
+                    // A deferred decision always carries the queued run's
+                    // snapshot; its absence is a core invariant violation.
+                    return Err(ProductSurfaceError::internal_invariant());
+                };
+                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                    thread_id: thread_id.clone(),
+                    accepted_message_ref,
+                    active_run_id,
+                    status: busy.status,
+                    event_cursor: busy.event_cursor,
+                    notice: rejected_busy_notice(busy.status),
+                })
             }
+            ProductInboundAck::Rejected(rejection) => Err(session_rejection_error(&rejection)),
+            ProductInboundAck::CommandResult { .. }
+            | ProductInboundAck::NoOp
+            | ProductInboundAck::Duplicate { .. } => Err(ProductSurfaceError::internal_invariant()),
         }
     }
 
@@ -5779,128 +5661,6 @@ fn operator_surface_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::service_unavailable(false)
 }
 
-struct AcceptedWebUiMessage {
-    thread_id: ThreadId,
-    message_id: ThreadMessageId,
-    actor_id: String,
-    source_binding_id: String,
-    reply_target_binding_id: String,
-}
-
-async fn mark_message_submitted_or_replay(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-    turn_id: String,
-    run_id: String,
-) -> Result<(), ProductSurfaceError> {
-    match thread_service
-        .mark_message_submitted(
-            thread_scope,
-            &handoff.thread_id,
-            handoff.message_id,
-            turn_id,
-            run_id.clone(),
-        )
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            reconcile_terminal_duplicate(
-                thread_service,
-                thread_scope,
-                handoff,
-                client_action_id,
-                |replay| {
-                    replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id)
-                },
-                error,
-            )
-            .await
-        }
-    }
-}
-
-async fn reconcile_terminal_duplicate(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-    matches_replay: impl FnOnce(&AcceptedInboundMessageReplay) -> bool,
-    original_error: SessionThreadError,
-) -> Result<(), ProductSurfaceError> {
-    let replay = thread_service
-        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-            scope: thread_scope.clone(),
-            actor_id: handoff.actor_id.clone(),
-            source_binding_id: handoff.source_binding_id.clone(),
-            external_event_id: client_action_id.as_str().to_string(),
-        })
-        .await
-        .map_err(map_thread_error)?;
-    match replay {
-        Some(replay)
-            if replay.thread_id == handoff.thread_id
-                && replay.message_id == handoff.message_id
-                && matches_replay(&replay) =>
-        {
-            Ok(())
-        }
-        _ => Err(map_thread_error(original_error)),
-    }
-}
-
-async fn replay_webui_send_message(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    scope: &TurnScope,
-    actor: &TurnActor,
-    external_event_id: &str,
-) -> Result<Option<(AcceptedInboundMessageReplay, String)>, ProductSurfaceError> {
-    let source_binding_id = webui_source_binding_id(scope, actor);
-    if let Some(replay) = replay_accepted_message(
-        thread_service,
-        thread_scope,
-        actor,
-        &source_binding_id,
-        external_event_id,
-    )
-    .await?
-    {
-        return Ok(Some((replay, source_binding_id)));
-    }
-
-    let legacy_source_binding_id = legacy_webui_source_binding_id(scope, actor);
-    replay_accepted_message(
-        thread_service,
-        thread_scope,
-        actor,
-        &legacy_source_binding_id,
-        external_event_id,
-    )
-    .await
-    .map(|replay| replay.map(|replay| (replay, legacy_source_binding_id)))
-}
-
-async fn replay_accepted_message(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    actor: &TurnActor,
-    source_binding_id: &str,
-    external_event_id: &str,
-) -> Result<Option<AcceptedInboundMessageReplay>, ProductSurfaceError> {
-    thread_service
-        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-            scope: thread_scope.clone(),
-            actor_id: actor.user_id.as_str().to_string(),
-            source_binding_id: source_binding_id.to_string(),
-            external_event_id: external_event_id.to_string(),
-        })
-        .await
-        .map_err(map_thread_error)
-}
-
 struct ResolvedThreadAccess {
     scope: TurnScope,
     run_actor: TurnActor,
@@ -6287,27 +6047,6 @@ where
     /// Ownership probe for `submit_turn` and `delete_thread` — these only
     /// operate on session-owned threads (not trigger threads), so the probe
     /// is user-scoped with no automation fallback.
-    async fn resolve_webui_thread_metadata(
-        &self,
-        scope: TurnScope,
-        actor: &TurnActor,
-    ) -> Result<(TurnScope, ThreadScope), ProductSurfaceError> {
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        // `read_thread` is the metadata-only probe; production backends
-        // override it to skip the message/summary load entirely. The
-        // ownership semantics (UnknownThread / ThreadScopeMismatch
-        // collapse to NotFound) must match `list_thread_history`'s
-        // path, which `map_ownership_probe_error` guarantees.
-        self.thread_service
-            .read_thread(ThreadHistoryRequest {
-                scope: thread_scope.clone(),
-                thread_id: scope.thread_id.clone(),
-            })
-            .await
-            .map_err(map_ownership_probe_error)?;
-        Ok((scope, thread_scope))
-    }
-
     async fn resolve_approval_gate(
         &self,
         scope: TurnScope,
@@ -6749,12 +6488,6 @@ fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceE
     TurnRunId::parse(value).map_err(|_| ProductSurfaceError::internal_invariant())
 }
 
-fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, ProductSurfaceError> {
-    AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
 /// Map a fatal steering-admission failure into this surface's sanitized
 /// error. Classification already happened in the gateway; this is pure
 /// error-shape translation plus server-side diagnosis.
@@ -6782,18 +6515,6 @@ fn steering_admission_error(
     }
 }
 
-fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError> {
-    crate::steering::parse_stored_run_id(value.as_deref()).map_err(|reason| {
-        tracing::debug!(%reason, "stored replay turn_run_id could not be parsed");
-        ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Conflict,
-            ProductSurfaceErrorKind::ReplayUnavailable,
-            409,
-            false,
-        )
-    })
-}
-
 fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
@@ -6812,47 +6533,92 @@ fn webui_reply_target_binding_ref_from_raw(
     })
 }
 
-fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
-    // WebUI retries are scoped to the authenticated caller context, not the
-    // thread id. When the caller is not project-bound, we encode that
-    // explicitly rather than collapsing onto an empty string.
-    format!(
-        "{}{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment(
-            "agent",
-            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
-        ),
-        segment(
-            "project_scope",
-            if scope.project_id.is_some() {
-                "bound"
-            } else {
-                "none"
-            }
-        ),
-        scope
-            .project_id
-            .as_ref()
-            .map(|project_id| segment("project", project_id.as_str()))
-            .unwrap_or_default(),
-        segment("actor", actor.user_id.as_str())
-    )
+/// Transport identity stamped on session-lane submissions that did not name
+/// a channel extension (the legacy browser route and API transports). Not a
+/// channel name: `webui` is the product transport itself, the same constant
+/// the turn kernel uses for the WebUi source channel.
+const SESSION_SURFACE_ADAPTER_ID: &str = "webui";
+/// External-actor ref kind for session callers in admission fingerprints.
+const SESSION_ACTOR_KIND: &str = "session_user";
+
+/// Build the neutral inbound-surface request for one session submission.
+fn session_inbound_request(
+    caller: ProductSurfaceCaller,
+    thread_id: &ThreadId,
+    client_action_id: &IdempotencyKey,
+    content: String,
+    requested_model: Option<String>,
+) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
+    let adapter_id = ProductAdapterId::new(SESSION_SURFACE_ADAPTER_ID)
+        .map_err(|_| ProductSurfaceError::internal_invariant())?;
+    let source_channel =
+        ironclaw_product_contracts::inbound::ProductSourceChannel::new(SESSION_SURFACE_ADAPTER_ID)
+            .map_err(|_| ProductSurfaceError::internal_invariant())?;
+    let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
+        .map_err(|_| ProductSurfaceError::internal_invariant())?;
+    let message = ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage {
+        actor: ironclaw_extension_contracts::external::ExternalActorRef::new(
+            SESSION_ACTOR_KIND,
+            caller.user_id.as_str(),
+            Option::<String>::None,
+        )
+        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
+            None,
+            thread_id.as_str(),
+            None,
+            None,
+        )
+        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        event_id: ironclaw_extension_contracts::external::ExternalEventId::new(
+            client_action_id.as_str(),
+        )
+        .map_err(|_| ProductSurfaceError::internal_invariant())?,
+        text: content,
+        trigger: ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
+        attachments: Vec::new(),
+        reply_context: None,
+    };
+    Ok(ChannelInboundSurfaceRequest {
+        adapter_id,
+        source_channel,
+        installation_id,
+        trust: ChannelInboundSurfaceTrust::SessionCaller { caller },
+        binding: ChannelInboundSurfaceBinding::OwnedThread {
+            thread_id: thread_id.clone(),
+        },
+        received_at: Utc::now(),
+        message,
+        classification: None,
+        requested_model,
+    })
 }
 
-fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment(
-            "agent",
-            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+/// Render a settled workflow rejection replayed for a session submission.
+fn session_rejection_error(
+    rejection: &ironclaw_product_contracts::inbound::ProductRejection,
+) -> ProductSurfaceError {
+    use ironclaw_product_contracts::inbound::ProductRejectionKind;
+    let retryable = rejection.disposition()
+        == ironclaw_product_contracts::inbound::ProductRejectionDisposition::Retryable;
+    match rejection.kind {
+        ProductRejectionKind::InvalidRequest => ProductSurfaceError::from_status(
+            ProductSurfaceErrorCode::InvalidRequest,
+            400,
+            retryable,
         ),
-        segment("thread", scope.thread_id.as_str()),
-        segment("actor", actor.user_id.as_str())
-    )
+        ProductRejectionKind::AccessDenied
+        | ProductRejectionKind::UnknownInstallation
+        | ProductRejectionKind::PolicyDenied => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, retryable)
+        }
+        ProductRejectionKind::BindingRequired => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::NotFound, 404, retryable)
+        }
+        ProductRejectionKind::AmbiguousResolution | ProductRejectionKind::StaleGate => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, retryable)
+        }
+    }
 }
 
 fn thread_operation_key(scope: &TurnScope) -> String {
@@ -7340,6 +7106,10 @@ fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfa
         ProductSurfaceRejectionKind::Unavailable => ProductSurfaceErrorKind::ServiceUnavailable,
         ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => {
             ProductSurfaceErrorKind::Conflict
+        }
+        ProductSurfaceRejectionKind::DuplicateAction => ProductSurfaceErrorKind::Duplicate,
+        ProductSurfaceRejectionKind::ReplayUnavailable => {
+            ProductSurfaceErrorKind::ReplayUnavailable
         }
     }
 }
