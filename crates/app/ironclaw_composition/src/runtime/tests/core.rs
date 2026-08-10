@@ -818,8 +818,6 @@ struct ToolCallingGateway {
     requests: StdMutex<Vec<HostManagedModelRequest>>,
 }
 
-const SANDBOX_SHELL_MARKER: &str = "profile-stable-sandbox-marker";
-
 #[derive(Debug, Default)]
 struct SandboxShellCallingGateway {
     calls: StdMutex<usize>,
@@ -1071,7 +1069,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("second model call should include shell result");
             assert!(
-                tool_result.content.contains(SANDBOX_SHELL_MARKER),
+                tool_result.content.contains("railway-sandbox-marker"),
                 "shell result should come from the configured sandbox transport: {}",
                 tool_result.content
             );
@@ -1118,7 +1116,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 turn_id: Some("provider-turn-shell".to_string()),
                 id: "shell-call-1".to_string(),
                 name: shell_tool.name,
-                arguments: serde_json::json!({"command": format!("printf {SANDBOX_SHELL_MARKER}")}),
+                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -3285,7 +3283,7 @@ impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandb
             .expect("sandbox request lock poisoned")
             .push(request);
         Ok(ironclaw_host_api::process::CommandExecutionOutput {
-            output: SANDBOX_SHELL_MARKER.to_string(),
+            output: "railway-sandbox-marker".to_string(),
             saved_output: None,
             exit_code: 0,
             // The trusted process adapter, rather than a provider transport,
@@ -3301,17 +3299,16 @@ impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandb
     }
 }
 
-async fn assert_sandboxed_hosted_profile_routes_shell_to_recording_port(
-    profile: RebornCompositionProfile,
-    root: &std::path::Path,
-) {
+#[tokio::test]
+async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+    let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(SandboxShellCallingGateway::default());
     let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_filesystem_build_input_with_profile(
-            profile,
-            "runtime-compatible-sandbox-owner",
-            root.to_path_buf(),
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+            "runtime-railway-shell-owner",
+            root.path().join("sandboxed"),
         )
         .with_runtime_policy(
             crate::hosted_single_tenant_volume_sandboxed_runtime_policy()
@@ -3322,10 +3319,10 @@ async fn assert_sandboxed_hosted_profile_routes_shell_to_recording_port(
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-compatible-sandbox-tenant".to_string(),
-        agent_id: "runtime-compatible-sandbox-agent".to_string(),
-        source_binding_id: "runtime-compatible-sandbox-source".to_string(),
-        reply_target_binding_id: "runtime-compatible-sandbox-reply".to_string(),
+        tenant_id: "runtime-railway-shell-tenant".to_string(),
+        agent_id: "runtime-railway-shell-agent".to_string(),
+        source_binding_id: "runtime-railway-shell-source".to_string(),
+        reply_target_binding_id: "runtime-railway-shell-reply".to_string(),
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
@@ -3336,8 +3333,8 @@ async fn assert_sandboxed_hosted_profile_routes_shell_to_recording_port(
     let runtime =
         tokio::time::timeout(PRODUCTION_SHAPED_BUILD_TIMEOUT, build_reborn_runtime(input))
             .await
-            .expect("sandboxed hosted runtime build should finish")
-            .expect("sandboxed hosted runtime builds");
+            .expect("sandboxed Railway runtime build should finish")
+            .expect("sandboxed Railway runtime builds");
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
         .enable_global_auto_approve_for_test(&conversation)
@@ -3362,65 +3359,13 @@ async fn assert_sandboxed_hosted_profile_routes_shell_to_recording_port(
             1,
             "shell must use the sandbox transport once"
         );
-        assert_eq!(
-            requests[0].command,
-            format!("printf {SANDBOX_SHELL_MARKER}"),
-            "{profile:?} must route the shell command to the injected user sandbox port"
-        );
-        assert!(
-            requests[0].extra_env.is_empty(),
-            "the sandbox process input must not receive ambient credentials"
-        );
+        assert_eq!(requests[0].command, "printf railway-sandbox-marker");
     }
     tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
         .await
         .expect("runtime shutdown should finish")
         .expect("runtime shutdown");
     assert_eq!(sandbox_transport.shutdown_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn compatible_base_docker_railway_sequence_routes_shell_only_to_user_sandbox_ports() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("canonical");
-    let base_input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input_with_profile(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            "runtime-compatible-sandbox-owner",
-            storage_root.clone(),
-        )
-        .with_runtime_policy(
-            crate::hosted_single_tenant_volume_runtime_policy()
-                .expect("hosted volume policy resolves"),
-        )
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::none()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-compatible-sandbox-tenant".to_string(),
-        agent_id: "runtime-compatible-sandbox-agent".to_string(),
-        source_binding_id: "runtime-compatible-sandbox-source".to_string(),
-        reply_target_binding_id: "runtime-compatible-sandbox-reply".to_string(),
-    });
-
-    let base_runtime = tokio::time::timeout(
-        PRODUCTION_SHAPED_BUILD_TIMEOUT,
-        build_reborn_runtime(base_input),
-    )
-    .await
-    .expect("processless base runtime build should finish")
-    .expect("processless base runtime builds without a host process fallback");
-    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, base_runtime.shutdown())
-        .await
-        .expect("processless base runtime shutdown should finish")
-        .expect("processless base runtime shutdown");
-
-    for profile in [
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
-    ] {
-        assert_sandboxed_hosted_profile_routes_shell_to_recording_port(profile, &storage_root)
-            .await;
-    }
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ use ironclaw_composition::test_support::SkillActivationTestSource;
 use ironclaw_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
 };
+use ironclaw_config::RebornStoragePaths;
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
@@ -96,12 +97,12 @@ pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMem
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 fn write_system_skill_fixture(
-    storage_root: &std::path::Path,
+    system_root: &std::path::Path,
     name: &str,
     description: &str,
     prompt: &str,
 ) -> HarnessResult<()> {
-    let dir = storage_root.join("system").join("skills").join(name);
+    let dir = system_root.join("skills").join(name);
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
@@ -747,12 +748,13 @@ impl HostRuntimeCapabilityHarness {
         } else {
             tempfile::tempdir()?
         });
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
+        let storage_paths =
+            RebornStoragePaths::from_installation_root(root.path().join("reborn-home"));
+        let workspace_root = storage_paths.workspace_root().to_path_buf();
         std::fs::create_dir_all(&workspace_root)?;
         for fixture in &system_skill_fixtures {
             write_system_skill_fixture(
-                &storage_root,
+                storage_paths.system_root(),
                 &fixture.name,
                 &fixture.description,
                 &fixture.prompt,
@@ -767,7 +769,7 @@ impl HostRuntimeCapabilityHarness {
                 .ok_or("user skill fixtures require with_skill_activation_user")?;
             for fixture in &user_skill_fixtures {
                 write_user_skill_fixture(
-                    &storage_root,
+                    storage_paths.installation_root(),
                     tenant,
                     user,
                     &fixture.name,
@@ -781,7 +783,10 @@ impl HostRuntimeCapabilityHarness {
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
                 &source,
-                &storage_root.join("system/extensions").join(extension_id),
+                &storage_paths
+                    .system_root()
+                    .join("extensions")
+                    .join(extension_id),
             )?;
         }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
@@ -792,7 +797,7 @@ impl HostRuntimeCapabilityHarness {
             ironclaw_composition::local_runtime_build_input_with_options(
                 ironclaw_composition::RebornCompositionProfile::StandaloneUnrestricted,
                 service_label,
-                storage_root,
+                storage_paths.clone(),
                 ironclaw_composition::RebornRuntimeProfileOptions {
                     confirm_host_access: true,
                 },
@@ -800,18 +805,23 @@ impl HostRuntimeCapabilityHarness {
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
-                storage_root.join("sandbox-workspaces"),
+                storage_paths.workspace_root().join("users"),
             )
             .await?;
-            ironclaw_composition::local_filesystem_build_input_with_profile(
+            ironclaw_composition::local_runtime_build_input(
                 ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
                 service_label,
-                storage_root,
-            )
+                storage_paths.clone(),
+            )?
             .with_runtime_process_binding(user_sandbox)
         } else {
-            ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
+            ironclaw_composition::local_runtime_build_input(
+                ironclaw_composition::RebornCompositionProfile::Standalone,
+                service_label,
+                storage_paths.clone(),
+            )?
         };
+        input = input.with_local_runtime_workspace_root(workspace_root.clone());
         if let Some((tenant_id, agent_id)) = &local_runtime_identity {
             input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
         }
@@ -1583,15 +1593,17 @@ impl HostRuntimeCapabilityHarness {
             .map(|source| source.context_source())
     }
 
-    /// E-DURABLE: the on-disk local-dev storage root this harness's capability
-    /// stores persist under (`<tempdir>/local-dev`). Mirrors the `storage_root`
+    /// E-DURABLE: the canonical on-disk installation root this harness's capability
+    /// stores persist under (`<tempdir>/reborn-home`). Mirrors the `RebornStoragePaths`
     /// computed inline in `new_with_options`. A durability test reopens a fresh,
     /// independent store at this path (see
     /// `open_standalone_extension_installation_store_for_test`) to prove capability
     /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
     /// Tests only.
     pub(crate) fn storage_root_for_test(&self) -> PathBuf {
-        self.root.path().join("local-dev")
+        RebornStoragePaths::from_installation_root(self.root.path().join("reborn-home"))
+            .installation_root()
+            .to_path_buf()
     }
 
     /// C-DURABLE: resolve `gate_ref` (a `"gate:approval-<id>"` local-dev
@@ -1618,7 +1630,7 @@ impl HostRuntimeCapabilityHarness {
 
     /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill
     /// filesystem so the model can activate it (`skill_activate`/`$name`). Writes
-    /// `<storage_root>/system/skills/<name>/SKILL.md` — the system bundle root is
+    /// `<installation_root>/system/skills/<name>/SKILL.md` — the system bundle root is
     /// always present in the skills extension's roots regardless of the run's
     /// tenant/user (`FirstPartySkillsExtensionHandles::bundle_roots`), so both
     /// `activate_skills_for_run` (the `skill_activate` capability) and the
@@ -1634,7 +1646,8 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
+        let paths = RebornStoragePaths::from_installation_root(self.storage_root_for_test());
+        write_system_skill_fixture(paths.system_root(), name, description, prompt)?;
         Ok(())
     }
 

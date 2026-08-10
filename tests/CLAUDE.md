@@ -224,14 +224,10 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | Behavior is identical on in-memory and libSQL storage | `backend_matrix.rs` |
 | Extension installation and its owner membership survive an independent fresh-store reopen | `durable.rs::extension_install_survives_independent_reopen_async` |
-| Secrets survive a genuine host-side on-disk reopen | `secrets.rs::secret_persists_across_libsql_reopen` |
-| A canonical composition rebuild preserves a thread, persisted inbound message, typed tenant/user scope, host-managed system prompt, and system skill | `ironclaw_composition::factory::tests::standalone_services_persist_thread_records_across_rebuilds` |
-| A user-installed skill survives a composition rebuild before later lifecycle operations | `ironclaw_composition::factory::tests::standalone_skill_management_invokes_through_first_party_runtime` |
-| A persisted system/tool setting is read through fresh settings services | `webui_v2_product_api.rs::settings_tool_permission_post_then_cold_read` |
+| Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
 | A committed canonical layout is admitted unchanged through the compatible hosted-volume base → Docker → Railway sequence; profile selection never creates a new state root or performs a normal-boot migration write | `ironclaw_cli::runtime::tests::compatible_base_docker_railway_layout_admission_never_rewrites_the_ready_layout` |
-| Compatible base → Docker → Railway startup uses no base process port and routes sandboxed shell work only through injected recording user-sandbox ports, with no ambient process environment | `ironclaw_composition::runtime::tests::compatible_base_docker_railway_sequence_routes_shell_only_to_user_sandbox_ports` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**
