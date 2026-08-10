@@ -471,6 +471,7 @@ fn resume_adoption(
 
     if journal.phase == AdoptionPhase::CanonicalInstalled {
         verify_canonical_inventory(paths, &candidate, &snapshot)?;
+        cleanup_completed_staging(adoption_root, &journal.operation_id)?;
         journal.phase = AdoptionPhase::MigrationPending;
         write_journal(journal_path, journal)?;
     }
@@ -529,13 +530,54 @@ fn reconcile_staged_install(
         paths.system_root(),
     )?;
     reconcile_staged_workspace(paths, workspace, &staging.join("workspace-leaf"))?;
-    remove_staging_owner_marker(&staging, operation_id)?;
-    fs::remove_dir(&staging)
-        .with_context(|| format!("remove empty staging root {}", staging.display()))?;
-    sync_directory(adoption_root)?;
-    #[cfg(test)]
-    fail_at_test_adoption_fault(TestAdoptionFaultPoint::StagingRemovedBeforeCanonicalPhase)?;
     Ok(())
+}
+
+fn cleanup_completed_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    match fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect completed staging root {}", staging.display()));
+        }
+        Ok(_) => {}
+    }
+
+    let marker = staging.join(STAGING_OWNER_FILE);
+    match fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if !directory_is_empty(&staging)? {
+                bail!(
+                    "completed staging tree at {} has content but no ownership marker; refusing to clean it",
+                    staging.display()
+                );
+            }
+            fs::remove_dir(&staging).with_context(|| {
+                format!("remove empty post-phase staging root {}", staging.display())
+            })?;
+            return sync_directory(adoption_root);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect completed staging ownership marker {}",
+                    marker.display()
+                )
+            });
+        }
+        Ok(_) => {}
+    }
+
+    require_proven_staging(&staging, operation_id)?;
+    remove_staging_owner_marker(&staging, operation_id)?;
+    #[cfg(test)]
+    fail_at_test_adoption_fault(
+        TestAdoptionFaultPoint::MarkerRemovedBeforeStagingDirectoryRemoval,
+    )?;
+    fs::remove_dir(&staging)
+        .with_context(|| format!("remove completed staging root {}", staging.display()))?;
+    sync_directory(adoption_root)
 }
 
 fn discard_proven_partial_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
@@ -2077,7 +2119,7 @@ enum TestAdoptionFaultPoint {
     StagingChildrenCreated,
     FirstStateCopy,
     StateRename,
-    StagingRemovedBeforeCanonicalPhase,
+    MarkerRemovedBeforeStagingDirectoryRemoval,
 }
 
 #[cfg(test)]
@@ -3558,32 +3600,39 @@ mod tests {
     }
 
     #[test]
-    fn fault_after_staging_cleanup_recovers_by_validating_complete_canonical_shape() {
+    fn fault_after_post_phase_marker_removal_recovers_staging_cleanup() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = reborn_home(temp.path());
         let requirement = embedded_single_user_requirement();
         let legacy = temp.path().join("local-dev");
         seed_legacy_embedded_store(&legacy);
 
-        let fault =
-            TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::StagingRemovedBeforeCanonicalPhase);
+        let fault = TestAdoptionFaultGuard::arm(
+            TestAdoptionFaultPoint::MarkerRemovedBeforeStagingDirectoryRemoval,
+        );
         let error = adopt_layout(&home, requirement, confirmed_options())
-            .expect_err("injected crash after staging cleanup before phase advance");
+            .expect_err("injected crash after marker removal before staging directory cleanup");
         drop(fault);
 
-        assert!(format!("{error:#}").contains("StagingRemovedBeforeCanonicalPhase"));
+        assert!(format!("{error:#}").contains("MarkerRemovedBeforeStagingDirectoryRemoval"));
         assert!(temp.path().join("state/reborn-local-dev.db").is_file());
         assert!(temp.path().join("system").is_dir());
-        assert!(!temp.path().join("runtime/layout-adoption/staging").exists());
+        assert!(temp.path().join("runtime/layout-adoption/staging").is_dir());
+        assert!(
+            !temp
+                .path()
+                .join("runtime/layout-adoption/staging/.adoption-owner")
+                .exists()
+        );
         assert!(
             fs::read_to_string(temp.path().join("runtime/layout-adoption/journal.toml"))
-                .expect("staged journal")
-                .contains("phase = \"staged\""),
-            "phase advancement has not yet been journaled"
+                .expect("canonical-installed journal")
+                .contains("phase = \"canonical-installed\""),
+            "phase advancement is durable before post-phase staging cleanup"
         );
 
         adopt_layout(&home, requirement, confirmed_options())
-            .expect("Staged recovery accepts only the exact fully installed canonical shape");
+            .expect("canonical recovery completes the interrupted staging cleanup");
         assert!(temp.path().join("layout.toml").is_file());
     }
 
