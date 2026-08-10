@@ -304,14 +304,12 @@ fn validate_manifest_artifacts(
             )));
         }
         for (path, prompt) in &entry.prompts {
-            ironclaw_extension_contracts::runtime::ExtensionAssetPath::new(path.clone()).map_err(
-                |error| {
-                    catalog(format!(
-                        "tool '{}' publishes an invalid prompt path: {error}",
-                        entry.name
-                    ))
-                },
-            )?;
+            ironclaw_extensions::ExtensionAssetPath::new(path.clone()).map_err(|error| {
+                catalog(format!(
+                    "tool '{}' publishes an invalid prompt path: {error}",
+                    entry.name
+                ))
+            })?;
             validate_artifact_for_origin(prompt, MAX_METADATA_BYTES, origin)?;
         }
     }
