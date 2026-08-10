@@ -921,30 +921,94 @@ fn build_sandboxed_local_runtime_services_input(
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
-/// Use the caller's cwd as the local-runtime workspace unless it contains the
-/// runtime storage root. The latter is the fresh-onboard shape: cwd=`$HOME`
-/// contains `<reborn_home>/local-dev`, so composition correctly rejects it as
-/// an ancestor of the protected skill roots. Fall back to
-/// `<reborn_home>/workspace`, the same workspace the installed service mounts.
+/// Use the caller's cwd as the local-runtime workspace unless it overlaps the
+/// storage root's protected roots (skills, system extensions). The fresh-onboard
+/// shape is cwd=`$HOME`, which contains `<reborn_home>/local-dev`; a cwd nested
+/// inside a protected root (e.g. `<storage_root>/skills/...`) is equally
+/// unusable. In both cases composition would reject the workspace, so fall back
+/// to `<reborn_home>/workspace`, the same workspace the installed service mounts.
 fn resolved_local_runtime_workspace_root(
     storage_root: &Path,
     reborn_home: &Path,
 ) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()
         .context("failed to resolve current directory for local runtime workspace")?;
-    let storage_root =
-        std::fs::canonicalize(storage_root).unwrap_or_else(|_| storage_root.to_path_buf());
-    if !storage_root.starts_with(&cwd) {
+    if !cwd_overlaps_protected_roots(&cwd, storage_root)? {
         return Ok(cwd);
     }
     let workspace_root = reborn_home.join("workspace");
     tracing::warn!(
         cwd = %cwd.display(),
         workspace = %workspace_root.display(),
-        "current directory contains the local runtime storage root; using the default \
+        "current directory overlaps protected storage roots; using the default \
          workspace instead"
     );
     Ok(workspace_root)
+}
+
+/// Whether `cwd` overlaps any of the storage root's protected roots in either
+/// direction (contains it, sits inside it, or equals it).
+///
+/// Mirrors the protected-root list in composition's
+/// `validate_workspace_skill_isolation` (`host_access_assembly`). Composition
+/// remains the authoritative fail-closed validator; this launch-time heuristic
+/// only decides whether to substitute the default workspace.
+fn cwd_overlaps_protected_roots(cwd: &Path, storage_root: &Path) -> anyhow::Result<bool> {
+    let cwd = std::fs::canonicalize(cwd)
+        .with_context(|| format!("failed to resolve current directory {}", cwd.display()))?;
+    for protected_root in [
+        storage_root.join("skills"),
+        storage_root.join("tenant-shared/skills"),
+        storage_root.join("system/skills"),
+        storage_root.join("system/extensions"),
+    ] {
+        let Some(protected_root) = canonicalize_existing_prefix(&protected_root)? else {
+            continue;
+        };
+        if cwd == protected_root
+            || cwd.starts_with(&protected_root)
+            || protected_root.starts_with(&cwd)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Canonicalize `path`, or — when it does not exist yet — canonicalize its
+/// nearest existing ancestor and re-append the missing suffix, so symlinked
+/// ancestors (macOS `/var` -> `/private/var`) compare correctly before
+/// composition creates the storage root. `None` only when no rooted ancestor
+/// resolves. Non-missing-path I/O failures propagate with context.
+fn canonicalize_existing_prefix(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let mut missing = Vec::new();
+    let mut probe = path;
+    loop {
+        match std::fs::canonicalize(probe) {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(Some(resolved));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = probe.file_name() else {
+                    return Ok(None);
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = probe.parent() else {
+                    return Ok(None);
+                };
+                probe = parent;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to resolve filesystem path {}", probe.display())
+                });
+            }
+        }
+    }
 }
 
 fn build_standalone_local_runtime_services_input(
@@ -1724,9 +1788,10 @@ mod tests {
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        build_runtime_input_with_options, cwd_overlaps_protected_roots,
+        initialize_local_runtime_storage_root, no_assistant_text_message,
+        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -2898,6 +2963,61 @@ regex_activation_enabled = false
                 .to_string()
                 .contains("failed to initialize Reborn runtime state")
         );
+    }
+
+    #[test]
+    fn cwd_overlaps_protected_roots_detects_ancestor_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+
+        // Fresh onboard: the operator's shell sits in `$HOME`, an ancestor of
+        // the storage root's protected roots.
+        assert!(cwd_overlaps_protected_roots(dir.path(), &storage_root).expect("no io error"));
+    }
+
+    #[test]
+    fn cwd_overlaps_protected_roots_detects_nested_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+
+        for protected in [
+            "skills",
+            "tenant-shared/skills",
+            "system/skills",
+            "system/extensions",
+        ] {
+            let protected_root = storage_root.join(protected);
+            std::fs::create_dir_all(&protected_root).expect("protected root");
+
+            assert!(
+                cwd_overlaps_protected_roots(&protected_root, &storage_root).expect("no io error")
+            );
+            let nested_cwd = protected_root.join("nested");
+            std::fs::create_dir_all(&nested_cwd).expect("nested cwd dir");
+            assert!(cwd_overlaps_protected_roots(&nested_cwd, &storage_root).expect("no io error"));
+        }
+    }
+
+    #[test]
+    fn cwd_overlaps_protected_roots_accepts_isolated_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+
+        assert!(!cwd_overlaps_protected_roots(&project, &storage_root).expect("no io error"));
+    }
+
+    #[test]
+    fn cwd_overlaps_protected_roots_handles_uncreated_storage_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+
+        // Storage root not materialized yet (first boot): the prefix
+        // canonicalization must still catch the overlap.
+        assert!(cwd_overlaps_protected_roots(dir.path(), &storage_root).expect("no io error"));
     }
 
     #[test]

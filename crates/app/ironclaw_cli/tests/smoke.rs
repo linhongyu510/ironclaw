@@ -2326,9 +2326,12 @@ fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
         .spawn()
         .expect("ironclaw-reborn serve should start");
     let stderr_text = wait_for_serve_banner(&mut child);
+    let used_workspace_fallback = stderr_text.contains("using the default workspace instead");
+    let _ = child.kill();
+    let _ = child.wait();
 
     assert!(
-        stderr_text.contains("using the default workspace instead"),
+        used_workspace_fallback,
         "expected the workspace fallback warning for cwd=<reborn_home>: stderr={stderr_text}"
     );
     let expected_workspace = reborn_home.join("workspace");
@@ -2341,9 +2344,62 @@ fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
         !reborn_home.join("local-dev/workspace").exists(),
         "fallback must not create a profile-local second workspace"
     );
+}
 
-    let _ = child.kill();
-    let _ = child.wait();
+/// Pins the CLI workspace-root fallback for cwds nested *inside* a protected
+/// root (issue #7431 companion): launching `serve` from
+/// `<storage_root>/skills/...` or `<storage_root>/system/extensions/...` must
+/// also fall back to `<reborn_home>/workspace` instead of letting composition
+/// reject the workspace.
+#[test]
+fn serve_boots_with_fallback_when_cwd_is_inside_a_protected_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let storage_root = reborn_home.join("local-dev");
+
+    for protected_root in [
+        storage_root.join("skills"),
+        storage_root.join("system/extensions"),
+    ] {
+        std::fs::create_dir_all(&protected_root).expect("protected root");
+        let _serve_port_guard = SERVE_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let port = unused_local_port();
+
+        let mut child = reborn_command()
+            .args(["serve", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .current_dir(&protected_root)
+            .env("HOME", &home)
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .env_remove("IRONCLAW_REBORN_PROFILE")
+            .env(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                format!("reborn-smoke-test-nested-{port}-token-0123456789abcdef"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ironclaw-reborn serve should start");
+        let stderr_text = wait_for_serve_banner(&mut child);
+        let used_workspace_fallback = stderr_text.contains("using the default workspace instead");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            used_workspace_fallback,
+            "expected the workspace fallback warning for cwd inside protected root {}: \
+             stderr={stderr_text}",
+            protected_root.display()
+        );
+    }
+    assert!(
+        reborn_home.join("workspace").is_dir(),
+        "fallback must use the same workspace as the installed service"
+    );
 }
 
 #[test]
