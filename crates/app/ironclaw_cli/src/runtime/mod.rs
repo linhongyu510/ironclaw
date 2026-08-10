@@ -2709,7 +2709,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_sandbox_profile_selects_docker_process_binding_when_required() {
+    fn cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
             eprintln!(
                 "skipping Docker-backed sandbox profile test; set IRONCLAW_REQUIRE_DOCKER_TESTS=1 to require it"
@@ -2724,7 +2724,7 @@ regex_activation_enabled = false
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
         let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
+            Some(reborn_home.clone().into_os_string()),
             None,
             None,
             Some("hosted-single-tenant-volume-sandboxed".into()),
@@ -2733,13 +2733,25 @@ regex_activation_enabled = false
 
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        assert!(!runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
+        let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
         assert_eq!(
             services.profile(),
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
         );
+        assert_eq!(paths.installation_root(), reborn_home);
+        assert_eq!(
+            paths.workspace_root(),
+            paths.installation_root().join("workspaces")
+        );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+        assert_eq!(policy.filesystem_backend.as_str(), "tenant_workspace");
+        assert_ne!(
+            policy.filesystem_backend.as_str(),
+            "host_workspace_and_home"
+        );
     }
 
     #[test]

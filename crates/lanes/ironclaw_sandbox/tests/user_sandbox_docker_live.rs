@@ -119,38 +119,39 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
         .run_command(request(
             scope("tenant-a", "user-a", "project-a", "thread-a"),
             format!(
-                "python - <<'PY'\n\
-                 import os\n\
-                 from pathlib import Path\n\
-                 assert os.getuid() != 0\n\
-                 assert Path('/.dockerenv').is_file()\n\
-                 assert not Path('/var/run/docker.sock').exists()\n\
-                 assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
-                 for relative in [\n\
-                     'reborn-home-sentinel.txt',\n\
-                     'state/reborn-state-sentinel.txt',\n\
-                     'state/.reborn-secrets-master-key',\n\
-                     'state/provider-credential-sentinel.txt',\n\
-                     'system/system-sentinel.txt',\n\
-                     'users/{}/sibling-sentinel.txt',\n\
-                 ]:\n\
-                     assert not (Path('/workspace') / relative).exists(), relative\n\
-                 forbidden_env = {{\n\
-                     'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',\n\
-                     'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID',\n\
-                     'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'GH_TOKEN',\n\
-                 }}\n\
-                 assert forbidden_env.isdisjoint(os.environ)\n\
-                 root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
-                 assert 'ro' in root[3].split(',')\n\
-                 routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
-                 assert any(route[1] == '00000000' for route in routes)\n\
-                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
-                 Path('state.txt').write_text('{marker}')\n\
-                 Path('container-write.txt').write_text('container-owned-leaf')\n\
-                 print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}}')\n\
-                 PY",
-                sibling_key.digest_segment(),
+                r#"python - <<'PY'
+import os
+from pathlib import Path
+
+assert os.getuid() != 0
+assert Path('/.dockerenv').is_file()
+assert not Path('/var/run/docker.sock').exists()
+assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'
+for relative in [
+    'reborn-home-sentinel.txt',
+    'state/reborn-state-sentinel.txt',
+    'state/.reborn-secrets-master-key',
+    'state/provider-credential-sentinel.txt',
+    'system/system-sentinel.txt',
+    'users/{sibling}/sibling-sentinel.txt',
+]:
+    assert not (Path('/workspace') / relative).exists(), relative
+forbidden_env = {{
+    'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',
+    'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'GH_TOKEN',
+}}
+assert forbidden_env.isdisjoint(os.environ)
+root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')
+assert 'ro' in root[3].split(',')
+routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]
+assert any(route[1] == '00000000' for route in routes)
+assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'
+Path('state.txt').write_text('{marker}')
+Path('container-write.txt').write_text('container-owned-leaf')
+print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}}')
+PY"#,
+                sibling = sibling_key.digest_segment(),
             ),
         ))
         .await

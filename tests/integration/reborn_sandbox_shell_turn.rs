@@ -33,9 +33,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         }
 
         let tenant = TenantId::new("tenant-itest").expect("sandbox tenant id");
-        let caller = UserId::new("host-user").expect("sandbox caller id");
         let sibling = UserId::new("sandbox-sibling").expect("sandbox sibling id");
-        let caller_key = TenantUserWorkspaceKey::from_tenant_user(&tenant, &caller);
         let sibling_key = TenantUserWorkspaceKey::from_tenant_user(&tenant, &sibling);
 
         let harness = RebornIntegrationHarness::test_default()
@@ -45,32 +43,33 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                     "builtin.shell",
                     json!({
                         "command": format!(
-                            "python - <<'PY'\n\
-                             import os\n\
-                             from pathlib import Path\n\
-                             assert Path('/.dockerenv').is_file()\n\
-                             assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
-                             for relative in [\n\
-                                 'reborn-home-sentinel.txt',\n\
-                                 'state/reborn-state-sentinel.txt',\n\
-                                 'state/.reborn-secrets-master-key',\n\
-                                 'state/provider-credential-sentinel.txt',\n\
-                                 'system/system-sentinel.txt',\n\
-                                 'users/{}/sibling-sentinel.txt',\n\
-                             ]:\n\
-                                 assert not (Path('/workspace') / relative).exists(), relative\n\
-                             forbidden_env = [\n\
-                                 'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',\n\
-                                 'NEARAI_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN', 'RAILWAY_TOKEN',\n\
-                                 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',\n\
-                             ]\n\
-                             assert all(name not in os.environ for name in forbidden_env)\n\
-                             Path('container-write.txt').write_text('container-owned-leaf')\n\
-                             Path('persistence-marker.txt').write_text('{PERSISTENCE_MARKER}')\n\
-                             print('{LEAF_ONLY_MARKER}')\n\
-                             print('{CONTAINER_MARKER}')\n\
-                             PY",
-                            sibling_key.digest_segment(),
+                            r#"python - <<'PY'
+import os
+from pathlib import Path
+
+assert Path('/.dockerenv').is_file()
+assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'
+for relative in [
+    'reborn-home-sentinel.txt',
+    'state/reborn-state-sentinel.txt',
+    'state/.reborn-secrets-master-key',
+    'state/provider-credential-sentinel.txt',
+    'system/system-sentinel.txt',
+    'users/{sibling}/sibling-sentinel.txt',
+]:
+    assert not (Path('/workspace') / relative).exists(), relative
+forbidden_env = [
+    'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+    'NEARAI_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN', 'RAILWAY_TOKEN',
+    'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+]
+assert all(name not in os.environ for name in forbidden_env)
+Path('container-write.txt').write_text('container-owned-leaf')
+Path('persistence-marker.txt').write_text('{PERSISTENCE_MARKER}')
+print('{LEAF_ONLY_MARKER}')
+print('{CONTAINER_MARKER}')
+PY"#,
+                            sibling = sibling_key.digest_segment(),
                         )
                     }),
                 ),
@@ -92,6 +91,8 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                 panic!("sandbox profile must use the production host-runtime capability path")
             }
         };
+        let caller_key =
+            TenantUserWorkspaceKey::from_scope(&harness.turn_scope.to_resource_scope());
         let selected_leaf = installation_home
             .join("workspaces")
             .join("users")

@@ -181,7 +181,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
-| A sandbox-profile shell turn, built through the production sandbox composition input, mounts only its selected tenant/user workspace leaf: the canonical Reborn home, state, system, master key, provider-credential sentinel, and sibling workspace stay unavailable; its own leaf persists across calls | `reborn_sandbox_shell_turn.rs` |
+| A Docker-gated sandbox-profile shell turn, built through the production sandbox composition input, mounts only the resolved caller's tenant/user workspace leaf: the canonical Reborn home, state, system, master key, provider-credential sentinel, sibling workspace, and credential environment stay unavailable; its own leaf persists across calls | `reborn_sandbox_shell_turn.rs`, `user_sandbox_docker_live.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
@@ -228,6 +228,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
 | A committed canonical layout is admitted unchanged through the compatible hosted-volume base → Docker → Railway sequence; profile selection never creates a new state root or performs a normal-boot migration write | `ironclaw_cli::runtime::tests::compatible_base_docker_railway_layout_admission_never_rewrites_the_ready_layout` |
+| The CLI sandbox profile roots workspaces at canonical `IRONCLAW_REBORN_HOME/workspaces`, selects the user-sandbox process backend, and does not admit trusted host-workspace access | `ironclaw_cli::runtime::tests::cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**

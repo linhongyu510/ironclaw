@@ -13,7 +13,7 @@ use super::CONTAINER_WORKSPACE_ROOT;
 
 const MANDATORY_WORKSPACE_TARGET_ROOT: &str = "/projects/workspace";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct RebornSandboxMountSources;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +48,7 @@ impl RebornSandboxMountSources {
         scope: &ResourceScope,
         mounts: Option<&MountView>,
     ) -> Result<Vec<ContainerBind>, RuntimeProcessError> {
+        validate_mandatory_workspace_mount_view(scope, mounts)?;
         let workspace_root = tokio::fs::canonicalize(workspace_root)
             .await
             .map_err(|error| {
@@ -89,31 +90,56 @@ impl RebornSandboxMountSources {
         }
         validate_prepared_workspace_leaf(&users_root, &workspace, scope)?;
 
-        let Some(mounts) = mounts else {
-            return Ok(vec![ContainerBind::new(
+        let workspace_bind = mounts
+            .and_then(|mounts| mounts.mounts.first())
+            .map(|grant| resolve_mandatory_workspace_grant(&workspace, scope, grant))
+            .transpose()?
+            .unwrap_or(ContainerBind::new(
                 workspace,
                 CONTAINER_WORKSPACE_ROOT,
                 DockerBindMode::ReadWrite,
-            )?]);
-        };
-
-        let mut workspace_bind = None;
-        for grant in &mounts.mounts {
-            if grant.alias.as_str() == CONTAINER_WORKSPACE_ROOT {
-                workspace_bind = Some(resolve_mandatory_workspace_grant(&workspace, scope, grant)?);
-            } else {
-                return Err(RuntimeProcessError::ExecutionFailed(
-                    "sandbox accepts only the mandatory /workspace caller workspace leaf and no extra mounts"
-                        .to_string(),
-                ));
-            }
-        }
-        Ok(vec![workspace_bind.unwrap_or(ContainerBind::new(
-            workspace,
-            CONTAINER_WORKSPACE_ROOT,
-            DockerBindMode::ReadWrite,
-        )?)])
+            )?);
+        Ok(vec![workspace_bind])
     }
+}
+
+/// Admit the sole virtual workspace grant both sandbox transports understand.
+/// The transport never resolves this virtual target to a caller-selected host
+/// path; Docker binds the already-prepared leaf and Railway keeps its own
+/// provider-owned leaf. Validating the common authority shape here prevents a
+/// public, manually constructed `MountView` from changing either transport's
+/// selection semantics.
+pub(super) fn validate_mandatory_workspace_mount_view(
+    scope: &ResourceScope,
+    mounts: Option<&MountView>,
+) -> Result<(), RuntimeProcessError> {
+    let Some(mounts) = mounts else {
+        return Ok(());
+    };
+    mounts.validate().map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!("sandbox mount view is invalid: {error}"))
+    })?;
+    let Some(grant) = mounts.mounts.first() else {
+        return Ok(());
+    };
+    if mounts.mounts.len() != 1 || grant.alias.as_str() != CONTAINER_WORKSPACE_ROOT {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox accepts only the mandatory /workspace caller workspace leaf and no extra mounts"
+                .to_string(),
+        ));
+    }
+    let key = TenantUserWorkspaceKey::from_scope(scope);
+    let expected_target = format!(
+        "{MANDATORY_WORKSPACE_TARGET_ROOT}/users/{}",
+        key.digest_segment()
+    );
+    if grant.target.as_str() != expected_target {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox /workspace mount must target the current caller workspace leaf".to_string(),
+        ));
+    }
+    DockerBindMode::from_grant(grant)?;
+    Ok(())
 }
 
 fn validate_prepared_workspace_leaf(
@@ -251,7 +277,7 @@ mod tests {
     #[test]
     fn sandbox_rejects_every_trusted_mount_source() {
         let temp = tempfile::tempdir().unwrap();
-        let mut sources = RebornSandboxMountSources::default();
+        let mut sources = RebornSandboxMountSources;
         for virtual_root in [
             "/projects",
             "/projects/workspace",
@@ -278,7 +304,7 @@ mod tests {
             .join("users")
             .join(TenantUserWorkspaceKey::from_scope(&scope).digest_segment());
         tokio::fs::create_dir_all(&scoped_workspace).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             caller_workspace_target(&scope),
@@ -322,7 +348,7 @@ mod tests {
             .join("workspace/users")
             .join(TenantUserWorkspaceKey::from_scope(&scope).digest_segment());
         tokio::fs::create_dir_all(&default_workspace).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             caller_workspace_target(&scope),
@@ -371,7 +397,7 @@ mod tests {
             .join("users")
             .join("c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22");
         tokio::fs::create_dir_all(&caller_leaf).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             VirtualPath::new(
@@ -401,7 +427,7 @@ mod tests {
             .join(key.digest_segment());
         let workspace_root = temp.path().join("workspace");
         tokio::fs::create_dir_all(&caller_leaf).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let targets = [
             "/projects/workspace".to_string(),
             "/projects/workspace/users".to_string(),
@@ -447,7 +473,7 @@ mod tests {
         tokio::fs::create_dir(workspace_root.join("users"))
             .await
             .unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             caller_workspace_target(&scope),
@@ -480,7 +506,7 @@ mod tests {
             .unwrap();
         symlink(&outside, workspace_root.join("users")).unwrap();
 
-        let error = RebornSandboxMountSources::default()
+        let error = RebornSandboxMountSources
             .prepare_container_binds(
                 &workspace_root,
                 &outside.join(key.digest_segment()),
@@ -516,7 +542,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = RebornSandboxMountSources::default()
+        let error = RebornSandboxMountSources
             .prepare_container_binds(
                 &workspace_root,
                 &workspace_root.join("users").join(key.digest_segment()),
@@ -535,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn none_mounts_use_default_workspace_bind() {
         let temp = tempfile::tempdir().unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
 
@@ -563,7 +589,7 @@ mod tests {
         let source_root = temp.path().join("source");
         let project_root = source_root.join("app");
         tokio::fs::create_dir_all(&source_root).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
         let mounts = MountView::new(vec![
@@ -613,9 +639,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn container_bind_rejects_a_manually_constructed_duplicate_workspace_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = caller_scope();
+        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let mounts = MountView {
+            mounts: vec![
+                MountGrant::new(
+                    MountAlias::new("/workspace").unwrap(),
+                    caller_workspace_target(&scope),
+                    process_read_write_permissions(),
+                ),
+                MountGrant::new(
+                    MountAlias::new("/workspace").unwrap(),
+                    caller_workspace_target(&scope),
+                    process_read_only_permissions(),
+                ),
+            ],
+        };
+
+        let error = RebornSandboxMountSources
+            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
+            .await
+            .expect_err("public MountView construction must not permit a last-wins workspace bind");
+
+        assert!(format!("{error}").contains("duplicate mount alias"));
+    }
+
+    #[tokio::test]
     async fn scoped_mount_rejects_unconfigured_virtual_target() {
         let temp = tempfile::tempdir().unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
         let mounts = MountView::new(vec![MountGrant::new(
@@ -639,7 +693,7 @@ mod tests {
         let source_root = temp.path().join("source");
         let project_root = source_root.join("app");
         tokio::fs::create_dir_all(&project_root).await.unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = RebornSandboxMountSources;
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
         let mut permissions = MountPermissions::read_write();
