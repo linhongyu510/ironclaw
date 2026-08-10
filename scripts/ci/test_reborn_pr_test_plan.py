@@ -495,6 +495,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [])
                 self.assertEqual(plan["integration_lanes"], [])
 
+    def test_repo_root_example_env_is_classified_and_selects_no_rust_lane(self) -> None:
+        plan = self.plan("pull_request", [".env.example"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        paired = self.plan(
+            "pull_request", [".env.example", "crates/alpha/src/lib.rs"]
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".env.local"])
+
     def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root `scripts/` and `tests/` files another workflow owns.
 

@@ -32,6 +32,8 @@ IGNORED_GUIDANCE_PATHS = {
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
 }
+# Repo-root example configuration is documentation, not runtime input.
+IGNORED_ROOT_FILES = {".env.example"}
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
@@ -388,6 +390,7 @@ def build_plan(
             continue
         if (
             path in IGNORED_GUIDANCE_PATHS
+            or path in IGNORED_ROOT_FILES
             or path.startswith(IGNORED_PREFIXES)
             or (path.endswith(".md") and "/" not in path)
         ):
