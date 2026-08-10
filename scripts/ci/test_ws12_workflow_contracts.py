@@ -27,6 +27,7 @@ from ws12_workflow_contracts import (
     job_body,
     load_workflows,
     step_body,
+    step_property_value,
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
@@ -171,16 +172,41 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         windows_job = job_body(workflow, "clippy-windows")
         self.assertIsNotNone(windows_job)
         self.assertEqual(validate_windows_webui_install_shell(workflow), [])
-
-        sabotaged_job = (windows_job or "").replace("        shell: bash\n", "")
-        self.assertNotEqual(sabotaged_job, windows_job)
-        sabotaged = dict(self.workflows)
-        sabotaged[CODE_STYLE_WORKFLOW] = workflow.replace(
-            windows_job or "", sabotaged_job, 1
+        self.assertEqual(
+            step_property_value(
+                windows_job or "", "Install WebUI frontend dependencies", "shell"
+            ),
+            "bash",
         )
 
-        errors = validate_workflow_texts(sabotaged)
-        self.assertTrue(any("must run" in error for error in errors), errors)
+        wrong_shell_job = (windows_job or "").replace(
+            "        shell: bash\n", "        shell: powershell\n", 1
+        )
+        sabotaged_jobs = {
+            "nested run text": wrong_shell_job.replace(
+                "        run: |\n",
+                "        run: |\n          echo 'shell: bash'\n",
+                1,
+            ),
+            "later unnamed step text": wrong_shell_job.replace(
+                "        with:\n          key: windows-",
+                "        with:\n          marker: |\n            shell: bash\n"
+                "          key: windows-",
+                1,
+            ),
+        }
+        self.assertIn("echo 'shell: bash'", sabotaged_jobs["nested run text"])
+        self.assertIn("marker: |", sabotaged_jobs["later unnamed step text"])
+        for case, sabotaged_job in sabotaged_jobs.items():
+            with self.subTest(case=case):
+                self.assertNotEqual(sabotaged_job, windows_job)
+                sabotaged = dict(self.workflows)
+                sabotaged[CODE_STYLE_WORKFLOW] = workflow.replace(
+                    windows_job or "", sabotaged_job, 1
+                )
+
+                errors = validate_workflow_texts(sabotaged)
+                self.assertTrue(any("must run" in error for error in errors), errors)
 
     def test_target_filters_on_the_production_lint_fail_loudly(self) -> None:
         """Every explicit target selector, in bare and value-bearing form.

@@ -294,10 +294,11 @@ PRODUCTION_LINT_STEP = "Check production-target lints"
 WINDOWS_CLIPPY_JOB = "clippy-windows"
 WEBUI_INSTALL_STEP = "Install WebUI frontend dependencies"
 
-# One `- name:` step heading. The scan is bounded to its own step because the
-# neighbouring `Check all-target lints` legitimately passes `--tests
-# --examples`; unbounded, this contract would blame this step for them.
-STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
+# One named step heading. The indentation is retained so a scan can stop at
+# the next same-level list item, including unnamed `- uses:` steps.
+STEP_HEADING = re.compile(
+    r"^(?P<indent>[ \t]*)- name: (?P<name>.+)$", re.MULTILINE
+)
 JOB_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
 
 # `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
@@ -340,14 +341,41 @@ FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
 )
 
 
-def step_body(text: str, step_name: str) -> str | None:
-    """Return one workflow step's body, bounded by the next step heading."""
+def step_mapping(text: str, step_name: str) -> tuple[str, str] | None:
+    """Return one named step's body and property indentation."""
     for heading in STEP_HEADING.finditer(text):
         if heading.group("name").strip() != step_name:
             continue
-        following = STEP_HEADING.search(text, heading.end())
-        return text[heading.end() : following.start() if following else len(text)]
+        indent = heading.group("indent")
+        following = re.search(
+            rf"^{re.escape(indent)}-[ \t]+",
+            text[heading.end() :],
+            re.MULTILINE,
+        )
+        end = heading.end() + following.start() if following else len(text)
+        return text[heading.end() : end], f"{indent}  "
     return None
+
+
+def step_body(text: str, step_name: str) -> str | None:
+    """Return one workflow step's body, bounded by the next sibling step."""
+    mapping = step_mapping(text, step_name)
+    return mapping[0] if mapping is not None else None
+
+
+def step_property_value(text: str, step_name: str, property_name: str) -> str | None:
+    """Return a top-level property from one named workflow step."""
+    mapping = step_mapping(text, step_name)
+    if mapping is None:
+        return None
+    body, property_indent = mapping
+    match = re.search(
+        rf"^{re.escape(property_indent)}{re.escape(property_name)}:[ \t]*(?P<value>[^\n]+?)"
+        r"[ \t]*$",
+        body,
+        re.MULTILINE,
+    )
+    return match.group("value") if match is not None else None
 
 
 def job_body(text: str, job_name: str) -> str | None:
@@ -367,13 +395,12 @@ def validate_windows_webui_install_shell(text: str) -> list[str]:
         return [
             f"{CODE_STYLE_WORKFLOW}: could not find the {WINDOWS_CLIPPY_JOB!r} job"
         ]
-    install_step = step_body(windows_job, WEBUI_INSTALL_STEP)
-    if install_step is None:
+    if step_body(windows_job, WEBUI_INSTALL_STEP) is None:
         return [
             f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} has no "
             f"{WEBUI_INSTALL_STEP!r} step"
         ]
-    if re.search(r"^[ \t]*shell:[ \t]*bash[ \t]*$", install_step, re.MULTILINE):
+    if step_property_value(windows_job, WEBUI_INSTALL_STEP, "shell") == "bash":
         return []
     return [
         f"{CODE_STYLE_WORKFLOW}: {WINDOWS_CLIPPY_JOB!r} must run "
