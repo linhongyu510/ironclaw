@@ -29,8 +29,6 @@ use crate::delivery_coordinator::{
 
 const FIRST_PREVIEW_UPDATE_DELAY: Duration = Duration::from_millis(150);
 const PREVIEW_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
-const PREVIEW_SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(1);
-const PREVIEW_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(150);
 
 pub(crate) struct PreviewForwarderHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -55,52 +53,36 @@ pub(crate) struct PreviewSourceRoute {
     pub(crate) actor_ref: ExternalActorRef,
 }
 
-pub(crate) async fn spawn_preview_forwarder(
+pub(crate) fn spawn_preview_forwarder(
     services: Arc<RunDeliveryServices>,
     scope: TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
     notice: PostedWorkingNotice,
     route: PreviewSourceRoute,
-) -> Option<PreviewForwarderHandle> {
-    let subscription = match tokio::time::timeout(
-        PREVIEW_SUBSCRIPTION_TIMEOUT,
-        services
+) -> PreviewForwarderHandle {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let join = tokio::spawn(async move {
+        let subscription = match services
             .projection_stream
             .subscribe(ProjectionSubscriptionRequest {
                 actor: actor.clone(),
                 scope: scope.clone(),
                 after_cursor: None,
-            }),
-    )
-    .await
-    {
-        Ok(Ok(subscription)) => subscription,
-        Ok(Err(error)) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                %error,
-                "progressive preview subscription unavailable"
-            );
-            return None;
-        }
-        Err(_) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                "progressive preview subscription timed out"
-            );
-            return None;
-        }
-    };
-    tracing::debug!(
-        target: "ironclaw::reborn::run_delivery",
-        %run_id,
-        "progressive preview subscription ready"
-    );
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(async move {
+            })
+            .await
+        {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %run_id,
+                    %error,
+                    "progressive preview subscription unavailable"
+                );
+                return;
+            }
+        };
         forward_loop(
             PreviewForwarder {
                 services,
@@ -115,10 +97,10 @@ pub(crate) async fn spawn_preview_forwarder(
         )
         .await;
     });
-    Some(PreviewForwarderHandle {
+    PreviewForwarderHandle {
         shutdown: Some(shutdown_tx),
         join: Some(join),
-    })
+    }
 }
 
 struct PreviewForwarder {
@@ -139,8 +121,6 @@ async fn forward_loop(
     let mut accepted = String::new();
     let mut current = String::new();
     let mut sequence = 0_u64;
-    let mut received_text_updates = 0_u64;
-    let mut delivered_updates = 0_u64;
     let mut last_update_at = None;
     let mut next_update_at = None;
 
@@ -149,59 +129,11 @@ async fn forward_loop(
             tokio::time::sleep_until(next_update_at.unwrap_or_else(tokio::time::Instant::now));
         tokio::pin!(update_timer);
         tokio::select! {
-            _ = &mut shutdown => {
-                let deadline = tokio::time::Instant::now() + PREVIEW_SHUTDOWN_DRAIN_TIMEOUT;
-                loop {
-                    let item = match tokio::time::timeout_at(deadline, subscription.next()).await {
-                        Ok(item) => item,
-                        Err(_) => break,
-                    };
-                    match item {
-                        Some(Ok(envelope)) => {
-                            if let Some(text) = live_cumulative_text(
-                                &envelope,
-                                forwarder.run_id,
-                                &mut bodies,
-                            ) {
-                                current = text;
-                                received_text_updates = received_text_updates.saturating_add(1);
-                            }
-                        }
-                        Some(Err(error)) => {
-                            tracing::debug!(
-                                target: "ironclaw::reborn::run_delivery",
-                                run_id = %forwarder.run_id,
-                                %error,
-                                "progressive preview update unavailable during shutdown"
-                            );
-                        }
-                        None => break,
-                    }
-                }
-                if current != accepted
-                    && !current.is_empty()
-                    && current.chars().count() <= forwarder.notice.max_chars as usize
-                {
-                    sequence = sequence.saturating_add(1);
-                    if deliver_preview_update(
-                        &forwarder,
-                        &accepted,
-                        &current,
-                        sequence,
-                    )
-                    .await
-                    {
-                        delivered_updates = delivered_updates.saturating_add(1);
-                        accepted.clone_from(&current);
-                    }
-                }
-                break;
-            },
+            _ = &mut shutdown => break,
             item = subscription.next() => match item {
                 Some(Ok(envelope)) => {
                     if let Some(text) = live_cumulative_text(&envelope, forwarder.run_id, &mut bodies) {
                         current = text;
-                        received_text_updates = received_text_updates.saturating_add(1);
                         if next_update_at.is_none() && current != accepted && !current.is_empty() {
                             next_update_at = Some(next_preview_update_at(
                                 last_update_at,
@@ -241,20 +173,10 @@ async fn forward_loop(
                     break;
                 }
                 accepted.clone_from(&current);
-                delivered_updates = delivered_updates.saturating_add(1);
                 last_update_at = Some(update_started_at);
             }
         }
     }
-    tracing::debug!(
-        target: "ironclaw::reborn::run_delivery",
-        run_id = %forwarder.run_id,
-        received_text_updates,
-        delivered_updates,
-        accepted_chars = accepted.chars().count(),
-        pending_chars = current.chars().count(),
-        "progressive preview forwarder stopped"
-    );
 }
 
 fn next_preview_update_at(
