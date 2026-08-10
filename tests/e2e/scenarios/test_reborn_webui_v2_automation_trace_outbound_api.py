@@ -175,8 +175,9 @@ async def test_reborn_v2_outbound_targets_and_channels_served(
         # route frames unknown ids as validation (`notification_channel_not_found`).
         assert unknown_channel.status_code == 400, unknown_channel.text
 
-        # `target_ids` is deliberately required: treating an omitted field as
-        # `[]` would turn a malformed request into a destructive clear-all.
+        # Omitting `target_ids` must fail closed rather than silently clearing
+        # every configured notification channel. An explicit empty list above
+        # is the only valid clear-all request.
         omitted_field = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/outbound/notification-channels",
             json={},

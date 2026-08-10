@@ -183,6 +183,9 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             "        shell: bash\n", "        shell: powershell\n", 1
         )
         sabotaged_jobs = {
+            "missing shell property": (windows_job or "").replace(
+                "        shell: bash\n", "", 1
+            ),
             "nested run text": wrong_shell_job.replace(
                 "        run: |\n",
                 "        run: |\n          echo 'shell: bash'\n",
