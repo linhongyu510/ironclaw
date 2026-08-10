@@ -323,6 +323,7 @@ entries.
 |---|---|
 | Load the app, sign in with a token, navigate, and be rejected without one | `test_reborn_webui_v2_legacy_core.py`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_serves_shell_and_gates_auth` |
 | Send a message and see a streamed reply; empty messages don't send | `test_reborn_webui_v2_legacy_core.py::test_reborn_legacy_core_send_message_and_receive_response`, `…::test_reborn_legacy_core_empty_message_not_sent` |
+| Choose an allowed model for one conversation and have that exact model reach the provider request | `test_reborn_webui_v2_smoke.py::test_reborn_v2_conversation_model_picker_reaches_provider` |
 | See their message immediately, keep it through a reconnect/reload, and not see it duplicated once confirmed | `test_reborn_webui_v2_legacy_pending_messages.py` (12), `test_pending_user_messages.py` (8) |
 | Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |

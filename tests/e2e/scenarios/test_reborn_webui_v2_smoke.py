@@ -1457,6 +1457,83 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
+async def test_reborn_v2_conversation_model_picker_reaches_provider(
+    reborn_v2_server,
+    reborn_v2_browser,
+    mock_llm_server,
+):
+    """An allowed conversation model is persisted and sent to the provider."""
+    selected_model = "e2e-selected-model"
+    prompt = f"conversation model routing {uuid.uuid4()}"
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        policy = await client.put(
+            f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
+            json={
+                "workspace_default": "mock-model",
+                "allowed_models": ["mock-model", selected_model],
+            },
+            timeout=15,
+        )
+        policy.raise_for_status()
+        thread_id = await _create_thread(client, reborn_v2_server)
+        reset = await client.post(
+            f"{mock_llm_server}/__mock/chat_requests/reset",
+            timeout=10,
+        )
+        reset.raise_for_status()
+
+        context = await reborn_v2_browser.new_context(
+            viewport={"width": 1280, "height": 720}
+        )
+        page = await context.new_page()
+        try:
+            await open_reborn_v2_page(
+                page,
+                reborn_v2_server,
+                path=f"/chat/{thread_id}",
+            )
+            picker = page.locator(SEL_V2["chat_model_picker"])
+            await expect(picker).to_be_enabled(timeout=15000)
+            await picker.select_option(selected_model)
+            await expect(picker).to_have_value(selected_model)
+
+            preference = None
+            async with asyncio.timeout(15):
+                while preference != selected_model:
+                    response = await client.get(
+                        f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/model",
+                        timeout=5,
+                    )
+                    response.raise_for_status()
+                    preference = response.json().get("model")
+                    if preference != selected_model:
+                        await asyncio.sleep(0.1)
+
+            composer = page.locator(SEL_V2["chat_composer"])
+            await composer.fill(prompt)
+            await composer.press("Enter")
+            await _wait_for_assistant_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+            )
+
+            requests = await client.get(
+                f"{mock_llm_server}/__mock/chat_requests",
+                timeout=10,
+            )
+            requests.raise_for_status()
+            matching = [
+                request
+                for request in requests.json().get("requests", [])
+                if prompt in json.dumps(request.get("messages", []))
+            ]
+            assert matching, "the selected-model turn never reached the mock provider"
+            assert matching[-1].get("model") == selected_model, matching[-1]
+        finally:
+            await context.close()
+
+
 async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
     reborn_v2_page,
 ):
