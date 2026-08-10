@@ -385,135 +385,244 @@ fn layout_manifest_rejects_unsupported_or_unowned_wire_fields() {
 }
 
 #[test]
-fn layout_manifest_transition_admission_preserves_durable_security_assumptions() {
+fn layout_manifest_transition_admission_has_an_explicit_durable_state_matrix() {
     struct Case {
         name: &'static str,
-        stored: LayoutRequirement,
-        requested: LayoutRequirement,
-        expected: ProfileTransitionAdmission,
+        stored: DurableStateKind,
+        requested: DurableStateKind,
+        expected_reason: Option<&'static str>,
     }
-
-    let embedded_single_trusted = LayoutRequirement {
-        durable_state: DurableStateKind::EmbeddedLibSql,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::SingleUser,
-            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-        },
-    };
-    let embedded_single_isolated = LayoutRequirement {
-        durable_state: DurableStateKind::EmbeddedLibSql,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::SingleUser,
-            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
-        },
-    };
-    let embedded_multi_isolated = LayoutRequirement {
-        durable_state: DurableStateKind::EmbeddedLibSql,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::MultiUser,
-            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
-        },
-    };
-    let embedded_multi_trusted = LayoutRequirement {
-        durable_state: DurableStateKind::EmbeddedLibSql,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::MultiUser,
-            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-        },
-    };
-    let external_multi_isolated = LayoutRequirement {
-        durable_state: DurableStateKind::ExternalPostgres,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::MultiUser,
-            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
-        },
-    };
 
     let cases = [
         Case {
-            name: "same local profile requirement",
-            stored: embedded_single_trusted,
-            requested: embedded_single_trusted,
-            expected: ProfileTransitionAdmission::Allowed,
+            name: "embedded libsql remains embedded libsql",
+            stored: DurableStateKind::EmbeddedLibSql,
+            requested: DurableStateKind::EmbeddedLibSql,
+            expected_reason: None,
         },
         Case {
-            name: "local dev to local dev yolo",
-            stored: embedded_single_trusted,
-            requested: embedded_single_trusted,
-            expected: ProfileTransitionAdmission::Allowed,
+            name: "embedded libsql changes to external postgres",
+            stored: DurableStateKind::EmbeddedLibSql,
+            requested: DurableStateKind::ExternalPostgres,
+            expected_reason: Some(
+                "durable state transition from embedded-libsql to external-postgres requires an explicit storage migration",
+            ),
         },
         Case {
-            name: "hosted volume without processes to docker sandbox",
-            stored: embedded_multi_isolated,
-            requested: embedded_multi_isolated,
-            expected: ProfileTransitionAdmission::Allowed,
+            name: "external postgres changes to embedded libsql",
+            stored: DurableStateKind::ExternalPostgres,
+            requested: DurableStateKind::EmbeddedLibSql,
+            expected_reason: Some(
+                "durable state transition from external-postgres to embedded-libsql requires an explicit storage migration",
+            ),
         },
         Case {
-            name: "docker sandbox to railway sandbox",
-            stored: embedded_multi_isolated,
-            requested: embedded_multi_isolated,
-            expected: ProfileTransitionAdmission::Allowed,
-        },
-        Case {
-            name: "railway sandbox to hosted volume without processes",
-            stored: embedded_multi_isolated,
-            requested: embedded_multi_isolated,
-            expected: ProfileTransitionAdmission::Allowed,
-        },
-        Case {
-            name: "tightening workspace access floor",
-            stored: embedded_single_trusted,
-            requested: embedded_single_isolated,
-            expected: ProfileTransitionAdmission::Allowed,
-        },
-        Case {
-            name: "weakening workspace access floor",
-            stored: embedded_multi_isolated,
-            requested: embedded_multi_trusted,
-            expected: ProfileTransitionAdmission::Rejected {
-                reason: "workspace access floor cannot weaken from per-caller-isolated to single-trusted-operator".to_owned(),
-            },
-        },
-        Case {
-            name: "multi user isolated to local host",
-            stored: embedded_multi_isolated,
-            requested: embedded_single_trusted,
-            expected: ProfileTransitionAdmission::Rejected {
-                reason: "tenancy transition from multi-user to single-user requires an explicit ownership migration".to_owned(),
-            },
-        },
-        Case {
-            name: "single user to multi user",
-            stored: embedded_single_trusted,
-            requested: embedded_multi_isolated,
-            expected: ProfileTransitionAdmission::Rejected {
-                reason: "tenancy transition from single-user to multi-user requires an explicit ownership migration".to_owned(),
-            },
-        },
-        Case {
-            name: "embedded libsql to external postgres",
-            stored: embedded_multi_isolated,
-            requested: external_multi_isolated,
-            expected: ProfileTransitionAdmission::Rejected {
-                reason: "durable state transition from embedded-libsql to external-postgres requires an explicit storage migration".to_owned(),
-            },
-        },
-        Case {
-            name: "external postgres to embedded libsql",
-            stored: external_multi_isolated,
-            requested: embedded_multi_isolated,
-            expected: ProfileTransitionAdmission::Rejected {
-                reason: "durable state transition from external-postgres to embedded-libsql requires an explicit storage migration".to_owned(),
-            },
+            name: "external postgres remains external postgres",
+            stored: DurableStateKind::ExternalPostgres,
+            requested: DurableStateKind::ExternalPostgres,
+            expected_reason: None,
         },
     ];
 
     for case in cases {
-        assert_eq!(
-            LayoutManifest::new(case.stored).admit(case.requested),
-            case.expected,
-            "case: {}",
-            case.name
+        assert_layout_transition(
+            case.name,
+            layout_requirement(
+                case.stored,
+                TenancyModel::SingleUser,
+                WorkspaceAccessFloor::SingleTrustedOperator,
+            ),
+            layout_requirement(
+                case.requested,
+                TenancyModel::SingleUser,
+                WorkspaceAccessFloor::SingleTrustedOperator,
+            ),
+            case.expected_reason,
         );
     }
+}
+
+#[test]
+fn layout_manifest_transition_admission_has_an_explicit_tenancy_matrix() {
+    struct Case {
+        name: &'static str,
+        stored: TenancyModel,
+        requested: TenancyModel,
+        expected_reason: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            name: "single user remains single user",
+            stored: TenancyModel::SingleUser,
+            requested: TenancyModel::SingleUser,
+            expected_reason: None,
+        },
+        Case {
+            name: "single user changes to multi user",
+            stored: TenancyModel::SingleUser,
+            requested: TenancyModel::MultiUser,
+            expected_reason: Some(
+                "tenancy transition from single-user to multi-user requires an explicit ownership migration",
+            ),
+        },
+        Case {
+            name: "multi user changes to single user",
+            stored: TenancyModel::MultiUser,
+            requested: TenancyModel::SingleUser,
+            expected_reason: Some(
+                "tenancy transition from multi-user to single-user requires an explicit ownership migration",
+            ),
+        },
+        Case {
+            name: "multi user remains multi user",
+            stored: TenancyModel::MultiUser,
+            requested: TenancyModel::MultiUser,
+            expected_reason: None,
+        },
+    ];
+
+    for case in cases {
+        assert_layout_transition(
+            case.name,
+            layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                case.stored,
+                WorkspaceAccessFloor::PerCallerIsolated,
+            ),
+            layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                case.requested,
+                WorkspaceAccessFloor::PerCallerIsolated,
+            ),
+            case.expected_reason,
+        );
+    }
+}
+
+#[test]
+fn layout_manifest_transition_admission_has_an_explicit_workspace_access_floor_matrix() {
+    struct Case {
+        name: &'static str,
+        stored: WorkspaceAccessFloor,
+        requested: WorkspaceAccessFloor,
+        expected_reason: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            name: "single trusted operator remains single trusted operator",
+            stored: WorkspaceAccessFloor::SingleTrustedOperator,
+            requested: WorkspaceAccessFloor::SingleTrustedOperator,
+            expected_reason: None,
+        },
+        Case {
+            name: "single trusted operator tightens to per caller isolation",
+            stored: WorkspaceAccessFloor::SingleTrustedOperator,
+            requested: WorkspaceAccessFloor::PerCallerIsolated,
+            expected_reason: None,
+        },
+        Case {
+            name: "per caller isolation weakens to single trusted operator",
+            stored: WorkspaceAccessFloor::PerCallerIsolated,
+            requested: WorkspaceAccessFloor::SingleTrustedOperator,
+            expected_reason: Some(
+                "workspace access floor cannot weaken from per-caller-isolated to single-trusted-operator",
+            ),
+        },
+        Case {
+            name: "per caller isolation remains per caller isolation",
+            stored: WorkspaceAccessFloor::PerCallerIsolated,
+            requested: WorkspaceAccessFloor::PerCallerIsolated,
+            expected_reason: None,
+        },
+    ];
+
+    for case in cases {
+        assert_layout_transition(
+            case.name,
+            layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                TenancyModel::SingleUser,
+                case.stored,
+            ),
+            layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                TenancyModel::SingleUser,
+                case.requested,
+            ),
+            case.expected_reason,
+        );
+    }
+}
+
+#[test]
+fn layout_manifest_transition_admission_preserves_rejection_precedence() {
+    assert_layout_transition(
+        "durable state rejection precedes tenancy and workspace access floor changes",
+        layout_requirement(
+            DurableStateKind::ExternalPostgres,
+            TenancyModel::MultiUser,
+            WorkspaceAccessFloor::PerCallerIsolated,
+        ),
+        layout_requirement(
+            DurableStateKind::EmbeddedLibSql,
+            TenancyModel::SingleUser,
+            WorkspaceAccessFloor::SingleTrustedOperator,
+        ),
+        Some(
+            "durable state transition from external-postgres to embedded-libsql requires an explicit storage migration",
+        ),
+    );
+
+    assert_layout_transition(
+        "tenancy rejection precedes a workspace access floor weakening",
+        layout_requirement(
+            DurableStateKind::EmbeddedLibSql,
+            TenancyModel::MultiUser,
+            WorkspaceAccessFloor::PerCallerIsolated,
+        ),
+        layout_requirement(
+            DurableStateKind::EmbeddedLibSql,
+            TenancyModel::SingleUser,
+            WorkspaceAccessFloor::SingleTrustedOperator,
+        ),
+        Some(
+            "tenancy transition from multi-user to single-user requires an explicit ownership migration",
+        ),
+    );
+}
+
+fn layout_requirement(
+    durable_state: DurableStateKind,
+    tenancy: TenancyModel,
+    workspace_access_floor: WorkspaceAccessFloor,
+) -> LayoutRequirement {
+    LayoutRequirement {
+        durable_state,
+        security: DeploymentSecurityEnvelope {
+            tenancy,
+            workspace_access_floor,
+        },
+    }
+}
+
+fn assert_layout_transition(
+    name: &str,
+    stored: LayoutRequirement,
+    requested: LayoutRequirement,
+    expected_reason: Option<&str>,
+) {
+    let expected = match expected_reason {
+        Some(reason) => ProfileTransitionAdmission::Rejected {
+            reason: reason.to_owned(),
+        },
+        None => ProfileTransitionAdmission::Allowed,
+    };
+
+    assert_eq!(
+        LayoutManifest::new(stored).admit(requested),
+        expected,
+        "case: {name}",
+    );
 }

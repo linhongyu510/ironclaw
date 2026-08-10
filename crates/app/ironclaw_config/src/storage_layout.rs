@@ -199,46 +199,133 @@ impl LayoutManifest {
     /// Admit only deployments that preserve the layout's durable assumptions.
     pub fn admit(&self, requested: LayoutRequirement) -> ProfileTransitionAdmission {
         let stored = self.requirement();
-        if stored.durable_state != requested.durable_state {
-            return ProfileTransitionAdmission::Rejected {
-                reason: format!(
-                    "durable state transition from {} to {} requires an explicit storage migration",
-                    stored.durable_state.as_str(),
-                    requested.durable_state.as_str()
-                ),
-            };
+        match durable_state_transition(stored.durable_state, requested.durable_state) {
+            DurableStateTransition::Compatible => {}
+            DurableStateTransition::RequiresExplicitStorageMigration => {
+                return ProfileTransitionAdmission::Rejected {
+                    reason: format!(
+                        "durable state transition from {} to {} requires an explicit storage migration",
+                        stored.durable_state.as_str(),
+                        requested.durable_state.as_str()
+                    ),
+                };
+            }
         }
 
-        if stored.security.tenancy != requested.security.tenancy {
-            return ProfileTransitionAdmission::Rejected {
-                reason: format!(
-                    "tenancy transition from {} to {} requires an explicit ownership migration",
-                    stored.security.tenancy.as_str(),
-                    requested.security.tenancy.as_str()
-                ),
-            };
+        match tenancy_transition(stored.security.tenancy, requested.security.tenancy) {
+            TenancyTransition::Compatible => {}
+            TenancyTransition::RequiresExplicitOwnershipMigration => {
+                return ProfileTransitionAdmission::Rejected {
+                    reason: format!(
+                        "tenancy transition from {} to {} requires an explicit ownership migration",
+                        stored.security.tenancy.as_str(),
+                        requested.security.tenancy.as_str()
+                    ),
+                };
+            }
         }
 
-        if matches!(
-            (
-                stored.security.workspace_access_floor,
-                requested.security.workspace_access_floor,
-            ),
-            (
-                WorkspaceAccessFloor::PerCallerIsolated,
-                WorkspaceAccessFloor::SingleTrustedOperator,
-            )
+        match workspace_access_floor_transition(
+            stored.security.workspace_access_floor,
+            requested.security.workspace_access_floor,
         ) {
-            return ProfileTransitionAdmission::Rejected {
-                reason: format!(
-                    "workspace access floor cannot weaken from {} to {}",
-                    stored.security.workspace_access_floor.as_str(),
-                    requested.security.workspace_access_floor.as_str()
-                ),
-            };
+            WorkspaceAccessFloorTransition::Compatible => {}
+            WorkspaceAccessFloorTransition::WeakensAccessFloor => {
+                return ProfileTransitionAdmission::Rejected {
+                    reason: format!(
+                        "workspace access floor cannot weaken from {} to {}",
+                        stored.security.workspace_access_floor.as_str(),
+                        requested.security.workspace_access_floor.as_str()
+                    ),
+                };
+            }
         }
 
         ProfileTransitionAdmission::Allowed
+    }
+}
+
+/// Exhaustive durable-state transition matrix.
+///
+/// The lack of a wildcard is intentional: adding a durable-state variant must
+/// make the compiler require a reviewed transition decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableStateTransition {
+    Compatible,
+    RequiresExplicitStorageMigration,
+}
+
+const fn durable_state_transition(
+    stored: DurableStateKind,
+    requested: DurableStateKind,
+) -> DurableStateTransition {
+    match (stored, requested) {
+        (DurableStateKind::EmbeddedLibSql, DurableStateKind::EmbeddedLibSql) => {
+            DurableStateTransition::Compatible
+        }
+        (DurableStateKind::EmbeddedLibSql, DurableStateKind::ExternalPostgres) => {
+            DurableStateTransition::RequiresExplicitStorageMigration
+        }
+        (DurableStateKind::ExternalPostgres, DurableStateKind::EmbeddedLibSql) => {
+            DurableStateTransition::RequiresExplicitStorageMigration
+        }
+        (DurableStateKind::ExternalPostgres, DurableStateKind::ExternalPostgres) => {
+            DurableStateTransition::Compatible
+        }
+    }
+}
+
+/// Exhaustive tenant-ownership transition matrix.
+///
+/// The lack of a wildcard is intentional: adding a tenancy variant must make
+/// the compiler require a reviewed transition decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenancyTransition {
+    Compatible,
+    RequiresExplicitOwnershipMigration,
+}
+
+const fn tenancy_transition(stored: TenancyModel, requested: TenancyModel) -> TenancyTransition {
+    match (stored, requested) {
+        (TenancyModel::SingleUser, TenancyModel::SingleUser) => TenancyTransition::Compatible,
+        (TenancyModel::SingleUser, TenancyModel::MultiUser) => {
+            TenancyTransition::RequiresExplicitOwnershipMigration
+        }
+        (TenancyModel::MultiUser, TenancyModel::SingleUser) => {
+            TenancyTransition::RequiresExplicitOwnershipMigration
+        }
+        (TenancyModel::MultiUser, TenancyModel::MultiUser) => TenancyTransition::Compatible,
+    }
+}
+
+/// Exhaustive workspace-access-floor transition matrix.
+///
+/// The lack of a wildcard is intentional: adding a workspace-access-floor
+/// variant must make the compiler require a reviewed transition decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceAccessFloorTransition {
+    Compatible,
+    WeakensAccessFloor,
+}
+
+const fn workspace_access_floor_transition(
+    stored: WorkspaceAccessFloor,
+    requested: WorkspaceAccessFloor,
+) -> WorkspaceAccessFloorTransition {
+    match (stored, requested) {
+        (
+            WorkspaceAccessFloor::SingleTrustedOperator,
+            WorkspaceAccessFloor::SingleTrustedOperator,
+        ) => WorkspaceAccessFloorTransition::Compatible,
+        (WorkspaceAccessFloor::SingleTrustedOperator, WorkspaceAccessFloor::PerCallerIsolated) => {
+            WorkspaceAccessFloorTransition::Compatible
+        }
+        (WorkspaceAccessFloor::PerCallerIsolated, WorkspaceAccessFloor::SingleTrustedOperator) => {
+            WorkspaceAccessFloorTransition::WeakensAccessFloor
+        }
+        (WorkspaceAccessFloor::PerCallerIsolated, WorkspaceAccessFloor::PerCallerIsolated) => {
+            WorkspaceAccessFloorTransition::Compatible
+        }
     }
 }
 
