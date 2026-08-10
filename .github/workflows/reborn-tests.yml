@@ -654,7 +654,9 @@ jobs:
         run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
       - name: Verify production local-sandbox profile wiring
-        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
+        env:
+          IRONCLAW_REQUIRE_DOCKER_TESTS: "1"
+        run: cargo test -p ironclaw runtime::tests::cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding -- --exact --nocapture
 
       - name: Run real-Docker user sandbox contract
         run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
