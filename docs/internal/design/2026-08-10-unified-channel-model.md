@@ -80,10 +80,13 @@ it. Its responsibilities:
    Pure, panic-isolated, no host authority (cannot forge trust — §9).
 2. **Outbound / reply** — consume the core's abstract reply-event stream and
    deliver it per the channel's declared reply mode (§5).
-3. **Notifications** — deliver a blocked-automation notice (approval/auth gate,
-   run-failure) through the channel, gated on the `notifications` capability.
+3. **Notifications (`deliver_notification`)** — the channel-specific *send* of a
+   notification (a blocked-automation notice, or any out-of-band notice), gated
+   on the `notifications` capability. This is where a channel's notification
+   logic lives. It is called by the generic `DeliveryCoordinator` facade (§7a),
+   never directly by feature code.
 4. **Notification setup** — perform/report the per-user enrollment a channel
-   needs before notifications can be delivered (§7). Web-app: register/remove a
+   needs before notifications can be delivered (§7b). Web-app: register/remove a
    browser push subscription and report how many browsers are enrolled.
 
 Auth has no adapter (the manifest recipe engine runs it); only channels get an
@@ -162,7 +165,38 @@ The channel declares its behavior; the generic core reads it and adapts:
   Telegram: no (a connected DM is deliverable as-is).
 - **`supports_markdown` / `supports_threads`**, **`conversation_model`** — as today.
 
-## 7. Notification enablement / setup is generic (this replaces `/web-push/*`)
+## 7. Notifications are generic — a send facade + a setup surface, both over the adapter
+
+Two notification concerns. Both are channel-agnostic in every caller and
+channel-specific only inside the adapter.
+
+### 7a. Send — a generic, any-caller facade over `ChannelAdapter::deliver_notification`
+
+- **The adapter owns the channel-specific send:**
+  `ChannelAdapter::deliver_notification(target, content) -> DeliveryReport`
+  (Slack DM, Telegram DM, web-push to enrolled browsers). One method; every
+  channel implements it. This is where a channel's notification *logic* lives.
+- **The generic facade is the `DeliveryCoordinator`** — already the single send
+  path, and already *not* routine-specific: its callers today are the routine
+  `TriggeredRunDeliveryDriver` **and** the model's `builtin.outbound_deliver`. It
+  resolves the target and dispatches by `extension_id` to that channel's adapter.
+  **Delivery is therefore already adapter-based — do not rebuild it.**
+- **Any subsystem sends a notification by calling the facade** — routines are one
+  caller among several. A "notify the user out-of-band" feature is simply a new
+  caller of the *same* facade. Callers decide WHEN and WHAT; they never decide
+  HOW and never name a channel (no `slack.…` at a call site — that violates §0).
+- Two generic targeting shapes, both → coordinator → adapter:
+  `notify_user(user, content)` fans out to the user's configured notification
+  channels (the picker set + `resolve_notification_target`, gated on the
+  `notifications` capability); `notify(target, content)` targets one channel.
+- Mediated, evidence-returning like every outbound: returns the provider ref /
+  `DeliveredUnconfirmed`, never a fabricated "sent"
+  (`.claude/rules/tool-evidence.md`).
+- **Stays generic (NOT in the adapter):** the coordinator, target resolution,
+  capability gating, the user's channel preferences. **Moves INTO the adapter:**
+  only the per-channel send mechanics (`deliver_notification`).
+
+### 7b. Setup / enrollment is generic (this replaces `/web-push/*`)
 
 Some channels can't deliver a notification until the user has *set them up* for
 this account/browser. Web-app needs a browser push subscription; a future channel
@@ -285,23 +319,30 @@ Reply/outbound unification:
 7. Make `max_message_chars` optional and load-bearing for the batched sink.
 
 Notification generalization:
-8. Add the generic notification-setup surface (status/enable/disable by
+8. Send facade: make `ChannelAdapter::deliver_notification(target, content)` the
+   channel's notification send, and have the `DeliveryCoordinator` (the generic
+   facade — already called by `TriggeredRunDeliveryDriver` + the model tool)
+   dispatch to it by `extension_id`. Expose the facade so any subsystem can send
+   (`notify_user(user, content)` / `notify(target, content)`). Delivery is
+   already adapter-based — this is naming/exposing the facade + the adapter
+   method, not a rebuild.
+9. Setup: add the generic notification-setup surface (status/enable/disable by
    `extension_id`) dispatching to the adapter; move the web-push subscription
    store + VAPID + endpoint validation behind the web-app adapter.
-9. **Delete `/web-push/{subscribe,unsubscribe,status}`**; point the frontend at
-   the generic surface; generalize the picker's readiness (per-channel status,
-   no channel name in the frontend).
+10. **Delete `/web-push/{subscribe,unsubscribe,status}`**; point the frontend at
+    the generic surface; generalize the picker's readiness (per-channel status,
+    no channel name in the frontend).
 
 Cleanup:
-10. Rename the extension id/package/crate/route constants `web-push` → `web-app`
+11. Rename the extension id/package/crate/route constants `web-push` → `web-app`
     and remove the `WEB_PUSH_*` id constants (the routes they named are gone).
     Internal crate rename (`ironclaw_web_push*`) is mechanical and may trail the
     behavior in the same PR.
 
 Order: 1–4 (inbound, highest-traffic path — test-first against the existing
 send-message/inbound contract, preserve caller-owns-thread + `client_action_id`
-replay + no thread auto-creation), then 5–7 (reply), then 8–9 (notifications),
-then 10 (rename).
+replay + no thread auto-creation), then 5–7 (reply), then 8–10 (notifications:
+send facade, setup, delete bespoke routes), then 11 (rename).
 
 ## 13. Enforcement (so future agents can't regress it)
 
