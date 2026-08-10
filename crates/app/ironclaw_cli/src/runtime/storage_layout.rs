@@ -18,14 +18,16 @@ use ironclaw_config::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use uuid::Uuid;
 
 const LAYOUT_MANIFEST_FILE: &str = "layout.toml";
 const ADOPTION_DIR: &str = "layout-adoption";
 const JOURNAL_FILE: &str = "journal.toml";
 const SNAPSHOT_DIR: &str = "snapshot";
 const STAGING_DIR: &str = "staging";
+const STAGING_OWNER_FILE: &str = ".adoption-owner";
 const ADOPTION_LOCK_FILE: &str = "adoption.lock";
-const JOURNAL_SCHEMA_VERSION: u32 = 2;
+const JOURNAL_SCHEMA_VERSION: u32 = 3;
 const DB_FILE: &str = "reborn-local-dev.db";
 const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
 const LIBSQL_DB_UNIT: &[&str] = &[
@@ -62,6 +64,7 @@ enum AdoptionPhase {
     SnapshotOwned,
     Staged,
     CanonicalInstalled,
+    MigrationPending,
     StoreVerified,
 }
 
@@ -153,6 +156,7 @@ struct AdoptionInventory {
 #[serde(deny_unknown_fields)]
 struct AdoptionJournal {
     schema_version: u32,
+    operation_id: String,
     source: LegacySourceKind,
     phase: AdoptionPhase,
     source_requirement: LayoutRequirement,
@@ -180,6 +184,16 @@ struct ValidatedWorkspaceImportDecision {
 
 impl WorkspaceImportDecision {
     fn validate(&self) -> anyhow::Result<ValidatedWorkspaceImportDecision> {
+        if !self.source.is_absolute() {
+            bail!(
+                "workspace journal source must be absolute; refusing to resolve a persisted relative path"
+            );
+        }
+        require_ordinary_directory(&self.source)
+            .context("workspace journal source must be an ordinary non-symlink directory")?;
+        validate_ordinary_tree(&self.source).context(
+            "workspace journal source tree must contain only ordinary non-symlink entries",
+        )?;
         let tenant = TenantId::new(self.tenant.clone())
             .map_err(|error| anyhow!("invalid workspace journal tenant identity: {error}"))?;
         let user = UserId::new(self.user.clone())
@@ -213,6 +227,7 @@ impl AdoptionJournal {
     ) -> Self {
         Self {
             schema_version: JOURNAL_SCHEMA_VERSION,
+            operation_id: Uuid::new_v4().to_string(),
             source: candidate.kind,
             phase: AdoptionPhase::Prepare,
             source_requirement: candidate.kind.requirement(),
@@ -241,6 +256,8 @@ impl AdoptionJournal {
     }
 
     fn validate_source_requirement(&self) -> anyhow::Result<()> {
+        Uuid::parse_str(&self.operation_id)
+            .map_err(|error| anyhow!("adoption journal operation_id must be a UUID: {error}"))?;
         if self.source_requirement != self.source.requirement() {
             bail!(
                 "adoption journal source security requirement does not match its fixed legacy source kind; refusing to resume"
@@ -427,54 +444,206 @@ fn resume_adoption(
     require_snapshot_shape(&candidate, &snapshot)?;
 
     if journal.phase == AdoptionPhase::SnapshotOwned {
-        stage_snapshot(&candidate, &snapshot, adoption_root, workspace.as_ref())?;
+        discard_proven_partial_staging(adoption_root, &journal.operation_id)?;
+        stage_snapshot(
+            &candidate,
+            &snapshot,
+            adoption_root,
+            workspace.as_ref(),
+            &journal.operation_id,
+        )?;
         journal.phase = AdoptionPhase::Staged;
         write_journal(journal_path, journal)?;
     }
 
     if journal.phase == AdoptionPhase::Staged {
-        require_staged_inventory(&candidate, &snapshot, adoption_root, workspace.as_ref())?;
-        install_staged(paths, adoption_root, workspace.as_ref())?;
+        reconcile_staged_install(
+            paths,
+            &candidate,
+            &snapshot,
+            adoption_root,
+            workspace.as_ref(),
+            &journal.operation_id,
+        )?;
         journal.phase = AdoptionPhase::CanonicalInstalled;
         write_journal(journal_path, journal)?;
     }
 
     if journal.phase == AdoptionPhase::CanonicalInstalled {
         verify_canonical_inventory(paths, &candidate, &snapshot)?;
+        journal.phase = AdoptionPhase::MigrationPending;
+        write_journal(journal_path, journal)?;
+    }
+
+    if journal.phase == AdoptionPhase::MigrationPending {
+        verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
         verify_canonical_store(paths, candidate.is_embedded())?;
+        verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
         journal.phase = AdoptionPhase::StoreVerified;
         write_journal(journal_path, journal)?;
     }
 
     // StoreVerified is durable progress, not a proof that the canonical tree
-    // still exists. Re-check the exact copied inventory and reopen the real
-    // store on every replay before the manifest makes the layout bootable.
-    verify_canonical_inventory(paths, &candidate, &snapshot)?;
+    // still exists. Never compare post-migration libSQL bytes to the immutable
+    // snapshot; validate the post-migration shape and reopen the real store.
+    verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
     verify_canonical_store(paths, candidate.is_embedded())?;
+    verify_post_migration_canonical_shape(paths, &candidate, &snapshot)?;
 
     let manifest = LayoutManifest::new(journal.target_requirement);
     write_manifest_last(home, &manifest)?;
     Ok(())
 }
 
-fn require_staged_inventory(
+fn reconcile_staged_install(
+    paths: &RebornStoragePaths,
     candidate: &LegacyCandidate,
     snapshot: &Path,
     adoption_root: &Path,
     workspace: Option<&ValidatedWorkspaceImportDecision>,
+    operation_id: &str,
 ) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
-    verify_inventory_roots(
-        &staging.join("state"),
-        &staging.join("system"),
+    require_proven_staging(&staging, operation_id)?;
+    reconcile_staged_state(
         candidate,
         snapshot,
-        "staged",
+        &staging.join("state"),
+        paths.state_root(),
     )?;
-    if workspace.is_some() {
-        validate_ordinary_tree(&staging.join("workspace-leaf"))?;
+    reconcile_staged_system(
+        candidate,
+        snapshot,
+        &staging.join("system"),
+        paths.system_root(),
+    )?;
+    reconcile_staged_workspace(paths, workspace, &staging.join("workspace-leaf"))?;
+    remove_staging_owner_marker(&staging, operation_id)?;
+    fs::remove_dir(&staging)
+        .with_context(|| format!("remove empty staging root {}", staging.display()))?;
+    sync_directory(adoption_root)
+}
+
+fn discard_proven_partial_staging(adoption_root: &Path, operation_id: &str) -> anyhow::Result<()> {
+    let staging = adoption_root.join(STAGING_DIR);
+    if !staging.exists() {
+        return Ok(());
+    }
+    require_proven_staging(&staging, operation_id)?;
+    validate_ordinary_tree(&staging)?;
+    fs::remove_dir_all(&staging).with_context(|| {
+        format!(
+            "discard journal-proven partial staging tree {}",
+            staging.display()
+        )
+    })?;
+    sync_directory(adoption_root)
+}
+
+fn require_proven_staging(staging: &Path, operation_id: &str) -> anyhow::Result<()> {
+    require_ordinary_directory(staging)?;
+    let marker = staging.join(STAGING_OWNER_FILE);
+    let contents = read_utf8_file_no_follow(&marker)?;
+    if contents != operation_id {
+        bail!(
+            "staging ownership marker at {} does not match the adoption journal; refusing to discard or install it",
+            marker.display()
+        );
     }
     Ok(())
+}
+
+fn remove_staging_owner_marker(staging: &Path, operation_id: &str) -> anyhow::Result<()> {
+    require_proven_staging(staging, operation_id)?;
+    let marker = staging.join(STAGING_OWNER_FILE);
+    fs::remove_file(&marker)
+        .with_context(|| format!("remove staging ownership marker {}", marker.display()))?;
+    sync_directory(staging)
+}
+
+fn reconcile_staged_state(
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    staged: &Path,
+    canonical: &Path,
+) -> anyhow::Result<()> {
+    match (staged.exists(), canonical.exists()) {
+        (true, false) => {
+            verify_state_inventory(staged, candidate, snapshot, "staged state")?;
+            fs::rename(staged, canonical)
+                .with_context(|| format!("install staged state at {}", canonical.display()))?;
+            sync_directory(
+                canonical
+                    .parent()
+                    .ok_or_else(|| anyhow!("canonical state root has no parent"))?,
+            )?;
+            #[cfg(test)]
+            {
+                fail_at_test_adoption_fault(TestAdoptionFaultPoint::AfterStateRename)?;
+            }
+            Ok(())
+        }
+        (false, true) => verify_state_inventory(canonical, candidate, snapshot, "canonical state"),
+        (true, true) => bail!(
+            "staged and canonical state both exist; refusing to choose or overwrite either tree"
+        ),
+        (false, false) => bail!(
+            "staged recovery is missing both staged and canonical state; refusing to reconstruct an ambiguous install"
+        ),
+    }
+}
+
+fn reconcile_staged_system(
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    staged: &Path,
+    canonical: &Path,
+) -> anyhow::Result<()> {
+    match (staged.exists(), canonical.exists()) {
+        (true, false) => {
+            verify_system_inventory(staged, candidate, snapshot, "staged system")?;
+            fs::rename(staged, canonical)
+                .with_context(|| format!("install staged system at {}", canonical.display()))?;
+            sync_directory(
+                canonical
+                    .parent()
+                    .ok_or_else(|| anyhow!("canonical system root has no parent"))?,
+            )
+        }
+        (false, true) => {
+            verify_system_inventory(canonical, candidate, snapshot, "canonical system")
+        }
+        (true, true) => bail!(
+            "staged and canonical system content both exist; refusing to choose or overwrite either tree"
+        ),
+        (false, false) => bail!(
+            "staged recovery is missing both staged and canonical system content; refusing to reconstruct an ambiguous install"
+        ),
+    }
+}
+
+fn reconcile_staged_workspace(
+    paths: &RebornStoragePaths,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
+    staged_leaf: &Path,
+) -> anyhow::Result<()> {
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+    let destination = workspace_leaf_path(paths, workspace);
+    match (staged_leaf.exists(), destination.exists()) {
+        (true, false) => {
+            validate_ordinary_tree(staged_leaf)?;
+            install_workspace_leaf(paths, workspace, staged_leaf)
+        }
+        (false, true) => validate_ordinary_tree(&destination),
+        (true, true) => bail!(
+            "staged and canonical workspace leaves both exist; refusing to choose or overwrite either leaf"
+        ),
+        (false, false) => {
+            bail!("staged recovery is missing both staged and canonical workspace leaves")
+        }
+    }
 }
 
 fn reconcile_prepare_shape(candidate: &LegacyCandidate, snapshot: &Path) -> anyhow::Result<()> {
@@ -549,12 +718,13 @@ fn snapshot_source(candidate: &LegacyCandidate, snapshot: &Path) -> anyhow::Resu
 }
 
 fn require_snapshot_shape(candidate: &LegacyCandidate, snapshot: &Path) -> anyhow::Result<()> {
-    if !snapshot.is_dir() {
-        bail!(
-            "adoption snapshot is missing at {}; only the offline adoption command may recover it",
+    require_ordinary_directory(snapshot).with_context(|| {
+        format!(
+            "adoption snapshot is missing or unsafe at {}; only the offline adoption command may recover it",
             snapshot.display()
-        );
-    }
+        )
+    })?;
+    let snapshot_handle = open_directory_no_follow(snapshot)?;
     if candidate.kind != LegacySourceKind::BareHome && candidate.source_root.exists() {
         bail!(
             "legacy source {} still exists after snapshot ownership; refusing to copy from an ambiguous source/snapshot pair",
@@ -566,7 +736,8 @@ fn require_snapshot_shape(candidate: &LegacyCandidate, snapshot: &Path) -> anyho
             "bare-home legacy DB/key entries remain after snapshot ownership; refusing to copy from an ambiguous source/snapshot pair"
         );
     }
-    validate_snapshot_inventory(candidate, snapshot)
+    validate_snapshot_inventory(candidate, snapshot)?;
+    ensure_directory_path_matches_handle(snapshot, &snapshot_handle)
 }
 
 fn bare_source_entries_absent(candidate: &LegacyCandidate) -> bool {
@@ -596,6 +767,7 @@ fn stage_snapshot(
     snapshot: &Path,
     adoption_root: &Path,
     workspace: Option<&ValidatedWorkspaceImportDecision>,
+    operation_id: &str,
 ) -> anyhow::Result<()> {
     let staging = adoption_root.join(STAGING_DIR);
     if staging.exists() {
@@ -611,9 +783,17 @@ fn stage_snapshot(
         .with_context(|| format!("create {}", staging_state.display()))?;
     fs::create_dir(&staging_system)
         .with_context(|| format!("create {}", staging_system.display()))?;
+    write_atomic_synced(&staging.join(STAGING_OWNER_FILE), operation_id, false)?;
 
-    for file in &candidate.db_files {
+    for (index, file) in candidate.db_files.iter().enumerate() {
         copy_ordinary_file(&snapshot.join(file), &staging_state.join(file))?;
+        let is_first_file = index == 0;
+        #[cfg(test)]
+        if is_first_file {
+            fail_at_test_adoption_fault(TestAdoptionFaultPoint::AfterFirstStateCopy)?;
+        }
+        #[cfg(not(test))]
+        let _ = is_first_file;
     }
     if candidate.has_master_key {
         copy_master_key(
@@ -633,6 +813,7 @@ fn stage_snapshot(
     Ok(())
 }
 
+#[cfg(test)]
 fn install_staged(
     paths: &RebornStoragePaths,
     adoption_root: &Path,
@@ -661,6 +842,12 @@ fn install_staged(
     if let Some(workspace) = workspace {
         install_workspace_leaf(paths, workspace, &staging.join("workspace-leaf"))?;
     }
+    fs::remove_file(staging.join(STAGING_OWNER_FILE)).with_context(|| {
+        format!(
+            "remove staging ownership marker under {}",
+            staging.display()
+        )
+    })?;
     fs::remove_dir(&staging)
         .with_context(|| format!("remove empty staging root {}", staging.display()))?;
     sync_directory(adoption_root)?;
@@ -694,9 +881,58 @@ fn verify_canonical_inventory(
     )
 }
 
+fn verify_post_migration_canonical_shape(
+    paths: &RebornStoragePaths,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+) -> anyhow::Result<()> {
+    require_ordinary_directory(paths.state_root())?;
+    for file in &candidate.db_files {
+        require_ordinary_file(&paths.state_root().join(file))?;
+    }
+    if candidate.has_master_key {
+        validate_master_key_source(&paths.state_root().join(MASTER_KEY_FILE))?;
+    }
+    for entry in fs::read_dir(paths.state_root())
+        .with_context(|| format!("read canonical state {}", paths.state_root().display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("read entry under {}", paths.state_root().display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name != MASTER_KEY_FILE && !LIBSQL_DB_UNIT.contains(&name.as_ref()) {
+            bail!(
+                "canonical state contains unexpected post-migration entry `{name}` at {}",
+                paths.state_root().display()
+            );
+        }
+        require_ordinary_file(&entry.path())?;
+    }
+    if candidate.has_system_content {
+        require_matching_tree(
+            &snapshot.join("system"),
+            paths.system_root(),
+            "canonical system content",
+        )?;
+    } else {
+        require_exact_file_inventory(paths.system_root(), &[], "canonical system")?;
+    }
+    Ok(())
+}
+
 fn verify_inventory_roots(
     state_root: &Path,
     system_root: &Path,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
+    verify_state_inventory(state_root, candidate, snapshot, &format!("{label} state"))?;
+    verify_system_inventory(system_root, candidate, snapshot, &format!("{label} system"))
+}
+
+fn verify_state_inventory(
+    state_root: &Path,
     candidate: &LegacyCandidate,
     snapshot: &Path,
     label: &str,
@@ -706,7 +942,7 @@ fn verify_inventory_roots(
         expected_state_files.push(MASTER_KEY_FILE.to_string());
     }
     expected_state_files.sort();
-    require_exact_file_inventory(state_root, &expected_state_files, &format!("{label} state"))?;
+    require_exact_file_inventory(state_root, &expected_state_files, label)?;
     for file in &candidate.db_files {
         require_matching_file(
             &snapshot.join(file),
@@ -724,15 +960,19 @@ fn verify_inventory_roots(
             &format!("{label} master key"),
         )?;
     }
+    Ok(())
+}
 
+fn verify_system_inventory(
+    system_root: &Path,
+    candidate: &LegacyCandidate,
+    snapshot: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
     if candidate.has_system_content {
-        require_matching_tree(
-            &snapshot.join("system"),
-            system_root,
-            &format!("{label} system content"),
-        )?;
+        require_matching_tree(&snapshot.join("system"), system_root, label)?;
     } else {
-        require_exact_file_inventory(system_root, &[], &format!("{label} system"))?;
+        require_exact_file_inventory(system_root, &[], label)?;
     }
     Ok(())
 }
@@ -1775,6 +2015,52 @@ fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<Adopti
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestAdoptionFaultPoint {
+    AfterFirstStateCopy,
+    AfterStateRename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ADOPTION_FAULT: std::cell::Cell<Option<TestAdoptionFaultPoint>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct TestAdoptionFaultGuard;
+
+#[cfg(test)]
+impl TestAdoptionFaultGuard {
+    fn arm(point: TestAdoptionFaultPoint) -> Self {
+        TEST_ADOPTION_FAULT.with(|fault| fault.set(Some(point)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestAdoptionFaultGuard {
+    fn drop(&mut self) {
+        TEST_ADOPTION_FAULT.with(|fault| fault.set(None));
+    }
+}
+
+#[cfg(test)]
+fn fail_at_test_adoption_fault(point: TestAdoptionFaultPoint) -> anyhow::Result<()> {
+    let should_fail = TEST_ADOPTION_FAULT.with(|fault| {
+        if fault.get() == Some(point) {
+            fault.set(None);
+            true
+        } else {
+            false
+        }
+    });
+    if should_fail {
+        bail!("injected ENOSPC-style adoption fault at {point:?}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
     #[cfg(unix)]
@@ -1791,10 +2077,10 @@ mod tests {
 
     use super::{
         ADOPTION_DIR, AdoptOptions, AdoptionJournal, AdoptionPhase, LegacySourceKind,
-        RebornStoragePaths, WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock,
-        adopt_layout, ensure_ready_layout, inspect_legacy_candidates, install_staged,
-        snapshot_source, stage_snapshot, tenant_user_workspace_digest, verify_canonical_store,
-        write_journal,
+        RebornStoragePaths, STAGING_OWNER_FILE, TestAdoptionFaultGuard, TestAdoptionFaultPoint,
+        WorkspaceImportDecision, WorkspaceImportOptions, acquire_adoption_lock, adopt_layout,
+        ensure_ready_layout, inspect_legacy_candidates, install_staged, snapshot_source,
+        stage_snapshot, tenant_user_workspace_digest, verify_canonical_store, write_journal,
     };
     use ironclaw_composition::host_api::{TenantId, UserId};
 
@@ -1844,10 +2130,19 @@ mod tests {
         };
         let ready =
             std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_READY").expect("lock holder ready path");
+        let release =
+            std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_RELEASE").expect("lock holder release path");
         let _lock = acquire_adoption_lock(std::path::Path::new(&adoption_root))
             .expect("subprocess holds adoption lock");
         fs::write(ready, b"ready").expect("signal held lock");
-        std::process::exit(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::path::Path::new(&release).is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            std::path::Path::new(&release).is_file(),
+            "parent did not release lock holder within the bounded test interval"
+        );
     }
 
     #[cfg(unix)]
@@ -1857,6 +2152,7 @@ mod tests {
         let adoption_root = temp.path().join("layout-adoption");
         fs::create_dir(&adoption_root).expect("adoption root");
         let ready = temp.path().join("lock-ready");
+        let release = temp.path().join("lock-release");
         let test_binary = std::env::current_exe().expect("test binary");
         let mut child = Command::new(test_binary)
             .args([
@@ -1866,6 +2162,7 @@ mod tests {
             ])
             .env("IRONCLAW_TEST_ADOPTION_LOCK_ROOT", &adoption_root)
             .env("IRONCLAW_TEST_ADOPTION_LOCK_READY", &ready)
+            .env("IRONCLAW_TEST_ADOPTION_LOCK_RELEASE", &release)
             .spawn()
             .expect("spawn lock holder");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1873,10 +2170,19 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(ready.is_file(), "lock holder reached its critical section");
-        let status = child.wait().expect("wait for crashed lock holder");
+        let contention = match acquire_adoption_lock(&adoption_root) {
+            Ok(_) => panic!("live lock holder prevents concurrent adoption"),
+            Err(error) => error,
+        };
+        assert!(
+            !format!("{contention:#}").is_empty(),
+            "contention exposes a diagnostic error"
+        );
+        fs::write(&release, b"release").expect("release lock holder");
+        let status = child.wait().expect("wait for released lock holder");
         assert!(
             status.success(),
-            "lock holder exited after retaining lock file"
+            "lock holder exits cleanly after its descriptor is released"
         );
 
         let _lock = acquire_adoption_lock(&adoption_root)
@@ -2411,7 +2717,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("runtime/layout-adoption")).expect("adoption root");
         fs::write(
             temp.path().join("runtime/layout-adoption/journal.toml"),
-            "schema_version = 3\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[source_requirement]\ndurable_state = \"embedded-libsql\"\n\n[source_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[target_requirement]\ndurable_state = \"embedded-libsql\"\n\n[target_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\n",
+            "schema_version = 4\noperation_id = \"00000000-0000-4000-8000-000000000001\"\nsource = \"local-dev\"\nphase = \"prepare\"\n\n[source_requirement]\ndurable_state = \"embedded-libsql\"\n\n[source_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[target_requirement]\ndurable_state = \"embedded-libsql\"\n\n[target_requirement.security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n\n[inventory]\ndb_files = []\nhas_master_key = false\nhas_system_content = false\n",
         )
         .expect("unsupported journal");
 
@@ -2504,7 +2810,10 @@ mod tests {
         )
         .expect_err("runtime symlink must not be followed");
 
-        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
         assert!(legacy.join("reborn-local-dev.db").is_file());
         assert!(
             fs::read_dir(&outside)
@@ -2539,7 +2848,10 @@ mod tests {
         let error = adopt_layout(&home, requirement, confirmed_options())
             .expect_err("snapshot symlink must not be followed during recovery");
 
-        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
         assert!(legacy.join("reborn-local-dev.db").is_file());
         assert!(
             fs::read_dir(&outside)
@@ -2548,6 +2860,49 @@ mod tests {
                 .is_none(),
             "recovery must not snapshot through a symlink"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_a_symlinked_snapshot_leaf_before_inventory_read() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        let preserved_snapshot = temp.path().join("preserved-snapshot");
+        fs::rename(&snapshot, &preserved_snapshot).expect("preserve real snapshot");
+        let outside = temp.path().join("outside-snapshot");
+        fs::create_dir(&outside).expect("outside snapshot");
+        symlink(&outside, &snapshot).expect("snapshot leaf symlink");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        journal.phase = AdoptionPhase::SnapshotOwned;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("snapshot leaf symlink must be rejected before inventory traversal");
+
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
+        assert!(
+            fs::read_dir(&outside)
+                .expect("outside remains readable")
+                .next()
+                .is_none(),
+            "recovery must not traverse a symlinked snapshot leaf"
+        );
+        assert!(preserved_snapshot.join("reborn-local-dev.db").is_file());
     }
 
     #[cfg(unix)]
@@ -2574,13 +2929,18 @@ mod tests {
         symlink(&outside, staging.join("state")).expect("swapped staging state");
         fs::create_dir(staging.join("system")).expect("staging system");
         let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        fs::write(staging.join(STAGING_OWNER_FILE), &journal.operation_id)
+            .expect("journal-owned staging marker");
         journal.phase = AdoptionPhase::Staged;
         write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
 
         let error = adopt_layout(&home, requirement, confirmed_options())
             .expect_err("replay must reject a swapped symlink before rename");
 
-        assert!(error.to_string().contains("ordinary non-symlink directory"));
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
         assert!(
             fs::read_dir(&outside)
                 .expect("outside remains readable")
@@ -2690,6 +3050,86 @@ mod tests {
     }
 
     #[test]
+    fn journal_workspace_source_must_be_absolute_before_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let tenant = TenantId::new("tenant-a").expect("tenant id");
+        let user = UserId::new("user-a").expect("user id");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let journal = AdoptionJournal::new(
+            candidate,
+            requirement,
+            Some(WorkspaceImportDecision {
+                source: std::path::PathBuf::from("relative-workspace"),
+                tenant: tenant.as_str().to_string(),
+                user: user.as_str().to_string(),
+                digest: tenant_user_workspace_digest(&tenant, &user),
+            }),
+        );
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("relative workspace source must fail before snapshot");
+
+        assert!(format!("{error:#}").contains("workspace journal source must be absolute"));
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(!temp.path().join("state").exists());
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_workspace_source_must_be_an_ordinary_tree_before_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let outside = temp.path().join("outside-workspace");
+        fs::create_dir(&outside).expect("outside workspace");
+        let linked_workspace = temp.path().join("linked-workspace");
+        symlink(&outside, &linked_workspace).expect("linked workspace");
+        let tenant = TenantId::new("tenant-a").expect("tenant id");
+        let user = UserId::new("user-a").expect("user id");
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let journal = AdoptionJournal::new(
+            candidate,
+            requirement,
+            Some(WorkspaceImportDecision {
+                source: linked_workspace,
+                tenant: tenant.as_str().to_string(),
+                user: user.as_str().to_string(),
+                digest: tenant_user_workspace_digest(&tenant, &user),
+            }),
+        );
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("symlinked workspace source must fail before snapshot");
+
+        assert!(
+            format!("{error:#}").contains("ordinary non-symlink directory"),
+            "{error:#}"
+        );
+        assert!(legacy.join("reborn-local-dev.db").is_file());
+        assert!(!temp.path().join("state").exists());
+        assert!(!temp.path().join("layout.toml").exists());
+    }
+
+    #[test]
     fn store_verified_replay_revalidates_exact_canonical_inventory_before_manifest() {
         for mutation in ["delete-db", "substitute-db"] {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -2705,7 +3145,14 @@ mod tests {
             let snapshot = candidate.snapshot_root(&adoption_root);
             let mut journal = AdoptionJournal::new(candidate, requirement, None);
             snapshot_source(candidate, &snapshot).expect("snapshot source");
-            stage_snapshot(candidate, &snapshot, &adoption_root, None).expect("stage snapshot");
+            stage_snapshot(
+                candidate,
+                &snapshot,
+                &adoption_root,
+                None,
+                &journal.operation_id,
+            )
+            .expect("stage snapshot");
             install_staged(&paths, &adoption_root, None).expect("install staged content");
             verify_canonical_store(&paths, true).expect("verify canonical store");
             journal.phase = AdoptionPhase::StoreVerified;
@@ -2722,15 +3169,78 @@ mod tests {
             let error = adopt_layout(&home, requirement, confirmed_options())
                 .expect_err("a StoreVerified replay must not publish a stale manifest");
 
-            assert!(
-                error.to_string().contains("canonical"),
-                "{mutation}: {error:#}"
-            );
+            let diagnostic = format!("{error:#}");
+            match mutation {
+                "delete-db" => assert!(
+                    diagnostic.contains("inspect file"),
+                    "{mutation}: {diagnostic}"
+                ),
+                "substitute-db" => assert!(
+                    diagnostic.contains("canonical") || diagnostic.contains("libSQL"),
+                    "{mutation}: {diagnostic}"
+                ),
+                _ => unreachable!("exhaustive mutation"),
+            }
             assert!(
                 !temp.path().join("layout.toml").exists(),
                 "{mutation}: manifest remains unpublished"
             );
         }
+    }
+
+    #[test]
+    fn migration_pending_recovery_accepts_a_real_post_copy_libsql_write() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        let journal = AdoptionJournal::new(candidate, requirement, None);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        stage_snapshot(
+            candidate,
+            &snapshot,
+            &adoption_root,
+            None,
+            &journal.operation_id,
+        )
+        .expect("stage snapshot");
+        install_staged(&paths, &adoption_root, None).expect("install staged content");
+
+        crate::runtime::block_on_cli({
+            let state_root = paths.state_root().to_path_buf();
+            async move {
+                let store = ironclaw_composition::open_standalone_secret_store(&state_root)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                ironclaw_operator::LlmKeyStore::new(
+                    ironclaw_composition::RuntimeOperatorSecretValueStore::shared(store),
+                )
+                .put(
+                    "migration-proof",
+                    ironclaw_secrets::SecretMaterial::from("post-copy-write"),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error))
+            }
+        })
+        .expect("real post-copy store write");
+
+        let journal = toml::to_string(&journal)
+            .expect("serialize journal")
+            .replace("phase = \"prepare\"", "phase = \"migration-pending\"");
+        fs::write(adoption_root.join("journal.toml"), journal).expect("migration-pending journal");
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("post-copy store writes must not be byte-compared to the snapshot");
+
+        assert!(temp.path().join("layout.toml").is_file());
     }
 
     #[test]
@@ -2748,7 +3258,14 @@ mod tests {
         let snapshot = candidate.snapshot_root(&adoption_root);
         let mut journal = AdoptionJournal::new(candidate, requirement, None);
         snapshot_source(candidate, &snapshot).expect("snapshot source");
-        stage_snapshot(candidate, &snapshot, &adoption_root, None).expect("stage snapshot");
+        stage_snapshot(
+            candidate,
+            &snapshot,
+            &adoption_root,
+            None,
+            &journal.operation_id,
+        )
+        .expect("stage snapshot");
         install_staged(&paths, &adoption_root, None).expect("install staged content");
         journal.phase = AdoptionPhase::CanonicalInstalled;
         write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal phase");
@@ -2767,12 +3284,154 @@ mod tests {
     }
 
     #[test]
+    fn staged_recovery_finishes_after_a_crash_between_state_and_system_renames() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        stage_snapshot(
+            candidate,
+            &snapshot,
+            &adoption_root,
+            None,
+            &journal.operation_id,
+        )
+        .expect("stage snapshot");
+        fs::rename(adoption_root.join("staging/state"), paths.state_root())
+            .expect("simulate crash after state rename");
+        journal.phase = AdoptionPhase::Staged;
+        write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("recovery finishes the remaining system rename");
+
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+        assert!(temp.path().join("system").is_dir());
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
+    fn snapshot_owned_recovery_discards_only_marker_proven_partial_staging() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+        let paths = RebornStoragePaths::from_home(&home);
+        let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+        fs::create_dir_all(&adoption_root).expect("adoption root");
+        let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+        let candidate = candidates.first().expect("one candidate");
+        let snapshot = candidate.snapshot_root(&adoption_root);
+        snapshot_source(candidate, &snapshot).expect("snapshot source");
+        let staging = adoption_root.join("staging");
+        fs::create_dir(&staging).expect("staging root");
+        fs::write(
+            staging.join(".adoption-owner"),
+            b"00000000-0000-4000-8000-000000000001",
+        )
+        .expect("staging owner marker");
+        fs::create_dir(staging.join("state")).expect("partial staged state");
+        fs::copy(
+            snapshot.join("reborn-local-dev.db"),
+            staging.join("state/reborn-local-dev.db"),
+        )
+        .expect("first staged copy");
+        let mut journal = AdoptionJournal::new(candidate, requirement, None);
+        journal.phase = AdoptionPhase::SnapshotOwned;
+        let journal_contents = toml::to_string(&journal).expect("serialize journal");
+        let mut journal: toml::Value = toml::from_str(&journal_contents).expect("journal TOML");
+        journal.as_table_mut().expect("journal table").insert(
+            "operation_id".into(),
+            toml::Value::String("00000000-0000-4000-8000-000000000001".into()),
+        );
+        fs::write(
+            adoption_root.join("journal.toml"),
+            toml::to_string(&journal).expect("journal with owner"),
+        )
+        .expect("journal");
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("proven partial staging is discarded and copied again");
+
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+        assert!(
+            temp.path()
+                .join("state/.reborn-local-dev-secrets-master-key")
+                .is_file()
+        );
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
+    fn enospc_style_copy_failure_recovers_from_journal_proven_partial_staging() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+
+        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::AfterFirstStateCopy);
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("injected ENOSPC-style copy failure");
+        drop(fault);
+
+        assert!(format!("{error:#}").contains("ENOSPC-style"));
+        assert!(
+            temp.path()
+                .join("runtime/layout-adoption/staging/.adoption-owner")
+                .is_file()
+        );
+        assert!(!temp.path().join("state").exists());
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("recovery discards only the proven staging tree and recopies");
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
+    fn fault_after_state_rename_resumes_the_remaining_install_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = reborn_home(temp.path());
+        let requirement = embedded_single_user_requirement();
+        let legacy = temp.path().join("local-dev");
+        seed_legacy_embedded_store(&legacy);
+
+        let fault = TestAdoptionFaultGuard::arm(TestAdoptionFaultPoint::AfterStateRename);
+        let error = adopt_layout(&home, requirement, confirmed_options())
+            .expect_err("injected crash after state rename");
+        drop(fault);
+
+        assert!(format!("{error:#}").contains("AfterStateRename"));
+        assert!(temp.path().join("state/reborn-local-dev.db").is_file());
+        assert!(
+            temp.path()
+                .join("runtime/layout-adoption/staging/system")
+                .is_dir()
+        );
+
+        adopt_layout(&home, requirement, confirmed_options())
+            .expect("recovery completes the remaining system rename");
+        assert!(temp.path().join("layout.toml").is_file());
+    }
+
+    #[test]
     fn offline_adopt_resumes_every_persisted_phase_and_commits_manifest_last() {
         for phase in [
             AdoptionPhase::Prepare,
             AdoptionPhase::SnapshotOwned,
             AdoptionPhase::Staged,
             AdoptionPhase::CanonicalInstalled,
+            AdoptionPhase::MigrationPending,
             AdoptionPhase::StoreVerified,
         ] {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -2796,14 +3455,24 @@ mod tests {
                 phase,
                 AdoptionPhase::Staged
                     | AdoptionPhase::CanonicalInstalled
+                    | AdoptionPhase::MigrationPending
                     | AdoptionPhase::StoreVerified
             ) {
-                stage_snapshot(candidate, &snapshot, &adoption_root, None).expect("stage snapshot");
+                stage_snapshot(
+                    candidate,
+                    &snapshot,
+                    &adoption_root,
+                    None,
+                    &journal.operation_id,
+                )
+                .expect("stage snapshot");
                 journal.phase = AdoptionPhase::Staged;
             }
             if matches!(
                 phase,
-                AdoptionPhase::CanonicalInstalled | AdoptionPhase::StoreVerified
+                AdoptionPhase::CanonicalInstalled
+                    | AdoptionPhase::MigrationPending
+                    | AdoptionPhase::StoreVerified
             ) {
                 install_staged(&paths, &adoption_root, None).expect("install staged content");
                 journal.phase = AdoptionPhase::CanonicalInstalled;
