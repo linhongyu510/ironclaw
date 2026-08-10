@@ -342,7 +342,7 @@ async fn prepare_workspace_leaf_no_follow(
     workspace_root: PathBuf,
     key: TenantUserWorkspaceKey,
     workspace_mode: u32,
-) -> Result<PathBuf, RuntimeProcessError> {
+) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
     tokio::task::spawn_blocking(move || {
         prepare_workspace_leaf_no_follow_blocking(&workspace_root, &key, workspace_mode)
     })
@@ -359,7 +359,7 @@ async fn prepare_workspace_leaf_no_follow(
     _workspace_root: PathBuf,
     _key: TenantUserWorkspaceKey,
     _workspace_mode: u32,
-) -> Result<PathBuf, RuntimeProcessError> {
+) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
     Err(RuntimeProcessError::ExecutionFailed(
         "sandbox workspace preparation requires Unix no-follow directory handles".to_string(),
     ))
@@ -370,7 +370,7 @@ fn prepare_workspace_leaf_no_follow_blocking(
     workspace_root: &Path,
     key: &TenantUserWorkspaceKey,
     workspace_mode: u32,
-) -> Result<PathBuf, RuntimeProcessError> {
+) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
     use std::{
         ffi::CString,
         os::{
@@ -513,7 +513,7 @@ fn prepare_workspace_leaf_no_follow_blocking(
         directory: &OwnedFd,
         label: &str,
         require_private_namespace: bool,
-    ) -> Result<(), RuntimeProcessError> {
+    ) -> Result<libc::stat, RuntimeProcessError> {
         let stat = directory_stat(directory)?;
         if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
             return Err(RuntimeProcessError::ExecutionFailed(format!(
@@ -531,7 +531,7 @@ fn prepare_workspace_leaf_no_follow_blocking(
                 "sandbox trusted host workspace boundary rejects {label}: group or other write permission is not allowed"
             )));
         }
-        Ok(())
+        Ok(stat)
     }
 
     let root = open_directory(workspace_root)
@@ -544,35 +544,80 @@ fn prepare_workspace_leaf_no_follow_blocking(
     workspace_prepare_test_hook::run(workspace_root);
     let leaf_name = segment_c_string(key.digest_segment(), "leaf")?;
     let leaf = open_or_create_directory_at(users.as_raw_fd(), &leaf_name, "leaf")?;
-    validate_host_owned_directory(&leaf, "workspace leaf", false)?;
+    let leaf_stat = validate_host_owned_directory(&leaf, "workspace leaf", false)?;
     set_directory_mode(&leaf, workspace_mode)?;
 
-    Ok(workspace_root.join("users").join(key.digest_segment()))
+    Ok(WorkspaceLeafAdmission {
+        path: workspace_root.join("users").join(key.digest_segment()),
+        identity: WorkspaceLeafIdentity {
+            device: leaf_stat.st_dev as u64,
+            inode: leaf_stat.st_ino as u64,
+        },
+    })
+}
+
+async fn admit_workspace_leaf(
+    workspace_root: PathBuf,
+    key: TenantUserWorkspaceKey,
+    workspace_mode: u32,
+) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
+    let users_root = workspace_root.join("users");
+    let workspace =
+        prepare_workspace_leaf_no_follow(workspace_root.clone(), key, workspace_mode).await?;
+    let canonical_workspace_root =
+        tokio::fs::canonicalize(&workspace_root)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace root could not be resolved: {error}"
+                ))
+            })?;
+    let canonical_users_root = tokio::fs::canonicalize(&users_root)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace users root could not be resolved: {error}"
+            ))
+        })?;
+    if canonical_users_root.parent() != Some(canonical_workspace_root.as_path()) {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox workspace users root escapes the configured workspace root".to_string(),
+        ));
+    }
+    let canonical_workspace = tokio::fs::canonicalize(&workspace.path)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace could not be resolved: {error}"
+            ))
+        })?;
+    if canonical_workspace.parent() != Some(canonical_users_root.as_path()) {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox workspace leaf escapes the configured users root".to_string(),
+        ));
+    }
+
+    Ok(WorkspaceLeafAdmission {
+        path: canonical_workspace,
+        identity: workspace.identity,
+    })
 }
 
 async fn revalidate_workspace_host_boundary(
     workspace_root: PathBuf,
     key: TenantUserWorkspaceKey,
-    workspace: &Path,
     workspace_mode: u32,
-    expected_leaf_identity: WorkspaceLeafIdentity,
+    expected_workspace: &WorkspaceLeafAdmission,
 ) -> Result<(), RuntimeProcessError> {
-    let final_workspace = prepare_workspace_leaf_no_follow(workspace_root, key, workspace_mode)
+    let final_workspace = admit_workspace_leaf(workspace_root, key, workspace_mode)
         .await
         .map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox trusted host workspace boundary could not be admitted before container creation: {error}"
             ))
         })?;
-    let final_workspace = tokio::fs::canonicalize(&final_workspace)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox trusted host workspace boundary could not resolve the final caller leaf: {error}"
-            ))
-        })?;
-    if final_workspace != workspace
-        || workspace_leaf_identity(final_workspace).await? != expected_leaf_identity
+    if final_workspace.path != expected_workspace.path
+        || final_workspace.identity != expected_workspace.identity
     {
         return Err(RuntimeProcessError::ExecutionFailed(
             "sandbox trusted host workspace boundary rejected a changed caller leaf before container creation".to_string(),
@@ -588,42 +633,14 @@ struct WorkspaceLeafIdentity {
     inode: u64,
 }
 
-#[cfg(unix)]
-async fn workspace_leaf_identity(
-    workspace: PathBuf,
-) -> Result<WorkspaceLeafIdentity, RuntimeProcessError> {
-    tokio::task::spawn_blocking(move || {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let metadata = std::fs::metadata(&workspace).map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox trusted host workspace boundary could not inspect the caller leaf identity: {error}"
-            ))
-        })?;
-        Ok(WorkspaceLeafIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    })
-    .await
-    .map_err(|error| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox workspace identity task failed: {error}"
-        ))
-    })?
-}
-
 #[cfg(not(unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkspaceLeafIdentity;
 
-#[cfg(not(unix))]
-async fn workspace_leaf_identity(
-    _workspace: PathBuf,
-) -> Result<WorkspaceLeafIdentity, RuntimeProcessError> {
-    Err(RuntimeProcessError::ExecutionFailed(
-        "sandbox workspace identity requires Unix host metadata".to_string(),
-    ))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceLeafAdmission {
+    path: PathBuf,
+    identity: WorkspaceLeafIdentity,
 }
 
 fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
@@ -671,47 +688,14 @@ impl RebornScopedSandboxCommandTransport {
     async fn prepare_workspace(
         &self,
         scope: &ResourceScope,
-    ) -> Result<PathBuf, RuntimeProcessError> {
+    ) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
         let key = TenantUserWorkspaceKey::from_scope(scope);
-        let workspace_root = self.config.workspace_root.clone();
-        let users_root = workspace_root.join("users");
-        let workspace = prepare_workspace_leaf_no_follow(
-            workspace_root.clone(),
+        admit_workspace_leaf(
+            self.config.workspace_root.clone(),
             key,
             self.config.container_identity.workspace_mode(),
         )
-        .await?;
-        let canonical_workspace_root =
-            tokio::fs::canonicalize(&workspace_root)
-                .await
-                .map_err(|error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace root could not be resolved: {error}"
-                    ))
-                })?;
-        let canonical_users_root = tokio::fs::canonicalize(&users_root)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace users root could not be resolved: {error}"
-                ))
-            })?;
-        if canonical_users_root.parent() != Some(canonical_workspace_root.as_path()) {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace users root escapes the configured workspace root".to_string(),
-            ));
-        }
-        let canonical_workspace = tokio::fs::canonicalize(&workspace).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace could not be resolved: {error}"
-            ))
-        })?;
-        if canonical_workspace.parent() != Some(canonical_users_root.as_path()) {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace leaf escapes the configured users root".to_string(),
-            ));
-        }
-        Ok(canonical_workspace)
+        .await
     }
 
     fn resolve_container_workdir(
@@ -744,7 +728,7 @@ impl RebornScopedSandboxCommandTransport {
     async fn execute_in_container(
         &self,
         request: CommandExecutionRequest,
-        workspace: &Path,
+        workspace: &WorkspaceLeafAdmission,
         workdir: ContainerWorkdir,
         timeout: Duration,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
@@ -755,17 +739,15 @@ impl RebornScopedSandboxCommandTransport {
             uuid::Uuid::new_v4()
         );
         let launch = self
-            .container_launch_config(request, workspace, workdir)
+            .container_launch_config(request, &workspace.path, workdir)
             .await?;
-        let workspace_identity = workspace_leaf_identity(workspace.to_path_buf()).await?;
         #[cfg(test)]
         container_create_test_hook::run(&self.config.workspace_root);
         revalidate_workspace_host_boundary(
             self.config.workspace_root.clone(),
             user_key,
-            workspace,
             self.config.container_identity.workspace_mode(),
-            workspace_identity,
+            workspace,
         )
         .await?;
 
@@ -1106,8 +1088,8 @@ mod tests {
         )
         .await
         .expect("canonical caller leaf");
-        assert_eq!(prepared, expected);
-        assert_eq!(prepared.parent(), expected.parent());
+        assert_eq!(prepared.path, expected);
+        assert_eq!(prepared.path.parent(), expected.parent());
     }
 
     #[tokio::test]
