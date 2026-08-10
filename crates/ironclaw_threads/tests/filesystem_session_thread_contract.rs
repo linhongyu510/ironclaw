@@ -3953,6 +3953,184 @@ async fn filesystem_list_threads_merges_partial_thread_index_with_source_rows() 
     assert!(ids.contains(&"legacy-missing"));
 }
 
+/// Break caught: an index row can exist with its projection keys missing —
+/// observed in staging, where a thread kept its record, its index row and all
+/// of its messages but never appeared in the sidebar. The ordered projection
+/// only emits a row when `indexed` carries the listing keys, so such a row is
+/// invisible to `list_threads`, and the scope's completion marker makes the
+/// repair pass skip the scope on every later start. Without self-healing the
+/// thread stays unreachable for the rest of the volume's life.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_without_projection_keys() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-unprojected", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-unprojected");
+
+    for id in ["projected-thread", "unprojected-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Listing once writes the scope's thread-index completion marker, which is
+    // what later suppresses the repair pass.
+    let seeded = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        seeded.threads.len(),
+        2,
+        "both threads must list before the index row is damaged"
+    );
+
+    // Reproduce the staging row exactly: no ordered-projection metadata on the
+    // entry, and a body that predates `projection_schema_version` so it
+    // deserializes at version zero.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let mut damaged: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes a derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    damaged
+        .as_object_mut()
+        .expect("index row is a json object")
+        .remove("projection_schema_version");
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&damaged).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row without projection keys");
+
+    // A fresh service stands in for a process restart: no in-memory scope
+    // cache, so the scope is re-declared from durable state alone.
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "a thread whose index row lost its projection keys must still be \
+         listable after a restart; got {ids:?}"
+    );
+}
+
+/// Break caught: repairing through the merge helper is not enough. `cas_update`
+/// compares only the decoded body, so an index row whose body already matches a
+/// rebuilt record — but whose projection keys are gone — takes the equality
+/// no-op path and is never physically rewritten. The repair then reports
+/// success while the thread stays invisible, and every later start repeats the
+/// scan for nothing. Recovery must not depend on the body differing.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_current_version_index_row_without_projection_keys() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-unprojected-current", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-unprojected-current");
+
+    for id in ["projected-thread", "unprojected-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    // Strip only the projection metadata: the body is left byte-for-byte as
+    // written, so it still carries the current projection schema version and a
+    // rebuilt record compares equal to it.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let body = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("ensure_thread writes a derived index row")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup strips the projection metadata only");
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "recovery must not depend on the record body differing from a rebuild; \
+         got {ids:?}"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete() {
     use ironclaw_threads::ListThreadsForScopeRequest;

@@ -22,8 +22,11 @@ const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
 const THREAD_INDEX_KNOWN_ROW_MAX: usize = 100_000;
+const THREAD_INDEX_SUFFIX: &str = ".json";
 const CURRENT_THREAD_INDEX_PROJECTION_VERSION: u32 = 2;
 const THREAD_INDEX_MIGRATION_MARKER_BODY: &[u8] = b"thread-index-v2";
+
+mod projection_repair;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ThreadIndexRecord {
@@ -168,6 +171,19 @@ where
                         "thread index migration marker failed exact readback".to_string(),
                     ));
                 }
+            } else if let Err(error) = self.reconcile_thread_index_projection(scope).await {
+                // Best-effort by design: this repairs rows the listing cannot
+                // see anyway. Before this pass a scope with its marker written
+                // did no further I/O here and could not fail, so propagating a
+                // transient storage error would turn a listing that used to
+                // succeed into a failure. Degrade to the rows we can project
+                // and let the next process start retry.
+                // `debug!`, not `warn!`: background diagnostics must not reach
+                // the REPL/TUI display.
+                tracing::debug!(
+                    error = %error,
+                    "thread index projection reconcile failed; listing continues with projected rows"
+                );
             }
         }
         Ok(())
@@ -592,7 +608,7 @@ where
             Err(error) => return Err(error.into()),
         };
         for entry in index_entries {
-            let Some(raw_id) = entry.name.strip_suffix(".json") else {
+            let Some(raw_id) = entry.name.strip_suffix(THREAD_INDEX_SUFFIX) else {
                 continue;
             };
             if !source_ids.contains(raw_id) {
@@ -682,9 +698,10 @@ pub(super) fn thread_index_record_path(
     thread_id: &ThreadId,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/thread_index/{}.json",
+        "{}/thread_index/{}{}",
         scope_axes_string(scope),
-        thread_id.as_str()
+        thread_id.as_str(),
+        THREAD_INDEX_SUFFIX
     ))
 }
 fn thread_index_cache_key(scope: &ThreadScope) -> String {
