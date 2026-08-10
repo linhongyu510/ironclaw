@@ -112,6 +112,9 @@ pub struct RebornStoragePaths {
     system_root: PathBuf,
     workspace_root: PathBuf,
     runtime_root: PathBuf,
+    logs_root: PathBuf,
+    cache_root: PathBuf,
+    temp_root: PathBuf,
 }
 
 impl RebornStoragePaths {
@@ -134,6 +137,9 @@ impl RebornStoragePaths {
             system_root: root.join("system"),
             workspace_root: root.join("workspaces"),
             runtime_root: root.join("runtime"),
+            logs_root: root.join("logs"),
+            cache_root: root.join("cache"),
+            temp_root: root.join("tmp"),
         }
     }
 
@@ -155,6 +161,18 @@ impl RebornStoragePaths {
 
     pub fn runtime_root(&self) -> &Path {
         &self.runtime_root
+    }
+
+    pub fn logs_root(&self) -> &Path {
+        &self.logs_root
+    }
+
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    pub fn temp_root(&self) -> &Path {
+        &self.temp_root
     }
 }
 

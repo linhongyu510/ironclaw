@@ -1106,6 +1106,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
             "scripts/codebase-graph.sh",
+            "scripts/reset-extension-state.sh",
+            "scripts/test-reset-extension-state.sh",
+            "tests/test_smoke_release_binary.py",
             "scripts/mutation-audit.sh",
             ".gitignore",
         ):

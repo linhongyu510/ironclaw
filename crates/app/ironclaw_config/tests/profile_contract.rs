@@ -239,6 +239,9 @@ fn storage_paths_are_derived_from_reborn_home_without_creating_directories() {
     assert_eq!(paths.system_root(), expected_home.join("system"));
     assert_eq!(paths.workspace_root(), expected_home.join("workspaces"));
     assert_eq!(paths.runtime_root(), expected_home.join("runtime"));
+    assert_eq!(paths.logs_root(), expected_home.join("logs"));
+    assert_eq!(paths.cache_root(), expected_home.join("cache"));
+    assert_eq!(paths.temp_root(), expected_home.join("tmp"));
     assert!(
         !expected_home.exists(),
         "deriving pure layout paths must not create the Reborn home"

@@ -1417,11 +1417,30 @@ fn ensure_startup_layout(
 
 /// Admit the active profile's durable layout before a CLI command opens a
 /// stateful store outside the runtime assembly path.
+#[cfg(test)]
 pub(crate) fn ensure_ready_layout_for_active_profile(
     config: &RebornBootConfig,
 ) -> anyhow::Result<ironclaw_config::RebornStoragePaths> {
     let config_file = read_config_file(config)?;
     let profile = effective_profile(config, config_file.as_ref())?;
+    ensure_ready_layout_for_profile(config, profile)
+}
+
+/// Admit a CLI secret write only when it can open the same embedded store as
+/// the selected runtime. Hosted PostgreSQL writes must use a PostgreSQL-aware
+/// operator surface; silently creating a local libSQL database would report a
+/// credential as saved while `serve` reads a different backend.
+pub(crate) fn ensure_embedded_secret_store_for_active_profile(
+    config: &RebornBootConfig,
+) -> anyhow::Result<ironclaw_config::RebornStoragePaths> {
+    let config_file = read_config_file(config)?;
+    let profile = effective_profile(config, config_file.as_ref())?;
+    let requirement = storage_layout_requirement_for_profile(profile)?;
+    if requirement.durable_state != ironclaw_config::DurableStateKind::EmbeddedLibSql {
+        anyhow::bail!(
+            "profile {profile} uses external PostgreSQL durable state; this CLI secret command cannot safely write that backend. Configure the credential through the hosted operator/WebUI surface or deployment secret environment"
+        );
+    }
     ensure_ready_layout_for_profile(config, profile)
 }
 
@@ -3366,6 +3385,28 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
                 config.home().path().join("state")
             );
         }
+    }
+
+    #[test]
+    fn cli_secret_store_refuses_external_postgres_profile_before_opening_local_libsql() {
+        let _lock = lock_runtime_env();
+        let _profile = EnvGuard::clear(ironclaw_config::REBORN_PROFILE_ENV);
+        let (_temp, config) = boot_config_with_file_profile("hosted-single-tenant");
+
+        let error = super::ensure_embedded_secret_store_for_active_profile(&config)
+            .expect_err("hosted CLI secret writes must not create a shadow libSQL store");
+
+        assert!(
+            error.to_string().contains("external PostgreSQL"),
+            "{error:#}"
+        );
+        assert!(
+            !config
+                .home()
+                .path()
+                .join("state/reborn-local-dev.db")
+                .exists()
+        );
     }
 
     #[test]

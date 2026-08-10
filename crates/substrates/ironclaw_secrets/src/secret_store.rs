@@ -159,6 +159,7 @@ where
 {
     let tenants_root = VirtualPath::new("/tenants").map_err(host_api_to_secret_store_error)?;
     let mut offset = 0_u64;
+    let mut saw_unverifiable_session = false;
     loop {
         if offset >= MASTER_KEY_VERIFICATION_RECORD_LIMIT {
             return Err(SecretStoreError::StoreUnavailable {
@@ -196,10 +197,25 @@ where
                         .map_err(secret_error_to_store_error)?;
                     return Ok(());
                 }
+                Some(CREDENTIAL_SESSION_KIND) => {
+                    // Session AAD includes invocation/mission/thread identity
+                    // that is intentionally encrypted inside the payload and
+                    // cannot be reconstructed from the storage path. Keep
+                    // scanning for a durable secret/account verifier; if none
+                    // exists, fail closed rather than accepting an unchecked
+                    // master key or exposing those identifiers in plaintext.
+                    saw_unverifiable_session = true;
+                }
                 _ => {}
             }
         }
         if entry_count < limit as usize {
+            if saw_unverifiable_session {
+                return Err(SecretStoreError::StoreUnavailable {
+                    reason: "credential-session ciphertext exists without a durable secret or credential-account record that can authenticate the configured master key; refusing storage cutover"
+                        .to_string(),
+                });
+            }
             return Ok(());
         }
         offset = offset.saturating_add(entry_count as u64);
@@ -1661,6 +1677,61 @@ mod tests {
             error.to_string().contains("cryptography"),
             "error remains redacted and classed as a crypto failure: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn session_only_encrypted_store_fails_closed_without_exposing_aad_metadata() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(
+            Arc::clone(&backend),
+            "/tenants/tenant-a/users/user-a/secrets",
+        );
+        let broker = CredentialBroker::new(scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("session-only").expect("account id");
+        let account = sample_account(
+            scope.clone(),
+            account_id.clone(),
+            SecretHandle::new("provider-key").expect("secret handle"),
+        );
+        let in_memory = InMemoryCredentialBroker::new();
+        in_memory.put_account(account).expect("seed account");
+        let session = in_memory
+            .create_session(crate::CredentialSessionRequest {
+                scope: scope.clone(),
+                invocation_id: scope.invocation_id,
+                capability_id: CapabilityId::new("openai.chat").expect("capability id"),
+                extension_id: ExtensionId::new("openai").expect("extension id"),
+                account_id,
+                method: NetworkMethod::Get,
+                url: "https://api.example.com/v1/models".to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+                max_uses: Some(1),
+            })
+            .expect("mint session");
+        broker
+            .issue_session(session)
+            .await
+            .expect("persist session");
+
+        let original_key_error =
+            verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+                .await
+                .expect_err("session-only state has no safely reconstructable AAD verifier");
+        assert!(
+            original_key_error
+                .to_string()
+                .contains("credential-session"),
+            "{original_key_error}"
+        );
+        let wrong_key = SecretsCrypto::new(SecretMaterial::from(
+            "fedcba9876543210fedcba9876543210".to_string(),
+        ))
+        .expect("different valid master key");
+        let error = verify_existing_encrypted_records(backend.as_ref(), &wrong_key)
+            .await
+            .expect_err("a different key must fail for a session-only store");
+        assert!(error.to_string().contains("credential-session"), "{error}");
     }
 
     /// Build a `ScopedFilesystem` over `backend` whose `/secrets` alias

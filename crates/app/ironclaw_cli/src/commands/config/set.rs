@@ -140,7 +140,7 @@ fn set_value_key(
     // with respect to the durable-state layout.
     let state_root = if key.destination() == ConfigDestination::SecretStorePort {
         Some(
-            crate::runtime::ensure_ready_layout_for_active_profile(context.boot_config())?
+            crate::runtime::ensure_embedded_secret_store_for_active_profile(context.boot_config())?
                 .state_root()
                 .to_path_buf(),
         )

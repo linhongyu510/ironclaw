@@ -1049,6 +1049,7 @@ fn resume_adoption(
         store_verification,
     )?;
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
+    initialize_disposable_namespaces(home, paths)?;
 
     let manifest = LayoutManifest::new(journal.target_requirement);
     write_manifest_last(home, &manifest)?;
@@ -1774,11 +1775,22 @@ fn initialize_fresh_layout(
         paths.system_root(),
         paths.workspace_root(),
         paths.runtime_root(),
+        paths.logs_root(),
+        paths.cache_root(),
+        paths.temp_root(),
     ] {
         create_or_validate_direct_child(home, path)?;
         sync_directory(path)?;
     }
     write_manifest_last(home, &LayoutManifest::new(requirement))
+}
+
+fn initialize_disposable_namespaces(home: &Path, paths: &RebornStoragePaths) -> anyhow::Result<()> {
+    for path in [paths.logs_root(), paths.cache_root(), paths.temp_root()] {
+        create_or_validate_direct_child(home, path)?;
+        sync_directory(path)?;
+    }
+    Ok(())
 }
 
 fn write_manifest_last(home: &Path, manifest: &LayoutManifest) -> anyhow::Result<()> {
@@ -1794,7 +1806,13 @@ fn write_manifest_last(home: &Path, manifest: &LayoutManifest) -> anyhow::Result
         );
     }
     let contents = toml::to_string(manifest).context("serialize durable layout manifest")?;
-    write_atomic_synced(&manifest_path, &contents, false)
+    match write_atomic_synced(&manifest_path, &contents, false) {
+        Ok(()) => Ok(()),
+        Err(create_error) => match read_manifest(&manifest_path) {
+            Ok(existing) if existing == *manifest => Ok(()),
+            _ => Err(create_error),
+        },
+    }
 }
 
 fn read_manifest(path: &Path) -> anyhow::Result<LayoutManifest> {
@@ -2035,6 +2053,9 @@ fn canonical_layout_is_empty(paths: &RebornStoragePaths) -> anyhow::Result<bool>
         paths.system_root(),
         paths.workspace_root(),
         paths.runtime_root(),
+        paths.logs_root(),
+        paths.cache_root(),
+        paths.temp_root(),
     ] {
         if path.exists() && !directory_is_empty(path)? {
             return Ok(false);
@@ -2062,7 +2083,13 @@ fn ensure_canonical_install_targets_empty(paths: &RebornStoragePaths) -> anyhow:
 
 fn ensure_initial_adoption_namespaces_empty(paths: &RebornStoragePaths) -> anyhow::Result<()> {
     ensure_canonical_install_targets_empty(paths)?;
-    for path in [paths.workspace_root(), paths.runtime_root()] {
+    for path in [
+        paths.workspace_root(),
+        paths.runtime_root(),
+        paths.logs_root(),
+        paths.cache_root(),
+        paths.temp_root(),
+    ] {
         if path.exists() && !directory_is_empty(path)? {
             bail!(
                 "canonical namespace {} contains unexplained data; initial adoption only permits an empty workspace/runtime namespace and never infers ownership or runtime provenance",
@@ -2079,6 +2106,9 @@ fn validate_initial_adoption_namespaces_empty(paths: &RebornStoragePaths) -> any
         paths.system_root(),
         paths.workspace_root(),
         paths.runtime_root(),
+        paths.logs_root(),
+        paths.cache_root(),
+        paths.temp_root(),
     ] {
         if path.exists() && !directory_is_empty(path)? {
             bail!(
@@ -2850,8 +2880,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use ironclaw_config::{
-        DeploymentSecurityEnvelope, DurableStateKind, LayoutRequirement, RebornHome, TenancyModel,
-        WorkspaceAccessFloor,
+        DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
+        RebornHome, TenancyModel, WorkspaceAccessFloor,
     };
 
     use super::{
@@ -2864,7 +2894,7 @@ mod tests {
         ensure_ready_layout, inspect_legacy_candidates, inspect_ready_layout, install_staged,
         preflight_automatic_adoption, prepare_automatic_adoption,
         ready_legacy_skill_snapshot_source, snapshot_source, stage_snapshot,
-        verify_canonical_store, write_journal,
+        verify_canonical_store, write_journal, write_manifest_last,
     };
     use ironclaw_composition::LegacySkillSnapshotSource;
     use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
@@ -3164,6 +3194,39 @@ mod tests {
         assert!(temp.path().join("system").is_dir());
         assert!(temp.path().join("workspaces").is_dir());
         assert!(temp.path().join("runtime").is_dir());
+        assert!(temp.path().join("logs").is_dir());
+        assert!(temp.path().join("cache").is_dir());
+        assert!(temp.path().join("tmp").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_fresh_initializers_admit_the_identical_manifest() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = Arc::new(temp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(16));
+        let manifest = LayoutManifest::new(embedded_single_user_requirement());
+        let mut workers = Vec::new();
+        for _ in 0..16 {
+            let home = Arc::clone(&home);
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                write_manifest_last(&home, &manifest)
+            }));
+        }
+        for worker in workers {
+            worker
+                .join()
+                .expect("initializer thread")
+                .expect("identical concurrent manifest is admitted");
+        }
+        assert_eq!(
+            super::read_manifest(&home.join(LAYOUT_MANIFEST_FILE)).expect("manifest"),
+            manifest
+        );
     }
 
     #[test]
@@ -3181,6 +3244,9 @@ mod tests {
             paths.system_root(),
             paths.workspace_root(),
             paths.runtime_root(),
+            paths.logs_root(),
+            paths.cache_root(),
+            paths.temp_root(),
         ] {
             assert!(
                 path.is_dir(),
@@ -3205,6 +3271,9 @@ mod tests {
         assert!(!temp.path().join("system").exists());
         assert!(!temp.path().join("workspaces").exists());
         assert!(!temp.path().join("runtime").exists());
+        assert!(!temp.path().join("logs").exists());
+        assert!(!temp.path().join("cache").exists());
+        assert!(!temp.path().join("tmp").exists());
     }
 
     #[test]
