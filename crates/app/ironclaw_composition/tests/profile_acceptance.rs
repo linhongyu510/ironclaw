@@ -1,3 +1,4 @@
+use ironclaw_composition::deployment::DeploymentConfig;
 use ironclaw_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -5,6 +6,11 @@ use ironclaw_composition::{
     RebornRuntimeProfileOptions, RebornServiceReadiness, RebornWorkerReadiness,
     build_reborn_runtime, hosted_single_tenant_volume_runtime_policy,
     local_runtime_build_input_with_options, standalone_unrestricted_runtime_policy,
+};
+
+use ironclaw_config::{
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutRequirement, TenancyModel,
+    WorkspaceAccessFloor,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -752,6 +758,101 @@ fn workspace_scoping_default_per_profile() {
         assert!(
             profile.workspace_scoped_per_caller(),
             "served profile {profile:?} defaults to caller-scoped workspace"
+        );
+    }
+}
+
+#[test]
+fn storage_layout_requirement_is_exhaustive_per_deployment_profile() {
+    let cases = [
+        (RebornCompositionProfile::Disabled, None),
+        (
+            RebornCompositionProfile::Standalone,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::StandaloneUnrestricted,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::HostedSingleTenant,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::Production,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            }),
+        ),
+        (
+            RebornCompositionProfile::MigrationDryRun,
+            Some(LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            }),
+        ),
+    ];
+
+    for (profile, expected) in cases {
+        assert_eq!(
+            DeploymentConfig::for_profile(profile, true).storage_layout_requirement(),
+            expected,
+            "profile: {profile:?}"
         );
     }
 }

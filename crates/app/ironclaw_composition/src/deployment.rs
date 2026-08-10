@@ -15,6 +15,10 @@
 //!   *handles*, not deployment policy — they continue to ride
 //!   `RebornStorageInput`. This value carries only the policy request.
 
+use ironclaw_config::{
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutRequirement, TenancyModel,
+    WorkspaceAccessFloor,
+};
 use ironclaw_event_store::RebornProfile;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_processes::ProcessConcurrencyLimits;
@@ -589,6 +593,42 @@ impl DeploymentConfig {
 
     pub fn storage_shape(&self) -> StorageShape {
         self.storage_shape
+    }
+
+    /// The durable-layout requirement implied by this deployment's established
+    /// trust model. This deliberately excludes the process backend: switching
+    /// among processless, Docker, and Railway execution cannot weaken a
+    /// multi-user layout's persisted access floor.
+    pub fn storage_layout_requirement(&self) -> Option<LayoutRequirement> {
+        let durable_state = match self.storage_shape {
+            StorageShape::None => return None,
+            StorageShape::LocalFilesystemRoot => DurableStateKind::EmbeddedLibSql,
+            StorageShape::HostedSingleTenantPool | StorageShape::OperatorSupplied => {
+                DurableStateKind::ExternalPostgres
+            }
+        };
+
+        let security = match self
+            .policy_request
+            .as_ref()
+            .map(|request| request.deployment)
+        {
+            Some(DeploymentMode::LocalSingleUser) => DeploymentSecurityEnvelope {
+                tenancy: TenancyModel::SingleUser,
+                workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+            },
+            // `DeploymentMode` is non-exhaustive. A new mode must not silently
+            // receive the weaker single-operator assumption.
+            _ => DeploymentSecurityEnvelope {
+                tenancy: TenancyModel::MultiUser,
+                workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            },
+        };
+
+        Some(LayoutRequirement {
+            durable_state,
+            security,
+        })
     }
 
     /// Whether this deployment must reuse scheduler wake wiring pre-minted by

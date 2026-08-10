@@ -1,6 +1,11 @@
 use std::{ffi::OsString, str::FromStr};
 
-use ironclaw_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornConfigError, RebornProfile};
+use ironclaw_config::{
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
+    ProfileTransitionAdmission, REBORN_PROFILE_ENV, RebornBootConfig, RebornConfigError,
+    RebornHome, RebornProfile, RebornStoragePaths, StateLayoutVersion, TenancyModel,
+    WorkspaceAccessFloor,
+};
 
 #[test]
 fn profile_wire_values_are_stable() {
@@ -242,4 +247,300 @@ fn boot_config_rejects_empty_profile_from_env_parts() {
             value: String::new(),
         }
     );
+}
+
+#[test]
+fn storage_paths_are_derived_from_reborn_home_without_creating_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let expected_home = temp.path().join("reborn-home");
+    let home = RebornHome::resolve_from_env_parts(
+        Some(expected_home.clone().into_os_string()),
+        None,
+        None,
+    )
+    .expect("Reborn home should resolve");
+
+    let paths = RebornStoragePaths::from_home(&home);
+
+    assert_eq!(paths.state_root(), expected_home.join("state"));
+    assert_eq!(paths.system_root(), expected_home.join("system"));
+    assert_eq!(paths.workspace_root(), expected_home.join("workspaces"));
+    assert_eq!(paths.runtime_root(), expected_home.join("runtime"));
+    assert!(
+        !expected_home.exists(),
+        "deriving pure layout paths must not create the Reborn home"
+    );
+}
+
+#[test]
+fn layout_manifest_v1_toml_wire_values_are_stable() {
+    struct Case {
+        name: &'static str,
+        requirement: LayoutRequirement,
+        expected_toml: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "embedded single trusted operator",
+            requirement: LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            expected_toml: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+        },
+        Case {
+            name: "embedded single isolated",
+            requirement: LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            },
+            expected_toml: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"per-caller-isolated\"\n",
+        },
+        Case {
+            name: "external multi trusted operator",
+            requirement: LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            expected_toml: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"external-postgres\"\n\n[security]\ntenancy = \"multi-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+        },
+        Case {
+            name: "external multi isolated",
+            requirement: LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            },
+            expected_toml: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"external-postgres\"\n\n[security]\ntenancy = \"multi-user\"\nworkspace_access_floor = \"per-caller-isolated\"\n",
+        },
+    ];
+
+    for case in cases {
+        let manifest = LayoutManifest::new(case.requirement);
+
+        assert_eq!(manifest.schema_version(), 1, "case: {}", case.name);
+        assert_eq!(
+            manifest.state_layout_version(),
+            StateLayoutVersion::V1,
+            "case: {}",
+            case.name
+        );
+        assert_eq!(
+            toml::to_string(&manifest).expect("manifest should serialize"),
+            case.expected_toml,
+            "case: {}",
+            case.name
+        );
+        assert_eq!(
+            toml::from_str::<LayoutManifest>(case.expected_toml)
+                .expect("manifest should deserialize"),
+            manifest,
+            "case: {}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn layout_manifest_rejects_unsupported_or_unowned_wire_fields() {
+    struct Case {
+        name: &'static str,
+        manifest: &'static str,
+        expected_error_fragment: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "unsupported schema version",
+            manifest: "schema_version = 2\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "unsupported layout manifest schema_version 2",
+        },
+        Case {
+            name: "unsupported state layout version",
+            manifest: "schema_version = 1\nstate_layout_version = 2\ndurable_state = \"embedded-libsql\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "unsupported state layout version 2",
+        },
+        Case {
+            name: "non kebab case durable state",
+            manifest: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded_libsql\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "embedded_libsql",
+        },
+        Case {
+            name: "profile name",
+            manifest: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\nprofile = \"local-dev\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "profile",
+        },
+        Case {
+            name: "state path",
+            manifest: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\nstate_root = \"/operator/state\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "state_root",
+        },
+        Case {
+            name: "process backend",
+            manifest: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\nprocess_backend = \"docker\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "process_backend",
+        },
+        Case {
+            name: "transient execution authority",
+            manifest: "schema_version = 1\nstate_layout_version = 1\ndurable_state = \"embedded-libsql\"\nruntime_authority = \"unrestricted\"\n\n[security]\ntenancy = \"single-user\"\nworkspace_access_floor = \"single-trusted-operator\"\n",
+            expected_error_fragment: "runtime_authority",
+        },
+    ];
+
+    for case in cases {
+        let error = toml::from_str::<LayoutManifest>(case.manifest)
+            .expect_err("unsupported manifest input must fail closed");
+
+        assert!(
+            error.to_string().contains(case.expected_error_fragment),
+            "case: {} error: {error}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn layout_manifest_transition_admission_preserves_durable_security_assumptions() {
+    struct Case {
+        name: &'static str,
+        stored: LayoutRequirement,
+        requested: LayoutRequirement,
+        expected: ProfileTransitionAdmission,
+    }
+
+    let embedded_single_trusted = LayoutRequirement {
+        durable_state: DurableStateKind::EmbeddedLibSql,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::SingleUser,
+            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+        },
+    };
+    let embedded_single_isolated = LayoutRequirement {
+        durable_state: DurableStateKind::EmbeddedLibSql,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::SingleUser,
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+        },
+    };
+    let embedded_multi_isolated = LayoutRequirement {
+        durable_state: DurableStateKind::EmbeddedLibSql,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::MultiUser,
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+        },
+    };
+    let embedded_multi_trusted = LayoutRequirement {
+        durable_state: DurableStateKind::EmbeddedLibSql,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::MultiUser,
+            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+        },
+    };
+    let external_multi_isolated = LayoutRequirement {
+        durable_state: DurableStateKind::ExternalPostgres,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::MultiUser,
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+        },
+    };
+
+    let cases = [
+        Case {
+            name: "same local profile requirement",
+            stored: embedded_single_trusted,
+            requested: embedded_single_trusted,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "local dev to local dev yolo",
+            stored: embedded_single_trusted,
+            requested: embedded_single_trusted,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "hosted volume without processes to docker sandbox",
+            stored: embedded_multi_isolated,
+            requested: embedded_multi_isolated,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "docker sandbox to railway sandbox",
+            stored: embedded_multi_isolated,
+            requested: embedded_multi_isolated,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "railway sandbox to hosted volume without processes",
+            stored: embedded_multi_isolated,
+            requested: embedded_multi_isolated,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "tightening workspace access floor",
+            stored: embedded_single_trusted,
+            requested: embedded_single_isolated,
+            expected: ProfileTransitionAdmission::Allowed,
+        },
+        Case {
+            name: "weakening workspace access floor",
+            stored: embedded_multi_isolated,
+            requested: embedded_multi_trusted,
+            expected: ProfileTransitionAdmission::Rejected {
+                reason: "workspace access floor cannot weaken from per-caller-isolated to single-trusted-operator".to_owned(),
+            },
+        },
+        Case {
+            name: "multi user isolated to local host",
+            stored: embedded_multi_isolated,
+            requested: embedded_single_trusted,
+            expected: ProfileTransitionAdmission::Rejected {
+                reason: "tenancy transition from multi-user to single-user requires an explicit ownership migration".to_owned(),
+            },
+        },
+        Case {
+            name: "single user to multi user",
+            stored: embedded_single_trusted,
+            requested: embedded_multi_isolated,
+            expected: ProfileTransitionAdmission::Rejected {
+                reason: "tenancy transition from single-user to multi-user requires an explicit ownership migration".to_owned(),
+            },
+        },
+        Case {
+            name: "embedded libsql to external postgres",
+            stored: embedded_multi_isolated,
+            requested: external_multi_isolated,
+            expected: ProfileTransitionAdmission::Rejected {
+                reason: "durable state transition from embedded-libsql to external-postgres requires an explicit storage migration".to_owned(),
+            },
+        },
+        Case {
+            name: "external postgres to embedded libsql",
+            stored: external_multi_isolated,
+            requested: embedded_multi_isolated,
+            expected: ProfileTransitionAdmission::Rejected {
+                reason: "durable state transition from external-postgres to embedded-libsql requires an explicit storage migration".to_owned(),
+            },
+        },
+    ];
+
+    for case in cases {
+        assert_eq!(
+            LayoutManifest::new(case.stored).admit(case.requested),
+            case.expected,
+            "case: {}",
+            case.name
+        );
+    }
 }

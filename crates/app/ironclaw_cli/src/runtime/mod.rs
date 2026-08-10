@@ -1305,12 +1305,9 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
 
 pub(crate) fn local_runtime_storage_root(
     config: &RebornBootConfig,
-    profile: RebornProfile,
+    _profile: RebornProfile,
 ) -> PathBuf {
-    config
-        .home()
-        .path()
-        .join(profile.local_runtime_storage_subdir())
+    config.home().path().to_path_buf()
 }
 
 pub(crate) async fn initialize_local_runtime_storage_root(
