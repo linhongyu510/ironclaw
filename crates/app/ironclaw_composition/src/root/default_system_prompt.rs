@@ -41,7 +41,7 @@ pub(crate) enum DefaultSystemPromptError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DefaultSystemPromptIdentitySource {
-    storage_root: PathBuf,
+    system_content_root: PathBuf,
     prompt_path: PathBuf,
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
@@ -59,14 +59,14 @@ pub(crate) struct DefaultSystemPromptIdentitySource {
 
 impl DefaultSystemPromptIdentitySource {
     pub(crate) fn try_new(
-        storage_root: PathBuf,
+        system_content_root: PathBuf,
         prompt_path: PathBuf,
         disclosure_protocol_active: bool,
         benchmarking_mode_active: bool,
     ) -> Result<Self, DefaultSystemPromptError> {
-        read_default_system_prompt(&storage_root, &prompt_path)?;
+        read_default_system_prompt(&system_content_root, &prompt_path)?;
         Ok(Self {
-            storage_root,
+            system_content_root,
             prompt_path,
             disclosure_protocol_active,
             benchmarking_mode_active,
@@ -78,7 +78,7 @@ impl DefaultSystemPromptIdentitySource {
         // Append in memory (not to the seeded, user-editable file) so these
         // sections are system invariants independent of user edits to SYSTEM.md
         // — and so existing installs get them, not just freshly seeded ones.
-        let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
+        let mut content = read_default_system_prompt(&self.system_content_root, &self.prompt_path)?;
         append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
         if self.disclosure_protocol_active {
             append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
@@ -113,15 +113,15 @@ impl DefaultSystemPromptIdentitySource {
 }
 
 pub(crate) fn seed_default_system_prompt(
-    storage_root: &Path,
+    system_content_root: &Path,
     path: &Path,
 ) -> Result<(), DefaultSystemPromptError> {
     if path.symlink_metadata().is_ok() {
-        validate_default_system_prompt(storage_root, path)?;
+        validate_default_system_prompt(system_content_root, path)?;
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        ensure_prompt_parent(storage_root, parent)?;
+        ensure_prompt_parent(system_content_root, parent)?;
     }
     match std::fs::OpenOptions::new()
         .write(true)
@@ -135,7 +135,7 @@ pub(crate) fn seed_default_system_prompt(
                 source,
             })?,
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-            validate_default_system_prompt(storage_root, path)?;
+            validate_default_system_prompt(system_content_root, path)?;
         }
         Err(source) => {
             return Err(DefaultSystemPromptError::Io {
@@ -144,7 +144,7 @@ pub(crate) fn seed_default_system_prompt(
             });
         }
     }
-    validate_default_system_prompt(storage_root, path)?;
+    validate_default_system_prompt(system_content_root, path)?;
     Ok(())
 }
 
@@ -160,10 +160,10 @@ fn append_section(content: &mut String, section: &str) {
 }
 
 fn read_default_system_prompt(
-    storage_root: &Path,
+    system_content_root: &Path,
     path: &Path,
 ) -> Result<String, DefaultSystemPromptError> {
-    validate_default_system_prompt(storage_root, path)?;
+    validate_default_system_prompt(system_content_root, path)?;
     let content = std::fs::read_to_string(path).map_err(|source| DefaultSystemPromptError::Io {
         path: path.to_path_buf(),
         source,
@@ -179,13 +179,13 @@ fn read_default_system_prompt(
 }
 
 fn validate_default_system_prompt(
-    storage_root: &Path,
+    system_content_root: &Path,
     path: &Path,
 ) -> Result<(), DefaultSystemPromptError> {
-    if !path.starts_with(storage_root) {
+    if !path.starts_with(system_content_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "path is outside the standalone storage root".to_string(),
+            reason: "path is outside the system content root".to_string(),
         });
     }
     let metadata = path
@@ -201,10 +201,10 @@ fn validate_default_system_prompt(
         });
     }
     let canonical_root =
-        storage_root
+        system_content_root
             .canonicalize()
             .map_err(|source| DefaultSystemPromptError::Io {
-                path: storage_root.to_path_buf(),
+                path: system_content_root.to_path_buf(),
                 source,
             })?;
     let canonical_path = path
@@ -216,7 +216,7 @@ fn validate_default_system_prompt(
     if !canonical_path.starts_with(&canonical_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "canonical path escapes the standalone storage root".to_string(),
+            reason: "canonical path escapes the system content root".to_string(),
         });
     }
     if metadata.len() > MAX_DEFAULT_SYSTEM_PROMPT_BYTES {
@@ -230,23 +230,22 @@ fn validate_default_system_prompt(
 }
 
 fn ensure_prompt_parent(
-    storage_root: &Path,
+    system_content_root: &Path,
     parent: &Path,
 ) -> Result<(), DefaultSystemPromptError> {
-    if !parent.starts_with(storage_root) {
+    if !parent.starts_with(system_content_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: parent.to_path_buf(),
-            reason: "parent is outside the standalone storage root".to_string(),
+            reason: "parent is outside the system content root".to_string(),
         });
     }
-    let relative_parent =
-        parent
-            .strip_prefix(storage_root)
-            .map_err(|_| DefaultSystemPromptError::InvalidFile {
-                path: parent.to_path_buf(),
-                reason: "parent is outside the standalone storage root".to_string(),
-            })?;
-    let mut current = storage_root.to_path_buf();
+    let relative_parent = parent.strip_prefix(system_content_root).map_err(|_| {
+        DefaultSystemPromptError::InvalidFile {
+            path: parent.to_path_buf(),
+            reason: "parent is outside the system content root".to_string(),
+        }
+    })?;
+    let mut current = system_content_root.to_path_buf();
     for component in relative_parent.components() {
         let std::path::Component::Normal(part) = component else {
             return Err(DefaultSystemPromptError::InvalidFile {
@@ -410,6 +409,18 @@ mod tests {
             !content.content.contains("tool_search"),
             "disclosure-off prompt must not mention the bridge tools"
         );
+    }
+
+    #[test]
+    fn source_validates_a_default_prompt_against_its_system_content_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let system_content_root = root.path().join("standalone/system");
+        let prompt_path = system_content_root.join("prompts/default-system.md");
+        std::fs::create_dir_all(&system_content_root).expect("system content root");
+        seed_default_system_prompt(&system_content_root, &prompt_path).expect("prompt seeds");
+
+        DefaultSystemPromptIdentitySource::try_new(system_content_root, prompt_path, false, false)
+            .expect("the prompt must be validated beneath system content, not state");
     }
 
     #[tokio::test]

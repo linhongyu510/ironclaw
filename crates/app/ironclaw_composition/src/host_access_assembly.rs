@@ -110,6 +110,11 @@ pub(crate) fn build_host_access(
     runtime_policy: Option<EffectiveRuntimePolicy>,
     workspace_scoped_per_caller: bool,
 ) -> Result<HostAccessAssembly, RebornBuildError> {
+    let configured_workspace_root = workspace_root_for_test
+        .as_deref()
+        .unwrap_or_else(|| paths.workspace_root());
+    preflight_storage_namespace_paths(&paths, configured_workspace_root)?;
+
     initialize_directory(paths.state_root(), "state root")?;
     initialize_directory(
         &paths.system_root().join("extensions"),
@@ -117,9 +122,6 @@ pub(crate) fn build_host_access(
     )?;
     initialize_directory(&paths.system_root().join("prompts"), "system prompts root")?;
     initialize_directory(&paths.system_root().join("skills"), "system skills root")?;
-    let configured_workspace_root = workspace_root_for_test
-        .as_deref()
-        .unwrap_or_else(|| paths.workspace_root());
     initialize_directory(configured_workspace_root, "workspace root")?;
 
     let installation_root = canonicalize_path(paths.installation_root(), "installation root")?;
@@ -173,6 +175,136 @@ fn initialize_directory(path: &Path, label: &str) -> Result<(), RebornBuildError
     std::fs::create_dir_all(path).map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("{label} could not be initialized: {error}"),
     })
+}
+
+/// Checks every resolved namespace before `create_dir_all` can follow a configured alias.
+///
+/// The roots can be absent on first boot, so this resolves each path through its nearest existing
+/// ancestor and validates the projected canonical result. It then rejects any existing symlink in
+/// the installation or namespace ancestry. A second canonical validation after initialization
+/// below remains the race-resistant final check for the roots handed to host access.
+fn preflight_storage_namespace_paths(
+    paths: &RebornStoragePaths,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let installation_root =
+        canonicalize_planned_path(paths.installation_root(), "installation root")?;
+    let state_root = canonicalize_planned_path(paths.state_root(), "state root")?;
+    let system_root = canonicalize_planned_path(paths.system_root(), "system root")?;
+    let canonical_workspace_root = canonicalize_planned_path(workspace_root, "workspace root")?;
+    validate_canonical_storage_paths(
+        &installation_root,
+        &state_root,
+        &system_root,
+        &canonical_workspace_root,
+    )?;
+    validate_workspace_skill_isolation(&system_root, &canonical_workspace_root)?;
+
+    let system_extensions_root = paths.system_root().join("extensions");
+    let system_prompts_root = paths.system_root().join("prompts");
+    let system_skills_root = paths.system_root().join("skills");
+    for (label, path) in [
+        ("state root", paths.state_root()),
+        ("system root", paths.system_root()),
+        ("system extensions root", system_extensions_root.as_path()),
+        ("system prompts root", system_prompts_root.as_path()),
+        ("system skills root", system_skills_root.as_path()),
+        ("workspace root", workspace_root),
+    ] {
+        reject_existing_namespace_symlinks(paths.installation_root(), path, label)?;
+    }
+    Ok(())
+}
+
+/// Resolves an existing path, or projects missing suffixes from the nearest existing ancestor.
+/// This never creates an entry and intentionally follows existing aliases only long enough for the
+/// canonical containment/disjointness validation performed by the caller.
+fn canonicalize_planned_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
+    let mut current = path;
+    let mut missing_components = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(_) => {
+                let canonical = std::fs::canonicalize(current).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("{label} could not be resolved: {error}"),
+                    }
+                })?;
+                let canonical_metadata = std::fs::metadata(&canonical).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("{label} could not be inspected: {error}"),
+                    }
+                })?;
+                if !canonical_metadata.is_dir() {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} must be a directory"),
+                    });
+                }
+                let mut projected = canonical;
+                for component in missing_components.iter().rev() {
+                    projected.push(component);
+                }
+                return Ok(projected);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} has no existing ancestor"),
+                    });
+                };
+                missing_components.push(name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} has no existing ancestor"),
+                    });
+                };
+                current = parent;
+            }
+            Err(error) => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{label} could not be inspected: {error}"),
+                });
+            }
+        }
+    }
+}
+
+fn reject_existing_namespace_symlinks(
+    installation_root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), RebornBuildError> {
+    let relative =
+        path.strip_prefix(installation_root)
+            .map_err(|_| RebornBuildError::InvalidConfig {
+                reason: format!("{label} must be beneath the selected installation root"),
+            })?;
+    let mut current = installation_root.to_path_buf();
+    inspect_namespace_component(&current, label)?;
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if !inspect_namespace_component(&current, label)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Returns false only when this and every descendant are necessarily absent.
+fn inspect_namespace_component(path: &Path, label: &str) -> Result<bool, RebornBuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} must not contain a symlink: {}", path.display()),
+        }),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} must be a directory: {}", path.display()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} could not be inspected: {error}"),
+        }),
+    }
 }
 
 fn canonicalize_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
@@ -319,5 +451,35 @@ mod tests {
                 .contains("state root must not overlap system root"),
             "unexpected path-validation error: {error}"
         );
+    }
+
+    #[test]
+    fn host_access_rejects_an_external_system_symlink_before_creating_children() {
+        let temp = tempfile::tempdir().expect("temporary installation root");
+        let home = temp.path().join("reborn-home");
+        let outside = temp.path().join("outside-system");
+        std::fs::create_dir_all(&home).expect("create installation root");
+        std::fs::create_dir_all(&outside).expect("create outside system root");
+        std::os::unix::fs::symlink(&outside, home.join("system"))
+            .expect("alias system to outside directory");
+
+        let error = match build_host_access(
+            RebornStoragePaths::from_installation_root(&home),
+            None,
+            None,
+            None,
+            false,
+        ) {
+            Ok(_) => panic!("external system aliases must fail before initialization"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("system root"), "{error}");
+        for child in ["extensions", "prompts", "skills"] {
+            assert!(
+                !outside.join(child).exists(),
+                "host access must not create {child} through an external system symlink"
+            );
+        }
     }
 }

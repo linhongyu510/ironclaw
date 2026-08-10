@@ -340,6 +340,8 @@ pub(crate) struct RebornRuntimeStores {
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) standalone_storage_root: Option<PathBuf>,
+    /// Host root for mutable system-owned content such as the seeded system prompt.
+    pub(crate) system_content_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,

@@ -14,7 +14,7 @@ use ironclaw_turns::TurnStatus;
 
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
-use super::{RebornRuntimeError, build_reborn_runtime};
+use super::{RebornRuntimeError, build_default_identity_context_source, build_reborn_runtime};
 
 #[derive(Debug)]
 struct RecordingGateway {
@@ -35,6 +35,35 @@ impl HostManagedModelGateway for RecordingGateway {
             "prompt observed".to_string(),
         ))
     }
+}
+
+#[test]
+fn runtime_prompt_caller_accepts_seeded_default_prompt_under_system_prompts() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let system_content_root = storage_root.join("system");
+    let prompt_path = system_content_root.join("prompts/default-system.md");
+    std::fs::create_dir_all(&system_content_root).expect("system content root");
+    crate::root::default_system_prompt::seed_default_system_prompt(
+        &system_content_root,
+        &prompt_path,
+    )
+    .expect("prompt seeds");
+
+    build_default_identity_context_source(
+        Some(system_content_root),
+        Some(prompt_path),
+        true,
+        false,
+    )
+    .expect("runtime prompt caller should accept a default prompt under system/prompts");
+
+    assert!(
+        storage_root
+            .join("system/prompts/default-system.md")
+            .is_file(),
+        "the runtime caller must validate the default prompt in the system-content namespace"
+    );
 }
 
 #[tokio::test]

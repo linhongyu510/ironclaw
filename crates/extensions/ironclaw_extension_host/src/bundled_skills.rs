@@ -243,6 +243,27 @@ pub async fn ensure_bundled_reborn_skills_installed(
     ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root).await
 }
 
+/// Installs bundled skills when the caller already owns the exact host `system/skills` root.
+///
+/// The standalone-storage entry point above deliberately mounts its argument at `/projects` and
+/// then writes `/projects/system/skills`. Callers that have already resolved `system/skills` must
+/// use this entry point so that namespace is not appended a second time.
+pub async fn ensure_bundled_reborn_skills_installed_at_system_skills_root(
+    system_skills_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let system_skills_root =
+        prepare_disk_skill_storage_root(system_skills_root, "standalone system skills root")?;
+    let virtual_system_skills_root = system_skills_root_path()?;
+    let mut filesystem = DiskFilesystem::new();
+    filesystem
+        .mount_local(
+            virtual_system_skills_root.clone(),
+            HostPath::from_path_buf(system_skills_root),
+        )
+        .map_err(invalid_config)?;
+    ensure_bundled_reborn_skills_installed_in(&filesystem, &virtual_system_skills_root).await
+}
+
 /// Install the bundled skills into ANY skill root, on any filesystem backend.
 ///
 /// Extracted from [`ensure_bundled_reborn_skills_installed`], which builds a `DiskFilesystem` from a
@@ -362,19 +383,24 @@ fn standalone_storage_filesystem(
 fn prepare_standalone_storage_root(
     standalone_storage_root: &Path,
 ) -> Result<PathBuf, RebornBuildError> {
-    reject_existing_symlink(standalone_storage_root, "standalone skill storage root")?;
-    fs::create_dir_all(standalone_storage_root).map_err(invalid_config)?;
-    reject_existing_symlink(standalone_storage_root, "standalone skill storage root")?;
-    let metadata = fs::metadata(standalone_storage_root).map_err(invalid_config)?;
+    prepare_disk_skill_storage_root(standalone_storage_root, "standalone skill storage root")
+}
+
+fn prepare_disk_skill_storage_root(
+    storage_root: &Path,
+    label: &str,
+) -> Result<PathBuf, RebornBuildError> {
+    reject_existing_symlink(storage_root, label)?;
+    fs::create_dir_all(storage_root).map_err(invalid_config)?;
+    reject_existing_symlink(storage_root, label)?;
+    let metadata = fs::metadata(storage_root).map_err(invalid_config)?;
     if !metadata.is_dir() {
         return Err(invalid_config(format!(
-            "standalone skill storage root is not a directory: {}",
-            standalone_storage_root.display()
+            "{label} is not a directory: {}",
+            storage_root.display()
         )));
     }
-    standalone_storage_root
-        .canonicalize()
-        .map_err(invalid_config)
+    storage_root.canonicalize().map_err(invalid_config)
 }
 
 fn reject_existing_symlink(path: &Path, label: &str) -> Result<(), RebornBuildError> {
@@ -826,6 +852,22 @@ mod tests {
             standalone_root
                 .join("system/skills/portfolio/scripts/backtest_strategy.py")
                 .is_file()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_system_skills_root_does_not_append_the_system_namespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let system_skills_root = dir.path().join("system/skills");
+
+        ensure_bundled_reborn_skills_installed_at_system_skills_root(&system_skills_root)
+            .await
+            .expect("install bundled skills at the exact system skills root");
+
+        assert!(system_skills_root.join("code-review/SKILL.md").is_file());
+        assert!(
+            !system_skills_root.join("system").exists(),
+            "an exact system skills root must not receive another system namespace"
         );
     }
 

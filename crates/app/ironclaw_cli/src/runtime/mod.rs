@@ -543,6 +543,8 @@ pub(crate) fn build_runtime_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
+    let migration_dry_run =
+        runtime_services.services_input.profile() == RebornCompositionProfile::MigrationDryRun;
 
     let services_input = with_binary_host_extension_bindings(runtime_services.services_input)?;
 
@@ -569,33 +571,37 @@ pub(crate) fn build_runtime_input_with_options(
         // required for both `run` and `serve`; without it `run` resolves the
         // configured provider here but still dispatches through `unconfigured`.
         runtime_input = runtime_input.with_boot_config(config.clone());
-        match resolve_reborn_runtime_llm_with_stored_key_fallback(
-            config,
-            runtime_services.config_file.as_ref(),
-            caller,
-        )? {
-            Some(llm) => {
-                tracing::debug!(
-                    provider_id = %llm.provider_id(),
-                    model = %llm.model(),
-                    base_url = %llm.base_url().unwrap_or_default(),
-                    "resolved LLM selection for Reborn runtime"
-                );
-                // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
-                // serve/run turn provider is built via `wrap_swappable_gateway`,
-                // which never wires `RecordingLlm` itself; this seam attaches the
-                // recorder factory over the gateway's swappable provider so the
-                // live QA lane can harvest replayable per-case traces. No-op when
-                // the env var is unset (production default).
-                runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
-            }
-            None => {
-                tracing::warn!(
-                    "no LLM selection configured; set `[llm.default]` in {} or configure \
-                     LLM_BACKEND / provider environment variables. Runs will fail until an \
-                     LLM is wired.",
-                    config.home().config_file_path().display()
-                );
+        if migration_dry_run {
+            tracing::debug!("skipping persisted LLM credential fallback for migration dry-run");
+        } else {
+            match resolve_reborn_runtime_llm_with_stored_key_fallback(
+                config,
+                runtime_services.config_file.as_ref(),
+                caller,
+            )? {
+                Some(llm) => {
+                    tracing::debug!(
+                        provider_id = %llm.provider_id(),
+                        model = %llm.model(),
+                        base_url = %llm.base_url().unwrap_or_default(),
+                        "resolved LLM selection for Reborn runtime"
+                    );
+                    // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
+                    // serve/run turn provider is built via `wrap_swappable_gateway`,
+                    // which never wires `RecordingLlm` itself; this seam attaches the
+                    // recorder factory over the gateway's swappable provider so the
+                    // live QA lane can harvest replayable per-case traces. No-op when
+                    // the env var is unset (production default).
+                    runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
+                }
+                None => {
+                    tracing::warn!(
+                        "no LLM selection configured; set `[llm.default]` in {} or configure \
+                         LLM_BACKEND / provider environment variables. Runs will fail until an \
+                         LLM is wired.",
+                        config.home().config_file_path().display()
+                    );
+                }
             }
         }
     }
@@ -737,7 +743,9 @@ pub(crate) fn build_services_input_with_options(
             build_production_services_input(profile, owner_id, config_file.as_ref())?
         }
     };
-    if let Some(ResolvedGoogleOAuthConfig {
+    if profile == RebornProfile::MigrationDryRun {
+        tracing::debug!("skipping persisted OAuth credential fallback for migration dry-run");
+    } else if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env(config, config_file.as_ref())?
@@ -1717,7 +1725,12 @@ fn runner_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::MutexGuard};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        path::{Path, PathBuf},
+        sync::MutexGuard,
+        time::SystemTime,
+    };
 
     use ironclaw_composition::TriggerFireAccessPolicy;
     use ironclaw_composition::{
@@ -2862,6 +2875,62 @@ regex_activation_enabled = false
         (temp, config)
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct LayoutEntrySnapshot {
+        kind: &'static str,
+        bytes: Option<Vec<u8>>,
+        len: u64,
+        modified: SystemTime,
+        readonly: bool,
+    }
+
+    fn layout_tree_snapshot(root: &Path) -> BTreeMap<PathBuf, LayoutEntrySnapshot> {
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            entries: &mut BTreeMap<PathBuf, LayoutEntrySnapshot>,
+        ) {
+            for entry in std::fs::read_dir(directory).expect("read layout directory") {
+                let entry = entry.expect("layout directory entry");
+                let path = entry.path();
+                let metadata = std::fs::symlink_metadata(&path).expect("layout entry metadata");
+                let kind = if metadata.file_type().is_symlink() {
+                    "symlink"
+                } else if metadata.is_dir() {
+                    "directory"
+                } else if metadata.is_file() {
+                    "file"
+                } else {
+                    "other"
+                };
+                let bytes = metadata.is_file().then(|| {
+                    std::fs::read(&path).expect("read layout file for immutable snapshot")
+                });
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("layout entry stays under root")
+                    .to_path_buf();
+                entries.insert(
+                    relative,
+                    LayoutEntrySnapshot {
+                        kind,
+                        bytes,
+                        len: metadata.len(),
+                        modified: metadata.modified().expect("layout modification time"),
+                        readonly: metadata.permissions().readonly(),
+                    },
+                );
+                if metadata.is_dir() {
+                    collect(root, &path, entries);
+                }
+            }
+        }
+
+        let mut entries = BTreeMap::new();
+        collect(root, root, &mut entries);
+        entries
+    }
+
     #[test]
     fn runtime_input_refuses_legacy_state_before_constructing_runtime_services() {
         let _lock = lock_runtime_env();
@@ -3405,6 +3474,84 @@ default_profile = "secure_default"
         assert_eq!(
             services.profile(),
             RebornCompositionProfile::MigrationDryRun
+        );
+    }
+
+    #[test]
+    fn migration_dry_run_never_opens_persisted_oauth_or_llm_fallback_stores() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _disable_keychain = EnvGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+        let _credential_env = EnvGuard::clear_many(&[
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+            "GOOGLE_CLIENT_SECRET",
+            "OPENAI_API_KEY",
+        ]);
+        let (_temp, config) = boot_config_with_config_toml(
+            "migration-dry-run",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+
+[google]
+client_id = "dry-run-client.apps.googleusercontent.com"
+redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        );
+        let requirement =
+            super::storage_layout_requirement_for_profile(super::RebornProfile::MigrationDryRun)
+                .expect("migration dry-run requirement");
+        let paths = super::storage_layout::ensure_ready_layout(config.home(), requirement)
+            .expect("prepare a valid dry-run layout fixture");
+        let state_root = paths.state_root().to_path_buf();
+        let store_root = state_root.clone();
+        block_on_cli(async move {
+            ironclaw_composition::open_standalone_secret_store(&store_root)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
+        .expect("seed an existing persisted store");
+        std::fs::remove_file(
+            state_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        )
+        .expect("remove cached key so a fallback opener would recreate it");
+
+        let before = layout_tree_snapshot(config.home().path());
+        let runtime_input = build_runtime_input(&config, RuntimeInputCaller::Serve)
+            .expect("migration dry-run does not resolve persisted LLM credentials");
+        let after = layout_tree_snapshot(config.home().path());
+
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::MigrationDryRun
+        );
+
+        assert_eq!(
+            after, before,
+            "migration dry-run must leave every layout file's bytes and metadata unchanged"
         );
     }
 
