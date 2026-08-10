@@ -38,12 +38,18 @@ where
     /// when they disagree.
     ///
     /// Bounded on purpose: the comparison costs one directory listing and one
-    /// capped query, and a scope holding more rows than [`Page::MAX_LIMIT`] is
-    /// skipped rather than walked page by page. This runs inside a live listing
-    /// request, so an unbounded scan would put a latency spike proportional to
-    /// scope size on whichever request arrives first after a restart. Scopes
-    /// that large keep their existing behaviour and are repaired by the
-    /// explicit migration.
+    /// capped query. This runs inside a live listing request, so an unbounded
+    /// scan would put a latency spike proportional to scope size on whichever
+    /// request arrives first after a restart. The listing asks for one entry
+    /// past [`Page::MAX_LIMIT`], which is enough to recognise an oversized
+    /// scope without materializing all of it on backends that stop early.
+    ///
+    /// A scope holding more rows than that cap is skipped, and today nothing
+    /// else repairs it: `migrate_thread_index_for_scope` runs only while the
+    /// scope's completion marker is absent, and both the listing path and the
+    /// deployment-wide startup migration reach this function once the marker
+    /// exists. Such a scope therefore keeps its damaged rows until an explicit
+    /// repair path is built for it — see the follow-up tracked from #7470.
     pub(super) async fn reconcile_thread_index_projection(
         &self,
         scope: &ThreadScope,
@@ -51,7 +57,11 @@ where
         let root = thread_index_root(scope)?;
         let durable = match self
             .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
+            .list_dir_bounded(
+                &scope.to_resource_scope(),
+                &root,
+                Page::MAX_LIMIT as usize + 1,
+            )
             .await
         {
             Ok(entries) => entries,
@@ -65,7 +75,17 @@ where
             .filter(|entry| entry.file_type == FileType::File)
             .filter_map(|entry| entry.name.strip_suffix(THREAD_INDEX_SUFFIX))
             .collect();
-        if index_rows.is_empty() || index_rows.len() > Page::MAX_LIMIT as usize {
+        if index_rows.is_empty() {
+            return Ok(());
+        }
+        if index_rows.len() > Page::MAX_LIMIT as usize {
+            // Surfaced rather than skipped silently: an oversized scope with
+            // damaged rows has no repair path at all, so leaving no trace would
+            // make it invisible in telemetry as well as in the sidebar.
+            tracing::debug!(
+                index_rows = index_rows.len(),
+                "thread index scope exceeds the reconcile cap; projection repair skipped"
+            );
             return Ok(());
         }
         if self.count_projected_thread_index_rows(scope).await? >= index_rows.len() {
