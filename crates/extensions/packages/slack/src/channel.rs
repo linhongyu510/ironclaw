@@ -481,6 +481,7 @@ async fn update_slack_message(
         "channel": channel,
         "ts": ts,
         "markdown_text": markdown_text,
+        "as_user": true,
     })) {
         Ok(body) => body,
         Err(error) => {
@@ -2579,6 +2580,7 @@ mod tests {
         );
         assert_eq!(body["ts"], "1710000000.000200");
         assert_eq!(body["markdown_text"], "Hello world");
+        assert_eq!(body["as_user"], true);
         assert!(matches!(
             &report.parts[..],
             [PartDeliveryOutcome::Sent {
