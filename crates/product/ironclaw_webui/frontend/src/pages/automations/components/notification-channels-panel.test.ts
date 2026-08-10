@@ -65,7 +65,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock, WebPushDeviceRow };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock, WebPushChannelRow };`;
 }
 
 function html(strings, ...values) {
@@ -663,16 +663,16 @@ function fakeDevice(overrides = {}) {
 // block is MOUNTED with the right props (and only under the web-push row),
 // and the block's own rendering is asserted by calling it directly.
 
-test("NotificationChannelsPanel mounts the device row under the web-push row only", () => {
+test("NotificationChannelsPanel mounts the web-push channel row under the web-push target only", () => {
   const harness = createHarness();
   const withWebPush = harness.render({
     targets: [target("slack-alpha"), webPushTarget()],
     channels: [],
   });
   assert.equal(
-    componentProps(withWebPush, harness.exports.WebPushDeviceRow).length,
+    componentProps(withWebPush, harness.exports.WebPushChannelRow).length,
     1,
-    "exactly one device row for the web-push row",
+    "exactly one web-push channel row for the web-push target",
   );
 
   const withoutWebPush = harness.render({
@@ -680,19 +680,28 @@ test("NotificationChannelsPanel mounts the device row under the web-push row onl
     channels: [],
   });
   assert.equal(
-    componentProps(withoutWebPush, harness.exports.WebPushDeviceRow).length,
+    componentProps(withoutWebPush, harness.exports.WebPushChannelRow).length,
     0,
-    "no device row without a web-push row — the status query never mounts for users without web push",
+    "no web-push row without a web-push target — the status query never mounts for users without web push",
   );
 });
 
-test("WebPushDeviceRow wires the device hook into the block", () => {
-  // The row is the only place the web-push device hook runs; the block itself
-  // stays a pure view. Prove the wrapper passes the hook's state through, so
-  // moving the hook off the panel top didn't sever the block from its data.
-  const device = fakeDevice({ browser: { state: "enrolled", accountMatch: true } });
+test("WebPushChannelRow wires the device hook into the block", () => {
+  // The web-push row is the only place the device hook runs; the block stays a
+  // pure view. Prove the row passes the hook's state through, so owning the
+  // hook here (not at the panel top) didn't sever the block from its data.
+  const device = fakeDevice({
+    subscriptionCount: 2,
+    browser: { state: "enrolled", accountMatch: true },
+  });
   const harness = createHarness({ webPushDevice: device });
-  const rendered = harness.exports.WebPushDeviceRow();
+  const rendered = harness.exports.WebPushChannelRow({
+    row: webPushTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
   const [block] = componentProps(rendered, harness.exports.WebPushDeviceBlock);
   assert.ok(block, "the row renders the device block");
   assert.equal(block.device, device, "the block receives the hook's device state");
@@ -709,9 +718,14 @@ test("NotificationChannelsPanel toggles the web-push target into the full-replac
     targets: [webPushTarget()],
     channels: [],
   });
-  const [checkbox] = nativeProps(rendered, "input");
-  assert.equal(checkbox.checked, false);
-  checkbox.onChange({ target: { checked: true } });
+  // The web-push checkbox lives inside WebPushChannelRow — a child the vm
+  // harness renders as a node without invoking — so drive the panel's toggle
+  // through the callback it hands that row (the same one the child's checkbox
+  // onChange calls).
+  const [webPushRow] = componentProps(rendered, harness.exports.WebPushChannelRow);
+  assert.ok(webPushRow, "the panel renders the web-push channel row");
+  assert.equal(webPushRow.isSelected, false);
+  webPushRow.onToggle(webPushRow.row.target_id);
 
   rendered = harness.render({ targets: [webPushTarget()], channels: [] });
   const [saveButton] = componentProps(rendered, harness.Button);
@@ -722,6 +736,93 @@ test("NotificationChannelsPanel toggles the web-push target into the full-replac
     [...saved[0]],
     ["web-push"],
     "Save posts the web-push id in target_ids",
+  );
+});
+
+test("WebPushChannelRow cannot be selected when no browser is enrolled", () => {
+  // subscription_count === 0 → nowhere to deliver a push, so the web-app
+  // channel is not selectable and its pill is not "Ready". The nested device
+  // block's "Enable notifications in this browser" button is how the user
+  // fixes it (covered by the WebPushDeviceBlock tests below).
+  const harness = createHarness({ webPushDevice: fakeDevice({ subscriptionCount: 0 }) });
+  const rendered = harness.exports.WebPushChannelRow({
+    row: webPushTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(
+    checkbox.disabled,
+    true,
+    "with zero enrolled browsers the web-app checkbox cannot be selected",
+  );
+  const scalars = collectScalars(rendered);
+  assert.ok(!scalars.includes("Ready"), "an unenrolled web-app row must not claim it is Ready");
+  assert.ok(
+    scalars.includes("Unavailable"),
+    "the pill reflects that the channel has no enrolled browser to deliver to",
+  );
+});
+
+test("WebPushChannelRow keeps an already-selected web app deselectable with zero enrolled browsers", () => {
+  // A browser that unsubscribes after the channel was saved must not leave the
+  // checkbox locked ON: the disable applies only to SELECTING (an unchecked
+  // row), so a stored selection can always be turned back off.
+  const harness = createHarness({ webPushDevice: fakeDevice({ subscriptionCount: 0 }) });
+  const rendered = harness.exports.WebPushChannelRow({
+    row: webPushTarget().target,
+    isSelected: true,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(checkbox.checked, true);
+  assert.equal(
+    checkbox.disabled,
+    false,
+    "a stored web-app selection stays deselectable even with zero enrolled browsers",
+  );
+});
+
+test("WebPushChannelRow is selectable and Ready once a browser is enrolled", () => {
+  const harness = createHarness({
+    webPushDevice: fakeDevice({
+      subscriptionCount: 1,
+      browser: { state: "enrolled", accountMatch: true },
+    }),
+  });
+  const rendered = harness.exports.WebPushChannelRow({
+    row: webPushTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(checkbox.disabled, false, "an enrolled browser makes the web-app channel selectable");
+  assert.ok(
+    collectScalars(rendered).includes("Ready"),
+    "an enrolled web-app row is Ready",
+  );
+});
+
+test("WebPushChannelRow keeps the checkbox disabled while editing is locked, even when enrolled", () => {
+  const harness = createHarness({ webPushDevice: fakeDevice({ subscriptionCount: 2 }) });
+  const rendered = harness.exports.WebPushChannelRow({
+    row: webPushTarget().target,
+    isSelected: false,
+    isEditingLocked: true,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(
+    checkbox.disabled,
+    true,
+    "a locked panel (loading/failed read) disables the web-app checkbox like every other row",
   );
 });
 
