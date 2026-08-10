@@ -483,6 +483,7 @@ fn live_text_envelope(run_id: TurnRunId, id: &str, body: &str) -> ProductOutboun
 struct HarnessOptions {
     mode: TurnMode,
     max_wait: Duration,
+    projection_subscribe_delay: Duration,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     manifest_commands: Option<Vec<&'static str>>,
     /// Wrap the recording approval service in [`ForeignScopeApprovalService`]
@@ -501,6 +502,7 @@ impl HarnessOptions {
         Self {
             mode,
             max_wait: Duration::from_secs(2),
+            projection_subscribe_delay: Duration::ZERO,
             auth_challenges: None,
             manifest_commands: None,
             foreign_scope_approvals: false,
@@ -596,7 +598,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
-    let projection = Arc::new(ironclaw_assistant::LiveProjectionStream::default());
+    let projection = Arc::new(
+        ironclaw_assistant::LiveProjectionStream::with_subscribe_delay(
+            options.projection_subscribe_delay,
+        ),
+    );
 
     let host =
         slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
@@ -2639,6 +2645,36 @@ async fn slack_dm_edits_a_preview_then_posts_the_complete_answer() {
     assert!(harness.slack_stream_starts().is_empty());
     assert!(harness.slack_stream_appends().is_empty());
     assert!(harness.slack_stream_stops().is_empty());
+}
+
+#[tokio::test]
+async fn slack_dm_streams_after_slow_projection_subscription() {
+    let mut options = HarnessOptions::new(TurnMode::Running);
+    options.max_wait = Duration::from_secs(4);
+    options.projection_subscribe_delay = Duration::from_millis(1_100);
+    let harness = build_harness_with_options(options).await;
+
+    let response = harness.post_event(dm_message("Ev-working", "think")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.wait_for_live_subscriber().await;
+    let run_id = harness.coordinator.active_run_id().expect("run id");
+    let live_body = "Streaming survives slow projection hydration.";
+    harness.push_live_text(run_id, "text:r:0", live_body);
+    harness
+        .coordinator
+        .complete_active_run(live_body)
+        .await
+        .expect("complete running turn");
+    harness.drain().await;
+
+    let updates = harness.slack_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["channel"], CHANNEL);
+    assert_eq!(updates[0]["markdown_text"], live_body);
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["text"], live_body);
 }
 
 #[tokio::test]

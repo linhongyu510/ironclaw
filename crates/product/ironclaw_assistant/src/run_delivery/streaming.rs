@@ -29,7 +29,6 @@ use crate::delivery_coordinator::{
 
 const FIRST_PREVIEW_UPDATE_DELAY: Duration = Duration::from_millis(150);
 const PREVIEW_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
-const PREVIEW_SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIEW_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(150);
 
 pub(crate) struct PreviewForwarderHandle {
@@ -55,52 +54,40 @@ pub(crate) struct PreviewSourceRoute {
     pub(crate) actor_ref: ExternalActorRef,
 }
 
-pub(crate) async fn spawn_preview_forwarder(
+pub(crate) fn spawn_preview_forwarder(
     services: Arc<RunDeliveryServices>,
     scope: TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
     notice: PostedWorkingNotice,
     route: PreviewSourceRoute,
-) -> Option<PreviewForwarderHandle> {
-    let subscription = match tokio::time::timeout(
-        PREVIEW_SUBSCRIPTION_TIMEOUT,
-        services
-            .projection_stream
-            .subscribe(ProjectionSubscriptionRequest {
+) -> PreviewForwarderHandle {
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let join = tokio::spawn(async move {
+        let subscription = tokio::select! {
+            _ = &mut shutdown_rx => return,
+            result = services.projection_stream.subscribe(ProjectionSubscriptionRequest {
                 actor: actor.clone(),
                 scope: scope.clone(),
                 after_cursor: None,
-            }),
-    )
-    .await
-    {
-        Ok(Ok(subscription)) => subscription,
-        Ok(Err(error)) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                %error,
-                "progressive preview subscription unavailable"
-            );
-            return None;
-        }
-        Err(_) => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_delivery",
-                %run_id,
-                "progressive preview subscription timed out"
-            );
-            return None;
-        }
-    };
-    tracing::debug!(
-        target: "ironclaw::reborn::run_delivery",
-        %run_id,
-        "progressive preview subscription ready"
-    );
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(async move {
+            }) => match result {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    tracing::debug!(
+                        target: "ironclaw::reborn::run_delivery",
+                        %run_id,
+                        %error,
+                        "progressive preview subscription unavailable"
+                    );
+                    return;
+                }
+            },
+        };
+        tracing::debug!(
+            target: "ironclaw::reborn::run_delivery",
+            %run_id,
+            "progressive preview subscription ready"
+        );
         forward_loop(
             PreviewForwarder {
                 services,
@@ -115,10 +102,10 @@ pub(crate) async fn spawn_preview_forwarder(
         )
         .await;
     });
-    Some(PreviewForwarderHandle {
+    PreviewForwarderHandle {
         shutdown: Some(shutdown_tx),
         join: Some(join),
-    })
+    }
 }
 
 struct PreviewForwarder {

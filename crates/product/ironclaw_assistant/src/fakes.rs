@@ -727,6 +727,7 @@ impl crate::ProjectFilesystemReader for NoProjectFilesystem {
 /// overflows drops updates. Preview delivery is best-effort, so a later
 /// cumulative update supersedes a missed one.
 pub struct LiveProjectionStream {
+    subscribe_delay: Duration,
     subscribers: std::sync::Mutex<
         Vec<
             tokio::sync::mpsc::Sender<
@@ -748,6 +749,14 @@ impl Default for LiveProjectionStream {
 impl LiveProjectionStream {
     pub fn new() -> Self {
         Self {
+            subscribe_delay: Duration::ZERO,
+            subscribers: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_subscribe_delay(subscribe_delay: Duration) -> Self {
+        Self {
+            subscribe_delay,
             subscribers: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -796,6 +805,7 @@ impl ironclaw_product_contracts::projection::ProjectionStream for LiveProjection
         ironclaw_product_contracts::projection::ProjectionStreamSubscription,
         ProductAdapterError,
     > {
+        tokio::time::sleep(self.subscribe_delay).await;
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         self.subscribers
             .lock()
