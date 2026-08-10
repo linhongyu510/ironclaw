@@ -1385,12 +1385,14 @@ impl RebornIntegrationHarness {
         &self,
         extension_id: &str,
         expected_member: &UserId,
+        rejected_member: &UserId,
     ) -> HarnessResult<()> {
         self._shared
             .capability
             .assert_extension_install_membership_persists_after_reopen(
                 extension_id,
                 expected_member,
+                rejected_member,
             )
             .await
     }

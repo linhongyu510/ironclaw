@@ -223,7 +223,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Behavior | Evidence |
 |---|---|
 | Behavior is identical on in-memory and libSQL storage | `backend_matrix.rs` |
-| Extension installation and its owner membership survive an independent fresh-store reopen | `durable.rs::extension_install_survives_independent_reopen_async` |
+| A canonical host-state lifecycle survives a cold reopen: typed thread/message ownership, encrypted secret tenant/user guard, exact personal extension membership, tool setting, system prompt, and system/user skill fixtures | `durable.rs::durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownership_async` |
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |

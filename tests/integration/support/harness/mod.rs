@@ -805,7 +805,7 @@ impl HostRuntimeCapabilityHarness {
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
-                storage_paths.workspace_root().join("users"),
+                sandbox_workspace_root(&storage_paths),
             )
             .await?;
             ironclaw_composition::local_runtime_build_input(
@@ -2241,6 +2241,13 @@ impl HostRuntimeCapabilityHarness {
             evaluated_at: chrono::Utc::now(),
         }
     }
+}
+
+/// The sandbox transport owns the `users/<tenant-user-digest>` suffix. The
+/// composition harness therefore supplies the canonical `workspaces` root,
+/// never its `users` child.
+pub(crate) fn sandbox_workspace_root(storage_paths: &RebornStoragePaths) -> PathBuf {
+    storage_paths.workspace_root().to_path_buf()
 }
 
 struct HostRuntimeHarnessSurfaceResolver;

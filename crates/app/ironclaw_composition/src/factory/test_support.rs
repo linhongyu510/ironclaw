@@ -846,6 +846,29 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
     Ok(bundle.filesystem)
 }
 
+/// Test-only (DURABLE-COLD): open a fresh, independent thread service over an
+/// existing standalone root. This is the production filesystem thread service
+/// and the same canonical `state/`, `system/`, and `workspaces/` assembly as
+/// standalone boot, without reconstructing a scheduler or runtime process.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_standalone_thread_service_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn SessionThreadService>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let bundle = build_filesystem(
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
+        None,
+        DurableStorageInput::EmbeddedLibsql,
+    )
+    .await?;
+    let scoped = crate::wrap_scoped(bundle.filesystem);
+    Ok(Arc::new(
+        ironclaw_threads::FilesystemSessionThreadService::new(scoped),
+    ))
+}
+
 /// Test-only (E-DURABLE seam): open a FRESH, independent
 /// [`ExtensionInstallationStore`] at an existing standalone `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql

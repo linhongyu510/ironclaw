@@ -20,6 +20,17 @@ pub async fn open_standalone_extension_installation_store_for_test(
     crate::factory::open_standalone_extension_installation_store_for_test(storage_root).await
 }
 
+/// Test-support entry point (DURABLE-COLD): reopen a fresh independent
+/// `SessionThreadService` at an existing standalone root. Delegates to the
+/// production filesystem service and canonical storage assembly without
+/// constructing a second full runtime.
+#[cfg(feature = "test-support")]
+pub async fn open_standalone_thread_service_for_test(
+    storage_root: &std::path::Path,
+) -> Result<std::sync::Arc<dyn ironclaw_threads::SessionThreadService>, crate::RebornBuildError> {
+    crate::factory::test_support::open_standalone_thread_service_for_test(storage_root).await
+}
+
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
 /// `ApprovalRequestStore` at an existing standalone `storage_root`. Mirrors
 /// [`open_standalone_extension_installation_store_for_test`] for approval-gate

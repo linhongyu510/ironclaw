@@ -50,6 +50,7 @@
 // does not exercise every variant.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -446,6 +447,7 @@ impl GroupCapability {
         &self,
         extension_id: &str,
         expected_member: &UserId,
+        rejected_member: &UserId,
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
@@ -472,14 +474,41 @@ impl GroupCapability {
             )
             .into());
         };
-        if installation.owner().visible_to(expected_member) {
-            return Ok(());
+        assert_exact_installation_owner(
+            installation.owner(),
+            expected_member,
+            rejected_member,
+            extension_id,
+        )
+    }
+}
+
+/// The durable reopen proof must reject legacy tenant-wide visibility. A
+/// personal install survives only when its exact member set survives too.
+pub(crate) fn assert_exact_installation_owner(
+    owner: &ironclaw_extension_registry::InstallationOwner,
+    expected_member: &UserId,
+    rejected_member: &UserId,
+    extension_id: &str,
+) -> HarnessResult<()> {
+    let expected_members = BTreeSet::from([expected_member.clone()]);
+    match owner {
+        ironclaw_extension_registry::InstallationOwner::Users { user_ids }
+            if user_ids == &expected_members && !owner.visible_to(rejected_member) =>
+        {
+            Ok(())
         }
-        Err(format!(
-            "extension {extension_id:?} lost membership for user {:?} after independent reopen",
+        ironclaw_extension_registry::InstallationOwner::Tenant => Err(format!(
+            "extension {extension_id:?} reopened with legacy tenant-wide ownership; expected exactly user {:?}",
             expected_member.as_str()
         )
-        .into())
+        .into()),
+        ironclaw_extension_registry::InstallationOwner::Users { user_ids } => Err(format!(
+            "extension {extension_id:?} reopened with users {user_ids:?}; expected exactly {:?} and no visibility for {:?}",
+            expected_member.as_str(),
+            rejected_member.as_str()
+        )
+        .into()),
     }
 }
 
@@ -759,12 +788,14 @@ impl RebornIntegrationGroup {
         &self,
         extension_id: &str,
         expected_member: &UserId,
+        rejected_member: &UserId,
     ) -> HarnessResult<()> {
         self.shared
             .capability
             .assert_extension_install_membership_persists_after_reopen(
                 extension_id,
                 expected_member,
+                rejected_member,
             )
             .await
     }

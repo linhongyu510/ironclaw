@@ -22,9 +22,10 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation, approval-request, trigger,
-//!    outbound-preferences, and approval-settings durable-store test support
-//!    (E-DURABLE / C-DURABLE / W6-COLD-SPOTS / W5-WEBUI-API-1 seam).
+//! 5. [`durable`] — thread-service, extension-installation, approval-request,
+//!    trigger, outbound-preferences, and approval-settings durable-store test
+//!    support (DURABLE-COLD / E-DURABLE / C-DURABLE / W6-COLD-SPOTS /
+//!    W5-WEBUI-API-1 seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
@@ -117,13 +118,15 @@ pub use channel_connection::{
     ChannelConnectionTestBundle, ChannelConnectionTestConfig, build_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use durable::open_standalone_extension_installation_store_for_test;
-#[cfg(feature = "test-support")]
 pub use durable::{
     open_standalone_approval_request_store_for_test,
     open_standalone_approval_settings_stores_for_test,
     open_standalone_outbound_preferences_store_for_test,
     open_standalone_trigger_repository_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use durable::{
+    open_standalone_extension_installation_store_for_test, open_standalone_thread_service_for_test,
 };
 pub use libsql_host_bindings::{
     libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,
