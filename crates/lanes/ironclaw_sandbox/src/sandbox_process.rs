@@ -555,6 +555,7 @@ async fn revalidate_workspace_host_boundary(
     key: TenantUserWorkspaceKey,
     workspace: &Path,
     workspace_mode: u32,
+    expected_leaf_identity: WorkspaceLeafIdentity,
 ) -> Result<(), RuntimeProcessError> {
     let final_workspace = prepare_workspace_leaf_no_follow(workspace_root, key, workspace_mode)
         .await
@@ -570,12 +571,59 @@ async fn revalidate_workspace_host_boundary(
                 "sandbox trusted host workspace boundary could not resolve the final caller leaf: {error}"
             ))
         })?;
-    if final_workspace != workspace {
+    if final_workspace != workspace
+        || workspace_leaf_identity(final_workspace).await? != expected_leaf_identity
+    {
         return Err(RuntimeProcessError::ExecutionFailed(
             "sandbox trusted host workspace boundary rejected a changed caller leaf before container creation".to_string(),
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceLeafIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+async fn workspace_leaf_identity(
+    workspace: PathBuf,
+) -> Result<WorkspaceLeafIdentity, RuntimeProcessError> {
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(&workspace).map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox trusted host workspace boundary could not inspect the caller leaf identity: {error}"
+            ))
+        })?;
+        Ok(WorkspaceLeafIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    })
+    .await
+    .map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace identity task failed: {error}"
+        ))
+    })?
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceLeafIdentity;
+
+#[cfg(not(unix))]
+async fn workspace_leaf_identity(
+    _workspace: PathBuf,
+) -> Result<WorkspaceLeafIdentity, RuntimeProcessError> {
+    Err(RuntimeProcessError::ExecutionFailed(
+        "sandbox workspace identity requires Unix host metadata".to_string(),
+    ))
 }
 
 fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
@@ -709,6 +757,7 @@ impl RebornScopedSandboxCommandTransport {
         let launch = self
             .container_launch_config(request, workspace, workdir)
             .await?;
+        let workspace_identity = workspace_leaf_identity(workspace.to_path_buf()).await?;
         #[cfg(test)]
         container_create_test_hook::run(&self.config.workspace_root);
         revalidate_workspace_host_boundary(
@@ -716,6 +765,7 @@ impl RebornScopedSandboxCommandTransport {
             user_key,
             workspace,
             self.config.container_identity.workspace_mode(),
+            workspace_identity,
         )
         .await?;
 
@@ -1287,6 +1337,51 @@ mod tests {
         assert!(
             !format!("{error}").contains("sandbox container create failed"),
             "Docker create must not run after final host admission fails: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_create_rejects_a_leaf_replacement_after_bind_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let users_root = workspace_root.join("users");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
+        let leaf_name = TenantUserWorkspaceKey::from_scope(&scope)
+            .digest_segment()
+            .to_string();
+        let users_root_for_hook = users_root.clone();
+        let hook = container_create_test_hook::install(
+            workspace_root.clone(),
+            Box::new(move || {
+                let leaf = users_root_for_hook.join(&leaf_name);
+                std::fs::rename(&leaf, users_root_for_hook.join("replaced-leaf"))
+                    .expect("park caller leaf");
+                std::fs::create_dir(&leaf).expect("replace caller leaf");
+            }),
+        );
+
+        let error = workspace_transport(&workspace_root)
+            .run_command(CommandExecutionRequest {
+                scope,
+                mounts: None,
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("replaced caller leaf must fail before Docker create");
+
+        drop(hook);
+        assert!(
+            format!("{error}").contains("changed caller leaf"),
+            "final host admission must reject a replacement at the same path: {error}"
+        );
+        assert!(
+            !format!("{error}").contains("sandbox container create failed"),
+            "Docker create must not run after final leaf identity changes: {error}"
         );
     }
 
