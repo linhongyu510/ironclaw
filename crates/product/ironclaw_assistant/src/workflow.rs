@@ -78,8 +78,9 @@ use ironclaw_product_contracts::binding::{
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 
 use crate::reborn_services::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+    ChannelInboundSurfaceTrust,
 };
 
 /// Host-side [`ProductSurface`] implementation that dispatches inbound
@@ -249,6 +250,27 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
         )
     }
 
+    async fn admit_channel_inbound_with_inline_attachments(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+        attachments: Vec<InboundAttachment>,
+    ) -> ChannelInboundSurfaceOutcome {
+        let envelope = match build_channel_envelope(request) {
+            Ok(envelope) => envelope,
+            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
+        };
+        admission_outcome(
+            envelope.clone(),
+            Box::pin(
+                self.submit_inbound_inner(
+                    envelope,
+                    InboundAttachmentAdmission::Inline(attachments),
+                ),
+            )
+            .await,
+        )
+    }
+
     async fn admit_channel_inbound_with_attachment_transfer(
         &self,
         request: ChannelInboundSurfaceRequest,
@@ -278,29 +300,70 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
 }
 
 /// Build the canonical channel inbound envelope from one verified, normalized
-/// surface request — shared by both admission doors.
+/// surface request — shared by every admission door.
+///
+/// The trust and binding arms must pair: webhook evidence binds through
+/// external refs, an authenticated session binds through its owned thread.
+/// A mixed pairing means a routing bug upstream and fails closed so the
+/// webhook trust/pairing machinery can never run for a session caller (and
+/// vice versa).
 fn build_channel_envelope(
     request: ChannelInboundSurfaceRequest,
 ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-    let context = TrustedInboundContext::from_verified_evidence_with_source_channel(
-        request.adapter_id,
-        request.source_channel,
-        request.installation_id,
-        request.received_at,
-        &request.evidence,
-    )?;
+    let context = match (request.trust, request.binding) {
+        (
+            ChannelInboundSurfaceTrust::VerifiedInbound { evidence },
+            ChannelInboundSurfaceBinding::ExternalRef,
+        ) => TrustedInboundContext::from_verified_evidence_with_source_channel(
+            request.adapter_id,
+            request.source_channel,
+            request.installation_id,
+            request.received_at,
+            &evidence,
+        )?,
+        (
+            ChannelInboundSurfaceTrust::SessionCaller { caller },
+            ChannelInboundSurfaceBinding::OwnedThread { thread_id },
+        ) => TrustedInboundContext::from_session_caller(
+            request.adapter_id,
+            request.source_channel,
+            request.installation_id,
+            request.received_at,
+            caller,
+            thread_id,
+        ),
+        (ChannelInboundSurfaceTrust::VerifiedInbound { .. }, _) => {
+            return Err(ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new("verified-inbound trust requires external-ref binding"),
+            });
+        }
+        (ChannelInboundSurfaceTrust::SessionCaller { .. }, _) => {
+            return Err(ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new("session-caller trust requires owned-thread binding"),
+            });
+        }
+    };
     let payload = match request.classification {
         Some(classification) => ProductInboundPayload::from(classification),
-        None => ProductInboundPayload::UserMessage(UserMessagePayload::new(
-            request.message.text.clone(),
-            request
-                .message
-                .attachments
-                .iter()
-                .map(|attachment| attachment.descriptor.clone())
-                .collect(),
-            request.message.trigger,
-        )?),
+        None => ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                request.message.text.clone(),
+                request
+                    .message
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.descriptor.clone())
+                    .collect(),
+                request.message.trigger,
+            )?
+            .with_requested_model(request.requested_model),
+        ),
     };
     let parsed = ParsedProductInbound::new(
         request.message.event_id,
@@ -358,6 +421,22 @@ impl DefaultProductSurface {
                 reason: RedactedString::new(
                     "projection read/subscribe requests must use ProductSurface projection doors",
                 ),
+            });
+        }
+
+        // A session envelope admits only user messages. Commands, approval
+        // and auth resolutions from an authenticated session ride their typed
+        // ProductSurface operations; letting them into the channel dispatch
+        // would run webhook-only binding/interaction machinery for a caller
+        // that has no verified-inbound claim.
+        if envelope.session_caller().is_some()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        {
+            return Err(ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new("session inbound admits only user-message payloads"),
             });
         }
 
@@ -523,8 +602,14 @@ struct DispatchPorts<'a> {
     delivered_gate_routes: &'a dyn ironclaw_outbound::DeliveredGateRouteStore,
 }
 
-fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
-    ResolveBindingRequest::from_envelope(envelope)
+fn resolve_binding_request(
+    envelope: &ProductInboundEnvelope,
+) -> Result<ResolveBindingRequest, ProductSurfaceFailure> {
+    ResolveBindingRequest::from_envelope(envelope).map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: error.to_string(),
+        }
+    })
 }
 
 async fn resolve_projection_subject(
@@ -570,7 +655,7 @@ async fn lookup_interaction_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ProductBindingResolver,
 ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-    let request = resolve_binding_request(envelope);
+    let request = resolve_binding_request(envelope)?;
     match binding_service
         .lookup_binding(request.clone())
         .await
@@ -620,7 +705,7 @@ async fn delivered_route_base_binding(
     // the delivered-route fallback depends on this invariant holding. The
     // interaction services remain the resolution authority for the downstream
     // approve/deny operation.
-    let request = match direct_base_binding_request(resolve_binding_request(envelope)) {
+    let request = match resolve_binding_request(envelope).and_then(direct_base_binding_request) {
         Ok(request) => request,
         Err(error) => {
             debug!(
@@ -971,6 +1056,7 @@ async fn resolve_via_delivered_approval_route(
                 ack: ProductInboundAck::Accepted {
                     accepted_message_ref,
                     submitted_run_id,
+                    submission: None,
                 },
                 dispatch_kind,
             },
@@ -1079,6 +1165,7 @@ async fn resolve_via_delivered_auth_route(
                 ack: ProductInboundAck::Accepted {
                     accepted_message_ref,
                     submitted_run_id,
+                    submission: None,
                 },
                 dispatch_kind,
             },
@@ -1339,6 +1426,7 @@ async fn dispatch_approval_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
@@ -1426,6 +1514,7 @@ async fn dispatch_scoped_approval_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::ScopedApprovalResolution,
     })
@@ -1541,6 +1630,7 @@ async fn dispatch_auth_resolution(
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("auth", envelope)?,
             submitted_run_id,
+            submission: None,
         },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
@@ -1736,7 +1826,7 @@ async fn dispatch_product_command(
         return Ok(command_rejected_ack(&command));
     };
     let binding = binding_service
-        .resolve_binding(resolve_binding_request(envelope))
+        .resolve_binding(resolve_binding_request(envelope)?)
         .await?;
     let is_new_command = matches!(&command, ProductCommand::New);
     let (operation_id, input, command_name) = product_command_operation(command, &binding)?;
@@ -1763,7 +1853,7 @@ async fn dispatch_product_command(
         if output.can_reset {
             binding_service
                 .reset_binding(ResetBindingRequest {
-                    resolve_request: resolve_binding_request(envelope),
+                    resolve_request: resolve_binding_request(envelope)?,
                     expected_thread_id: binding.thread_id,
                 })
                 .await?;
@@ -1986,7 +2076,18 @@ fn terminal_ack_for_error(error: &ProductSurfaceFailure) -> Option<ProductInboun
             retryable: true, ..
         }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
-        | ProductSurfaceFailure::DuplicateAction { .. } => None,
+        | ProductSurfaceFailure::DuplicateAction { .. }
+        // Session-arm failures deliberately never settle: the caller can
+        // create the missing thread (OwnedThreadUnavailable), retry against
+        // the original thread (ClientActionReplayMismatch), or retry after
+        // the transient bookkeeping fault (ReplayUnavailable /
+        // SkillActivationFailed) — settling any of them would replay a
+        // rejection for a client action that could now legitimately succeed.
+        | ProductSurfaceFailure::OwnedThreadUnavailable
+        | ProductSurfaceFailure::ClientActionReplayMismatch
+        | ProductSurfaceFailure::ReplayUnavailable { .. }
+        | ProductSurfaceFailure::SkillActivationFailed { .. }
+        | ProductSurfaceFailure::AttachmentLanderUnavailable => None,
     }
 }
 
@@ -2097,6 +2198,7 @@ mod tests {
         let accepted = ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid ref"),
             submitted_run_id,
+            submission: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&accepted, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2109,6 +2211,7 @@ mod tests {
         let deferred = ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:deferred").expect("valid ref"),
             active_run_id,
+            busy: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&deferred, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2121,6 +2224,7 @@ mod tests {
         let rejected_busy = ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
             active_run_id: Some(rejected_run_id),
+            busy: None,
         };
         assert_eq!(
             dispatch_kind_from_ack(&rejected_busy, &ProductInboundPayload::NoOp).expect("kind"),
@@ -2281,10 +2385,12 @@ mod tests {
         assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
             active_run_id: TurnRunId::new(),
+            busy: None,
         }));
         assert!(should_settle_ack(&ProductInboundAck::RejectedBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("valid ref"),
             active_run_id: Some(TurnRunId::new()),
+            busy: None,
         }));
     }
 

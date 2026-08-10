@@ -606,6 +606,7 @@ impl FakeInboundTurnService {
             accepted_message_ref,
             submitted_run_id: TurnRunId::new(),
             binding,
+            submission: None,
         })
     }
 }
