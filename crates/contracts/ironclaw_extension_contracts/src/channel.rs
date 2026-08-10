@@ -176,6 +176,22 @@ impl ChannelDescriptor {
                 .verification
                 .validate()
                 .map_err(ChannelDescriptorError::Verification)?;
+            // Pair the ingress trust class with the mount: authenticated_session
+            // ingress is verified upstream by the host transport (T1) and mounts
+            // no webhook route, so it must NOT carry a route_suffix; every
+            // webhook recipe (T2) MUST, or there is no route to receive on.
+            match (
+                ingress.verification.is_authenticated_session(),
+                ingress.route_suffix.is_some(),
+            ) {
+                (true, true) => {
+                    return Err(ChannelDescriptorError::SessionIngressWithRouteSuffix);
+                }
+                (false, false) => {
+                    return Err(ChannelDescriptorError::WebhookIngressWithoutRouteSuffix);
+                }
+                _ => {}
+            }
         }
         for egress in &self.egress {
             if egress.host.trim().is_empty() || egress.host.contains('*') {
@@ -382,7 +398,11 @@ pub struct ChannelConnectionNotices {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelIngressDescriptor {
-    pub route_suffix: RouteSuffix,
+    /// Present for webhook ingress (the mounted route's last path segment);
+    /// absent for `authenticated_session` ingress, which mounts no webhook
+    /// route. The pairing is enforced by [`ChannelDescriptor::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_suffix: Option<RouteSuffix>,
     #[serde(default)]
     pub method: ChannelIngressMethod,
     #[serde(default = "default_body_limit_bytes")]
@@ -561,6 +581,12 @@ pub enum ChannelDescriptorError {
     WildcardOrEmptyEgressHost { host: String },
     #[error("egress target `{host}` declares an invalid path or transfer bound")]
     InvalidEgressConstraint { host: String },
+    #[error(
+        "authenticated_session ingress mounts no webhook route and must not declare a route_suffix"
+    )]
+    SessionIngressWithRouteSuffix,
+    #[error("webhook ingress must declare a route_suffix to mount its receiving route")]
+    WebhookIngressWithoutRouteSuffix,
 }
 
 #[cfg(test)]
@@ -620,6 +646,74 @@ max_message_chars = 40000
             "conversation_model = \"continuous\"\n",
             &format!("conversation_model = \"continuous\"\ncommands = {commands}\n"),
         )
+    }
+
+    fn session_channel_toml(with_route_suffix: bool) -> String {
+        let route_line = if with_route_suffix {
+            "route_suffix = \"push\"\n"
+        } else {
+            ""
+        };
+        format!(
+            r#"
+id = "web-app"
+display_name = "Web app"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[ingress]
+{route_line}method = "post"
+
+[ingress.verification]
+kind = "authenticated_session"
+"#
+        )
+    }
+
+    #[test]
+    fn authenticated_session_ingress_is_valid_without_a_route_suffix() {
+        let channel: ChannelDescriptor =
+            toml::from_str(&session_channel_toml(false)).expect("parse session channel");
+        let ingress = channel.ingress.as_ref().expect("ingress declared");
+        assert!(ingress.route_suffix.is_none());
+        assert!(ingress.verification.is_authenticated_session());
+        channel
+            .validate()
+            .expect("a session channel with no route_suffix is valid");
+    }
+
+    #[test]
+    fn authenticated_session_ingress_rejects_a_route_suffix() {
+        // A session channel is verified upstream (T1) and mounts no webhook
+        // route, so declaring one is a contradiction — fail closed.
+        let channel: ChannelDescriptor =
+            toml::from_str(&session_channel_toml(true)).expect("parse session channel");
+        assert_eq!(
+            channel.validate().unwrap_err(),
+            ChannelDescriptorError::SessionIngressWithRouteSuffix,
+        );
+    }
+
+    #[test]
+    fn webhook_ingress_requires_a_route_suffix() {
+        // `documented_channel_toml` is a webhook (hmac) ingress; drop its
+        // route_suffix and the mount has nowhere to receive.
+        let without_suffix = documented_channel_toml().replace("route_suffix = \"events\"\n", "");
+        let channel: ChannelDescriptor =
+            toml::from_str(&without_suffix).expect("parse webhook channel without route_suffix");
+        assert!(
+            channel
+                .ingress
+                .as_ref()
+                .expect("ingress")
+                .route_suffix
+                .is_none()
+        );
+        assert_eq!(
+            channel.validate().unwrap_err(),
+            ChannelDescriptorError::WebhookIngressWithoutRouteSuffix,
+        );
     }
 
     #[test]
@@ -730,7 +824,14 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert_eq!(channel.conversation_model, ConversationModel::Continuous);
         let ingress = channel.ingress.as_ref().unwrap();
-        assert_eq!(ingress.route_suffix.as_str(), "events");
+        assert_eq!(
+            ingress
+                .route_suffix
+                .as_ref()
+                .expect("webhook ingress declares a route_suffix")
+                .as_str(),
+            "events"
+        );
         assert_eq!(ingress.body_limit_bytes, 1_048_576);
         assert!(channel.presentation.supports_threads);
     }

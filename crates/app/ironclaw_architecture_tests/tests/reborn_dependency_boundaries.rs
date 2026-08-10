@@ -628,7 +628,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `ChannelDescriptor.notifications` field + its doc — a manifest capability
         // declaration only; notification delivery gating lives in
         // ironclaw_outbound (DeliveryTargetCapabilities) and product resolution.
-        ("ironclaw_extension_contracts", 7_758),
+        // 7_758 -> 7_872 (2026-08-10, PR2 generic inbound): +114 lines for the
+        // `IngressVerificationRecipe::AuthenticatedSession` trust class (recipe.rs)
+        // and the `route_suffix` -> Option change with its trust-class<->mount
+        // validation, two paired errors, and their inline `#[cfg(test)]` coverage
+        // (channel.rs). Ingress-trust vocabulary + validation on the descriptor's
+        // own shape; the shared inbound pipeline that consumes it lives in
+        // ironclaw_extension_host / product, not here.
+        ("ironclaw_extension_contracts", 7_872),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

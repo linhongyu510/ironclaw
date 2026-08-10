@@ -146,7 +146,14 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     assert_eq!(channel.id, "messages");
     assert_eq!(channel.conversation_model, ConversationModel::Continuous);
     let ingress = channel.ingress.as_ref().expect("ingress declared");
-    assert_eq!(ingress.route_suffix.as_str(), "events");
+    assert_eq!(
+        ingress
+            .route_suffix
+            .as_ref()
+            .expect("webhook ingress declares a route_suffix")
+            .as_str(),
+        "events"
+    );
 
     assert_eq!(resolved.auth.len(), 1);
     let auth = &resolved.auth[0];

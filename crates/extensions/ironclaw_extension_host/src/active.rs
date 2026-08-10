@@ -169,8 +169,9 @@ impl ActiveSnapshot {
             }
             if let Some(channel) = &extension.resolved.channel
                 && let Some(ingress) = &channel.ingress
+                && let Some(route_suffix) = &ingress.route_suffix
             {
-                let suffix = ingress.route_suffix.as_str().to_string();
+                let suffix = route_suffix.as_str().to_string();
                 if let Some(existing) =
                     route_owner.insert(suffix.clone(), extension.extension_id.clone())
                 {
@@ -220,7 +221,10 @@ impl ActiveSnapshot {
         let extension = self.extensions.get(extension_id)?;
         let channel = extension.resolved.channel.as_ref()?;
         let ingress = channel.ingress.as_ref()?;
-        if !channel.inbound || ingress.route_suffix.as_str() != route_suffix {
+        // authenticated_session ingress carries no route_suffix, so it never
+        // matches a mounted webhook route — the `?` fails closed here.
+        let declared_suffix = ingress.route_suffix.as_ref()?;
+        if !channel.inbound || declared_suffix.as_str() != route_suffix {
             return None;
         }
         Some(Arc::clone(extension))
@@ -252,8 +256,9 @@ impl ActiveSnapshot {
         }
         if let Some(channel) = &candidate.resolved.channel
             && let Some(ingress) = &channel.ingress
+            && let Some(route_suffix) = &ingress.route_suffix
         {
-            let suffix = ingress.route_suffix.as_str();
+            let suffix = route_suffix.as_str();
             if let Some(existing) = self.route_owner.get(suffix)
                 && existing != &candidate.extension_id
             {

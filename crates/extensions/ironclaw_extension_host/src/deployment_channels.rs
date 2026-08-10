@@ -87,7 +87,10 @@ impl DeploymentChannelRegistry {
         let binding = self.bindings.get(extension_id)?;
         let channel = binding.resolved.channel.as_ref()?;
         let ingress = channel.ingress.as_ref()?;
-        if !channel.inbound || ingress.route_suffix.as_str() != route_suffix {
+        // authenticated_session ingress carries no route_suffix and never
+        // matches a mounted webhook route — fail closed.
+        let declared_suffix = ingress.route_suffix.as_ref()?;
+        if !channel.inbound || declared_suffix.as_str() != route_suffix {
             return None;
         }
         Some(Arc::clone(binding))
