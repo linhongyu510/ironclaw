@@ -14,15 +14,7 @@ use super::CONTAINER_WORKSPACE_ROOT;
 const MANDATORY_WORKSPACE_TARGET_ROOT: &str = "/projects/workspace";
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct RebornSandboxMountSources {
-    sources: Vec<RebornSandboxMountSource>,
-}
-
-#[derive(Debug, Clone)]
-struct RebornSandboxMountSource {
-    virtual_root: VirtualPath,
-    host_root: PathBuf,
-}
+pub(super) struct RebornSandboxMountSources;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ContainerBind {
@@ -40,40 +32,13 @@ enum DockerBindMode {
 impl RebornSandboxMountSources {
     pub(super) fn add_local_source(
         &mut self,
-        virtual_root: VirtualPath,
-        host_root: impl Into<PathBuf>,
+        _virtual_root: VirtualPath,
+        _host_root: impl Into<PathBuf>,
     ) -> Result<(), RuntimeProcessError> {
-        if virtual_path_prefix_matches(virtual_root.as_str(), MANDATORY_WORKSPACE_TARGET_ROOT) {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "the caller workspace root is mandatory and cannot be a request-resolvable trusted sandbox mount source".to_string(),
-            ));
-        }
-        if self
-            .sources
-            .iter()
-            .any(|source| source.virtual_root == virtual_root)
-        {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "trusted sandbox mount source for {virtual_root} is already configured"
-            )));
-        }
-
-        let host_root = std::fs::canonicalize(host_root.into()).map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "trusted sandbox mount source for {virtual_root} could not be resolved: {error}"
-            ))
-        })?;
-        if !host_root.is_dir() {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "trusted sandbox mount source for {virtual_root} is not a directory"
-            )));
-        }
-
-        self.sources.push(RebornSandboxMountSource {
-            virtual_root,
-            host_root,
-        });
-        Ok(())
+        Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox accepts only the mandatory /workspace caller workspace leaf and no trusted extra mount sources"
+                .to_string(),
+        ))
     }
 
     pub(super) async fn prepare_container_binds(
@@ -133,86 +98,21 @@ impl RebornSandboxMountSources {
         };
 
         let mut workspace_bind = None;
-        let mut request_binds = Vec::new();
         for grant in &mounts.mounts {
             if grant.alias.as_str() == CONTAINER_WORKSPACE_ROOT {
                 workspace_bind = Some(resolve_mandatory_workspace_grant(&workspace, scope, grant)?);
             } else {
-                request_binds.push(self.resolve_grant(grant).await?);
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "sandbox accepts only the mandatory /workspace caller workspace leaf and no extra mounts"
+                        .to_string(),
+                ));
             }
         }
-        request_binds.sort_by_key(|bind| bind.target.len());
-        let mut binds = vec![workspace_bind.unwrap_or(ContainerBind::new(
+        Ok(vec![workspace_bind.unwrap_or(ContainerBind::new(
             workspace,
             CONTAINER_WORKSPACE_ROOT,
             DockerBindMode::ReadWrite,
-        )?)];
-        binds.extend(request_binds);
-
-        Ok(binds)
-    }
-
-    async fn resolve_grant(
-        &self,
-        grant: &MountGrant,
-    ) -> Result<ContainerBind, RuntimeProcessError> {
-        validate_container_mount_target(grant.alias.as_str())?;
-        let mode = DockerBindMode::from_grant(grant)?;
-        let source = self
-            .sources
-            .iter()
-            .filter(|source| {
-                virtual_path_prefix_matches(source.virtual_root.as_str(), grant.target.as_str())
-            })
-            .max_by_key(|source| source.virtual_root.as_str().len())
-            .ok_or_else(|| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "no trusted sandbox mount source is configured for virtual path {}",
-                    grant.target
-                ))
-            })?;
-
-        let mut joined = source.host_root.clone();
-        let tail = grant
-            .target
-            .as_str()
-            .strip_prefix(source.virtual_root.as_str())
-            .unwrap_or_default()
-            .trim_start_matches('/');
-        if !tail.is_empty() {
-            for segment in tail.split('/') {
-                joined.push(segment);
-            }
-        }
-
-        if mode == DockerBindMode::ReadWrite {
-            tokio::fs::create_dir_all(&joined).await.map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox mount target {} could not be initialized: {error}",
-                    grant.target
-                ))
-            })?;
-        }
-        let canonical = tokio::fs::canonicalize(&joined).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox mount target {} could not be resolved: {error}",
-                grant.target
-            ))
-        })?;
-        if !canonical.starts_with(&source.host_root) {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox mount target {} escapes its trusted source",
-                grant.target
-            )));
-        }
-        if !canonical.is_dir() {
-            return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox mount target {} is not a directory",
-                grant.target
-            )));
-        }
-
-        ContainerBind::new(canonical, grant.alias.as_str(), mode)
+        )?)])
     }
 }
 
@@ -307,26 +207,6 @@ impl DockerBindMode {
     }
 }
 
-fn validate_container_mount_target(target: &str) -> Result<(), RuntimeProcessError> {
-    const FORBIDDEN_TARGETS: &[&str] = &[
-        "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root",
-        "/run", "/sbin", "/sys", "/usr", "/var",
-    ];
-    if FORBIDDEN_TARGETS
-        .iter()
-        .any(|forbidden| target == *forbidden || target.starts_with(&format!("{forbidden}/")))
-    {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox mount target collides with the container system filesystem".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn virtual_path_prefix_matches(prefix: &str, path: &str) -> bool {
-    Path::new(path).starts_with(Path::new(prefix))
-}
-
 fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
     if value.as_bytes().contains(&0) {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
@@ -369,34 +249,24 @@ mod tests {
     }
 
     #[test]
-    fn trusted_mount_source_validates_host_root_during_config() {
-        let mut sources = RebornSandboxMountSources::default();
-        let error = sources
-            .add_local_source(
-                VirtualPath::new("/artifacts/test-fixture").unwrap(),
-                PathBuf::from("/path/that/does/not/exist"),
-            )
-            .unwrap_err();
-
-        assert!(format!("{error}").contains("could not be resolved"));
-    }
-
-    #[test]
-    fn trusted_mount_source_rejects_duplicate_virtual_roots() {
+    fn sandbox_rejects_every_trusted_mount_source() {
         let temp = tempfile::tempdir().unwrap();
-        let mut sources = sources_with(
-            VirtualPath::new("/artifacts/test-fixture").unwrap(),
-            temp.path(),
-        );
+        let mut sources = RebornSandboxMountSources::default();
+        for virtual_root in [
+            "/projects",
+            "/projects/workspace",
+            "/artifacts/test-fixture",
+            "/system/extensions",
+        ] {
+            let error = sources
+                .add_local_source(VirtualPath::new(virtual_root).unwrap(), temp.path())
+                .expect_err("only the caller workspace leaf may be mounted into a sandbox");
 
-        let error = sources
-            .add_local_source(
-                VirtualPath::new("/artifacts/test-fixture").unwrap(),
-                temp.path(),
-            )
-            .unwrap_err();
-
-        assert!(format!("{error}").contains("already configured"));
+            assert!(
+                format!("{error}").contains("only the mandatory /workspace"),
+                "{virtual_root}: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -558,6 +428,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_virtual_path_rejects_a_bare_root_before_resolver_admission() {
+        let error = VirtualPath::new("/").expect_err("a sandbox workspace target may not be root");
+
+        assert!(format!("{error}").contains("root path is not valid here"));
+    }
+
     #[tokio::test]
     async fn workspace_grant_rejects_a_host_directory_other_than_the_caller_leaf() {
         let temp = tempfile::tempdir().unwrap();
@@ -619,19 +496,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mandatory_workspace_parent_cannot_be_registered_as_a_trusted_source() {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_bind_rejects_a_caller_leaf_symlink_that_escapes_users_root() {
+        use std::os::unix::fs::symlink;
+
         let temp = tempfile::tempdir().unwrap();
-        for virtual_root in ["/projects", "/projects/workspace"] {
-            let mut sources = RebornSandboxMountSources::default();
-            let error = sources
-                .add_local_source(VirtualPath::new(virtual_root).unwrap(), temp.path())
-                .expect_err("the caller workspace root must not be request-resolvable");
-            assert!(
-                format!("{error}").contains("mandatory"),
-                "{virtual_root}: {error}"
-            );
-        }
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        let key = TenantUserWorkspaceKey::from_scope(&scope);
+        tokio::fs::create_dir_all(workspace_root.join("users"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&outside).await.unwrap();
+        symlink(
+            &outside,
+            workspace_root.join("users").join(key.digest_segment()),
+        )
+        .unwrap();
+
+        let error = RebornSandboxMountSources::default()
+            .prepare_container_binds(
+                &workspace_root,
+                &workspace_root.join("users").join(key.digest_segment()),
+                &scope,
+                None,
+            )
+            .await
+            .expect_err("a caller workspace leaf may not escape through a symlink");
+
+        assert!(
+            format!("{error}").contains("caller workspace leaf"),
+            "caller leaf symlink escape must fail at bind construction: {error}"
+        );
     }
 
     #[tokio::test]
@@ -660,45 +558,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_write_scoped_mount_initializes_target_directory() {
+    async fn sandbox_rejects_extra_mount_without_initializing_a_host_directory() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("source");
+        let project_root = source_root.join("app");
         tokio::fs::create_dir_all(&source_root).await.unwrap();
-        let sources = sources_with(
-            VirtualPath::new("/artifacts/test-fixture").unwrap(),
-            &source_root,
-        );
+        let sources = RebornSandboxMountSources::default();
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/project").unwrap(),
-            VirtualPath::new("/artifacts/test-fixture/new-task").unwrap(),
-            process_read_write_permissions(),
-        )])
+        let mounts = MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                caller_workspace_target(&scope),
+                process_read_write_permissions(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/project").unwrap(),
+                VirtualPath::new("/artifacts/test-fixture/app").unwrap(),
+                process_read_write_permissions(),
+            ),
+        ])
         .unwrap();
 
-        let binds = sources
+        let error = sources
             .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
             .await
-            .unwrap();
+            .expect_err("the sandbox must receive only the mandatory caller workspace leaf");
 
-        assert!(source_root.join("new-task").is_dir());
+        assert!(format!("{error}").contains("only the mandatory /workspace"));
         assert!(
-            binds
-                .into_iter()
-                .any(|bind| bind.into_docker_bind().ends_with(":/project:rw"))
+            !project_root.exists(),
+            "the rejected extra mount must not initialize a host directory"
         );
+    }
+
+    #[test]
+    fn mount_catalog_rejects_a_duplicate_workspace_mount_override() {
+        let scope = caller_scope();
+        let error = MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                caller_workspace_target(&scope),
+                process_read_write_permissions(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                caller_workspace_target(&scope),
+                process_read_write_permissions(),
+            ),
+        ])
+        .expect_err("a sandbox admits exactly one mandatory workspace mount");
+
+        assert!(format!("{error}").contains("duplicate mount alias"));
     }
 
     #[tokio::test]
     async fn scoped_mount_rejects_unconfigured_virtual_target() {
         let temp = tempfile::tempdir().unwrap();
-        let source_root = temp.path().join("source");
-        tokio::fs::create_dir_all(&source_root).await.unwrap();
-        let sources = sources_with(
-            VirtualPath::new("/artifacts/test-fixture").unwrap(),
-            source_root,
-        );
+        let sources = RebornSandboxMountSources::default();
         let scope = caller_scope();
         let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
         let mounts = MountView::new(vec![MountGrant::new(
@@ -740,44 +657,6 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error}").contains("permissions cannot be enforced"));
-    }
-
-    #[tokio::test]
-    async fn scoped_mount_rejects_container_system_targets() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_root = temp.path().join("source");
-        let project_root = source_root.join("app");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-        let sources = sources_with(
-            VirtualPath::new("/artifacts/test-fixture").unwrap(),
-            source_root,
-        );
-        let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/etc").unwrap(),
-            VirtualPath::new("/artifacts/test-fixture/app").unwrap(),
-            process_read_only_permissions(),
-        )])
-        .unwrap();
-
-        let error = sources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
-            .await
-            .unwrap_err();
-
-        assert!(format!("{error}").contains("container system filesystem"));
-    }
-
-    fn sources_with(
-        virtual_root: VirtualPath,
-        host_root: impl Into<PathBuf>,
-    ) -> RebornSandboxMountSources {
-        let mut sources = RebornSandboxMountSources::default();
-        sources
-            .add_local_source(virtual_root, host_root.into())
-            .unwrap();
-        sources
     }
 
     async fn prepared_workspace(

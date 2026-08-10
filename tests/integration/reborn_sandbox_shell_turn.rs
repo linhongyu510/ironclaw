@@ -9,11 +9,14 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::GroupCapability;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
+const LEAF_ONLY_MARKER: &str = "SANDBOX_CANONICAL_LEAF_ONLY";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
 
 #[test]
@@ -29,6 +32,12 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             return;
         }
 
+        let tenant = TenantId::new("tenant-itest").expect("sandbox tenant id");
+        let caller = UserId::new("host-user").expect("sandbox caller id");
+        let sibling = UserId::new("sandbox-sibling").expect("sandbox sibling id");
+        let caller_key = TenantUserWorkspaceKey::from_tenant_user(&tenant, &caller);
+        let sibling_key = TenantUserWorkspaceKey::from_tenant_user(&tenant, &sibling);
+
         let harness = RebornIntegrationHarness::test_default()
             .with_sandbox_shell_tools()
             .script([
@@ -36,7 +45,32 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                     "builtin.shell",
                     json!({
                         "command": format!(
-                            "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && echo {CONTAINER_MARKER}"
+                            "python - <<'PY'\n\
+                             import os\n\
+                             from pathlib import Path\n\
+                             assert Path('/.dockerenv').is_file()\n\
+                             assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
+                             for relative in [\n\
+                                 'reborn-home-sentinel.txt',\n\
+                                 'state/reborn-state-sentinel.txt',\n\
+                                 'state/.reborn-secrets-master-key',\n\
+                                 'state/provider-credential-sentinel.txt',\n\
+                                 'system/system-sentinel.txt',\n\
+                                 'users/{}/sibling-sentinel.txt',\n\
+                             ]:\n\
+                                 assert not (Path('/workspace') / relative).exists(), relative\n\
+                             forbidden_env = [\n\
+                                 'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',\n\
+                                 'NEARAI_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN', 'RAILWAY_TOKEN',\n\
+                                 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',\n\
+                             ]\n\
+                             assert all(name not in os.environ for name in forbidden_env)\n\
+                             Path('container-write.txt').write_text('container-owned-leaf')\n\
+                             Path('persistence-marker.txt').write_text('{PERSISTENCE_MARKER}')\n\
+                             print('{LEAF_ONLY_MARKER}')\n\
+                             print('{CONTAINER_MARKER}')\n\
+                             PY",
+                            sibling_key.digest_segment(),
                         )
                     }),
                 ),
@@ -49,6 +83,62 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .build()
             .await
             .expect("sandbox-shell harness builds");
+
+        let installation_home = match &harness._shared.capability {
+            GroupCapability::HostRuntime(capability) => capability.storage_root_for_test(),
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
+                panic!("sandbox profile must use the production host-runtime capability path")
+            }
+        };
+        let selected_leaf = installation_home
+            .join("workspaces")
+            .join("users")
+            .join(caller_key.digest_segment());
+        let sibling_leaf = installation_home
+            .join("workspaces")
+            .join("users")
+            .join(sibling_key.digest_segment());
+        std::fs::create_dir_all(&selected_leaf).expect("selected workspace leaf");
+        std::fs::create_dir_all(&sibling_leaf).expect("sibling workspace leaf");
+        std::fs::create_dir_all(installation_home.join("state")).expect("canonical state root");
+        std::fs::create_dir_all(installation_home.join("system")).expect("canonical system root");
+        std::fs::write(
+            selected_leaf.join("selected-leaf-sentinel.txt"),
+            "host-selected-leaf",
+        )
+        .expect("selected sentinel");
+        std::fs::write(
+            sibling_leaf.join("sibling-sentinel.txt"),
+            "host-sibling-only",
+        )
+        .expect("sibling sentinel");
+        std::fs::write(
+            installation_home.join("reborn-home-sentinel.txt"),
+            "host-reborn-home-only",
+        )
+        .expect("Reborn home sentinel");
+        std::fs::write(
+            installation_home.join("state/reborn-state-sentinel.txt"),
+            "host-state-only",
+        )
+        .expect("state sentinel");
+        std::fs::write(
+            installation_home.join("state/.reborn-secrets-master-key"),
+            "host-master-key-only",
+        )
+        .expect("master-key sentinel");
+        std::fs::write(
+            installation_home.join("state/provider-credential-sentinel.txt"),
+            "host-provider-credential-only",
+        )
+        .expect("provider credential sentinel");
+        std::fs::write(
+            installation_home.join("system/system-sentinel.txt"),
+            "host-system-only",
+        )
+        .expect("system sentinel");
 
         harness
             .submit_turn("run a sandboxed shell command")
@@ -67,6 +157,10 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .await
             .expect("command ran in Docker");
         harness
+            .assert_tool_result_contains(LEAF_ONLY_MARKER)
+            .await
+            .expect("sandbox received only its selected canonical workspace leaf");
+        harness
             .assert_tool_result_contains("NON_ROOT_UID_OK")
             .await
             .expect("command ran as a non-root sandbox uid");
@@ -78,6 +172,16 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_reply_contains("ran in the sandbox")
             .await
             .expect("turn finalized");
+        assert_eq!(
+            std::fs::read_to_string(selected_leaf.join("container-write.txt"))
+                .expect("container writes stay in the selected leaf"),
+            "container-owned-leaf"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sibling_leaf.join("sibling-sentinel.txt"))
+                .expect("sibling sentinel remains host-only"),
+            "host-sibling-only"
+        );
     });
 }
 

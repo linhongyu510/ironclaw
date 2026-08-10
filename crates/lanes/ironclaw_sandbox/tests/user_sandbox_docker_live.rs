@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{AgentId, InvocationId, ProjectId, TenantId, TenantUserWorkspaceKey, ThreadId, UserId},
     process::{CommandExecutionRequest, SandboxCommandTransport},
     resource::ResourceScope,
 };
@@ -52,8 +52,61 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     // see; a worktree-local tempdir exercises the real bind contract instead.
     let temp =
         tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("Docker-visible workspace tempdir");
-    let workspace_root = temp.path().join("sandbox-workspaces");
-    std::fs::create_dir(&workspace_root).expect("host-managed workspace root");
+    let reborn_home = temp.path().join("reborn-home");
+    let workspace_root = reborn_home.join("workspaces");
+    let caller_key = TenantUserWorkspaceKey::from_tenant_user(
+        &TenantId::new("tenant-a").expect("tenant id"),
+        &UserId::new("user-a").expect("user id"),
+    );
+    let sibling_key = TenantUserWorkspaceKey::from_tenant_user(
+        &TenantId::new("tenant-a").expect("tenant id"),
+        &UserId::new("user-b").expect("user id"),
+    );
+    let caller_leaf = workspace_root
+        .join("users")
+        .join(caller_key.digest_segment());
+    let sibling_leaf = workspace_root
+        .join("users")
+        .join(sibling_key.digest_segment());
+    std::fs::create_dir_all(&caller_leaf).expect("selected workspace leaf");
+    std::fs::create_dir_all(&sibling_leaf).expect("sibling workspace leaf");
+    std::fs::create_dir_all(reborn_home.join("state")).expect("canonical state root");
+    std::fs::create_dir_all(reborn_home.join("system")).expect("canonical system root");
+    std::fs::write(
+        caller_leaf.join("selected-leaf-sentinel.txt"),
+        "host-selected-leaf",
+    )
+    .expect("selected leaf sentinel");
+    std::fs::write(
+        sibling_leaf.join("sibling-sentinel.txt"),
+        "host-sibling-only",
+    )
+    .expect("sibling leaf sentinel");
+    std::fs::write(
+        reborn_home.join("reborn-home-sentinel.txt"),
+        "host-reborn-home-only",
+    )
+    .expect("Reborn home sentinel");
+    std::fs::write(
+        reborn_home.join("state/reborn-state-sentinel.txt"),
+        "host-state-only",
+    )
+    .expect("state sentinel");
+    std::fs::write(
+        reborn_home.join("state/.reborn-secrets-master-key"),
+        "host-master-key-only",
+    )
+    .expect("master key sentinel");
+    std::fs::write(
+        reborn_home.join("state/provider-credential-sentinel.txt"),
+        "host-provider-credential-only",
+    )
+    .expect("provider credential sentinel");
+    std::fs::write(
+        reborn_home.join("system/system-sentinel.txt"),
+        "host-system-only",
+    )
+    .expect("system sentinel");
     let transport = RebornScopedSandboxCommandTransport::connect(
         RebornSandboxConfig::new(workspace_root).with_network_enabled(),
     )
@@ -72,8 +125,18 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
                  assert os.getuid() != 0\n\
                  assert Path('/.dockerenv').is_file()\n\
                  assert not Path('/var/run/docker.sock').exists()\n\
+                 assert Path('selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
+                 for relative in [\n\
+                     'reborn-home-sentinel.txt',\n\
+                     'state/reborn-state-sentinel.txt',\n\
+                     'state/.reborn-secrets-master-key',\n\
+                     'state/provider-credential-sentinel.txt',\n\
+                     'system/system-sentinel.txt',\n\
+                     'users/{}/sibling-sentinel.txt',\n\
+                 ]:\n\
+                     assert not (Path('/workspace') / relative).exists(), relative\n\
                  forbidden_env = {{\n\
-                     'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',\n\
+                     'IRONCLAW_REBORN_HOME', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',\n\
                      'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID',\n\
                      'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'GH_TOKEN',\n\
                  }}\n\
@@ -84,8 +147,10 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
                  assert any(route[1] == '00000000' for route in routes)\n\
                  assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
                  Path('state.txt').write_text('{marker}')\n\
+                 Path('container-write.txt').write_text('container-owned-leaf')\n\
                  print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}}')\n\
-                 PY"
+                 PY",
+                sibling_key.digest_segment(),
             ),
         ))
         .await
@@ -93,6 +158,16 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     assert_eq!(first.exit_code, 0, "first command failed: {}", first.output);
     assert!(first.output.contains("LOCAL_DOCKER_SANDBOX_OK"));
     assert!(first.sandboxed);
+    assert_eq!(
+        std::fs::read_to_string(caller_leaf.join("container-write.txt"))
+            .expect("container write remains in selected leaf"),
+        "container-owned-leaf"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sibling_leaf.join("sibling-sentinel.txt"))
+            .expect("sibling sentinel remains host-only"),
+        "host-sibling-only"
+    );
 
     let nonzero = transport
         .run_command(request(

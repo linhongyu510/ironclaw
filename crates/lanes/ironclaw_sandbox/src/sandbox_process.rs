@@ -1738,7 +1738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_rejects_unconfigured_trusted_mount_before_container_create() {
+    async fn run_command_rejects_extra_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_root = temp.path().join("workspaces");
         tokio::fs::create_dir(&workspace_root)
@@ -1764,7 +1764,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error}").contains("no trusted sandbox mount source"));
+        assert!(format!("{error}").contains("only the mandatory /workspace"));
     }
 
     fn process_read_only_permissions() -> MountPermissions {

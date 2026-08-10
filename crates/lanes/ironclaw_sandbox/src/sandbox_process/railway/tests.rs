@@ -663,6 +663,36 @@ async fn ephemeral_worker_defaults_to_networkless_and_hardened() {
 }
 
 #[tokio::test]
+async fn inner_worker_command_receives_no_railway_control_service_environment() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    transport
+        .run_command(request("tenant", "user", "true"))
+        .await
+        .expect("worker command runs through the Railway control service");
+
+    let invocations = cli.invocations().await;
+    let argv = &model_container_runs(&invocations)[0].args;
+    let worker_environment: Vec<_> = argv
+        .windows(2)
+        .filter_map(|pair| (pair[0] == "--env").then(|| pair[1].as_str()))
+        .collect();
+
+    assert_eq!(
+        worker_environment,
+        vec!["IRONCLAW_REBORN_NETWORK_MODE=disabled"],
+        "the inner worker command may receive only its network-mode marker"
+    );
+    assert!(
+        !argv.iter().any(|argument| {
+            argument.contains("RAILWAY_TOKEN") || argument.contains("RAILWAY_API_TOKEN")
+        }),
+        "Railway control-service credentials must never enter the inner worker command"
+    );
+}
+
+#[tokio::test]
 async fn explicit_direct_network_omits_network_none_without_weakening_worker_hardening() {
     let cli = Arc::new(FakeRailwayCli::new());
     let transport =
