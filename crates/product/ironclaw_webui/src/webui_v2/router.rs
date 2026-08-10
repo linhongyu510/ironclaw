@@ -57,7 +57,8 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
     WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
     WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES, WEBUI_V2_PATTERN_TRACE_CREDITS,
-    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE, WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+    WEBUI_V2_PATTERN_USER_MODEL_POLICY,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
@@ -252,6 +253,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             put(handlers::admin_put_user_secret).delete(handlers::admin_delete_user_secret),
         )
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
+        .route(
+            WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+            get(handlers::get_user_model_catalog),
+        )
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_LOGS, get(handlers::query_logs))
@@ -450,6 +455,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
                 post(handlers::set_active_llm),
+            )
+            .route(
+                WEBUI_V2_PATTERN_USER_MODEL_POLICY,
+                put(handlers::set_user_model_policy),
             )
             .route(
                 WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,

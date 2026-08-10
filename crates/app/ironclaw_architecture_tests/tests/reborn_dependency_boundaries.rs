@@ -680,7 +680,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // growth is the three admin scrape request DTOs and the wire
         // `RebornListThreadsResponse` reuse — declarations only; authorization,
         // audit, and artifact building stay in ironclaw_assistant.
-        ("ironclaw_product_contracts", 15_800),
+        // Raised 15_800 -> 15_870 by #7419 (tenant model allowlist): the
+        // growth is limited to the policy persistence port, user-safe DTOs,
+        // and transport-consumed descriptors; validation, storage, and request
+        // enforcement stay in owning crates.
+        ("ironclaw_product_contracts", 15_870),
         ("ironclaw_prompt_envelope", 832),
     ];
 
