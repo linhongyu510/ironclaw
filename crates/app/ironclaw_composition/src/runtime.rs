@@ -76,8 +76,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
-    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
+    ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::operator_llm::ActiveModelReader;
@@ -624,6 +624,7 @@ pub struct RebornRuntime {
         Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
+    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
@@ -1844,6 +1845,10 @@ impl RebornRuntime {
                     progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    // A registered channel DM is both a final-reply target and a
+                    // notification channel, mirroring the generic channel
+                    // provider's `full_capabilities`.
+                    notifications: true,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
@@ -3670,11 +3675,24 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // filesystem so the model port can build multimodal image parts for
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
-        attachment_read_port: Some(
+        //
+        // Lander and reader share ONE handle so an inbound attachment is read
+        // back from the subtree it landed in. Under a per-caller workspace
+        // policy (`serve` sets it unconditionally) the lander writes to
+        // `/projects/workspace/tenants/{tenant}/users/{user}`, and the shared
+        // read-only `workspace_filesystem` would address the root instead —
+        // the exact regression that dropped every image from the model payload
+        // after #7062 scoped the write lanes. Mirrors the channel-host wiring
+        // in `channel_host_source`.
+        attachment_read_port: crate::runtime_mounts::read_write_workspace_filesystem(
+            &services.extension_filesystem,
+            &services.workspace_mounts,
+        )
+        .map(|filesystem| {
             Arc::new(ironclaw_assistant::ProjectScopedAttachmentReader::new(
-                Arc::clone(&services.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-        ),
+                filesystem,
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
+        }),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
@@ -3737,12 +3755,35 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_context_source,
         input_queue: Some(host_input_queue_reader),
         input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
-        identity_context_source: build_default_identity_context_source(
+        identity_context_source: match (
             services.system_content_root.clone(),
             services.default_system_prompt_path.clone(),
-            resolved_tool_disclosure.is_bridged(),
-            bool_env_flag("BENCHMARKING_MODE"),
-        )?,
+        ) {
+            (Some(system_content_root), Some(default_system_prompt_path)) => {
+                Arc::new(
+                    // Standalone seeding validates the prompt path first, so non-file prompt paths fail
+                    // as build errors before this runtime-level identity-source guard is reached.
+                    DefaultSystemPromptIdentitySource::try_new(
+                        system_content_root,
+                        default_system_prompt_path,
+                        resolved_tool_disclosure.is_bridged(),
+                        bool_env_flag("BENCHMARKING_MODE"),
+                    )
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: error.to_string(),
+                    })?,
+                ) as Arc<dyn HostIdentityContextSource>
+            }
+            (None, None) => {
+                Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
+            }
+            _ => {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: "assembled runtime must provide system content root and default system prompt path together"
+                        .to_string(),
+                });
+            }
+        },
         // Resolve the per-user agent-context profile (timezone/locale/location) from
         // `context/profile.json` via the workspace filesystem. When a standalone workspace
         // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
@@ -4274,6 +4315,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_ingress: services.extension_ingress.clone(),
         #[cfg(any(test, feature = "test-support"))]
         deployment_channels: services.deployment_channels.clone(),
+        web_push: services.web_push.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
         #[cfg(feature = "test-support")]
@@ -4446,42 +4488,6 @@ struct ComposedSkillContextSource {
 }
 
 const MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
-
-/// Builds the default prompt identity source from the system-content namespace selected by
-/// composition. Keeping this seam explicit keeps a `system/prompts` path paired with its
-/// system-content root rather than the unrelated `state` root.
-fn build_default_identity_context_source(
-    system_content_root: Option<PathBuf>,
-    default_system_prompt_path: Option<PathBuf>,
-    disclosure_protocol_active: bool,
-    benchmarking_mode_active: bool,
-) -> Result<Arc<dyn HostIdentityContextSource>, RebornRuntimeError> {
-    let source = match (system_content_root, default_system_prompt_path) {
-        (Some(system_content_root), Some(default_system_prompt_path)) => {
-            Arc::new(
-                // Standalone seeding validates the prompt path first, so non-file prompt paths fail
-                // as build errors before this runtime-level identity-source guard is reached.
-                DefaultSystemPromptIdentitySource::try_new(
-                    system_content_root,
-                    default_system_prompt_path,
-                    disclosure_protocol_active,
-                    benchmarking_mode_active,
-                )
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: error.to_string(),
-                })?,
-            ) as Arc<dyn HostIdentityContextSource>
-        }
-        (None, None) => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
-        _ => {
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason: "assembled runtime must provide system content root and default system prompt path together"
-                    .to_string(),
-            });
-        }
-    };
-    Ok(source)
-}
 
 /// Reads a boolean feature flag from the environment. Absent or unrecognized
 /// values are treated as off — this gates an opt-in prompt addendum for

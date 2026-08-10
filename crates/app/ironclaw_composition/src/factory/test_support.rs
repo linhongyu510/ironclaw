@@ -853,7 +853,7 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_thread_service_for_test(
     storage_root: &Path,
-) -> Result<Arc<dyn SessionThreadService>, RebornBuildError> {
+) -> Result<Arc<ironclaw_threads::FilesystemSessionThreadService>, RebornBuildError> {
     let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
     let bundle = build_filesystem(
         paths.state_root(),
@@ -887,11 +887,10 @@ pub(crate) async fn open_standalone_skill_management_for_test(
         DurableStorageInput::EmbeddedLibsql,
     )
     .await?;
-    let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
     Ok(Arc::new(
         ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
             owner_user_id,
-            filesystem,
+            bundle.filesystem,
             Arc::new(super::production_backend_assembly::production_skill_management_mount_view),
         ),
     ))
