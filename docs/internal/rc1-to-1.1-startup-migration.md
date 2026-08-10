@@ -63,29 +63,36 @@ identifiers, message contents, credentials, or secret handles.
   configured 1.1 tenant/default owner is its intended recipient. A conflicting
   destination or unsupported special file fails startup without overwrite.
 
-### Emergency Slack/Telegram state bypass
+### Slack/Telegram state migration default
 
-If the retained rc1 Slack/Telegram extension-state rows are malformed and the
-operator accepts reconfiguring those channels in 1.1, set:
+In 1.1.1, retained rc1 Slack/Telegram extension state is skipped by default so
+malformed legacy channel rows cannot block the urgent-fix upgrade. The source
+rows remain retained, but Slack and Telegram must be reconfigured in 1.1.1.
+The equivalent explicit setting is:
 
 ```bash
 IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION=true
 ```
 
-This is an explicit, narrow override. It skips only Slack/Telegram setup,
+This narrow default skips only Slack/Telegram setup,
 channel-admin secret bindings, identities, routes, DM targets, connection
 rows, and pairing state. Thread messages, routines/triggers, channel conversations and
 idempotency, extension installations, OAuth provider aliases, processes, and
 the optional workspace snapshot still migrate normally. The source channel
 rows are retained, startup emits a warning, and the release completion report
-records `channel_extension_state.status=skipped_by_operator` without fabricated
+records `channel_extension_state.status=skipped_by_release_policy` without fabricated
 counts.
 
-Keep the variable configured while this release-pair migration remains in the
-binary: completed migrations are reverified on every startup. Remove it only
-to retry the normal channel-state migration after repairing the rc1 source.
-Invalid or blank values fail startup; unset, `0`, or `false` preserve the
-default fail-closed migration.
+To opt into the verified legacy channel-state import, set:
+
+```bash
+IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION=false
+```
+
+Keep the chosen value configured while this release-pair migration remains in
+the binary: completed migrations are reverified on every startup. Invalid or
+blank values fail startup; unset, `1`, or `true` skip the channel-state import,
+while `0` or `false` run it.
 
 ## Release artifact gate
 

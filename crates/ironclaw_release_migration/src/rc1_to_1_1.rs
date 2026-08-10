@@ -189,7 +189,7 @@ pub struct Rc1To11ExtensionReports {
 /// fabricating success counts or deleting the retained rc1 authority.
 pub enum Rc1To11ChannelStateMigrationOutcome {
     Completed(ironclaw_extension_host::Rc1ChannelStateMigrationReport),
-    SkippedByOperator,
+    SkippedByReleasePolicy,
 }
 
 /// In-progress rc1 -> 1.1 migration barrier.
@@ -805,13 +805,15 @@ fn redacted_core_report(
             "scopes": extension_state_scopes,
         }));
     }
-    if let (Value::Object(domains), Some(Rc1To11ChannelStateMigrationOutcome::SkippedByOperator)) =
-        (&mut report, extension_state)
+    if let (
+        Value::Object(domains),
+        Some(Rc1To11ChannelStateMigrationOutcome::SkippedByReleasePolicy),
+    ) = (&mut report, extension_state)
     {
         domains.insert(
             "channel_extension_state".to_string(),
             json!({
-                "status": "skipped_by_operator",
+                "status": "skipped_by_release_policy",
                 "counts_available": false,
                 "source_retained": true,
             }),

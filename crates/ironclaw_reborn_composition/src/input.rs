@@ -547,12 +547,24 @@ impl RebornHostBindings {
         self
     }
 
-    /// Omit only the rc1 Slack/Telegram extension-state import.
+    /// Retain the default that omits only the rc1 Slack/Telegram
+    /// extension-state import.
     ///
-    /// This is a data-loss-accepting operator action: the old rows remain
-    /// available for recovery, but 1.1 channel setup must be reconfigured.
-    pub fn with_rc1_channel_state_migration_skipped_by_operator(mut self) -> Self {
+    /// The old rows remain available for recovery, but 1.1 channel setup must
+    /// be reconfigured.
+    pub fn with_rc1_channel_state_migration_skipped(mut self) -> Self {
         self.skip_rc1_channel_state_migration = true;
+        self
+    }
+
+    /// Explicitly import rc1 Slack/Telegram extension state.
+    ///
+    /// The 1.1.1 default is to retain the legacy rows and require channel
+    /// reconfiguration instead of allowing malformed legacy state to block
+    /// startup. Operators can opt into the verified import with the CLI
+    /// environment override.
+    pub fn with_rc1_channel_state_migration_enabled_by_operator(mut self) -> Self {
+        self.skip_rc1_channel_state_migration = false;
         self
     }
 
@@ -954,7 +966,7 @@ impl RebornHostBindings {
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
             legacy_workspace_snapshot: None,
-            skip_rc1_channel_state_migration: false,
+            skip_rc1_channel_state_migration: true,
         }
     }
 
@@ -1315,11 +1327,14 @@ mod tests {
     }
 
     #[test]
-    fn rc1_channel_state_migration_skip_requires_explicit_builder() {
+    fn rc1_channel_state_migration_is_skipped_by_default() {
         let default_input = RebornHostBindings::disabled("test-owner");
-        assert!(!default_input.skip_rc1_channel_state_migration);
+        assert!(default_input.skip_rc1_channel_state_migration);
 
-        let skipped_input = default_input.with_rc1_channel_state_migration_skipped_by_operator();
+        let skipped_input = default_input.with_rc1_channel_state_migration_skipped();
         assert!(skipped_input.skip_rc1_channel_state_migration);
+
+        let enabled_input = skipped_input.with_rc1_channel_state_migration_enabled_by_operator();
+        assert!(!enabled_input.skip_rc1_channel_state_migration);
     }
 }

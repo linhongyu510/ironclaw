@@ -24,8 +24,8 @@ fn absent_extension_domains_are_not_reported_as_completed() {
 }
 
 #[test]
-fn operator_skipped_channel_state_is_recorded_without_false_success_counts() {
-    let channel_state = Rc1To11ChannelStateMigrationOutcome::SkippedByOperator;
+fn release_policy_skipped_channel_state_is_recorded_without_false_success_counts() {
+    let channel_state = Rc1To11ChannelStateMigrationOutcome::SkippedByReleasePolicy;
     let report = redacted_core_report(
         &ironclaw_processes::LegacyProcessMigrationReport::default(),
         &ironclaw_threads::ThreadStartupMigrationReport::default(),
@@ -37,11 +37,11 @@ fn operator_skipped_channel_state_is_recorded_without_false_success_counts() {
     );
     let channel_state = report
         .get("channel_extension_state")
-        .expect("operator skip must remain visible in release completion evidence");
+        .expect("release-policy skip must remain visible in release completion evidence");
 
     assert_eq!(
         channel_state.get("status"),
-        Some(&json!("skipped_by_operator"))
+        Some(&json!("skipped_by_release_policy"))
     );
     assert_eq!(channel_state.get("counts_available"), Some(&json!(false)));
     assert_eq!(channel_state.get("source_retained"), Some(&json!(true)));

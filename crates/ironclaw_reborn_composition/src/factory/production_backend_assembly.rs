@@ -965,9 +965,9 @@ pub(super) async fn build_backend_production(
         tracing::warn!(
             override_env = "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION",
             source_rows_retained = true,
-            "skipping rc1 Slack/Telegram extension-state startup migration by explicit operator override; channel credentials, setup, identities, routes, and DM targets must be reconfigured"
+            "skipping rc1 Slack/Telegram extension-state startup migration by 1.1.1 release policy; set the override to false to import it; channel credentials, setup, identities, routes, and DM targets must be reconfigured"
         );
-        ironclaw_release_migration::Rc1To11ChannelStateMigrationOutcome::SkippedByOperator
+        ironclaw_release_migration::Rc1To11ChannelStateMigrationOutcome::SkippedByReleasePolicy
     } else {
         let legacy_channel_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
         let report = match ironclaw_extension_host::migrate_all_rc1_channel_state(

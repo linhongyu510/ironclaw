@@ -724,12 +724,15 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_legacy_workspace_snapshot(snapshot);
     }
-    if caller == RuntimeInputCaller::Serve
-        && parse_rc1_channel_state_migration_override(std::env::var(
-            "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION",
-        ))?
-    {
-        services_input = services_input.with_rc1_channel_state_migration_skipped_by_operator();
+    if caller == RuntimeInputCaller::Serve {
+        let skip_rc1_channel_state_migration = parse_rc1_channel_state_migration_override(
+            std::env::var("IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION"),
+        )?;
+        services_input = if skip_rc1_channel_state_migration {
+            services_input.with_rc1_channel_state_migration_skipped()
+        } else {
+            services_input.with_rc1_channel_state_migration_enabled_by_operator()
+        };
     }
     if let Some(ResolvedGoogleOAuthConfig {
         client,
@@ -1191,7 +1194,7 @@ fn parse_rc1_channel_state_migration_override(
             "0" | "false" => Ok(false),
             _ => anyhow::bail!("{NAME} must be one of 1, true, 0, false"),
         },
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(true),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{NAME} contains non-UTF-8 bytes")
         }
@@ -1651,10 +1654,10 @@ mod tests {
     }
 
     #[test]
-    fn rc1_channel_state_migration_override_is_explicit_and_fail_loud() {
+    fn rc1_channel_state_migration_is_skipped_by_default_and_fail_loud() {
         assert!(
-            !parse_rc1_channel_state_migration_override(Err(std::env::VarError::NotPresent))
-                .expect("unset override keeps fail-closed migration enabled")
+            parse_rc1_channel_state_migration_override(Err(std::env::VarError::NotPresent))
+                .expect("unset override skips legacy channel-state migration")
         );
         assert!(
             parse_rc1_channel_state_migration_override(Ok(" TRUE ".to_string()))
@@ -1662,7 +1665,7 @@ mod tests {
         );
         assert!(
             !parse_rc1_channel_state_migration_override(Ok("0".to_string()))
-                .expect("explicit false keeps migration enabled")
+                .expect("explicit false opts into legacy channel-state migration")
         );
 
         let error = parse_rc1_channel_state_migration_override(Ok("".to_string()))
