@@ -2614,24 +2614,21 @@ async fn slack_dm_edits_a_preview_then_posts_the_complete_answer() {
     let run_id = harness.coordinator.active_run_id().expect("run id");
     let live_body = "Hello world — ".repeat(18);
     harness.push_live_text(run_id, "text:r:0", &live_body);
-    for _ in 0..80 {
-        if !harness.slack_updates().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let updates = harness.slack_updates();
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0]["channel"], CHANNEL);
-    assert_eq!(updates[0]["ts"], preview_ts);
-    assert_eq!(updates[0]["markdown_text"], live_body);
-
+    // Completion may race the first-update debounce. Shutting down the
+    // forwarder must flush the latest cumulative text instead of silently
+    // collapsing the preview into the final message.
     harness
         .coordinator
         .complete_active_run(&live_body)
         .await
         .expect("complete running turn");
     harness.drain().await;
+
+    let updates = harness.slack_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["channel"], CHANNEL);
+    assert_eq!(updates[0]["ts"], preview_ts);
+    assert_eq!(updates[0]["markdown_text"], live_body);
 
     let deletes = harness.slack_deletes();
     assert_eq!(deletes.len(), 1);

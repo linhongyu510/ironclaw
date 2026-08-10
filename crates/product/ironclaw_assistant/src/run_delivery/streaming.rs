@@ -129,7 +129,22 @@ async fn forward_loop(
             tokio::time::sleep_until(next_update_at.unwrap_or_else(tokio::time::Instant::now));
         tokio::pin!(update_timer);
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => {
+                if current != accepted
+                    && !current.is_empty()
+                    && current.chars().count() <= forwarder.notice.max_chars as usize
+                {
+                    sequence = sequence.saturating_add(1);
+                    let _ = deliver_preview_update(
+                        &forwarder,
+                        &accepted,
+                        &current,
+                        sequence,
+                    )
+                    .await;
+                }
+                break;
+            },
             item = subscription.next() => match item {
                 Some(Ok(envelope)) => {
                     if let Some(text) = live_cumulative_text(&envelope, forwarder.run_id, &mut bodies) {
