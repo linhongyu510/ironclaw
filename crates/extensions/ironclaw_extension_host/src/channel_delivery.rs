@@ -157,7 +157,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
                 .resolved
                 .channel
                 .as_ref()
-                .map(|channel| channel.notifications_require_setup);
+                .map(|channel| channel.requires_enrollment());
         }
         let snapshot = self.watch.current();
         let extension = snapshot.extension(extension_id)?;
@@ -165,19 +165,19 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             .resolved
             .channel
             .as_ref()
-            .map(|channel| channel.notifications_require_setup)
+            .map(|channel| channel.requires_enrollment())
     }
 
-    fn channel_reply_mode(
+    fn channel_reply_transport(
         &self,
         extension_id: &str,
-    ) -> Option<ironclaw_extension_contracts::channel::ChannelReplyMode> {
+    ) -> Option<ironclaw_extension_contracts::channel::ReplyTransport> {
         if let Some(extension) = self.deployment_channels.extension(extension_id) {
             return extension
                 .resolved
                 .channel
                 .as_ref()
-                .map(|channel| channel.reply_mode);
+                .and_then(|channel| channel.reply_transport());
         }
         let snapshot = self.watch.current();
         let extension = snapshot.extension(extension_id)?;
@@ -185,7 +185,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             .resolved
             .channel
             .as_ref()
-            .map(|channel| channel.reply_mode)
+            .and_then(|channel| channel.reply_transport())
     }
 }
 

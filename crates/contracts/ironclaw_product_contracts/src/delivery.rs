@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel::ChannelReplyMode;
+use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
@@ -39,11 +39,16 @@ pub struct ResolvedChannelDelivery {
     pub adapter: Arc<dyn ChannelAdapter>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
-    /// The channel's declared reply sink. Conversation-reply intents for a
-    /// `streaming` channel ride the durable projection stream and must never
-    /// be delivered through the batched coordinator path; notification-class
-    /// sends flow regardless of mode.
-    pub reply_mode: ChannelReplyMode,
+    /// The channel's declared reply transport (`[channel.reply]`). `None`
+    /// means the channel has no reply half at all — it can be an out-of-band
+    /// delivery target but cannot answer a run's input.
+    ///
+    /// A `Stream` reply rides the durable projection pipeline and must never
+    /// be sent through the coordinator's adapter path. That is a property of
+    /// the **route**, not of the content: a delivery to this channel flows
+    /// regardless, which is why the gate keys on `OutboundRoute` rather than
+    /// on what is being said.
+    pub reply_transport: Option<ReplyTransport>,
 }
 
 /// Resolver port: the coordinator's view of the active extension set.
@@ -52,20 +57,24 @@ pub struct ResolvedChannelDelivery {
 pub trait ChannelDeliveryResolver: Send + Sync {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery>;
 
-    /// The channel's declared reply mode, when known — a lightweight lookup
-    /// the coordinator's streaming-reply gate consults BEFORE persisting an
+    /// The channel's declared reply transport, when known — a lightweight
+    /// lookup the coordinator's stream gate consults BEFORE persisting an
     /// attempt, so it cannot count as (or race with) the single
     /// generation-pinned resolution `resolve_channel_delivery` performs.
-    /// `None` means unknown: the gate stays out of the way and the delivery
-    /// path's own resolution failure handling remains authoritative.
-    fn channel_reply_mode(&self, _extension_id: &str) -> Option<ChannelReplyMode> {
+    ///
+    /// `None` covers both "unknown extension" and "known, but declares no
+    /// reply half". The gate acts only on `Some(Stream)` and stays out of the
+    /// way otherwise, leaving the delivery path's own resolution-failure
+    /// handling authoritative — the two `None` cases need no distinction
+    /// here because neither is a stream.
+    fn channel_reply_transport(&self, _extension_id: &str) -> Option<ReplyTransport> {
         None
     }
 
-    /// Whether the channel's manifest declares per-user notification setup
-    /// (§7b), when the extension is known. `None` = unknown extension —
-    /// the setup surface fails closed as not-found on it.
-    fn notifications_require_setup(&self, _extension_id: &str) -> Option<bool> {
+    /// Whether the channel's `[channel.delivery]` declares
+    /// `requires_enrollment`, when the extension is known. `None` = unknown
+    /// extension — enrollment surfaces fail closed as not-found on it.
+    fn requires_enrollment(&self, _extension_id: &str) -> Option<bool> {
         None
     }
 }

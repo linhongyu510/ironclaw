@@ -93,18 +93,71 @@ impl<'de> serde::Deserialize<'de> for RouteSuffix {
     }
 }
 
-/// The channel's declared reply-sink behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// How a run's answer gets back to where the input came from — the **reply**
+/// axis (`[channel.reply] transport`).
+///
+/// Deliberately a separate type from [`DeliveryTransport`]: `Stream` is
+/// meaningless for delivery and `Push` is meaningless for reply, so two enums
+/// make those nonsense combinations unrepresentable. `Message` appearing in
+/// both is not duplication — it is the observation that for a conversational
+/// vendor the two axes happen to share a mechanism, which is exactly why the
+/// distinction stayed invisible until a streaming channel existed.
+///
+/// A third transport (a channel that streams but cannot subscribe itself, so
+/// the host pushes chunks into it) would join here as a new variant rather
+/// than forcing a reshape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChannelReplyMode {
-    /// Replies stream to the client over the durable projection pipeline
-    /// (SSE/WebSocket). Per-conversation reply delivery never routes through
-    /// the batched delivery coordinator.
-    Streaming,
-    /// Replies are collected and sent as channel messages through the
-    /// delivery coordinator, split to fit the channel's declared bounds.
-    #[default]
-    Batched,
+pub enum ReplyTransport {
+    /// The answer streams to a subscribed client over the durable projection
+    /// pipeline. The host publishes; the channel's adapter is never called for
+    /// a reply, which is why such a channel implements no reply half at all.
+    Stream,
+    /// The answer is sent as one or more channel messages, split to fit
+    /// [`ChannelReplyDescriptor::max_message_chars`].
+    Message,
+}
+
+/// How we reach someone out of band — the **delivery** axis
+/// (`[channel.delivery] transport`). See [`ReplyTransport`] for why these are
+/// two types rather than one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryTransport {
+    /// A push notification to the user's enrolled clients.
+    Push,
+    /// A message in a resolved target conversation.
+    Message,
+}
+
+/// The `[channel.reply]` section: how a run's answer gets back to its source.
+///
+/// **Absence means the channel has no reply half** — it cannot answer a run's
+/// input at all (a notification-only channel), or its replies are published by
+/// the host rather than sent by the adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelReplyDescriptor {
+    pub transport: ReplyTransport,
+    /// Split bound for `transport = "message"`. Undeclared means unlimited.
+    /// Meaningless for `transport = "stream"`, which never batches or splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_message_chars: Option<u32>,
+}
+
+/// The `[channel.delivery]` section: how we reach the user outside a run.
+///
+/// **Absence means the channel cannot be an out-of-band delivery target** —
+/// it is reply-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelDeliveryDescriptor {
+    pub transport: DeliveryTransport,
+    /// Whether a per-user registration must exist before this channel can
+    /// deliver. The host owns those registrations and resolves a channel with
+    /// zero of them to a "no target" outcome before any adapter call.
+    #[serde(default)]
+    pub requires_enrollment: bool,
 }
 
 /// The declared channel surface of one extension.
@@ -114,23 +167,6 @@ pub struct ChannelDescriptor {
     /// Channel surface id within the extension (e.g. `messages`).
     pub id: String,
     pub display_name: String,
-    #[serde(default)]
-    pub inbound: bool,
-    #[serde(default)]
-    pub outbound: bool,
-    /// This channel can fulfil blocked-automation notifications (approval/auth
-    /// gates, failure notices). Independent of `inbound`/`outbound`: a channel
-    /// may deliver notifications without being a two-way conversation surface
-    /// (e.g. a browser-push channel, notification-only for final replies).
-    #[serde(default)]
-    pub notifications: bool,
-    /// Whether notification delivery needs per-user enrollment before it can
-    /// deliver (§7b): the generic setup surface consults the adapter's
-    /// status/enable/disable operations for such channels. A channel whose
-    /// conversation surface is already connected is deliverable as-is and
-    /// keeps the default.
-    #[serde(default)]
-    pub notifications_require_setup: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
     /// Exact product command tokens exposed by this channel, without a leading
@@ -143,14 +179,20 @@ pub struct ChannelDescriptor {
     pub egress: Vec<ChannelEgressDescriptor>,
     #[serde(default)]
     pub presentation: ChannelPresentation,
-    /// How this channel's reply sink consumes the durable reply-event stream.
-    /// `streaming` forwards the live/replayed event stream to the client (the
-    /// authenticated-session transports); `batched` collects and sends
-    /// per-message through the delivery coordinator (webhook vendors). The
-    /// sink sits on top of the durable event/projection pipeline either way —
-    /// a consumer of durable reply events, never a replacement.
-    #[serde(default)]
-    pub reply_mode: ChannelReplyMode,
+    /// The reply axis (`[channel.reply]`): how this run's answer gets back to
+    /// where the input came from. Source-routed; never exists without a run.
+    /// Absent means this channel has no reply half.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ChannelReplyDescriptor>,
+    /// The delivery axis (`[channel.delivery]`): how we reach the user out of
+    /// band. Target-resolved; may exist with no run at all. Absent means this
+    /// channel is not an out-of-band delivery target.
+    ///
+    /// The two are **orthogonal, not alternatives** — one run can stream an
+    /// answer into an open tab (reply) *and* fire a push because the user is
+    /// not looking (delivery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ChannelDeliveryDescriptor>,
     /// User-account connection behavior for this channel. This declaration is
     /// the only authority for pairing presentation and connection notices;
     /// hosts must not infer a recipe from an extension id or display name.
@@ -159,6 +201,56 @@ pub struct ChannelDescriptor {
 }
 
 impl ChannelDescriptor {
+    /// Whether this channel accepts input. **Presence of `[channel.ingress]`
+    /// is the declaration** — there is no separate `inbound` boolean saying
+    /// *that* a channel does something without saying *how*.
+    pub fn supports_inbound(&self) -> bool {
+        self.ingress.is_some()
+    }
+
+    /// Whether this channel can answer a run's input (the reply axis).
+    pub fn supports_reply(&self) -> bool {
+        self.reply.is_some()
+    }
+
+    /// Whether this channel can be reached out of band (the delivery axis).
+    pub fn supports_delivery(&self) -> bool {
+        self.delivery.is_some()
+    }
+
+    /// Whether this channel emits anything at all. Kept as one predicate
+    /// because a few host paths genuinely mean "either axis" (does this
+    /// channel need egress wiring at all); anything deciding *how* to send
+    /// must ask the axes separately.
+    pub fn supports_outbound(&self) -> bool {
+        self.supports_reply() || self.supports_delivery()
+    }
+
+    pub fn reply_transport(&self) -> Option<ReplyTransport> {
+        self.reply.as_ref().map(|reply| reply.transport)
+    }
+
+    pub fn delivery_transport(&self) -> Option<DeliveryTransport> {
+        self.delivery.as_ref().map(|delivery| delivery.transport)
+    }
+
+    /// Whether delivery needs a per-user registration first. False when the
+    /// channel has no delivery half at all — nothing to enroll for.
+    pub fn requires_enrollment(&self) -> bool {
+        self.delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.requires_enrollment)
+    }
+
+    /// The declared split bound for message-shaped output. `None` is
+    /// unlimited — a stream reply never splits, and an undeclared bound on a
+    /// message reply means the vendor imposes none the manifest knows about.
+    pub fn max_message_chars(&self) -> Option<u32> {
+        self.reply
+            .as_ref()
+            .and_then(|reply| reply.max_message_chars)
+    }
+
     /// Structural validation beyond field-level deserialization.
     pub fn validate(&self) -> Result<(), ChannelDescriptorError> {
         if self.id.trim().is_empty() {
@@ -191,11 +283,22 @@ impl ChannelDescriptor {
         {
             return Err(ChannelDescriptorError::InvalidCommandPrefix);
         }
-        if self.inbound && self.ingress.is_none() {
-            return Err(ChannelDescriptorError::InboundWithoutIngress);
-        }
-        if self.connection.is_some() && !self.inbound {
+        if self.connection.is_some() && self.ingress.is_none() {
             return Err(ChannelDescriptorError::ConnectionWithoutInbound);
+        }
+        // A `stream` reply forwards the durable projection stream over the
+        // session transport. A webhook vendor has no such stream to consume,
+        // and a channel with no ingress has no run whose answer to stream —
+        // so the declared reply transport must pair with the entrypoint.
+        // Checked outside the ingress block below so the no-ingress case is
+        // rejected too, not silently skipped.
+        if self.reply_transport() == Some(ReplyTransport::Stream)
+            && !self
+                .ingress
+                .as_ref()
+                .is_some_and(|ingress| ingress.verification.is_authenticated_session())
+        {
+            return Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress);
         }
         if let Some(connection) = &self.connection {
             connection.validate()?;
@@ -220,14 +323,6 @@ impl ChannelDescriptor {
                     return Err(ChannelDescriptorError::WebhookIngressWithoutRouteSuffix);
                 }
                 _ => {}
-            }
-            // A streaming reply sink forwards the projection stream over the
-            // session transport; a webhook vendor has no such stream to
-            // consume. Pair the declared reply mode with the entrypoint.
-            if self.reply_mode == ChannelReplyMode::Streaming
-                && !ingress.verification.is_authenticated_session()
-            {
-                return Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress);
             }
         }
         for egress in &self.egress {
@@ -550,8 +645,10 @@ pub struct ChannelPresentation {
     /// root id vs. a reply-to-message id) live in each channel package.
     #[serde(default)]
     pub can_reply_in_threads: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_message_chars: Option<u32>,
+    // `max_message_chars` moved to `[channel.reply]` (the two-axis contract,
+    // 2026-08-11): a split bound is a property of the reply transport, not of
+    // presentation, and it is meaningless for `transport = "stream"`. Read it
+    // through `ChannelDescriptor::max_message_chars()`.
     /// Optional per-command display prefix a channel adapter renders before
     /// each declared command name in user-visible help text (e.g. a channel
     /// whose native command namespace requires an app-scoped dispatcher
@@ -577,9 +674,10 @@ pub enum ChannelDescriptorError {
         "channel presentation command_prefix must be non-empty, start with '/', contain no control characters, and be at most 32 bytes"
     )]
     InvalidCommandPrefix,
-    #[error("an inbound channel must declare [channel.ingress]")]
-    InboundWithoutIngress,
-    #[error("[channel.connection] requires inbound = true")]
+    // `InboundWithoutIngress` is gone: `[channel.ingress]` IS the inbound
+    // declaration, so the contradiction it named — claiming inbound without
+    // declaring how input arrives — is now unrepresentable.
+    #[error("[channel.connection] requires an inbound channel ([channel.ingress])")]
     ConnectionWithoutInbound,
     #[error("channel connection field `{field}` must not be empty")]
     EmptyConnectionField { field: &'static str },
@@ -618,21 +716,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn streaming_reply_mode_requires_the_session_entrypoint() {
+    fn stream_reply_transport_requires_the_session_entrypoint() {
         let mut channel: ChannelDescriptor =
             toml::from_str(documented_channel_toml()).expect("documented channel deserializes");
-        assert_eq!(
-            channel.reply_mode,
-            ChannelReplyMode::Batched,
-            "undeclared reply mode defaults to batched"
-        );
-        channel.reply_mode = ChannelReplyMode::Streaming;
+        assert_eq!(channel.reply_transport(), Some(ReplyTransport::Message));
+        channel
+            .reply
+            .as_mut()
+            .expect("documented channel declares a reply half")
+            .transport = ReplyTransport::Stream;
         assert!(
             matches!(
                 channel.validate(),
                 Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress)
             ),
-            "a webhook channel must not declare a streaming reply sink"
+            "a webhook channel must not declare a stream reply transport"
         );
 
         let mut session = channel.clone();
@@ -642,16 +740,79 @@ mod tests {
         }
         session
             .validate()
-            .expect("streaming reply mode over the session entrypoint validates");
+            .expect("a stream reply over the session entrypoint validates");
+
+        // A channel with no ingress has no run whose answer to stream. This
+        // arm is why the check sits outside the `if let Some(ingress)` block:
+        // with it inside, a no-ingress stream declaration validated silently.
+        let mut ingressless = session.clone();
+        ingressless.ingress = None;
+        ingressless.connection = None;
+        assert!(
+            matches!(
+                ingressless.validate(),
+                Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress)
+            ),
+            "a stream reply with no entrypoint must fail closed"
+        );
+    }
+
+    #[test]
+    fn absent_sections_mean_the_axis_is_unsupported() {
+        // The whole point of §2: presence of a section is the declaration.
+        // A channel that declares neither reply nor delivery emits nothing,
+        // and one that declares no ingress accepts nothing — all valid
+        // shapes, none of them expressible as a boolean that says *that* a
+        // channel does something without saying *how*.
+        let channel: ChannelDescriptor = toml::from_str(
+            r#"
+id = "messages"
+display_name = "Vendor messages"
+conversation_model = "continuous"
+"#,
+        )
+        .expect("a bare channel deserializes");
+        channel.validate().expect("a bare channel is valid");
+
+        assert!(!channel.supports_inbound());
+        assert!(!channel.supports_reply());
+        assert!(!channel.supports_delivery());
+        assert!(!channel.supports_outbound());
+        assert!(!channel.requires_enrollment());
+        assert_eq!(channel.reply_transport(), None);
+        assert_eq!(channel.delivery_transport(), None);
+        assert_eq!(channel.max_message_chars(), None);
+    }
+
+    #[test]
+    fn the_two_axes_are_orthogonal_not_alternatives() {
+        // One channel can stream a reply into an open tab AND push out of
+        // band. Expressing that was the reason for the split.
+        let channel: ChannelDescriptor =
+            toml::from_str(&session_channel_toml(false)).expect("parse session channel");
+        channel.validate().expect("both axes together validate");
+
+        assert_eq!(channel.reply_transport(), Some(ReplyTransport::Stream));
+        assert_eq!(channel.delivery_transport(), Some(DeliveryTransport::Push));
+        assert!(channel.requires_enrollment());
+        assert!(
+            channel.max_message_chars().is_none(),
+            "a stream reply never splits, so it declares no bound"
+        );
     }
 
     fn documented_channel_toml() -> &'static str {
         r#"
 id = "messages"
 display_name = "Vendor messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
+
+[reply]
+transport = "message"
+max_message_chars = 40000
+
+[delivery]
+transport = "message"
 
 [ingress]
 route_suffix = "events"
@@ -683,7 +844,6 @@ credential_handle = "vendor_bot_token"
 supports_markdown = true
 supports_threads = true
 can_reply_in_threads = true
-max_message_chars = 40000
 "#
     }
 
@@ -711,9 +871,14 @@ max_message_chars = 40000
             r#"
 id = "web-app"
 display_name = "Web app"
-inbound = true
-outbound = true
 conversation_model = "continuous"
+
+[reply]
+transport = "stream"
+
+[delivery]
+transport = "push"
+requires_enrollment = true
 
 [ingress]
 {route_line}method = "post"
@@ -818,9 +983,13 @@ kind = "authenticated_session"
     }
 
     fn channel_toml_with_command_prefix(prefix_toml_value: &str) -> String {
+        // Anchored on the last `[presentation]` key, not on `max_message_chars`
+        // — that bound now lives in `[channel.reply]`, so anchoring there
+        // would inject `command_prefix` into the wrong section and
+        // `deny_unknown_fields` would reject it for the wrong reason.
         documented_channel_toml().replace(
-            "max_message_chars = 40000\n",
-            &format!("max_message_chars = 40000\ncommand_prefix = {prefix_toml_value}\n"),
+            "can_reply_in_threads = true\n",
+            &format!("can_reply_in_threads = true\ncommand_prefix = {prefix_toml_value}\n"),
         )
     }
 
@@ -1136,23 +1305,6 @@ kind = "authenticated_session"
                 "expected rejection for {declaration}"
             );
         }
-    }
-
-    #[test]
-    fn inbound_channels_require_ingress() {
-        let channel: ChannelDescriptor = toml::from_str(
-            r#"
-id = "messages"
-display_name = "Vendor messages"
-inbound = true
-conversation_model = "continuous"
-"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            channel.validate().unwrap_err(),
-            ChannelDescriptorError::InboundWithoutIngress
-        ));
     }
 
     #[test]
