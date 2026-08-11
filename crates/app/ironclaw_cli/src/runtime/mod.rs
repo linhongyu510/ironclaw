@@ -949,26 +949,20 @@ fn resolved_local_runtime_workspace_root(
 /// Whether `cwd` overlaps any of the storage root's protected roots in either
 /// direction (contains it, sits inside it, or equals it).
 ///
-/// Mirrors the protected-root list in composition's
-/// `validate_workspace_skill_isolation` (`host_access_assembly`). Composition
-/// remains the authoritative fail-closed validator; this launch-time heuristic
-/// only decides whether to substitute the default workspace.
+/// Consumes composition's `protected_root_suffixes` / `paths_overlap`
+/// (`host_access_assembly`), the same policy
+/// `validate_workspace_skill_isolation` enforces fail-closed, so the launch
+/// heuristic and the validator can never drift apart. This resolver only
+/// decides whether to substitute the default workspace; composition remains
+/// the authoritative validator.
 fn cwd_overlaps_protected_roots(cwd: &Path, storage_root: &Path) -> anyhow::Result<bool> {
     let cwd = std::fs::canonicalize(cwd)
         .with_context(|| format!("failed to resolve current directory {}", cwd.display()))?;
-    for protected_root in [
-        storage_root.join("skills"),
-        storage_root.join("tenant-shared/skills"),
-        storage_root.join("system/skills"),
-        storage_root.join("system/extensions"),
-    ] {
-        let Some(protected_root) = canonicalize_existing_prefix(&protected_root)? else {
+    for suffix in ironclaw_composition::protected_root_suffixes() {
+        let Some(protected_root) = canonicalize_existing_prefix(&storage_root.join(suffix))? else {
             continue;
         };
-        if cwd == protected_root
-            || cwd.starts_with(&protected_root)
-            || protected_root.starts_with(&cwd)
-        {
+        if ironclaw_composition::paths_overlap(&cwd, &protected_root) {
             return Ok(true);
         }
     }
@@ -2981,12 +2975,7 @@ regex_activation_enabled = false
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
 
-        for protected in [
-            "skills",
-            "tenant-shared/skills",
-            "system/skills",
-            "system/extensions",
-        ] {
+        for protected in ironclaw_composition::protected_root_suffixes() {
             let protected_root = storage_root.join(protected);
             std::fs::create_dir_all(&protected_root).expect("protected root");
 
