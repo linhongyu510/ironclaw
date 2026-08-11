@@ -31,59 +31,21 @@ enum DockerBindMode {
 impl RebornSandboxMountSources {
     pub(super) async fn prepare_container_binds(
         &self,
-        workspace_root: &Path,
         workspace: &Path,
         scope: &ResourceScope,
         mounts: Option<&MountView>,
     ) -> Result<Vec<ContainerBind>, RuntimeProcessError> {
         validate_mandatory_workspace_mount_view(scope, mounts)?;
-        let workspace_root = tokio::fs::canonicalize(workspace_root)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace root could not be resolved: {error}"
-                ))
-            })?;
-        if !workspace_root.is_dir() {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace root must be a directory".to_string(),
-            ));
-        }
-        let users_root = tokio::fs::canonicalize(workspace_root.join("users"))
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace users root could not be resolved: {error}"
-                ))
-            })?;
-        if !users_root.is_dir() {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace users root must be a directory".to_string(),
-            ));
-        }
-        if users_root.parent() != Some(workspace_root.as_path()) {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace users root escapes the configured workspace root".to_string(),
-            ));
-        }
-        let workspace = tokio::fs::canonicalize(workspace).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox caller workspace could not be resolved: {error}"
-            ))
-        })?;
-        if !workspace.is_dir() {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox caller workspace must be a directory".to_string(),
-            ));
-        }
-        validate_prepared_workspace_leaf(&users_root, &workspace, scope)?;
+        // `workspace` is the canonical leaf from `admit_workspace_leaf`.
+        // Do not re-resolve it here: the final admission immediately before
+        // Docker create deliberately performs the TOCTOU revalidation.
 
         let workspace_bind = mounts
             .and_then(|mounts| mounts.mounts.first())
-            .map(|grant| resolve_mandatory_workspace_grant(&workspace, scope, grant))
+            .map(|grant| resolve_mandatory_workspace_grant(workspace, scope, grant))
             .unwrap_or_else(|| {
                 ContainerBind::new(
-                    workspace,
+                    workspace.to_path_buf(),
                     CONTAINER_WORKSPACE_ROOT,
                     DockerBindMode::ReadWrite,
                 )
@@ -128,21 +90,6 @@ pub(super) fn validate_mandatory_workspace_mount_view(
         ));
     }
     DockerBindMode::from_grant(grant)?;
-    Ok(())
-}
-
-fn validate_prepared_workspace_leaf(
-    users_root: &Path,
-    workspace: &Path,
-    scope: &ResourceScope,
-) -> Result<(), RuntimeProcessError> {
-    let key = TenantUserWorkspaceKey::from_scope(scope);
-    let expected = users_root.join(key.digest_segment());
-    if workspace != expected {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox caller workspace leaf must be the prepared tenant/user workspace".to_string(),
-        ));
-    }
     Ok(())
 }
 
@@ -240,7 +187,7 @@ mod tests {
         resource::ResourceScope,
     };
 
-    use super::*;
+    use super::{super::workspace_admission::admit_workspace_leaf, *};
 
     fn caller_scope() -> ResourceScope {
         ResourceScope {
@@ -264,6 +211,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_workspace_admission_is_bound_without_reresolving_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspace");
+        tokio::fs::create_dir(&workspace_root)
+            .await
+            .expect("workspace root");
+        let admission = admit_workspace_leaf(
+            workspace_root.clone(),
+            TenantUserWorkspaceKey::from_scope(&scope),
+            0o700,
+        )
+        .await
+        .expect("initial workspace admission");
+        std::fs::rename(
+            workspace_root.join("users"),
+            workspace_root.join("users-before-final-revalidation"),
+        )
+        .expect("move users root after initial admission");
+
+        let binds = RebornSandboxMountSources
+            .prepare_container_binds(&admission.path, &scope, None)
+            .await
+            .expect("mount preparation uses the existing admission");
+
+        assert_eq!(
+            binds[0].clone().into_docker_bind(),
+            format!("{}:/workspace:rw", admission.path.display())
+        );
+    }
+
+    #[tokio::test]
     async fn scoped_workspace_mount_replaces_default_workspace_bind() {
         let temp = tempfile::tempdir().unwrap();
         let scope = caller_scope();
@@ -272,6 +251,9 @@ mod tests {
             .join("users")
             .join(TenantUserWorkspaceKey::from_scope(&scope).digest_segment());
         tokio::fs::create_dir_all(&scoped_workspace).await.unwrap();
+        let scoped_workspace = tokio::fs::canonicalize(scoped_workspace)
+            .await
+            .expect("prepared workspace canonical path");
         let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -281,7 +263,7 @@ mod tests {
         .unwrap();
 
         let binds = sources
-            .prepare_container_binds(&workspace_root, &scoped_workspace, &scope, Some(&mounts))
+            .prepare_container_binds(&scoped_workspace, &scope, Some(&mounts))
             .await
             .unwrap();
 
@@ -316,6 +298,9 @@ mod tests {
             .join("workspace/users")
             .join(TenantUserWorkspaceKey::from_scope(&scope).digest_segment());
         tokio::fs::create_dir_all(&default_workspace).await.unwrap();
+        let default_workspace = tokio::fs::canonicalize(default_workspace)
+            .await
+            .expect("prepared workspace canonical path");
         let sources = RebornSandboxMountSources;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -325,12 +310,7 @@ mod tests {
         .unwrap();
 
         let binds = sources
-            .prepare_container_binds(
-                &temp.path().join("workspace"),
-                &default_workspace,
-                &scope,
-                Some(&mounts),
-            )
+            .prepare_container_binds(&default_workspace, &scope, Some(&mounts))
             .await
             .unwrap();
 
@@ -377,7 +357,7 @@ mod tests {
         .unwrap();
 
         let error = sources
-            .prepare_container_binds(&workspace_root, &caller_leaf, &scope, Some(&mounts))
+            .prepare_container_binds(&caller_leaf, &scope, Some(&mounts))
             .await
             .expect_err("a sibling workspace target must be rejected");
 
@@ -393,7 +373,6 @@ mod tests {
             .path()
             .join("workspace/users")
             .join(key.digest_segment());
-        let workspace_root = temp.path().join("workspace");
         tokio::fs::create_dir_all(&caller_leaf).await.unwrap();
         let sources = RebornSandboxMountSources;
         let targets = [
@@ -412,7 +391,7 @@ mod tests {
             .unwrap();
 
             let error = sources
-                .prepare_container_binds(&workspace_root, &caller_leaf, &scope, Some(&mounts))
+                .prepare_container_binds(&caller_leaf, &scope, Some(&mounts))
                 .await
                 .expect_err("only the exact caller workspace target is admitted");
             assert!(
@@ -430,111 +409,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_grant_rejects_a_host_directory_other_than_the_caller_leaf() {
-        let temp = tempfile::tempdir().unwrap();
-        let scope = caller_scope();
-        let workspace_root = temp.path().join("workspaces");
-        let arbitrary_directory = workspace_root.join("not-the-caller-leaf");
-        tokio::fs::create_dir_all(&arbitrary_directory)
-            .await
-            .unwrap();
-        tokio::fs::create_dir(workspace_root.join("users"))
-            .await
-            .unwrap();
-        let sources = RebornSandboxMountSources;
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/workspace").unwrap(),
-            caller_workspace_target(&scope),
-            process_read_write_permissions(),
-        )])
-        .unwrap();
-
-        let error = sources
-            .prepare_container_binds(&workspace_root, &arbitrary_directory, &scope, Some(&mounts))
-            .await
-            .expect_err("only the prepared caller leaf may bind at /workspace");
-
-        assert!(format!("{error}").contains("caller workspace leaf"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn container_bind_rejects_a_users_root_that_escapes_the_workspace_root() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let scope = caller_scope();
-        let workspace_root = temp.path().join("workspace");
-        let outside = temp.path().join("outside");
-        let key = TenantUserWorkspaceKey::from_scope(&scope);
-        tokio::fs::create_dir(&workspace_root).await.unwrap();
-        tokio::fs::create_dir(&outside).await.unwrap();
-        tokio::fs::create_dir(outside.join(key.digest_segment()))
-            .await
-            .unwrap();
-        symlink(&outside, workspace_root.join("users")).unwrap();
-
-        let error = RebornSandboxMountSources
-            .prepare_container_binds(
-                &workspace_root,
-                &outside.join(key.digest_segment()),
-                &scope,
-                None,
-            )
-            .await
-            .expect_err("bind construction must retain workspace-root containment");
-
-        assert!(
-            format!("{error}").contains("users root escapes"),
-            "users symlink escape must fail at bind construction: {error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn container_bind_rejects_a_caller_leaf_symlink_that_escapes_users_root() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let scope = caller_scope();
-        let workspace_root = temp.path().join("workspace");
-        let outside = temp.path().join("outside");
-        let key = TenantUserWorkspaceKey::from_scope(&scope);
-        tokio::fs::create_dir_all(workspace_root.join("users"))
-            .await
-            .unwrap();
-        tokio::fs::create_dir(&outside).await.unwrap();
-        symlink(
-            &outside,
-            workspace_root.join("users").join(key.digest_segment()),
-        )
-        .unwrap();
-
-        let error = RebornSandboxMountSources
-            .prepare_container_binds(
-                &workspace_root,
-                &workspace_root.join("users").join(key.digest_segment()),
-                &scope,
-                None,
-            )
-            .await
-            .expect_err("a caller workspace leaf may not escape through a symlink");
-
-        assert!(
-            format!("{error}").contains("caller workspace leaf"),
-            "caller leaf symlink escape must fail at bind construction: {error}"
-        );
-    }
-
-    #[tokio::test]
     async fn none_mounts_use_default_workspace_bind() {
         let temp = tempfile::tempdir().unwrap();
         let sources = RebornSandboxMountSources;
         let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let workspace = prepared_workspace(&temp, &scope).await;
 
         let binds = sources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, None)
+            .prepare_container_binds(&workspace, &scope, None)
             .await
             .unwrap();
 
@@ -559,7 +441,7 @@ mod tests {
         tokio::fs::create_dir_all(&source_root).await.unwrap();
         let sources = RebornSandboxMountSources;
         let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let workspace = prepared_workspace(&temp, &scope).await;
         let mounts = MountView::new(vec![
             MountGrant::new(
                 MountAlias::new("/workspace").unwrap(),
@@ -575,7 +457,7 @@ mod tests {
         .unwrap();
 
         let error = sources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
+            .prepare_container_binds(&workspace, &scope, Some(&mounts))
             .await
             .expect_err("the sandbox must receive only the mandatory caller workspace leaf");
 
@@ -610,7 +492,7 @@ mod tests {
     async fn container_bind_rejects_a_manually_constructed_duplicate_workspace_override() {
         let temp = tempfile::tempdir().unwrap();
         let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let workspace = prepared_workspace(&temp, &scope).await;
         let mounts = MountView {
             mounts: vec![
                 MountGrant::new(
@@ -627,7 +509,7 @@ mod tests {
         };
 
         let error = RebornSandboxMountSources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
+            .prepare_container_binds(&workspace, &scope, Some(&mounts))
             .await
             .expect_err("public MountView construction must not permit a last-wins workspace bind");
 
@@ -639,7 +521,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let sources = RebornSandboxMountSources;
         let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let workspace = prepared_workspace(&temp, &scope).await;
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             VirtualPath::new("/memory/app").unwrap(),
@@ -648,7 +530,7 @@ mod tests {
         .unwrap();
 
         let error = sources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
+            .prepare_container_binds(&workspace, &scope, Some(&mounts))
             .await
             .unwrap_err();
 
@@ -663,7 +545,7 @@ mod tests {
         tokio::fs::create_dir_all(&project_root).await.unwrap();
         let sources = RebornSandboxMountSources;
         let scope = caller_scope();
-        let (workspace_root, workspace) = prepared_workspace(&temp, &scope).await;
+        let workspace = prepared_workspace(&temp, &scope).await;
         let mut permissions = MountPermissions::read_write();
         permissions.execute = true;
         let mounts = MountView::new(vec![MountGrant::new(
@@ -674,17 +556,14 @@ mod tests {
         .unwrap();
 
         let error = sources
-            .prepare_container_binds(&workspace_root, &workspace, &scope, Some(&mounts))
+            .prepare_container_binds(&workspace, &scope, Some(&mounts))
             .await
             .unwrap_err();
 
         assert!(format!("{error}").contains("permissions cannot be enforced"));
     }
 
-    async fn prepared_workspace(
-        temp: &tempfile::TempDir,
-        scope: &ResourceScope,
-    ) -> (PathBuf, PathBuf) {
+    async fn prepared_workspace(temp: &tempfile::TempDir, scope: &ResourceScope) -> PathBuf {
         let workspace_root = temp.path().join("workspaces");
         let workspace = workspace_root
             .join("users")
@@ -692,7 +571,9 @@ mod tests {
         tokio::fs::create_dir_all(&workspace)
             .await
             .expect("prepared caller workspace");
-        (workspace_root, workspace)
+        tokio::fs::canonicalize(workspace)
+            .await
+            .expect("prepared workspace canonical path")
     }
 
     fn process_read_only_permissions() -> MountPermissions {

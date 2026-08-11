@@ -523,12 +523,7 @@ impl RebornScopedSandboxCommandTransport {
         let mut binds = self
             .config
             .mount_sources
-            .prepare_container_binds(
-                &self.config.workspace_root,
-                workspace,
-                &request.scope,
-                request.mounts.as_ref(),
-            )
+            .prepare_container_binds(workspace, &request.scope, request.mounts.as_ref())
             .await?
             .into_iter()
             .map(|bind| bind.into_docker_bind())
@@ -989,6 +984,7 @@ mod tests {
             .join("users")
             .join(TenantUserWorkspaceKey::from_scope(&ResourceScope::system()).digest_segment());
         std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
         let network_socket = temp.path().join("network-broker.sock");
         let secret_socket = temp.path().join("secret-broker.sock");
         let config = RebornSandboxConfig::new(&workspace_root)
@@ -1079,6 +1075,7 @@ mod tests {
             .join("users")
             .join(TenantUserWorkspaceKey::from_scope(&ResourceScope::system()).digest_segment());
         std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
         let config = RebornSandboxConfig::new(&workspace_root)
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();

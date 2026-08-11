@@ -69,17 +69,17 @@ fn prepare_workspace_leaf_no_follow_blocking(
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
     fn path_c_string(path: &Path) -> Result<CString, RuntimeProcessError> {
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            RuntimeProcessError::ExecutionFailed(
-                "sandbox workspace root contains an unsupported NUL byte".to_string(),
-            )
+        CString::new(path.as_os_str().as_bytes()).map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace root contains an unsupported NUL byte: {error}"
+            ))
         })
     }
 
     fn segment_c_string(segment: &str, label: &str) -> Result<CString, RuntimeProcessError> {
-        CString::new(segment).map_err(|_| {
+        CString::new(segment).map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace {label} contains an unsupported NUL byte"
+                "sandbox workspace {label} contains an unsupported NUL byte: {error}"
             ))
         })
     }
@@ -397,6 +397,25 @@ mod tests {
             "missing root must fail closed: {error}"
         );
         assert!(!workspace_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_preparation_preserves_c_string_conversion_cause() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+        let error = prepare_workspace_leaf_no_follow(
+            PathBuf::from(OsString::from_vec(b"workspace\0root".to_vec())),
+            TenantUserWorkspaceKey::from_scope(&caller_scope()),
+            0o700,
+        )
+        .await
+        .expect_err("NUL-containing workspace roots cannot reach openat");
+
+        assert!(
+            format!("{error}").contains("nul byte found"),
+            "CString conversion cause must be retained: {error}"
+        );
     }
 
     #[cfg(unix)]
