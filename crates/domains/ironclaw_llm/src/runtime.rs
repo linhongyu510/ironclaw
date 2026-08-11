@@ -23,7 +23,7 @@
 //!   the override. Callers that rely on a model override must persist it
 //!   through the normal settings path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use async_trait::async_trait;
@@ -177,6 +177,45 @@ impl SwappableLlmProvider {
     fn current(&self) -> Arc<dyn LlmProvider> {
         read(&self.state).inner.clone()
     }
+
+    /// Ensure a tool-capable request is legal for `inner`: when the provider
+    /// that will execute the request cannot serve native deferred tool
+    /// loading for the effective model, fold `deferred_tools` into the
+    /// ordinary `tools` list (deduplicated by name) so promoted tools stay
+    /// available on the wire instead of being dropped or serialized with
+    /// unsupported `defer_loading` flags.
+    ///
+    /// This pins the capability decision and the completion to the same
+    /// inner provider: a concurrent [`Self::swap`] between the gateway's
+    /// `supports_deferred_tool_loading` check and its completion call can no
+    /// longer hand a native-deferred request to a provider that cannot serve
+    /// it.
+    fn deferred_capable_request(
+        &self,
+        inner: &dyn LlmProvider,
+        mut request: ToolCompletionRequest,
+    ) -> ToolCompletionRequest {
+        if request.deferred_tools.is_empty() {
+            return request;
+        }
+        let model = match request.model.as_deref() {
+            Some(model) => model.to_string(),
+            None => inner.active_model_name(),
+        };
+        if inner.supports_deferred_tool_loading(&model) {
+            return request;
+        }
+        let existing: HashSet<&str> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        request
+            .deferred_tools
+            .retain(|tool| !existing.contains(tool.name.as_str()));
+        request.tools.append(&mut request.deferred_tools);
+        request
+    }
 }
 
 #[async_trait]
@@ -213,7 +252,9 @@ impl LlmProvider for SwappableLlmProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.current().complete_with_tools(request).await
+        let inner = self.current();
+        let request = self.deferred_capable_request(&*inner, request);
+        inner.complete_with_tools(request).await
     }
 
     async fn complete_with_tools_streaming(
@@ -221,9 +262,9 @@ impl LlmProvider for SwappableLlmProvider {
         request: ToolCompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.current()
-            .complete_with_tools_streaming(request, sink)
-            .await
+        let inner = self.current();
+        let request = self.deferred_capable_request(&*inner, request);
+        inner.complete_with_tools_streaming(request, sink).await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

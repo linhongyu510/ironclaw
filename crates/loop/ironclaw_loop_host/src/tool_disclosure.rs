@@ -79,9 +79,8 @@ const BRIDGE_CAPABILITY_PREFIX: &str = "ironclaw";
 pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
-/// Provider tool name of the loop's `capability_info` inspector (mirrors
-/// `crate::capability_info::TOOL_NAME`).
-pub(crate) const CAPABILITY_INFO_NAME: &str = "capability_info";
+/// Provider tool name of the loop's `capability_info` inspector.
+pub(crate) use crate::capability_info::TOOL_NAME as CAPABILITY_INFO_NAME;
 
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (

@@ -918,3 +918,37 @@ async fn multi_entry_collection_knobs_round_trip() {
     assert_eq!(last.get(&builtin_provider), Some(&builtin_trust));
     assert_eq!(last.get(&other_provider), Some(&other_trust));
 }
+
+/// `deferred_tool_definitions()` is forwarded through the refreshing wrapper:
+/// it succeeds through the real production factory and never duplicates a
+/// name already advertised in `tool_definitions()`.
+#[tokio::test]
+async fn deferred_tool_definitions_forwarded_through_refreshing_port() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let parts = test_parts(
+        run_context("deferred").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io,
+        None,
+        HashMap::new(),
+        BTreeMap::new(),
+    );
+    let port = create_refreshing_capability_port_for_test(parts)
+        .await
+        .expect("port assembles through the real production factory");
+
+    let tools = port.tool_definitions().expect("tool definitions");
+    let deferred = port
+        .deferred_tool_definitions()
+        .expect("deferred definitions");
+    let tool_names: HashSet<&str> = tools
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect();
+    assert!(
+        deferred
+            .iter()
+            .all(|definition| !tool_names.contains(definition.name.as_str())),
+        "deferred definitions must not duplicate advertised tools: {deferred:?}"
+    );
+}

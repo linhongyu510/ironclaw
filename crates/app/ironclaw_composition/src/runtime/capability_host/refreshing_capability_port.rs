@@ -415,6 +415,10 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         self.current_port()?.tool_definitions()
     }
 
+    fn deferred_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.current_port()?.deferred_tool_definitions()
+    }
+
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,

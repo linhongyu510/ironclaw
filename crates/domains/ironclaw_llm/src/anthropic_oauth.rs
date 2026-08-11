@@ -811,7 +811,11 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn cache_read_discount(&self) -> Decimal {
-        Decimal::from(10)
+        if self.cache_retention == CacheRetention::None {
+            Decimal::ONE
+        } else {
+            Decimal::from(10) // Anthropic: 90% discount (cost = input_rate / 10)
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -1642,6 +1646,65 @@ mod tests {
                 "content": "matches"
             }])
         );
+    }
+
+    #[test]
+    fn beta_header_value_covers_auth_and_deferred_combinations() {
+        let oauth_config = || {
+            let mut config = RegistryProviderConfig::generic(
+                crate::registry::ProviderProtocol::Anthropic,
+                "anthropic_oauth",
+                None,
+                String::new(),
+                "claude-test",
+            );
+            config.oauth_token = Some(SecretString::from("test-token".to_string()));
+            config
+        };
+        let key_config = || {
+            RegistryProviderConfig::generic(
+                crate::registry::ProviderProtocol::Anthropic,
+                "anthropic_oauth",
+                Some(SecretString::from("test-key".to_string())),
+                String::new(),
+                "claude-test",
+            )
+        };
+        let request = |deferred: bool| AnthropicRequest {
+            stream: false,
+            model: "claude-test".to_string(),
+            messages: Vec::new(),
+            system: None,
+            max_tokens: 64,
+            temperature: None,
+            thinking: None,
+            tools: Some(vec![AnthropicTool {
+                name: "tool_search".to_string(),
+                description: "search".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: deferred,
+            }]),
+            tool_choice: None,
+            cache_control: None,
+        };
+
+        let oauth = AnthropicProvider::new(&oauth_config()).expect("oauth provider");
+        let api_key =
+            AnthropicProvider::new_with_api_key(&key_config(), 60).expect("api-key provider");
+
+        assert_eq!(
+            oauth.beta_header_value(&request(true)).as_deref(),
+            Some("advanced-tool-use-2025-11-20,oauth-2025-04-20")
+        );
+        assert_eq!(
+            api_key.beta_header_value(&request(true)).as_deref(),
+            Some("advanced-tool-use-2025-11-20")
+        );
+        assert_eq!(
+            oauth.beta_header_value(&request(false)).as_deref(),
+            Some("oauth-2025-04-20")
+        );
+        assert_eq!(api_key.beta_header_value(&request(false)), None);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -12,7 +12,8 @@ use ironclaw_host_api::ids::{
 };
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    LlmError, LlmProvider, Role, SwappableLlmProvider, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -325,6 +326,13 @@ async fn native_deferred_promotion_keeps_tool_cache_signature_stable() {
         logs_contain("tool_definitions_changed=false"),
         "native deferred promotion must preserve the tool cache signature"
     );
+    drop(requests);
+    let queries = provider.deferred_support_queries.lock().unwrap();
+    assert_eq!(
+        queries.as_slice(),
+        ["host-selected-model", "host-selected-model"],
+        "the gateway must pass the resolved provider model to the deferred capability check"
+    );
 }
 
 #[tokio::test]
@@ -380,6 +388,146 @@ async fn non_native_promotion_merges_hidden_tool_exactly_once() {
             promoted_tool_count, 1,
             "the promoted tool must appear exactly once in the top-level tools array (call {index})"
         );
+    }
+}
+
+#[tokio::test]
+async fn deferred_request_folded_when_reload_swaps_provider_between_check_and_completion() {
+    // Production wires the gateway to a SwappableLlmProvider; a settings
+    // reload can swap the inner provider between the gateway's
+    // supports_deferred_tool_loading check and its completion call. The
+    // wrapper must pin the decision to the provider that actually executes:
+    // a native-deferred request landing on a non-native replacement must be
+    // folded into the ordinary tools list, not dropped from the wire.
+    let replacement = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        tool_stop_reply_with_cache_read("ok", 100_000),
+    ]));
+    let swappable_ref: Arc<Mutex<Option<Arc<SwappableLlmProvider>>>> = Arc::new(Mutex::new(None));
+    let straddle = Arc::new(ReloadStraddleProvider {
+        swappable: Arc::clone(&swappable_ref),
+        replacement: Arc::clone(&replacement) as Arc<dyn LlmProvider>,
+        swapped: AtomicBool::new(false),
+    });
+    let swappable = Arc::new(SwappableLlmProvider::new(straddle as Arc<dyn LlmProvider>));
+    *swappable_ref.lock().unwrap() = Some(Arc::clone(&swappable));
+
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        swappable,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(GatewayCapabilityPort::with_hidden_resolvable_tool_surface()),
+        )
+        .await
+        .unwrap();
+
+    let requests = replacement.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].deferred_tools.is_empty(),
+        "the non-native replacement must not receive native deferred tools"
+    );
+    let hidden_count = requests[0]
+        .tools
+        .iter()
+        .filter(|tool| tool.name == "demo__hidden")
+        .count();
+    assert_eq!(
+        hidden_count, 1,
+        "the promoted tool must stay available after the reload straddle"
+    );
+}
+
+/// First inner of a `SwappableLlmProvider`: answers the deferred capability
+/// query like the native provider, and swaps the wrapper to `replacement`
+/// before the gateway's completion call — deterministically reproducing the
+/// concurrent-reload straddle.
+struct ReloadStraddleProvider {
+    swappable: Arc<Mutex<Option<Arc<SwappableLlmProvider>>>>,
+    replacement: Arc<dyn LlmProvider>,
+    swapped: AtomicBool,
+}
+
+impl ReloadStraddleProvider {
+    fn swappable(&self) -> Arc<SwappableLlmProvider> {
+        self.swappable
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .expect("swappable wired before use")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ReloadStraddleProvider {
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        if !self.swapped.swap(true, Ordering::SeqCst) {
+            // First query (pre-reload): replace the inner before the
+            // completion call, but answer like the provider the gateway
+            // decided against.
+            self.swappable().swap(Arc::clone(&self.replacement));
+            return true;
+        }
+        self.swappable().supports_deferred_tool_loading(model)
+    }
+
+    fn provider_id(&self) -> String {
+        "reload-straddle".to_string()
+    }
+
+    fn model_name(&self) -> &str {
+        "reload-straddle"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        Decimal::ONE
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        Decimal::ONE
+    }
+
+    fn active_model_name(&self) -> String {
+        "host-selected-model".to_string()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.swappable().complete(request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.swappable().complete_streaming(request, sink).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.swappable().complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.swappable()
+            .complete_with_tools_streaming(request, sink)
+            .await
     }
 }
 
@@ -4945,6 +5093,9 @@ struct ToolAwareProvider {
     plain_response: Mutex<Option<CompletionResponse>>,
     tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
     native_deferred_tools: bool,
+    /// Models the gateway passed to `supports_deferred_tool_loading`, so the
+    /// resolved effective model is pinned rather than silently discarded.
+    deferred_support_queries: Mutex<Vec<String>>,
 }
 
 impl ToolAwareProvider {
@@ -4964,6 +5115,7 @@ impl ToolAwareProvider {
             })),
             tool_responses: Mutex::new(VecDeque::new()),
             native_deferred_tools: false,
+            deferred_support_queries: Mutex::new(Vec::new()),
         }
     }
 
@@ -5024,6 +5176,7 @@ impl ToolAwareProvider {
             plain_response: Mutex::new(None),
             tool_responses: Mutex::new(responses.into()),
             native_deferred_tools: false,
+            deferred_support_queries: Mutex::new(Vec::new()),
         }
     }
 
@@ -5035,7 +5188,11 @@ impl ToolAwareProvider {
 
 #[async_trait]
 impl LlmProvider for ToolAwareProvider {
-    fn supports_deferred_tool_loading(&self, _model: &str) -> bool {
+    fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        self.deferred_support_queries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(model.to_string());
         self.native_deferred_tools
     }
 

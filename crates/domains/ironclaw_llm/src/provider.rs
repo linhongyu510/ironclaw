@@ -752,6 +752,16 @@ pub trait LlmProvider: Send + Sync {
 
     /// Whether the provider keeps deferred definitions in a stable wire array
     /// and loads them through transcript `tool_reference` blocks for `model`.
+    ///
+    /// Native providers must tolerate a tool name present in both `tools` and
+    /// `deferred_tools` (a promoted tool is advertised while its deferred
+    /// definition is still forwarded): the wire `tools` array must contain
+    /// each tool exactly once, with the deferred entry winning so the cached
+    /// prefix stays byte-identical across promotion. Providers that do not
+    /// return `true` must not serialize native deferred-tool fields
+    /// (`defer_loading`, `tool_reference`) on the wire; they may ignore
+    /// `deferred_tools` or fold them into `tools` (deduplicated by name) so
+    /// promoted tools stay callable.
     fn supports_deferred_tool_loading(&self, model: &str) -> bool {
         let _ = model;
         false
