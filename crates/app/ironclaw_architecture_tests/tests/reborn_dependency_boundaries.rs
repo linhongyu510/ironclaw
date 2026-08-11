@@ -781,7 +781,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the retired per-channel enrollment module. Declarations only — admission, dispatch, and
         // storage stay in their owning crates. Count read from this test's
         // failure on the merged branch.
-        ("ironclaw_product_contracts", 16_119),
+        // 16_119 -> 16_132 (2026-08-11): +13 lines for
+        // `session_ingress::BUILTIN_SESSION_SURFACE_ID` and its doc — the
+        // built-in session surface a deployment always has, so the generic
+        // session route never depends on an installed extension. A constant
+        // and its rationale; the fallback logic lives in composition.
+        ("ironclaw_product_contracts", 16_132),
         ("ironclaw_prompt_envelope", 832),
     ];
 
