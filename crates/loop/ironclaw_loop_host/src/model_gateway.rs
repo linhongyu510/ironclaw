@@ -22,6 +22,9 @@ use std::{
     time::Instant,
 };
 
+use crate::tool_disclosure::{
+    CAPABILITY_INFO_NAME, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
+};
 use crate::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -2723,7 +2726,7 @@ fn tool_references_for_result(
     content: &str,
 ) -> Vec<String> {
     match provider_call.provider_tool_name.as_str() {
-        "tool_search" => tool_search_results(content)
+        TOOL_SEARCH_NAME => tool_search_results(content)
             .into_iter()
             .flatten()
             .filter_map(|result| {
@@ -2733,7 +2736,7 @@ fn tool_references_for_result(
                     .map(str::to_string)
             })
             .collect(),
-        "tool_describe" | "tool_call" | "capability_info" => provider_call
+        TOOL_DESCRIBE_NAME | TOOL_CALL_NAME | CAPABILITY_INFO_NAME => provider_call
             .arguments
             .get("name")
             .and_then(serde_json::Value::as_str)

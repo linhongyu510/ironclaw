@@ -415,11 +415,16 @@ impl LlmProvider for FailoverProvider {
     }
 
     fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+        // One request is forwarded to every provider in the group. Each adapter
+        // serves the caller-requested model when the request carries a per-request
+        // override, and its own active model otherwise, so deferred tool loading
+        // is only safe when every provider supports it for both the requested
+        // model and the model it will actually serve on a fallback attempt.
         !self.providers.is_empty()
-            && self
-                .providers
-                .iter()
-                .all(|provider| provider.supports_deferred_tool_loading(model))
+            && self.providers.iter().all(|provider| {
+                provider.supports_deferred_tool_loading(model)
+                    && provider.supports_deferred_tool_loading(provider.model_name())
+            })
     }
 
     fn model_name(&self) -> &str {

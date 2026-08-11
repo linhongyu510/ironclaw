@@ -22,9 +22,10 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::tool_disclosure::{
-    ActiveSet, CapabilityCatalog, DisclosureCaps, PromotedSet, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME, bridge_tool_definitions, canonicalize_json, definition_matches_provider_name,
-    is_bridge_capability_id, is_bridge_name, select_active_set,
+    ActiveSet, CAPABILITY_INFO_NAME, CapabilityCatalog, DisclosureCaps, PromotedSet,
+    TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME, bridge_tool_definitions,
+    canonicalize_json, definition_matches_provider_name, is_bridge_capability_id, is_bridge_name,
+    select_active_set,
 };
 use crate::tool_search::{
     AuthorizedToolSearchIndex, MAX_SEARCH_QUERY_BYTES, definitions_fingerprint,
@@ -42,13 +43,9 @@ const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 /// model's retry can carry the required fields. See `register_describe_first`.
 const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 
-/// Provider tool name of the loop's `capability_info` inspector (mirrors
-/// `crate::capability_info::TOOL_NAME`). Inspecting a deferred
-/// tool via `capability_info` is treated as intent to use it: the target is
-/// disclosed + promoted so it becomes directly callable — the `tool_search` →
-/// `capability_info` → direct-call discovery path.
-const CAPABILITY_INFO_NAME: &str = "capability_info";
-
+/// Decorates the capability port with progressive disclosure: inspecting a
+/// deferred tool via `capability_info` is treated as intent to use it — the
+/// `tool_search` → `capability_info` → direct-call discovery path.
 pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
@@ -228,11 +225,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             &state.catalog,
             &PromotedSet::default(),
             self.caps,
-            &self.allow_set,
+            &self.policy,
         );
         Ok(state
             .catalog
-            .deferred_definitions(&initial, &self.allow_set))
+            .deferred_definitions(&initial, &self.policy))
     }
 
     fn provider_tool_call_capability_ids(

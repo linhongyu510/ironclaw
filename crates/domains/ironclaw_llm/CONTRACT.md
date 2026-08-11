@@ -24,11 +24,11 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `failover.rs` | `FailoverProvider` — tries providers in order with per-provider cooldown |
 | `response_cache.rs` | In-memory LLM response cache with TTL and LRU eviction (keyed by SHA-256) |
 | (cost table moved) | The per-model cost table + usage pricing now lives in `ironclaw_common::llm_costs` (shared by every surface that reports cost). Providers import it as `use ironclaw_common::llm_costs as costs;`. |
-| `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
+| `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
-| `anthropic_oauth.rs` | Anthropic OAuth provider (Claude.ai subscription / OAuth tokens, fallback when no API key) |
+| `anthropic_oauth.rs` | Anthropic provider (OAuth bearer or API-key authentication, deferred tool loading) |
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |

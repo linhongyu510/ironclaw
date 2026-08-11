@@ -108,9 +108,15 @@ fn supports_tool_references(model: &str) -> bool {
 /// Required beta flag to enable OAuth Bearer auth on api.anthropic.com.
 /// Without this header, the API returns 401 "OAuth authentication is currently not supported."
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Required beta flag for `defer_loading` and `tool_reference` blocks in the
+/// Messages API (advanced tool use). Requests serializing deferred tools must
+/// carry this header or the API rejects the unknown parameters.
+const ANTHROPIC_ADVANCED_TOOL_USE_BETA: &str = "advanced-tool-use-2025-11-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 enum AnthropicAuth {
+    /// OAuth token, wrapped in RwLock so it can be updated after a successful
+    /// Keychain refresh (fixes `#1136`: stale token reuse after expiry).
     OAuth(std::sync::RwLock<SecretString>),
     ApiKey(SecretString),
 }
@@ -120,8 +126,7 @@ pub(crate) struct AnthropicProvider {
     client: Client,
     streaming_client: Client,
     stream_idle_timeout: Duration,
-    /// OAuth token, wrapped in RwLock so it can be updated after a successful
-    /// Keychain refresh (fixes #1136: stale token reuse after expiry).
+    /// Credential material and authentication mode for this provider.
     auth: AnthropicAuth,
     provider_id: String,
     model: String,
@@ -148,13 +153,11 @@ impl AnthropicProvider {
                     provider: "anthropic_oauth".to_string(),
                     reason: format!("Failed to build HTTP client: {}", e),
                 })?;
-        let streaming_client = crate::config::hardened_streaming_client_builder()
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("Failed to build streaming HTTP client: {e}"),
-            })?;
-
+        let streaming_client = crate::url_check::build_http_client(
+            &config.provider_id,
+            &config.base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
         let active_model = std::sync::RwLock::new(config.model.clone());
         let base_url = if config.base_url.is_empty() {
             None
@@ -191,16 +194,15 @@ impl AnthropicProvider {
             &config.base_url,
             request_timeout_secs,
         )?;
-        let streaming_client = crate::config::hardened_streaming_client_builder()
-            .build()
-            .map_err(|error| LlmError::RequestFailed {
-                provider: config.provider_id.clone(),
-                reason: format!("Failed to build streaming HTTP client: {error}"),
-            })?;
+        let streaming_client = crate::url_check::build_http_client(
+            &config.provider_id,
+            &config.base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
         Ok(Self {
             client,
             streaming_client,
-            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             auth: AnthropicAuth::ApiKey(api_key),
             provider_id: config.provider_id.clone(),
             model: config.model.clone(),
@@ -266,12 +268,36 @@ impl AnthropicProvider {
         }
     }
 
-    fn authorize(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.auth {
-            AnthropicAuth::OAuth(_) => builder
-                .bearer_auth(self.current_token())
-                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA),
+    /// Comma-joined `anthropic-beta` value for a request, covering the auth
+    /// mode and any deferred-tool features the payload uses.
+    fn beta_header_value(&self, body: &AnthropicRequest) -> Option<String> {
+        let oauth = matches!(self.auth, AnthropicAuth::OAuth(_));
+        let advanced_tool_use = body
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.defer_loading));
+        match (advanced_tool_use, oauth) {
+            (true, true) => Some(format!(
+                "{ANTHROPIC_ADVANCED_TOOL_USE_BETA},{ANTHROPIC_OAUTH_BETA}"
+            )),
+            (true, false) => Some(ANTHROPIC_ADVANCED_TOOL_USE_BETA.to_string()),
+            (false, true) => Some(ANTHROPIC_OAUTH_BETA.to_string()),
+            (false, false) => None,
+        }
+    }
+
+    fn authorize(
+        &self,
+        builder: reqwest::RequestBuilder,
+        beta: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let builder = match &self.auth {
+            AnthropicAuth::OAuth(_) => builder.bearer_auth(self.current_token()),
             AnthropicAuth::ApiKey(api_key) => builder.header("x-api-key", api_key.expose_secret()),
+        };
+        match beta {
+            Some(value) => builder.header("anthropic-beta", value),
+            None => builder,
         }
     }
 
@@ -295,8 +321,9 @@ impl AnthropicProvider {
 
         tracing::debug!(provider = %self.provider_id, "Sending request to Anthropic: {}", url);
 
+        let beta = self.beta_header_value(body);
         let response = self
-            .authorize(self.client.post(&url))
+            .authorize(self.client.post(&url), beta.as_deref())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("Content-Type", "application/json")
             .json(body)
@@ -338,7 +365,10 @@ impl AnthropicProvider {
                         .post(&url)
                         .bearer_auth(fresh_token.expose_secret())
                         .header("anthropic-version", ANTHROPIC_API_VERSION)
-                        .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                        .header(
+                            "anthropic-beta",
+                            beta.as_deref().unwrap_or(ANTHROPIC_OAUTH_BETA),
+                        )
                         .header("Content-Type", "application/json")
                         .json(body)
                         .send()
@@ -527,13 +557,14 @@ impl AnthropicProvider {
         body: &AnthropicRequest,
         oauth_token_override: Option<&str>,
     ) -> Result<reqwest::Response, LlmError> {
+        let beta = self.beta_header_value(body);
         let builder = match oauth_token_override {
-            Some(token) => self
-                .streaming_client
-                .post(url)
-                .bearer_auth(token)
-                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA),
-            None => self.authorize(self.streaming_client.post(url)),
+            Some(token) => self.streaming_client.post(url).bearer_auth(token),
+            None => self.authorize(self.streaming_client.post(url), None),
+        };
+        let builder = match beta {
+            Some(value) => builder.header("anthropic-beta", value),
+            None => builder,
         };
         tokio::time::timeout(
             self.stream_idle_timeout,
@@ -785,7 +816,10 @@ impl LlmProvider for AnthropicProvider {
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         let response = self
-            .authorize(self.client.get(self.models_url()))
+            .authorize(
+                self.client.get(self.models_url()),
+                self.uses_oauth().then_some(ANTHROPIC_OAUTH_BETA),
+            )
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .send()
             .await
@@ -1363,8 +1397,18 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     tracing::warn!("Skipping Tool message without tool_call_id");
                     continue;
                 };
-                // Tool results go into a user message with tool_result blocks
-                if !msg.tool_references.is_empty() {
+                // Tool results go into a user message with tool_result blocks.
+                // A referencing result carries its ToolReference blocks (and
+                // any result text) inside the same ToolResult; both shapes must
+                // flow through the consecutive-tool-result merge below, because
+                // Anthropic requires the results of one assistant turn's
+                // parallel tool calls to sit in a single user message.
+                let mut pending: Vec<AnthropicContentBlock> = if msg.tool_references.is_empty() {
+                    vec![AnthropicContentBlock::ToolResult {
+                        tool_use_id: tool_call_id,
+                        content: AnthropicToolResultContent::Text(msg.content),
+                    }]
+                } else {
                     let blocks = msg
                         .tool_references
                         .into_iter()
@@ -1378,35 +1422,37 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     if !msg.content.is_empty() {
                         blocks.push(AnthropicContentBlock::Text { text: msg.content });
                     }
-                    anthropic_msgs.push(AnthropicMessage {
-                        role: "user".to_string(),
-                        content: AnthropicContent::Blocks(blocks),
-                    });
-                    continue;
-                }
-                let block = AnthropicContentBlock::ToolResult {
-                    tool_use_id: tool_call_id,
-                    content: AnthropicToolResultContent::Text(msg.content),
+                    blocks
                 };
-                // If the last message is already a user message of *only*
-                // tool-result blocks, append to it (Anthropic requires
-                // consecutive tool results in one user message). Crucially, do
-                // not merge into a multimodal user prompt (text + image
-                // blocks) — that would fold a tool result into a different
-                // conversational turn.
+                // If the last message is already a user message of tool-result
+                // blocks, append to it (Anthropic requires consecutive tool
+                // results in one user message). A reference-carrying result may
+                // leave a trailing text block after its ToolResult, so the
+                // merge predicate anchors on the first block rather than
+                // requiring every block to be a ToolResult. Crucially, do not
+                // merge into a multimodal user prompt (text + image blocks) —
+                // that would fold a tool result into a different conversational
+                // turn.
                 if let Some(last) = anthropic_msgs.last_mut()
                     && last.role == "user"
-                    && let AnthropicContent::Blocks(ref mut blocks) = last.content
+                    && let AnthropicContent::Blocks(blocks) = &mut last.content
                     && blocks
-                        .iter()
-                        .all(|b| matches!(b, AnthropicContentBlock::ToolResult { .. }))
+                        .first()
+                        .is_some_and(|b| matches!(b, AnthropicContentBlock::ToolResult { .. }))
+                    && blocks.iter().all(|b| {
+                        matches!(
+                            b,
+                            AnthropicContentBlock::ToolResult { .. }
+                                | AnthropicContentBlock::Text { .. }
+                        )
+                    })
                 {
-                    blocks.push(block);
+                    blocks.append(&mut pending);
                     continue;
                 }
                 anthropic_msgs.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: AnthropicContent::Blocks(vec![block]),
+                    content: AnthropicContent::Blocks(pending),
                 });
             }
         }
@@ -1524,6 +1570,77 @@ mod tests {
             ))
             .expect("tools")[1]["defer_loading"],
             true
+        );
+        let encoded = serde_json::to_value(convert_anthropic_tools(
+            vec![test_tool("tool_search")],
+            vec![test_tool("calendar_list")],
+        ))
+        .expect("tools");
+        assert!(
+            encoded[0].get("defer_loading").is_none(),
+            "ordinary tools must omit defer_loading to keep the cached prefix byte-identical"
+        );
+    }
+
+    #[test]
+    fn parallel_tool_results_with_references_stay_in_one_user_message() {
+        // Anthropic requires the results of one assistant turn's parallel tool
+        // calls to sit in a single user message. A reference-carrying search
+        // result must merge with its sibling result instead of splitting the
+        // turn into consecutive user messages.
+        let messages = vec![
+            ChatMessage::tool_result("call-1", "tool_search", "matches")
+                .with_tool_references(vec!["calendar_list".to_string()]),
+            ChatMessage::tool_result("call-2", "calendar_list", "list"),
+        ];
+        let (_system, anthropic) = convert_messages(messages);
+        let value = serde_json::to_value(anthropic).expect("messages");
+
+        assert_eq!(
+            value.as_array().expect("user messages").len(),
+            1,
+            "both parallel results must land in a single user message: {value}"
+        );
+        assert_eq!(
+            value[0]["content"],
+            serde_json::json!([
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": [{
+                        "type": "tool_reference",
+                        "tool_name": "calendar_list"
+                    }]
+                },
+                {"type": "text", "text": "matches"},
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-2",
+                    "content": "list"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn deferred_tool_reference_to_unknown_tool_is_dropped() {
+        // A `tool_reference` naming a tool absent from `deferred_tools` is a
+        // request the API can reject, so the retain filter is load-bearing:
+        // the result must serialize with no tool_reference block.
+        let message = ChatMessage::tool_result("call-1", "tool_search", "matches")
+            .with_tool_references(vec!["revoked_tool".to_string()]);
+        let mut messages = vec![message];
+        retain_deferred_tool_references(&mut messages, &[test_tool("calendar_list")]);
+        let (_system, anthropic) = convert_messages(messages);
+        let value = serde_json::to_value(anthropic).expect("messages");
+
+        assert_eq!(
+            value[0]["content"],
+            serde_json::json!([{
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "content": "matches"
+            }])
         );
     }
 
@@ -1758,6 +1875,60 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    #[tokio::test]
+    async fn list_models_loopback_projects_data_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let request_line = String::from_utf8_lossy(&request);
+            assert!(
+                request_line.starts_with("GET /v1/models"),
+                "models discovery must target {{base}}/v1/models, got: {request_line}"
+            );
+            let body = r#"{"data":[{"id":"claude-sonnet-4-5"},{"id":"claude-opus-4-5"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write models response");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-test",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        let provider = AnthropicProvider::new(&config).expect("provider");
+        let models = provider.list_models().await.expect("list models");
+        server.await.expect("loopback server");
+
+        assert_eq!(
+            models,
+            vec![
+                "claude-sonnet-4-5".to_string(),
+                "claude-opus-4-5".to_string()
+            ]
+        );
     }
 
     #[tokio::test]

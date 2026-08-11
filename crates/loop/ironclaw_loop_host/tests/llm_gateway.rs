@@ -328,6 +328,62 @@ async fn native_deferred_promotion_keeps_tool_cache_signature_stable() {
 }
 
 #[tokio::test]
+async fn non_native_promotion_merges_hidden_tool_exactly_once() {
+    // Providers without native deferred loading receive deferred definitions
+    // merged into the ordinary `tools` array, deduplicated against the active
+    // name set. A regression in that filter would hand a promoted tool to a
+    // non-Anthropic provider twice in the top-level array.
+    let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        tool_stop_reply_with_cache_read("ok one", 200_000),
+        tool_stop_reply_with_cache_read("ok two", 50_000),
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_hidden_resolvable_tool_surface()),
+        )
+        .await
+        .unwrap();
+
+    let mut promoted = GatewayCapabilityPort::with_hidden_resolvable_tool_surface();
+    promoted
+        .definitions
+        .push(promoted.deferred_definitions[0].clone());
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway
+        .stream_model_with_capabilities(request, Arc::new(promoted))
+        .await
+        .unwrap();
+
+    let requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (index, request) in requests.iter().enumerate() {
+        assert!(
+            request.deferred_tools.is_empty(),
+            "non-native providers must not receive deferred_tools (call {index})"
+        );
+        let promoted_tool_count = request
+            .tools
+            .iter()
+            .filter(|tool| tool.name == "demo__hidden")
+            .count();
+        assert_eq!(
+            promoted_tool_count, 1,
+            "the promoted tool must appear exactly once in the top-level tools array (call {index})"
+        );
+    }
+}
+
+#[tokio::test]
 async fn gateway_replays_search_reference_then_calls_promoted_deferred_tool() {
     let provider = Arc::new(
         ToolAwareProvider::tool_calls(vec![ToolCall {

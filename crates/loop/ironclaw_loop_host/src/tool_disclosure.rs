@@ -74,6 +74,9 @@ const BRIDGE_CAPABILITY_PREFIX: &str = "ironclaw";
 pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
+/// Provider tool name of the loop's `capability_info` inspector (mirrors
+/// `crate::capability_info::TOOL_NAME`).
+pub(crate) const CAPABILITY_INFO_NAME: &str = "capability_info";
 
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
@@ -189,7 +192,7 @@ impl CapabilityCatalog {
     pub(crate) fn deferred_definitions(
         &self,
         initial: &ActiveSet,
-        allow_set: &CapabilityAllowSet,
+        policy: &CapabilitySurfacePolicy,
     ) -> Vec<ProviderToolDefinition> {
         if !initial.deferred {
             return Vec::new();
@@ -199,7 +202,7 @@ impl CapabilityCatalog {
             .iter()
             .map(|definition| definition.name.as_str())
             .collect();
-        self.effective_entries(allow_set)
+        self.effective_entries(policy)
             .filter(|entry| !initial_names.contains(entry.definition.name.as_str()))
             .map(|entry| entry.definition.clone())
             .collect()
