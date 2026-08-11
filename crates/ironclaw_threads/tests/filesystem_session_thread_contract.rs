@@ -47,7 +47,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest, migrate_all_thread_scopes,
 };
-use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
+use tokio::{
+    sync::{Barrier, Mutex, OwnedMutexGuard},
+    time::{Duration, timeout},
+};
 
 fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
     ProviderToolCallReferenceEnvelope {
@@ -4331,6 +4334,340 @@ async fn filesystem_list_threads_recovers_index_row_when_write_precedes_first_li
     );
 }
 
+/// Required-path repair is serialized only with another repair for the same
+/// scope. A slow first reconcile for one sidebar must not hold unrelated
+/// scopes behind it: index declaration itself is idempotent and intentionally
+/// lockless, while repair mutates only the scoped projection rows.
+#[tokio::test]
+async fn filesystem_list_threads_reconciles_unrelated_scopes_independently() {
+    let blocked_scope = scope("index-scope-lock-blocked");
+    let unrelated_scope = scope("index-scope-lock-unrelated");
+    let backend = Arc::new(BlockingScopeReconcileBackend::new(format!(
+        "/agents/{}/",
+        blocked_scope.agent_id.as_str()
+    )));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-scope-lock", "alice");
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+
+    for (scope, thread_id) in [
+        (&blocked_scope, "blocked-scope-thread"),
+        (&unrelated_scope, "unrelated-scope-thread"),
+    ] {
+        seeding_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(thread_id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(thread_id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        seeding_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("seed listing writes the completed migration marker");
+    }
+
+    backend.arm();
+    let restarted = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let blocked_service = Arc::clone(&restarted);
+    let blocked_scope_for_task = blocked_scope.clone();
+    let blocked_listing = tokio::spawn(async move {
+        blocked_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: blocked_scope_for_task,
+                limit: None,
+                cursor: None,
+            })
+            .await
+    });
+    backend.reconcile_entered.wait().await;
+
+    let unrelated = timeout(
+        Duration::from_millis(250),
+        restarted.list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: unrelated_scope,
+            limit: None,
+            cursor: None,
+        }),
+    )
+    .await
+    .expect("unrelated scope must not wait behind another scope's reconcile")
+    .expect("unrelated scope listing succeeds");
+    assert_eq!(unrelated.threads.len(), 1);
+
+    backend.release_reconcile.wait().await;
+    blocked_listing
+        .await
+        .expect("blocked listing task joins")
+        .expect("blocked listing succeeds after release");
+}
+
+/// Reconciliation is a best-effort repair for rows that the listing projection
+/// cannot see. A transient failure while discovering those rows must not turn
+/// an otherwise-readable sidebar page into a hard listing failure.
+#[tokio::test]
+async fn filesystem_list_threads_degrades_to_projected_rows_when_reconcile_fails() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-failure",
+        "alice",
+    );
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-reconcile-failure");
+
+    for id in ["projected-before-failure-a", "projected-before-failure-b"] {
+        seeding_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed migration marker");
+
+    let damaged_path = thread_index_record_path_for_test(&scope, "projected-before-failure-b");
+    let damaged_body = scoped
+        .get(&scope.to_resource_scope(), &damaged_path)
+        .await
+        .unwrap()
+        .expect("seeded index row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &damaged_path,
+            Entry::bytes(damaged_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup removes the damaged row's projection keys");
+
+    // A fresh process reaches the marker-complete reconcile branch. Fail its
+    // bounded directory discovery so the caller must preserve the projected
+    // rows instead of returning the reconcile error.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ListDir)
+            .path("/thread_index")
+            .nth(1)
+            .backend("projection reconcile directory listing fails once"),
+    );
+    let restarted = FilesystemSessionThreadService::new(scoped);
+    let degraded = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("a reconcile failure must degrade to projected listing rows");
+    let degraded_ids: Vec<&str> = degraded
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(degraded_ids.len(), 1);
+    assert!(degraded_ids.contains(&"projected-before-failure-a"));
+    assert!(!degraded_ids.contains(&"projected-before-failure-b"));
+
+    // A best-effort failure is not a completed reconcile. Once the transient
+    // fault is spent, the next list must retry and restore the missing row.
+    let repaired = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("the next list retries the failed reconcile");
+    let repaired_ids: Vec<&str> = repaired
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(repaired_ids.len(), 2);
+    assert!(repaired_ids.contains(&"projected-before-failure-a"));
+    assert!(repaired_ids.contains(&"projected-before-failure-b"));
+}
+
+/// A current-version record can still be invisible when its entry sidecar
+/// loses the ordered keys. Repair must use the shared CAS retry loop rather
+/// than a one-shot conditional put, because a benign concurrent rewrite can
+/// race this best-effort projection repair.
+#[tokio::test]
+async fn filesystem_list_threads_retries_reconcile_projection_repair_after_cas_race() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-cas-race",
+        "alice",
+    );
+    let scope = scope("index-reconcile-cas-race");
+    let thread_id = ThreadId::new("current-version-damaged-row").unwrap();
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    seeding_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("current version damaged row".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed migration marker");
+
+    let index_path = thread_index_record_path_for_test(&scope, thread_id.as_str());
+    let current_body = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("seeded index row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(current_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup removes current row projection keys");
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path(format!("/thread_index/{}.json", thread_id.as_str()))
+            .nth(1)
+            .version_mismatch(),
+    );
+
+    let restarted = FilesystemSessionThreadService::new(scoped);
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("listing retries the projection repair after a CAS race");
+    assert_eq!(listed.threads.len(), 1);
+    assert_eq!(listed.threads[0].thread_id, thread_id);
+}
+
+/// The live reconcile pass intentionally bounds itself at one backend page.
+/// Above that cap it must skip repair without failing the listing, leaving a
+/// damaged row absent until the separate pagewise/background repair exists.
+#[tokio::test]
+async fn filesystem_list_threads_skips_reconcile_for_oversized_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-oversized", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-oversized");
+    let damaged_id = ThreadId::new("thread-oversized-hidden").unwrap();
+
+    for index in 0..Page::MAX_LIMIT {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(format!("thread-oversized-{index:04}")).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(format!("thread {index}")),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(damaged_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("damaged oversized row".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Make the fresh service take its marker-complete reconcile branch instead
+    // of the full migration. Then remove the damaged row's projection keys.
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &thread_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"thread-index-v2".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed completed thread-index migration marker");
+    let damaged_path = thread_index_record_path_for_test(&scope, damaged_id.as_str());
+    let damaged_body = scoped
+        .get(&scope.to_resource_scope(), &damaged_path)
+        .await
+        .unwrap()
+        .expect("damaged row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &damaged_path,
+            Entry::bytes(damaged_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("strip damaged row projection keys");
+
+    let restarted = FilesystemSessionThreadService::new(scoped);
+    let mut listed_ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: Some(200),
+                cursor,
+            })
+            .await
+            .expect("oversized reconcile skip must not fail listing");
+        listed_ids.extend(page.threads.into_iter().map(|record| record.thread_id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    assert_eq!(listed_ids.len(), Page::MAX_LIMIT as usize);
+    assert!(
+        !listed_ids.contains(&damaged_id),
+        "the damaged row must remain unlisted when the oversized scope skips repair"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete() {
     use ironclaw_threads::ListThreadsForScopeRequest;
@@ -5418,6 +5755,17 @@ struct QueryCountingBackend {
     get_count: AtomicUsize,
 }
 
+/// Holds the first reconcile directory scan for one scope so the caller test
+/// can prove another scope's required listing still makes progress.
+struct BlockingScopeReconcileBackend {
+    inner: InMemoryBackend,
+    blocked_scope_path: String,
+    armed: AtomicBool,
+    blocked_once: AtomicBool,
+    reconcile_entered: Arc<Barrier>,
+    release_reconcile: Arc<Barrier>,
+}
+
 struct MigrationRaceBackend {
     inner: InMemoryBackend,
     armed: AtomicBool,
@@ -5459,6 +5807,30 @@ impl QueryCountingBackend {
 
     fn get_count(&self) -> usize {
         self.get_count.load(Ordering::SeqCst)
+    }
+}
+
+impl BlockingScopeReconcileBackend {
+    fn new(blocked_scope_path: String) -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            blocked_scope_path,
+            armed: AtomicBool::new(false),
+            blocked_once: AtomicBool::new(false),
+            reconcile_entered: Arc::new(Barrier::new(2)),
+            release_reconcile: Arc::new(Barrier::new(2)),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn blocks_reconcile_for(&self, path: &VirtualPath) -> bool {
+        self.armed.load(Ordering::SeqCst)
+            && path.as_str().contains(&self.blocked_scope_path)
+            && path.as_str().ends_with("/thread_index")
+            && !self.blocked_once.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -5604,6 +5976,76 @@ impl RootFilesystem for QueryCountingBackend {
         page: &OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         self.query_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for BlockingScopeReconcileBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if self.blocks_reconcile_for(path) {
+            self.reconcile_entered.wait().await;
+            self.release_reconcile.wait().await;
+        }
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         self.inner.query_ordered(path, filter, page).await
     }
 

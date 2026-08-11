@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, ContentType, Entry, FileType, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
-    SortDirection, cas_update,
+    SortDirection, VersionedEntry, cas_update,
 };
 use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
@@ -22,10 +22,10 @@ const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
 const THREAD_INDEX_KNOWN_ROW_MAX: usize = 100_000;
+const THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES: usize = 128;
 const THREAD_INDEX_SUFFIX: &str = ".json";
 const CURRENT_THREAD_INDEX_PROJECTION_VERSION: u32 = 2;
 const THREAD_INDEX_MIGRATION_MARKER_BODY: &[u8] = b"thread-index-v2";
-
 mod projection_repair;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,18 +121,6 @@ where
         if already_declared && self.thread_index_reconciled(&scope_key) {
             return Ok(());
         }
-        let _declaration_guard = self.thread_index_declaration_lock.lock().await;
-        let already_declared = self
-            .ready_thread_index_scopes
-            .lock()
-            .map(|ready| ready.contains(&scope_key))
-            .unwrap_or(false);
-        if already_declared && !required {
-            return Ok(());
-        }
-        if already_declared && self.thread_index_reconciled(&scope_key) {
-            return Ok(());
-        }
         // The listing projection is declared once per mount at the `/threads`
         // alias root, not per scope. Ancestor-prefix resolution lets the
         // per-scope `thread_index_root` query below still find it.
@@ -147,63 +135,70 @@ where
         .await?;
         if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
             ready.insert(scope_key.clone());
-            evict_entry_over_limit(&mut ready, 128, &scope_key);
+            evict_entry_over_limit(&mut ready, THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES, &scope_key);
         }
-        if required {
+        if !required {
+            return Ok(());
+        }
+
+        let scope_lock = self.thread_index_reconcile_lock(&scope_key);
+        let _scope_guard = scope_lock.lock().await;
+        if self.thread_index_reconciled(&scope_key) {
+            return Ok(());
+        }
+
+        let repair_succeeded = if !self.thread_index_migration_complete(scope).await? {
             let marker = thread_index_migration_marker_path(scope)?;
+            if let Err(error) = self.migrate_thread_index_for_scope(scope).await {
+                if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
+                    ready.remove(&scope_key);
+                }
+                return Err(error);
+            }
+            self.filesystem
+                .put(
+                    &scope.to_resource_scope(),
+                    &marker,
+                    Entry::bytes(THREAD_INDEX_MIGRATION_MARKER_BODY.to_vec()),
+                    CasExpectation::Any,
+                )
+                .await?;
             if !self.thread_index_migration_complete(scope).await? {
-                if let Err(error) = self.migrate_thread_index_for_scope(scope).await {
-                    if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
-                        ready.remove(&scope_key);
-                    }
-                    return Err(error);
-                }
-                self.filesystem
-                    .put(
-                        &scope.to_resource_scope(),
-                        &marker,
-                        Entry::bytes(THREAD_INDEX_MIGRATION_MARKER_BODY.to_vec()),
-                        CasExpectation::Any,
-                    )
-                    .await?;
-                if !self.thread_index_migration_complete(scope).await? {
-                    return Err(SessionThreadError::Backend(
-                        "thread index migration marker failed exact readback".to_string(),
-                    ));
-                }
-            } else if let Err(error) = self.reconcile_thread_index_projection(scope).await {
-                // Best-effort by design: this repairs rows the listing cannot
-                // see anyway. Before this pass a scope with its marker written
-                // did no further I/O here and could not fail, so propagating a
-                // transient storage error would turn a listing that used to
-                // succeed into a failure. Degrade to the rows we can project
-                // and let the next process start retry.
-                // `debug!`, not `warn!`: background diagnostics must not reach
-                // the REPL/TUI display.
-                tracing::debug!(
-                    error = %error,
-                    "thread index projection reconcile failed; listing continues with projected rows"
-                );
+                return Err(SessionThreadError::Backend(
+                    "thread index migration marker failed exact readback".to_string(),
+                ));
             }
-            if let Ok(mut reconciled) = self.reconciled_thread_index_scopes.lock() {
-                reconciled.insert(scope_key.clone());
-                evict_entry_over_limit(&mut reconciled, 128, &scope_key);
+            true
+        } else {
+            match self.reconcile_thread_index_projection(scope).await {
+                Ok(()) => true,
+                Err(error) => {
+                    // Best-effort by design: this repairs rows the listing
+                    // cannot see anyway. Before this pass a scope with its
+                    // marker written did no further I/O here and could not
+                    // fail, so propagating a transient storage error would
+                    // turn a listing that used to succeed into a failure.
+                    // Degrade to the rows we can project, but do not cache a
+                    // failed repair as complete: a later list retries it.
+                    // `debug!`, not `warn!`: background diagnostics must not
+                    // reach the REPL/TUI display.
+                    tracing::debug!(
+                        error = %error,
+                        "thread index projection reconcile failed; listing continues with projected rows"
+                    );
+                    false
+                }
             }
+        };
+        if repair_succeeded && let Ok(mut reconciled) = self.reconciled_thread_index_scopes.lock() {
+            reconciled.insert(scope_key.clone());
+            evict_entry_over_limit(
+                &mut reconciled,
+                THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES,
+                &scope_key,
+            );
         }
         Ok(())
-    }
-
-    /// Whether this process has already run required-path repair for
-    /// `scope_key` at least once. Kept separate from the durable migration
-    /// marker (see the field doc on `reconciled_thread_index_scopes`): the
-    /// marker can already be complete on disk from a previous process, and
-    /// gating on it directly would let the reconcile step be skipped forever
-    /// once an optional call has declared the scope in this process.
-    fn thread_index_reconciled(&self, scope_key: &str) -> bool {
-        self.reconciled_thread_index_scopes
-            .lock()
-            .map(|reconciled| reconciled.contains(scope_key))
-            .unwrap_or(false)
     }
 
     fn thread_index_record(stored: &StoredThreadRecord) -> ThreadIndexRecord {
@@ -497,16 +492,11 @@ where
         limit: usize,
     ) -> Result<(Vec<ThreadIndexRecord>, bool), SessionThreadError> {
         self.ensure_thread_index_query(scope, true).await?;
-        let root = thread_index_root(scope)?;
-        let mut page = OrderedPage::new(
-            thread_index_name()?,
-            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
-            thread_index_key(THREAD_ID_INDEX_KEY)?,
-            SortDirection::Ascending,
+        let mut page = Self::thread_index_ordered_page(
             u32::try_from(limit.saturating_add(1))
                 .unwrap_or(Page::MAX_LIMIT)
                 .min(Page::MAX_LIMIT),
-        );
+        )?;
         if let Some(cursor) = cursor {
             let cursor = self.decode_thread_index_cursor(scope, cursor).await?;
             page = page.after(OrderedQueryCursor {
@@ -514,18 +504,7 @@ where
                 tie_breaker: IndexValue::Text(cursor.thread_id),
             });
         }
-        let rows = self
-            .filesystem
-            .query_ordered(
-                &scope.to_resource_scope(),
-                &root,
-                &Filter::Eq {
-                    key: thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
-                    value: IndexValue::Text(thread_index_cache_key(scope)),
-                },
-                &page,
-            )
-            .await?;
+        let rows = self.query_thread_index_rows(scope, &page).await?;
         let has_more = rows.len() > limit;
         let records = rows
             .into_iter()
@@ -536,6 +515,38 @@ where
         // explicit migration/repair path; rereading every source row here
         // turns each user-facing page into an N+1 storage operation.
         Ok((records, has_more))
+    }
+
+    /// The canonical ordered page shape for the thread-listing projection.
+    pub(super) fn thread_index_ordered_page(limit: u32) -> Result<OrderedPage, SessionThreadError> {
+        Ok(OrderedPage::new(
+            thread_index_name()?,
+            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+            thread_index_key(THREAD_ID_INDEX_KEY)?,
+            SortDirection::Ascending,
+            limit,
+        ))
+    }
+
+    /// Query thread-listing projection rows for one scope.
+    pub(super) async fn query_thread_index_rows(
+        &self,
+        scope: &ThreadScope,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, SessionThreadError> {
+        let root = thread_index_root(scope)?;
+        self.filesystem
+            .query_ordered(
+                &scope.to_resource_scope(),
+                &root,
+                &Filter::Eq {
+                    key: thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+                    value: IndexValue::Text(thread_index_cache_key(scope)),
+                },
+                page,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn decode_thread_index_cursor(

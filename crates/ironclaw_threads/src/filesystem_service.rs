@@ -42,7 +42,7 @@ pub use transcript_migration::{LegacyAppendMigrationReport, TranscriptMigrationR
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
@@ -178,7 +178,10 @@ where
     /// `tenant:user` — the pair the alias resolves through. Keeps thread create
     /// off the index-DDL path after a mount's first thread.
     ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
-    thread_index_declaration_lock: tokio::sync::Mutex<()>,
+    /// Ephemeral admission locks for required migration/reconcile work. The
+    /// declaration path deliberately remains lockless because index
+    /// declaration is idempotent; only per-scope repair needs serialization.
+    thread_index_reconcile_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -207,7 +210,7 @@ where
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
             reconciled_thread_index_scopes: Mutex::new(HashSet::new()),
             ready_index_mounts: Mutex::new(HashSet::new()),
-            thread_index_declaration_lock: tokio::sync::Mutex::new(()),
+            thread_index_reconcile_locks: Mutex::new(HashMap::new()),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }

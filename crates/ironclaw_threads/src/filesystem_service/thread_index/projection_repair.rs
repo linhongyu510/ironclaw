@@ -11,25 +11,56 @@
 //! repair work, the same concern `startup_migration` and `transcript_migration`
 //! own for their projections.
 
-use ironclaw_filesystem::{
-    CasExpectation, FileType, Filter, IndexValue, OrderedPage, Page, RootFilesystem, SortDirection,
-};
+use ironclaw_filesystem::{CasApply, FileType, Page, RootFilesystem, cas_update};
 use ironclaw_host_api::ids::ThreadId;
 
 use crate::{FilesystemSessionThreadService, SessionThreadError, ThreadScope};
 
 use super::{
-    CURRENT_THREAD_INDEX_PROJECTION_VERSION, THREAD_ACTIVITY_SORT_KEY, THREAD_ID_INDEX_KEY,
-    THREAD_INDEX_SUFFIX, THREAD_SCOPE_INDEX_KEY, ThreadIndexRecord, thread_activity_index_spec,
-    thread_index_cache_key, thread_index_key, thread_index_name, thread_index_record_path,
+    CURRENT_THREAD_INDEX_PROJECTION_VERSION, THREAD_INDEX_SUFFIX, ThreadIndexRecord,
+    no_op_thread_index_record, thread_activity_index_spec, thread_index_record_path,
     thread_index_root,
 };
-use crate::filesystem_service::{deserialize, invalid_path, is_not_found};
+use crate::filesystem_service::{deserialize, invalid_path, is_not_found, map_cas_error};
 
 impl<F> FilesystemSessionThreadService<F>
 where
     F: RootFilesystem,
 {
+    /// Whether this process has already run required-path repair for
+    /// `scope_key` at least once. Kept separate from the durable migration
+    /// marker (see the field doc on `reconciled_thread_index_scopes`): the
+    /// marker can already be complete on disk from a previous process, and
+    /// gating on it directly would let the reconcile step be skipped forever
+    /// once an optional call has declared the scope in this process.
+    pub(super) fn thread_index_reconciled(&self, scope_key: &str) -> bool {
+        self.reconciled_thread_index_scopes
+            .lock()
+            .map(|reconciled| reconciled.contains(scope_key))
+            .unwrap_or(false)
+    }
+
+    /// Returns the short-lived lock for one scope's required repair path.
+    /// Weak entries let the registry shed idle scopes without a separate cache
+    /// eviction policy; active callers keep the `Arc` alive through their
+    /// awaitable repair work.
+    pub(super) fn thread_index_reconcile_lock(
+        &self,
+        scope_key: &str,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .thread_index_reconcile_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(scope_key).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(scope_key.to_string(), std::sync::Arc::downgrade(&lock));
+        lock
+    }
+
     /// Repair rows the listing projection cannot see, when there are any.
     ///
     /// Discovery cannot run through the projection, because a damaged row is
@@ -108,40 +139,18 @@ where
         &self,
         scope: &ThreadScope,
     ) -> Result<usize, SessionThreadError> {
-        let root = thread_index_root(scope)?;
-        let page = OrderedPage::new(
-            thread_index_name()?,
-            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
-            thread_index_key(THREAD_ID_INDEX_KEY)?,
-            SortDirection::Ascending,
-            Page::MAX_LIMIT,
-        );
-        let rows = self
-            .filesystem
-            .query_ordered(
-                &scope.to_resource_scope(),
-                &root,
-                &Filter::Eq {
-                    key: thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
-                    value: IndexValue::Text(thread_index_cache_key(scope)),
-                },
-                &page,
-            )
-            .await?;
+        let page = Self::thread_index_ordered_page(Page::MAX_LIMIT)?;
+        let rows = self.query_thread_index_rows(scope, &page).await?;
         Ok(rows.len())
     }
 
     /// Rewrite one index row so the ordered projection picks it up again.
     ///
-    /// Writes the entry through `put` rather than the usual merge helper on
-    /// purpose. `cas_update` skips the write whenever the decoded snapshot
-    /// equals what it read, and that comparison sees only the record body,
-    /// never the entry's indexed sidecar. A row whose body already matches a
-    /// rebuild but whose keys are gone would take that no-op path and stay
-    /// invisible while the repair reported success. Writing the entry directly
-    /// keeps recovery independent of body equality, so it holds for every way a
-    /// row can lose its keys rather than only for bodies that predate
-    /// `projection_schema_version`.
+    /// Uses the shared bounded CAS helper so a concurrent index-row writer is
+    /// never clobbered. `CasApply::force_write` intentionally bypasses only
+    /// the decoded-body equality fast-path: entry sidecars are not represented
+    /// in `ThreadIndexRecord`, so a row whose body already matches but whose
+    /// indexed projection keys are gone still needs a physical rewrite.
     async fn restore_thread_index_projection(
         &self,
         scope: &ThreadScope,
@@ -155,21 +164,17 @@ where
         else {
             return Ok(());
         };
-        let mut record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
+        let record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
         // A row whose body disagrees with its own path is not ours to rewrite;
         // stale and cross-scope rows belong to the explicit migration.
         if record.record.scope != *scope || record.record.thread_id != *thread_id {
             return Ok(());
         }
-        // The ordered projection needs every key the spec declares
-        // (`scope_key`, `activity_sort`, `thread_id`), not just the partition
-        // key: `query_ordered` filters on `scope_key` but sorts and paginates
-        // on the other two, so a row missing either of them is just as
-        // invisible to listing as one missing `scope_key` outright. Comparing
-        // against what a fresh rebuild would set — rather than only checking
-        // presence — also catches a row whose stored value has drifted from
-        // what the current record would produce (e.g. a stale `activity_sort`
-        // left behind by a body-only write).
+        // Selective repair matters: one missing projection row should not
+        // rewrite every otherwise-valid row in the bounded scope. The CAS loop
+        // below takes a fresh read before writing, so this precheck only admits
+        // rows whose sidecars are currently proven stale; it is not itself a
+        // read-modify-write operation.
         let rebuilt = Self::thread_index_entry(&record)?;
         let projection_current = thread_activity_index_spec()?
             .keys
@@ -178,16 +183,47 @@ where
         if projection_current {
             return Ok(());
         }
-        record.projection_schema_version = CURRENT_THREAD_INDEX_PROJECTION_VERSION;
-        self.filesystem
-            .put(
-                &scope.to_resource_scope(),
-                &path,
-                Self::thread_index_entry(&record)?,
-                CasExpectation::Version(versioned.version),
-            )
-            .await?;
-        self.mark_thread_index_known(scope, thread_id);
+        let resource_scope = scope.to_resource_scope();
+        let scope_for_retry = scope.clone();
+        let thread_id_for_retry = thread_id.clone();
+        let repaired = cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
+            |record: &ThreadIndexRecord| Self::thread_index_entry(record),
+            |current: Option<ThreadIndexRecord>| {
+                let scope = scope_for_retry.clone();
+                let thread_id = thread_id_for_retry.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Ok(CasApply::no_op(
+                            no_op_thread_index_record(scope, thread_id),
+                            false,
+                        ));
+                    };
+                    // A row whose body disagrees with its own path is not ours
+                    // to rewrite; stale and cross-scope rows belong to the
+                    // explicit migration.
+                    if record.record.scope != scope || record.record.thread_id != thread_id {
+                        return Ok(CasApply::no_op(record, false));
+                    }
+                    // The CAS helper intentionally passes only the decoded
+                    // record to `apply`; entry-sidecar metadata is rebuilt by
+                    // `encode`. The precheck admitted only a row whose
+                    // sidecar is stale, so force-write it without treating
+                    // body equality as proof that its ordered keys are
+                    // current.
+                    record.projection_schema_version = CURRENT_THREAD_INDEX_PROJECTION_VERSION;
+                    Ok(CasApply::force_write(record, true))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)?;
+        if repaired {
+            self.mark_thread_index_known(scope, thread_id);
+        }
         Ok(())
     }
 }
