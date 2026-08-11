@@ -39,6 +39,17 @@ pub const RENDER_SUGGESTIONS_CAPABILITY_ID: &str = "builtin.render_suggestions";
 const MIN_CARDS: usize = 1;
 const MAX_CARDS: usize = 8;
 
+// Mirror the `maxLength` values declared in
+// `schemas/builtin/render_suggestions.input.v1.json` (see `schemas.rs`) —
+// the JSON schema is documentation for the model's tool-calling contract
+// only; nothing validates a dispatch's `input` against it server-side, so
+// these are the actual enforcement and must stay in sync with the schema.
+const MAX_TITLE_LEN: usize = 200;
+const MAX_DESCRIPTION_LEN: usize = 500;
+const MAX_EXTENSION_ID_LEN: usize = 128;
+const MAX_SUGGESTED_PROMPT_LEN: usize = 2000;
+const MAX_CATEGORY_LEN: usize = 100;
+
 const DESCRIPTION: &str = "Finish this suggestion-generation run by submitting the automation suggestion cards you decided on. This is the ONLY way to finish: a reply without calling this tool is recorded as a failed generation. Call it exactly once with your final list of 3 to 6 cards.";
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +126,13 @@ impl FirstPartyCapabilityHandler for RenderSuggestionsHandler {
                 ],
             ));
         }
+        let length_issues = card_length_issues(&input.cards);
+        if !length_issues.is_empty() {
+            return Err(FirstPartyCapabilityError::invalid_input_issues(
+                "render_suggestions input failed validation",
+                length_issues,
+            ));
+        }
         let card_count = input.cards.len();
         self.hook
             .record_cards(&request.scope, input.cards)
@@ -144,6 +162,34 @@ impl RenderSuggestionsHook for UnavailableRenderSuggestionsHook {
             reason: "render_suggestions hook is not wired".to_string(),
         })
     }
+}
+
+/// Byte-length bounds on every card string field before persistence — the
+/// card-count check above bounds fan-out, but nothing previously bounded an
+/// individual field's size (PR review: coderabbitai).
+fn card_length_issues(cards: &[SuggestionCard]) -> Vec<DispatchInputIssue> {
+    let mut issues = Vec::new();
+    for (index, card) in cards.iter().enumerate() {
+        let mut check = |field: &'static str, value: &str, max_len: usize| {
+            if value.len() > max_len {
+                issues.push(
+                    DispatchInputIssue::new(
+                        format!("cards[{index}].{field}"),
+                        DispatchInputIssueCode::InvalidValue,
+                    )
+                    .expected(format!("at most {max_len} bytes")),
+                );
+            }
+        };
+        check("title", &card.title, MAX_TITLE_LEN);
+        check("description", &card.description, MAX_DESCRIPTION_LEN);
+        check("suggested_prompt", &card.suggested_prompt, MAX_SUGGESTED_PROMPT_LEN);
+        check("category", &card.category, MAX_CATEGORY_LEN);
+        if let Some(extension_id) = &card.extension_id {
+            check("extension_id", extension_id, MAX_EXTENSION_ID_LEN);
+        }
+    }
+    issues
 }
 
 fn map_hook_error(error: RenderSuggestionsHookError) -> FirstPartyCapabilityError {
@@ -298,6 +344,29 @@ mod tests {
             .expect_err("more than 8 cards must fail");
 
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+        assert!(hook.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_card_field_is_rejected_before_the_hook() {
+        let hook = Arc::new(FakeHook::new(Ok(())));
+        let handler = RenderSuggestionsHandler { hook: hook.clone() };
+        let mut oversized_card = card("Triage inbox");
+        oversized_card["title"] = json!("x".repeat(MAX_TITLE_LEN + 1));
+
+        let error = handler
+            .dispatch(sample_request(json!({ "cards": [oversized_card] })))
+            .await
+            .expect_err("oversized title must fail");
+
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+            panic!("expected Dispatch variant");
+        };
+        let Some(DispatchFailureDetail::InvalidInput { issues }) = detail.as_deref() else {
+            panic!("expected InvalidInput detail, got {detail:?}");
+        };
+        assert!(issues.iter().any(|issue| issue.path == "cards[0].title"));
         assert!(hook.seen.lock().unwrap().is_empty());
     }
 

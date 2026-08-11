@@ -238,12 +238,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "type": "object",
                         "properties": {
                             "id": { "type": "string", "format": "uuid", "description": "A fresh UUID you generate for this card." },
-                            "title": { "type": "string", "minLength": 1 },
-                            "description": { "type": "string", "minLength": 1 },
-                            "extension_id": { "type": "string", "description": "The extension this suggestion is about, if any." },
+                            "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+                            "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+                            "extension_id": { "type": "string", "maxLength": 128, "description": "The extension this suggestion is about, if any." },
                             "requires_connection": { "type": "boolean", "description": "True if the user must connect/authorize the extension before this suggestion can run." },
-                            "suggested_prompt": { "type": "string", "minLength": 1, "description": "The exact message to submit on the user's behalf if they click this card." },
-                            "category": { "type": "string", "minLength": 1 }
+                            "suggested_prompt": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "The exact message to submit on the user's behalf if they click this card." },
+                            "category": { "type": "string", "minLength": 1, "maxLength": 100 }
                         },
                         "required": ["id", "title", "description", "requires_connection", "suggested_prompt", "category"],
                         "additionalProperties": false
