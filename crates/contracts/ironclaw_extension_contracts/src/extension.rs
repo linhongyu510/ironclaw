@@ -2,8 +2,8 @@
 //!
 //! Declarative manifest data remains owned by `ironclaw_extension_registry`; this
 //! module defines the in-process callable shape a host publishes after loading
-//! and binding an extension. The callable facets are the existing
-//! [`ToolAdapter`] and [`ChannelAdapter`] contracts.
+//! and binding an extension. The callable facets are [`ToolAdapter`] and the
+//! channel's optional [`ChannelSurfaces`] capability set.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

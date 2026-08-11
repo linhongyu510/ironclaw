@@ -1,11 +1,17 @@
 # Reply and delivery: two axes for channel output
 
-**Status:** proposed · **Date:** 2026-08-11 · **Follows:** the unified channel
-model (`2026-08-10-unified-channel-model.md`), which unified the *pipeline*.
-This reshapes the *contract* that pipeline drives.
+**Status:** implemented with dated amendments below · **Date:** 2026-08-11 ·
+**Follows:** the unified channel model
+(`2026-08-10-unified-channel-model.md`), which unified the *pipeline*. This
+reshapes the *contract* that pipeline drives.
 
-**Audience:** anyone touching `ChannelAdapter`, extension lifecycle, the
-delivery coordinator, or the projection stream.
+**Audience:** anyone touching the channel capability contracts, extension
+lifecycle, the delivery coordinator, or the projection stream.
+
+**Implementation amendment (2026-08-11):** the reply/delivery split landed,
+but implementation work disproved the post-ack attachment proposal in §7.
+The dated amendments at §§4.4, 5, 7, 7.4, 9, and 10 are authoritative over
+the preserved proposal text.
 
 ---
 
@@ -209,7 +215,12 @@ the cursor; it does not own it. What a channel legitimately owns is its
 That is the piece with no home today, which is why the browser's half lives in
 the WebUI frontend.
 
-### 4.4 Open: verify vs own
+### 4.4 Decision: verify, do not own
+
+> **Amended 2026-08-11 — settled as verify.** `StreamDelivered` records the
+> projection cursor the turn pipeline already wrote. The delivery coordinator
+> verifies and reports that durable evidence; it does not take ownership of
+> transcript/projection persistence or disturb replay.
 
 Should `Stream` **verify** the append (read the cursor the turn already wrote)
 or **own** it (move the assistant-message append out of the turn pipeline)?
@@ -222,8 +233,16 @@ interface does not change if the write moves later.
 
 ## 5. Adapter traits
 
-Each trait pairs with its manifest section, so declaration and code cannot
-disagree.
+> **Amended 2026-08-11 — agreement is now enforced, not merely possible.**
+> Pairing a trait with a manifest section did not by itself prevent the
+> `ChannelSurfaces` options from drifting. `check_binding` now checks each axis
+> at activation: vendor/webhook ingress requires `ChannelIngress`, message
+> reply requires `ChannelReply`, and delivery requires `ChannelDelivery`;
+> authenticated-session ingress and stream reply require their adapter halves
+> to be absent because the host owns them. The regression is pinned by
+> `ironclaw_extension_host::entrypoint::tests::each_channel_section_must_have_exactly_its_implementing_half`
+> (with the host-owned absence cases pinned by
+> `a_stream_reply_and_session_ingress_must_bind_no_half`).
 
 ```rust
 trait ChannelIngress  { async fn receive(&self, verified) -> InboundOutcome; }
@@ -231,10 +250,10 @@ trait ChannelReply    { async fn send_reply(&self, envelope, egress) -> Report; 
 trait ChannelDelivery { async fn deliver(&self, envelope, egress) -> Report; }
 ```
 
-**Eleven methods on one trait → three across three traits.** Web-app
-implements `ChannelIngress` + `ChannelDelivery` and **not** `ChannelReply` —
-because `transport = "stream"` means the host publishes and the adapter is
-never called. That absence is now meaningful rather than a mystery.
+**Eleven methods on one trait → three across three traits.** Web-app implements
+only `ChannelDelivery`: `authenticated_session` means the host normalizes
+ingress, and `transport = "stream"` means the host publishes the reply. Both
+missing halves are meaningful rather than a mystery.
 
 ---
 
@@ -271,7 +290,44 @@ implementor.
 
 ---
 
-## 7. Decision — `receive` is async; the attachment fetch moves *later*
+## 7. Superseded proposal — `receive` is async; attachment fetch stays pre-ack
+
+> **Amended 2026-08-11 — complete messages won.** The owner declined the
+> refs/post-ack design after measuring the live path. Both old adapter
+> callbacks already ran before the durable acceptance commit, so resolving
+> attachments inside `receive` does **not** move or lengthen the pre-ack window
+> relative to the code it replaces. The actual order is:
+>
+> 1. verify/bound the request and construct manifest-restricted egress;
+> 2. `ChannelIngress::receive` parses and resolves attachment bytes and any
+>    conversation context through that egress;
+> 3. the host sanitizes context, validates exact descriptor/byte agreement and
+>    budgets, and runs inbound policy;
+> 4. the host durably accepts the message (idempotency, binding, turn submit,
+>    and attachment landing); then
+> 5. the router returns 2xx.
+>
+> The prior `fetch_attachment`/`fetch_conversation_context` callbacks occupied
+> step 2 as well, between parse and `accept_prepared_user_message`. Ack-after-
+> commit and retry semantics are unchanged.
+>
+> `[channel.attachments]` was deleted because neither shipped transfer is a
+> generic request template. Telegram performs `getFile` and then downloads a
+> response-derived, path-validated suffix; Slack follows a payload-derived
+> absolute URL and must reject HTML error bodies returned with HTTP 200. Most
+> of both implementations validates untrusted vendor responses. Encoding those
+> protocols — especially Telegram's path-traversal defense — as a TOML
+> validation DSL would be less reviewable and less safe than keeping them in
+> package Rust.
+>
+> Conversation context is also not analogous to an attachment reference: the
+> context *is* the content. There is no cheap ref to commit first, and fetching
+> it after admission would make the current turn answer without the shared
+> messages that make questions such as “can you check?” meaningful. It is
+> therefore completed by `receive` too.
+
+The text below records the original post-ack proposal and its reasoning; it is
+retained as decision history and superseded by the amendment above.
 
 `inbound` is synchronous today, which is an artificial constraint. Make it
 async. But **do not fold attachment fetching into it** — and the obvious
@@ -330,7 +386,12 @@ ahead of the commit.
 
 `fetch_conversation_context` follows the same analysis.
 
-### 7.4 The cost to design carefully
+### 7.4 Moot: no unresolved-attachment window
+
+> **Amended 2026-08-11.** Because `receive` returns complete attachments and
+> the durable accept still lands their bytes atomically with the message, the
+> proposed unresolved window does not exist. No wait/backfill behavior is
+> required.
 
 Bytes landing after submission means the turn must tolerate briefly
 unresolved attachments. Refs are committed, so nothing is lost if a fetch
@@ -391,27 +452,29 @@ path.
 | `DeliveryIntent` (11 variants) | `OutboundRoute` + `ReplyKind` |
 | `NoDelivery` for streaming | `Delivered { via: Projection, cursor }` |
 | `activate` / `cleanup` | `[channel.ingress.registration]` recipe |
-| `fetch_attachment` / `fetch_conversation_context` | `[channel.attachments]` recipe, post-ack |
+| `fetch_attachment` / `fetch_conversation_context` callbacks | one complete async `ChannelIngress::receive`, pre-commit through restricted egress |
 | 3 notification-setup methods | host-owned registrations |
 
 ---
 
 ## 10. Open questions
 
-1. **§8 placement.** Do per-user delivery registrations live with credential
-   accounts (`ironclaw_auth`) or as an `ironclaw_outbound` record type? They
-   are credential-shaped but delivery-scoped. *Owner call.*
-2. **§4.4** verify vs own for the `Stream` transport.
-3. **§7.4** behavior for a turn whose attachment bytes have not landed yet.
-4. **§4.1 audit shape.** Full attempt row for a `Stream` delivery, or a
+1. **§4.1 audit shape.** Full attempt row for a `Stream` delivery, or a
    lighter marker on the browser's high-traffic path?
-5. **Third transport.** A channel that streams but cannot subscribe itself
+2. **Third transport.** A channel that streams but cannot subscribe itself
    (a third-party websocket the host pushes chunks into) would need
    `PushStreaming`. Not built now; the enums are shaped so adding it is not a
    rewrite.
 
 **Settled** (2026-08-11): `ReplyKind::Prompt` stays content with the router
-deciding its axis (§1.1); two transport enums rather than one (§3).
+deciding its axis (§1.1); two transport enums rather than one (§3); stream
+evidence verifies the existing projection cursor (§4.4); complete inbound
+attachments/context stay pre-commit (§7); and delivery registrations live in
+`ironclaw_auth`, not `ironclaw_outbound`. Both candidate owners were already
+reachable from all consumers, so the tie-break was the outgoing edge: the
+adapter-facing registration view belongs in `ironclaw_extension_contracts`,
+which auth already depends on and outbound does not. Semantically, a per-user,
+revocable, settings-listed delivery grant is credential-shaped.
 
 ---
 
@@ -426,6 +489,6 @@ both unreviewable.
 | 1 | `OutboundRoute` + terminal outcome for `Stream` (§3, §4) | small | low — closes the audit hole, kills the no-op |
 | 2 | Delete `activate`/`cleanup` → ingress-registration recipe (§6) | small | low — one channel affected |
 | 3 | Manifest sections replace the booleans (§2) | medium | low — mechanical, gate-checked |
-| 4 | Async `receive` + post-ack declarative fetch (§7) | medium | medium — needs §7.4 decided |
+| 4 | Async `receive` returns complete attachments/context (§7 amendment) | medium | medium — vendor I/O remains in the existing pre-ack window |
 | 5 | Host-owned registrations (§8) | large | medium — persisted data moves |
 | 6 | Split into three traits (§5) | mechanical | low — after 1-5 |

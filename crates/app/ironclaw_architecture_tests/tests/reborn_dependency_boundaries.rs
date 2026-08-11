@@ -654,7 +654,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // bounds). Declarations and shape validation only; dispatch lives in
         // ironclaw_assistant and behavior behind each adapter. Count read
         // from this test's failure on the merged branch.
-        ("ironclaw_extension_contracts", 8_157),
+        // 8_157 -> 8_594 (2026-08-11, channel capability contract): the
+        // ingress/reply/delivery descriptor axes and transport vocabulary,
+        // three optional capability traits, complete inbound
+        // `NormalizedAttachment`/conversation-context DTOs, declarative
+        // ingress registration recipes, and host-owned delivery-registration
+        // view replace booleans, one eleven-method trait, and post-parse
+        // callbacks. Declarations and shape validation only; vendor I/O stays
+        // in packages and routing/persistence in extension_host/assistant.
+        // Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 8_594),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -746,7 +755,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_306),
+        // 13_306 -> 13_307 (2026-08-11, channel output facts): one net line
+        // documents `ConnectedChannelSummary` carrying the single derived
+        // `ChannelOutputFacts` projection (presentation + reply split bound)
+        // instead of a loose duplicated scalar. Contract field/docs only;
+        // rendering behavior is unchanged. Count read from this test's own
+        // failure message.
+        ("ironclaw_loop_contracts", 13_307),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

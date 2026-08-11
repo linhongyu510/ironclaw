@@ -1,26 +1,25 @@
 //! Telegram channel extension for Reborn (issue #3285).
 //!
-//! The Telegram side of the Reborn generic-ingress [`ChannelAdapter`]
-//! contract defined in `ironclaw_extension_contracts`. The package owns both
-//! halves of the extension:
+//! The Telegram side of the Reborn channel capability contracts defined in
+//! `ironclaw_extension_contracts`. The package owns both halves of the
+//! extension:
 //!
 //! * the pure Bot API protocol engine — no I/O and no secrets — in
 //!   [`payload`] (payload normalization: private/group gating, attachment
 //!   descriptors, idempotency from `update_id`, the channel-normalized
 //!   [`TelegramInboundEvent`]) and [`render`] (`FinalReplyView` ->
 //!   `sendMessage` body shaping);
-//! * the adapter itself — live inbound/outbound plus the webhook
-//!   registration hooks (extension-runtime P4) — which stays free of raw
-//!   token bytes: hosts run the manifest-declared `shared_secret_header`
-//!   verification and inject credentials on mediated egress.
+//! * the channel capabilities — complete inbound (including the two-hop file
+//!   exchange), reply, and delivery — which stay free of raw token bytes:
+//!   hosts run the manifest-declared `shared_secret_header` verification and
+//!   inject credentials on mediated egress. Webhook registration is manifest
+//!   data executed by the generic host.
 //!
 //! The protocol engine shipped as its own crate
 //! (`ironclaw_telegram_v2_adapter`) until the Wave 2 package colocation
 //! merged it here, giving Telegram the same one-crate-per-package shape Slack
 //! already had (PROPOSAL §5, CHECKLIST WS2).
 //!
-//! [`ChannelAdapter`]: ironclaw_extension_contracts::ChannelAdapter
-
 #![forbid(unsafe_code)]
 
 mod attachment_transfer;

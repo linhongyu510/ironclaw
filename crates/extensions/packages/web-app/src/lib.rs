@@ -1,10 +1,10 @@
-//! Web Push channel package: the `ChannelAdapter` that fans one delivery out
-//! to a user's enrolled browsers, the preference-target codec for the
+//! Web Push channel package: the `ChannelDelivery` implementation that fans
+//! one host-owned registration set out to a user's enrolled browsers, the preference-target codec for the
 //! `web-app/v1/<tenant>/<user>` binding grammar, and the owner-scoped
 //! outbound target provider that puts "Web app" in the delivery-target
 //! catalog.
 //!
-//! Protocol mechanics (records, encryption, request planning) live in
+//! Protocol mechanics (registration parsing, encryption, request planning) live in
 //! `ironclaw_web_app`; the `Authorization: vapid` header is computed
 //! host-side at the egress credential boundary. This crate is linked only by
 //! the binary's binding table, like every concrete channel package.

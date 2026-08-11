@@ -110,7 +110,7 @@ fn envelope(registrations: Vec<DeliveryRegistration>) -> OutboundEnvelope {
         installation_id: "web-app".to_string(),
         delivery_attempt_id: "attempt-1".to_string(),
         target: OutboundTarget {
-            conversation: ExternalConversationRef::new(None, "web-push", None, None)
+            conversation: ExternalConversationRef::new(None, "browser-conversation", None, None)
                 .expect("conversation"),
             thread_anchor: None,
         },

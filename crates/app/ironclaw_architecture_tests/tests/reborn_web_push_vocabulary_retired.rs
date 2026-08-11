@@ -68,6 +68,10 @@ const SANCTIONED_PATHS: &[(&str, &[&str])] = &[
     // The per-user mount alias the enrollment documents physically live
     // under — it resolves to a physical subpath, so it keeps its spelling.
     ("crates/app/ironclaw_composition/src/lib.rs", &["web-push"]),
+    (
+        "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+        &["web-push"],
+    ),
     // The persisted credential handle in the channel's own manifest, and the
     // package README that documents that value for a reader who greps for it.
     (
@@ -115,6 +119,29 @@ fn is_sanctioned(sanctioned: Option<&'static [&'static str]>, term: &str) -> boo
 /// A scan error is a gate failure, not a skip — same shape as
 /// `reborn_retired_taxonomy.rs`. `dist/` is skipped beside `target/`: it is
 /// git-ignored Vite build output, rebuilt from the scanned sources.
+fn scan_file(
+    root: &Path,
+    path: &Path,
+    hits: &mut Vec<String>,
+    scanned: &mut Vec<String>,
+) -> std::io::Result<()> {
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    scanned.push(relative.clone());
+    let sanctioned = sanctioned_terms(&relative);
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| std::io::Error::new(error.kind(), format!("{relative}: {error}")))?;
+    for term in RETIRED_TERMS {
+        if contents.contains(term) && !is_sanctioned(sanctioned, term) {
+            hits.push(format!("{relative}: `{term}`"));
+        }
+    }
+    Ok(())
+}
+
 fn scan_dir(
     root: &Path,
     dir: &Path,
@@ -142,23 +169,11 @@ fn scan_dir(
             || name.ends_with(".js");
         let is_manifest = name.ends_with(".toml");
         let is_guidance = name.ends_with(".json") || name.ends_with(".md");
-        if !(is_rust || is_frontend || is_manifest || is_guidance) {
+        let is_python = name.ends_with(".py");
+        if !(is_rust || is_frontend || is_manifest || is_guidance || is_python) {
             continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        scanned.push(relative.clone());
-        let sanctioned = sanctioned_terms(&relative);
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|error| std::io::Error::new(error.kind(), format!("{relative}: {error}")))?;
-        for term in RETIRED_TERMS {
-            if contents.contains(term) && !is_sanctioned(sanctioned, term) {
-                hits.push(format!("{relative}: `{term}`"));
-            }
-        }
+        scan_file(root, &path, hits, scanned)?;
     }
     Ok(())
 }
@@ -166,6 +181,7 @@ fn scan_dir(
 fn scan_workspace(root: &Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
     let mut hits = Vec::new();
     let mut scanned = Vec::new();
+    scan_file(root, &root.join("Cargo.toml"), &mut hits, &mut scanned)?;
     scan_dir(root, &root.join("crates"), &mut hits, &mut scanned)?;
     scan_dir(
         root,
@@ -173,6 +189,7 @@ fn scan_workspace(root: &Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
         &mut hits,
         &mut scanned,
     )?;
+    scan_dir(root, &root.join("tests/e2e"), &mut hits, &mut scanned)?;
     scan_dir(root, &root.join("skills"), &mut hits, &mut scanned)?;
     hits.sort();
     hits.dedup();
@@ -194,6 +211,22 @@ fn retired_web_push_spelling_stays_at_zero_occurrences() {
         "retired `web-push` identity spelling found outside the sanctioned persisted-compat \
          paths — the channel is `web-app` now, and generic code names no channel at all:\n  {}",
         hits.join("\n  "),
+    );
+}
+
+#[test]
+fn retired_vocabulary_scan_reaches_root_manifest_e2e_and_python() {
+    let root = workspace_root();
+    let (_, scanned) = scan_workspace(&root).expect("workspace scan must complete");
+    assert!(
+        scanned.iter().any(|path| path == "Cargo.toml"),
+        "the retired-vocabulary gate must scan the workspace root manifest"
+    );
+    assert!(
+        scanned
+            .iter()
+            .any(|path| path.starts_with("tests/e2e/") && path.ends_with(".py")),
+        "the retired-vocabulary gate must scan Python sources under tests/e2e"
     );
 }
 
