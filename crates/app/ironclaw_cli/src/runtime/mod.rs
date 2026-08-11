@@ -816,10 +816,10 @@ pub(crate) fn build_services_input_with_options(
             .and_then(|file| file.memory.as_ref())
             .and_then(|memory| memory.mem0_base_url.clone())
     });
-    let mem0_app_id = match optional_nonempty_env("MEMORY_MEM0_APP_ID") {
-        Some(app_id) => Some(app_id),
-        None => storage_layout::ready_memory_provider_app_id(config.home())?,
-    };
+    let mem0_app_id = memory_provider_app_id_for_runtime(
+        config.home(),
+        optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+    )?;
     let memory_provider_connection = ironclaw_composition::Mem0ConnectionConfig {
         base_url: mem0_base_url,
         api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
@@ -1341,6 +1341,16 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn memory_provider_app_id_for_runtime(
+    home: &ironclaw_config::RebornHome,
+    explicit_app_id: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match explicit_app_id {
+        Some(app_id) => Ok(Some(app_id)),
+        None => storage_layout::ready_memory_provider_app_id(home),
+    }
 }
 
 pub(crate) fn default_owner_id(config_file: Option<&ironclaw_config::RebornConfigFile>) -> &str {

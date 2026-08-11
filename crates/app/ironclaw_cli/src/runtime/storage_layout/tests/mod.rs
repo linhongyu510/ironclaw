@@ -69,7 +69,7 @@ fn automatic_startup_cutover_lock_serializes_competing_new_replicas() {
     };
 
     assert!(contention.to_string().contains("automatic storage cutover"));
-    assert!(legacy.join("reborn-local-dev.db").is_file());
+    assert!(legacy.join(DB_FILE).is_file());
     assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
     assert!(
         !temp

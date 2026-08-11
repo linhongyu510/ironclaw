@@ -184,6 +184,21 @@ fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
         Some(legacy_memory_provider_app_id.as_str()),
         "legacy remote-memory namespace survives physical storage adoption"
     );
+    assert_eq!(
+        crate::runtime::memory_provider_app_id_for_runtime(&home, None)
+            .expect("restart resolves persisted memory-provider namespace"),
+        Some(legacy_memory_provider_app_id.clone()),
+        "a restart without an environment override must reopen the released remote-memory partition"
+    );
+    assert_eq!(
+        crate::runtime::memory_provider_app_id_for_runtime(
+            &home,
+            Some("operator-override".to_string()),
+        )
+        .expect("explicit namespace resolves"),
+        Some("operator-override".to_string()),
+        "an explicit operator override must retain precedence over the persisted namespace"
+    );
     assert!(!legacy.exists());
     assert!(
         temp.path()
