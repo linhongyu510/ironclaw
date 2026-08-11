@@ -1,12 +1,77 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{
+    BackendCapabilities, DirEntry, Entry, FileStat, FilesystemError, InMemoryBackend,
+    RootFilesystem, VersionedEntry,
+};
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_api::turn::TurnRunId;
 use uuid::Uuid;
 
 use super::*;
+
+/// Forces the exact read/read/write/write interleaving a real
+/// `claim_active_job` race produces, deterministically — see
+/// `concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winner`
+/// below for why driving real concurrent tasks against a plain
+/// `InMemoryBackend` can't be trusted to land the race (its uncontended
+/// `tokio::sync::Mutex` is fast enough that even 16 real racers across 4
+/// worker threads converged cleanly whether or not the store's CAS
+/// expectation was live). Only the FIRST `get` from each of the two racers
+/// blocks on a 2-party barrier before returning — a correctly-behaving CAS
+/// loser retries with a second `get`, which must pass straight through, or
+/// the barrier would wait forever for a third party that never arrives.
+struct RaceBarrierFilesystem {
+    inner: Arc<InMemoryBackend>,
+    read_barrier: Arc<tokio::sync::Barrier>,
+    barriered_reads_remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl RootFilesystem for RaceBarrierFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let result = self.inner.get(path).await;
+        // `fetch_update` so only the first two callers (across both racers)
+        // ever wait — anything after that (a CAS retry) passes straight
+        // through.
+        let claimed_a_slot = self
+            .barriered_reads_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok();
+        if claimed_a_slot {
+            self.read_barrier.wait().await;
+        }
+        result
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
 
 fn tenant() -> TenantId {
     TenantId::new("suggestions-tenant").expect("tenant id")
@@ -233,9 +298,93 @@ async fn wrong_schema_version_reads_as_absent() {
 // and (for the happy path) the real `render_suggestions` tool — a strictly
 // stronger proof than exercising this store directly, so keeping both would
 // be pure duplication. What stays here is what the integration tier
-// genuinely cannot reach: the wrong-schema-version-reads-as-absent edge case
-// and the superseded-job no-op race below (deterministic at this tier;
-// timing-dependent to force through a full production run).
+// genuinely cannot reach: the wrong-schema-version-reads-as-absent edge case,
+// the superseded-job no-op race below, and — genuinely load-bearing, not
+// just "can't reach" — the CAS-conflict test below it. Driving many
+// concurrent racers through the real service at the integration tier (tried
+// first) does NOT reliably force the exact read/read/write/write
+// interleaving CAS exists to resolve: against `InMemoryBackend`'s fast,
+// uncontended `tokio::sync::Mutex`, even 16 racers across 4 worker threads
+// converged on one job every time whether or not the store's CAS expectation
+// was live. Only a deterministic, hand-driven interleaving — as below —
+// actually exercises the conflict path.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winner() {
+    let filesystem = Arc::new(RaceBarrierFilesystem {
+        inner: Arc::new(InMemoryBackend::default()),
+        read_barrier: Arc::new(tokio::sync::Barrier::new(2)),
+        barriered_reads_remaining: std::sync::atomic::AtomicUsize::new(2),
+    });
+    let store = Arc::new(SuggestionsStore::new(filesystem));
+
+    // Two real `claim_active_job` calls, actually concurrent (separate
+    // spawned tasks on a multi-thread runtime) — the barrier inside `get`
+    // forces both reads to complete before either write can start, which is
+    // exactly the race `claim_active_job`'s CAS write exists to resolve.
+    let store_a = Arc::clone(&store);
+    let racer_a = tokio::spawn(async move {
+        store_a
+            .claim_active_job(
+                &tenant(),
+                &user(),
+                ThreadId::new("racer-a").expect("thread id"),
+                TurnRunId::new(),
+            )
+            .await
+    });
+    let store_b = Arc::clone(&store);
+    let racer_b = tokio::spawn(async move {
+        store_b
+            .claim_active_job(
+                &tenant(),
+                &user(),
+                ThreadId::new("racer-b").expect("thread id"),
+                TurnRunId::new(),
+            )
+            .await
+    });
+
+    let result_a = racer_a
+        .await
+        .expect("racer a task panicked")
+        .expect("racer a claim");
+    let result_b = racer_b
+        .await
+        .expect("racer b task panicked")
+        .expect("racer b claim");
+
+    // Exactly one racer wins `Claimed`; the other's stale write is rejected
+    // by CAS, its retry re-reads, and it reports `AlreadyClaimed` with the
+    // SAME job_id the winner claimed — never a distinct job_id (which is
+    // what an unconditional write, `CasExpectation::Any`, would silently
+    // produce: both racers writing their own differing job and each
+    // reporting `Claimed` with its own id).
+    let job_id = match (result_a, result_b) {
+        (ClaimOutcome::Claimed { job_id }, ClaimOutcome::AlreadyClaimed { job_id: other })
+        | (ClaimOutcome::AlreadyClaimed { job_id: other }, ClaimOutcome::Claimed { job_id }) => {
+            assert_eq!(
+                job_id, other,
+                "the loser must dedupe to the winner's job_id"
+            );
+            job_id
+        }
+        (a, b) => panic!(
+            "expected exactly one Claimed and one AlreadyClaimed for the SAME job, got a={a:?} b={b:?}"
+        ),
+    };
+
+    let doc = store
+        .read_doc(&tenant(), &user())
+        .await
+        .expect("read")
+        .expect("doc present");
+    assert_eq!(
+        doc.active_job.expect("active job").job_id,
+        job_id,
+        "the persisted doc must reflect exactly the winning claim, not a clobbered mix"
+    );
+}
 
 #[tokio::test]
 async fn record_result_for_superseded_job_is_a_noop() {

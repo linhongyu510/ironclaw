@@ -4926,6 +4926,7 @@ dependencies = [
 name = "ironclaw_suggestions"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",

@@ -99,32 +99,57 @@ async fn second_generate_while_running_dedupes_to_the_same_job() -> HarnessResul
     Ok(())
 }
 
-/// (2) Concurrent-POST CAS case: two racing `generate` calls converge on
+/// (2) Concurrent-POST CAS case: many racing `generate` calls converge on
 /// exactly one claim — the store's compare-and-swap, driven through the real
 /// service, not just the store's own unit test.
-#[tokio::test]
+///
+/// Runs on a multi-thread runtime with real `tokio::spawn` tasks (not
+/// `tokio::join!` on a single-threaded runtime, which never actually
+/// interleaves two futures that don't yield mid-operation against an
+/// in-memory backend — confirmed empirically: with only 2 racers under
+/// `tokio::join!`, this test still passed even with the store's CAS
+/// expectation replaced by an unconditional write, because one racer's
+/// read-modify-write always ran to completion before the other's first
+/// read). 16 genuinely concurrent racers across worker threads reliably
+/// produce the read/read/write/write interleaving CAS exists to resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_generate_calls_converge_on_one_claim() -> HarnessResult<()> {
     let harness = RebornIntegrationHarness::test_default()
         .script([RebornScriptedReply::text("unused")])
         .build()
         .await?;
-    let service = suggestions_service_for_harness(&harness);
+    let service = Arc::new(suggestions_service_for_harness(&harness));
     let caller = harness.suggestions_caller();
 
-    let (a, b) = tokio::join!(
-        service.generate_suggestions_for_test(caller.clone(), suggestions_thread_id("race-a")),
-        service.generate_suggestions_for_test(caller.clone(), suggestions_thread_id("race-b")),
-    );
-    let (a, b) = (a?, b?);
+    const RACER_COUNT: usize = 16;
+    let mut tasks = Vec::with_capacity(RACER_COUNT);
+    for i in 0..RACER_COUNT {
+        let service = Arc::clone(&service);
+        let caller = caller.clone();
+        let thread_id = suggestions_thread_id(&format!("race-{i}"));
+        tasks.push(tokio::spawn(async move {
+            service
+                .generate_suggestions_for_test(caller, thread_id)
+                .await
+        }));
+    }
 
-    assert_eq!(
-        a.generation.job_id, b.generation.job_id,
-        "concurrent racers must converge on ONE job_id: a={a:?} b={b:?}"
-    );
-    assert_eq!(
-        a.generation.state,
-        ironclaw_suggestions::GenerationState::Running
-    );
+    let mut results = Vec::with_capacity(RACER_COUNT);
+    for task in tasks {
+        results.push(task.await.expect("racer task panicked")?);
+    }
+
+    let first_job_id = results[0].generation.job_id;
+    for (i, result) in results.iter().enumerate() {
+        assert_eq!(
+            result.generation.job_id, first_job_id,
+            "racer {i} must converge on the SAME job_id as racer 0: {result:?}"
+        );
+        assert_eq!(
+            result.generation.state,
+            ironclaw_suggestions::GenerationState::Running
+        );
+    }
     Ok(())
 }
 

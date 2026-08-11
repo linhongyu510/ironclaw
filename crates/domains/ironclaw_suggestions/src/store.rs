@@ -224,7 +224,13 @@ impl SuggestionsStore {
         })
     }
 
-    async fn read_versioned(
+    // `pub(crate)`, not private: the CAS-race test below deliberately drives
+    // stale reads and writes out of `claim_active_job`'s own retry loop to
+    // deterministically force the exact interleaving CAS exists to resolve
+    // (real concurrent execution against `InMemoryBackend` was tried first —
+    // see that test's doc comment for why it can't be trusted to land the
+    // race reliably).
+    pub(crate) async fn read_versioned(
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
@@ -246,7 +252,7 @@ impl SuggestionsStore {
         Ok(Some((doc, entry.version)))
     }
 
-    async fn write_doc(
+    pub(crate) async fn write_doc(
         &self,
         path: &VirtualPath,
         doc: &SuggestionsDoc,
