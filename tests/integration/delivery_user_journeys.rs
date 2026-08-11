@@ -52,7 +52,7 @@ use chrono::Utc;
 use ironclaw_assistant::{RunDeliveryObserver, RunDeliveryServices};
 use ironclaw_composition::RebornRuntime;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
+    ChannelIngress, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::preference_target::{
@@ -554,9 +554,9 @@ async fn assert_partial_failure_attempts(services: &RebornRuntime, scope: &TurnS
 /// Parse a raw Slack Events API body through the REAL adapter into one
 /// normalized message (mirrors the first half of `extension_delivery.rs`'s
 /// `preresolve_vendor_turn_scope`, without the HTTP layer).
-fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
+async fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
     let outcome = ironclaw_slack_extension::SlackChannelAdapter
-        .inbound(VerifiedInbound {
+        .receive(VerifiedInbound {
             extension_id: "slack",
             installation_id: SLACK_INSTALLATION,
             config: &[],
@@ -567,6 +567,7 @@ fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
             // way, but the value must mirror the shipped manifest.
             can_reply_in_threads: true,
         })
+        .await
         .expect("the slack DM body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("the slack DM body must normalize to messages");
@@ -722,7 +723,7 @@ async fn parse_and_preresolve_slack_dm(
     harness: &RebornIntegrationHarness,
     body: &str,
 ) -> (NormalizedInboundMessage, TurnScope) {
-    let message = parse_slack_dm_message(body);
+    let message = parse_slack_dm_message(body).await;
     // `test_verified` is the `test-support` seam standing in for the ingress
     // verifier: minting is witness-gated (PROPOSAL §11.2.5) and the harness
     // holds no `VerifiedInboundGrant`.

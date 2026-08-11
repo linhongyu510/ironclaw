@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use ironclaw_extension_contracts::channel::{ChannelOutputFacts, ChannelPresentation};
+use ironclaw_extension_contracts::channel::ChannelOutputFacts;
 
 use ironclaw_host_api::turn::{ProductTurnContext, TurnOriginKind};
 

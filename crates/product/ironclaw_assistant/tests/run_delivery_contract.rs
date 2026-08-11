@@ -5,6 +5,10 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelDelivery, ChannelReply, ChannelSurfaces,
+};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,10 +25,9 @@ use ironclaw_assistant::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
 };
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction, VerifiedInbound,
+    ChannelError, DeliveryReport, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
+    ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -325,11 +328,20 @@ impl RecordingChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for RecordingChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-        Ok(InboundOutcome::Ignore)
+impl ChannelReply for RecordingChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        // Reply and delivery share one mechanism for this double, as they do
+        // for a conversational vendor; the axis is the coordinator\'s choice.
+        self.deliver(envelope, egress).await
     }
+}
 
+#[async_trait]
+impl ChannelDelivery for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
@@ -354,6 +366,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
         let mut counter = self.counter.lock().expect("counter");
         *counter += 1;
         Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: envelope
                 .parts
                 .iter()
@@ -390,7 +403,9 @@ impl ChannelDeliveryResolver for StaticResolver {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            surfaces: ChannelSurfaces::default()
+                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
+                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         })
@@ -951,6 +966,7 @@ fn build_harness_with_gate_ports(
             adapter: Arc::clone(&adapter),
         }),
         Arc::new(NoStoredReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -2031,6 +2047,7 @@ async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_rout
         .lock()
         .expect("reports lock")
         .push_back(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Sent {
                 vendor_message_ref: Some("ts-\u{7}1".to_string()),
             }],
@@ -2312,6 +2329,7 @@ async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry()
         .lock()
         .expect("reports lock")
         .push_back(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Permanent {
                 reason: "scripted failure".to_string(),
             }],
@@ -2670,6 +2688,7 @@ fn build_triggered_harness_with_turns_catalog(
             adapter: Arc::clone(&adapter),
         }),
         Arc::new(NoStoredReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -3462,6 +3481,7 @@ async fn triggered_timeout_notice_delivery_failure_records_failed() {
         .lock()
         .expect("reports lock")
         .push_back(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Permanent {
                 reason: "scripted failure".to_string(),
             }],
@@ -3911,7 +3931,9 @@ impl ChannelDeliveryResolver for ResolverMissingOneExtension {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            surfaces: ChannelSurfaces::default()
+                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
+                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         })
@@ -3950,6 +3972,7 @@ fn notify_user_fixture(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         channel_resolver,
         Arc::new(NoStoredReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 1,
             backoff: Duration::ZERO,

@@ -8,6 +8,7 @@
 
 use super::*;
 use chrono::TimeZone;
+use ironclaw_extension_contracts::channel::ChannelPresentation;
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::turn::TurnOwner;
 

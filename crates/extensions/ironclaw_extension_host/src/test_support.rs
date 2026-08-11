@@ -5,8 +5,8 @@
 //! feature-gated seam) so the acme fixture and the state-machine contract
 //! tests share one construction path.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -111,6 +111,63 @@ conversation_model = "continuous"
 
 [channel.delivery]
 transport = "message"
+"#;
+
+const REGISTERING_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-hook"
+name = "Acme Hook"
+version = "0.1.0"
+description = "fixture: a channel whose ingress needs vendor-side registration"
+trust = "third_party"
+
+[runtime]
+kind = "first_party"
+service = "acme-hook.extension/v1"
+
+[channel]
+id = "messages"
+display_name = "Acme hook"
+conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "acme_hook_secret"
+header = "X-Acme-Secret"
+
+[channel.ingress.registration]
+method = "post"
+path = "/bot{acme_hook_token}/setWebhook"
+body = { url = "{acme_webhook_url}" }
+body_credentials = ["acme_hook_secret"]
+
+[channel.ingress.deregistration]
+method = "post"
+path = "/bot{acme_hook_token}/deleteWebhook"
+
+[admin_configuration]
+group_id = "acme.hook"
+display_name = "Acme Hook channel"
+fields = [ { handle = "acme_hook_secret", label = "Shared secret", secret = true } ]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.acme.example"
+methods = ["post"]
+credential_handle = "acme_hook_token"
+injection = { type = "path_placeholder", placeholder = "acme_hook_token" }
+paths = ["/bot{acme_hook_token}/setWebhook", "/bot{acme_hook_token}/deleteWebhook"]
+body_credentials = [ { handle = "acme_hook_secret", pointer = "/secret_token" } ]
 "#;
 
 const CHANNEL_MANIFEST: &str = r#"
@@ -303,6 +360,11 @@ kind = "authenticated_session"
 /// An authenticated-session channel resolved manifest.
 pub fn session_channel_manifest() -> ResolvedExtensionManifest {
     resolve(SESSION_CHANNEL_MANIFEST)
+}
+
+/// A channel whose `[channel.ingress]` declares both vendor-wiring recipes.
+pub fn registering_channel_manifest() -> ResolvedExtensionManifest {
+    resolve(REGISTERING_CHANNEL_MANIFEST)
 }
 
 /// A channel-only resolved manifest.
@@ -522,6 +584,74 @@ impl EgressFactory for FakeEgressFactory {
         _declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllEgress)
+    }
+}
+
+/// Records every vendor call the host makes on a channel's behalf and answers
+/// with a scripted status, so a lifecycle test can assert the ingress-wiring
+/// recipes actually reached restricted egress in the right shape.
+#[derive(Default)]
+pub struct RecordingEgressFactory {
+    pub requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
+    pub status: u16,
+}
+
+impl RecordingEgressFactory {
+    pub fn ok() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            status: 200,
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            status: 500,
+        }
+    }
+
+    pub fn requests(&self) -> Vec<RestrictedEgressRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+impl EgressFactory for RecordingEgressFactory {
+    fn egress_for_channel(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
+    ) -> Arc<dyn RestrictedEgress> {
+        Arc::new(RecordingEgress {
+            requests: Arc::clone(&self.requests),
+            status: self.status,
+        })
+    }
+}
+
+struct RecordingEgress {
+    requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
+    status: u16,
+}
+
+#[async_trait]
+impl RestrictedEgress for RecordingEgress {
+    async fn send(
+        &self,
+        request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
+        Ok(RestrictedEgressResponse {
+            status: self.status,
+            body: b"{\"ok\":true}".to_vec(),
+        })
     }
 }
 

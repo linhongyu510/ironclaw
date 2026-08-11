@@ -810,7 +810,13 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
             tools: Some(Arc::new(AcmeFixtureToolAdapter {
                 fallback_egress: Arc::clone(&self.fallback_egress),
             })),
-            channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
+            channel: {
+                let adapter = Arc::new(AcmeFixtureChannelAdapter);
+                ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
         })
     }
 }
@@ -825,8 +831,8 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
-    fn inbound(
+impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtureChannelAdapter {
+    async fn receive(
         &self,
         request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
     ) -> Result<
@@ -884,12 +890,16 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
             _ => Ok(InboundOutcome::Ignore),
         }
     }
+}
 
+/// One vendor mechanism serves both output axes for this fixture, exactly as
+/// it does for a real conversational vendor.
+impl AcmeFixtureChannelAdapter {
     /// Minimal real outbound: one vendor POST per text part. Proves the
     /// generic delivery path (coordinator → adapter → restricted egress)
     /// needs no real product, and gives the conformance suite a deliverable
     /// fixture.
-    async fn deliver(
+    async fn send(
         &self,
         envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
@@ -951,7 +961,35 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                 break;
             }
         }
-        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport { parts })
+        Ok(ironclaw_extension_contracts::channel_adapter::DeliveryReport::from_parts(parts))
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelReply for AcmeFixtureChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        self.send(envelope, egress).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_extension_contracts::channel_adapter::ChannelDelivery for AcmeFixtureChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: ironclaw_extension_contracts::channel_adapter::OutboundEnvelope,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        self.send(envelope, egress).await
     }
 }
 
@@ -1740,9 +1778,14 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: None,
-            channel: Some(Arc::new(
-                ironclaw_telegram_extension::TelegramChannelAdapter::default(),
-            )),
+            channel: {
+                let adapter =
+                    Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
+                ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
         })
     }
 }
@@ -1911,7 +1954,13 @@ pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResu
 fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
@@ -1922,7 +1971,13 @@ fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBi
 fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
-        adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         // Explicit model-initiated delivery (`builtin.outbound_deliver`)
         // decodes a Telegram target's conversation through THIS codec
         // (`CoordinatedModelChannelDelivery`'s `CodecChannelTargetResolver`

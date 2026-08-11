@@ -1,4 +1,8 @@
 // arch-exempt: large_file, mechanical OutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelDelivery, ChannelReply, ChannelSurfaces,
+};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -244,10 +248,8 @@ use ironclaw_assistant::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
-    VerifiedInbound,
+    ChannelError, DeliveryReport, OutboundEnvelope, PartDeliveryOutcome,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -315,11 +317,20 @@ impl ScriptedChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for ScriptedChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-        Ok(InboundOutcome::Ignore)
+impl ChannelReply for ScriptedChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        // Reply and delivery share one mechanism for this double, as they do
+        // for a conversational vendor; the axis is the coordinator\'s choice.
+        self.deliver(envelope, egress).await
     }
+}
 
+#[async_trait]
+impl ChannelDelivery for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
@@ -346,22 +357,12 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             .pop_front()
             .unwrap_or_else(|| Err(ChannelError::Unsupported))
     }
-
-    async fn deliver_notification(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        self.notification_sends
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.deliver(envelope, egress).await
-    }
 }
 
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
-    reply_transport: ironclaw_extension_contracts::channel::ReplyTransport,
+    reply_transport: Option<ironclaw_extension_contracts::channel::ReplyTransport>,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -372,9 +373,11 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
         Some(ResolvedChannelDelivery {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            surfaces: ChannelSurfaces::default()
+                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
+                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(CoordinatorDenyAllEgress),
-            reply_transport: Some(self.reply_transport),
+            reply_transport: self.reply_transport,
         })
     }
 
@@ -385,7 +388,7 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
         if self.unavailable {
             return None;
         }
-        Some(self.reply_transport)
+        self.reply_transport
     }
 }
 
@@ -437,7 +440,9 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("inst-ordered")
                 .expect("valid installation id"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            surfaces: ChannelSurfaces::default()
+                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
+                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(CoordinatorDenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         })
@@ -657,6 +662,7 @@ fn coordinator_over_recording_reply_lookups(
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -781,6 +787,7 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-100")],
         })],
     ));
@@ -869,6 +876,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-dm")],
         })],
     ));
@@ -937,6 +945,7 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-should-not-happen")],
         })],
     ));
@@ -977,9 +986,11 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
         scope.clone(),
         vec![
             Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![retryable_part()],
             }),
             Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![sent("ts-200")],
             }),
         ],
@@ -1022,6 +1033,7 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-300"), retryable_part()],
         })],
     ));
@@ -1069,6 +1081,7 @@ async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
             3,
         )],
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), retryable_part()],
         })],
     )
@@ -1122,6 +1135,7 @@ async fn coordinator_preserves_text_and_materializes_only_durable_attachment_ref
             workspace_attachment_ref("data", "/workspace/data.csv", "data.csv", "text/csv", 4),
         ],
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), sent("file-report"), sent("file-data")],
         })],
     )
@@ -1164,6 +1178,7 @@ async fn coordinator_does_not_materialize_workspace_path_mentioned_only_in_prose
         "The report remains at /workspace/report.pdf.",
         Vec::new(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text")],
         })],
     )
@@ -1196,6 +1211,7 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-text"), sent("ts-file")],
         })],
     ));
@@ -1209,6 +1225,7 @@ async fn coordinator_reads_workspace_only_after_channel_and_reply_context_resolu
         Arc::new(OrderedReplyContext {
             phase: Arc::clone(&phase),
         }),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 1,
             backoff: std::time::Duration::ZERO,
@@ -1672,6 +1689,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-777")],
         })],
     ));
@@ -1686,6 +1704,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -1740,6 +1759,7 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-400")],
         })],
     ));
@@ -1804,6 +1824,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy::default(),
     );
 
@@ -1876,6 +1897,7 @@ async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-notice")],
         })],
     ));
@@ -1884,10 +1906,11 @@ async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -1959,6 +1982,7 @@ async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-900")],
         })],
     ));
@@ -2096,6 +2120,7 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![PartDeliveryOutcome::Sent {
                 vendor_message_ref: None,
             }],
@@ -2161,6 +2186,7 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-950")],
         })],
     ));
@@ -2200,6 +2226,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy::default(),
     );
 
@@ -2291,6 +2318,7 @@ async fn codec_resolver_enforces_the_dm_rule_from_the_codec_verdict() {
             Arc::clone(&store),
             scope.clone(),
             vec![Ok(DeliveryReport {
+                prune_registrations: Vec::new(),
                 parts: vec![sent("ts-dm")],
             })],
         ));
@@ -2377,6 +2405,7 @@ async fn streaming_channel_conversation_reply_skips_batched_delivery() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-100")],
         })],
     ));
@@ -2385,10 +2414,11 @@ async fn streaming_channel_conversation_reply_skips_batched_delivery() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -2430,6 +2460,7 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-200")],
         })],
     ));
@@ -2438,10 +2469,11 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -2483,6 +2515,7 @@ async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-300")],
         })],
     ));
@@ -2491,10 +2524,11 @@ async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -2557,6 +2591,7 @@ async fn notification_class_delivery_rides_the_adapters_notification_send() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-300")],
         })],
     ));
@@ -2598,6 +2633,7 @@ async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
         Arc::clone(&store),
         scope.clone(),
         vec![Ok(DeliveryReport {
+            prune_registrations: Vec::new(),
             parts: vec![sent("ts-301")],
         })],
     ));
@@ -2625,332 +2661,216 @@ async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
     );
 }
 
-// ── §7b: the generic notification-setup dispatch over the same resolver ──────
+// ── §8: the generic notification-setup surface over host-owned registrations ─
+//
+// The block that stood here drove `AdapterChannelNotificationSetupService`
+// against a scripted adapter, pinning that the service passed the caller's
+// identity and the channel-opaque payload through verbatim. Those adapter
+// methods are gone (design §8), and the two properties split:
+//
+//   * The caller's identity is still never reinterpreted — the scope is built
+//     from `ProductSurfaceCaller` alone, pinned below.
+//   * The opaque payload is now stored host-side and parsed only at delivery,
+//     pinned in `ironclaw_auth::delivery_registrations` (storage bounds, the
+//     endpoint allowlist, the forward migration) and in the web-app package's
+//     `registration_parsing_contract` (interpretation).
+//
+// What is genuinely THIS layer's, and therefore what is tested here, is the
+// pre-storage endpoint admission: the surface must refuse an endpoint the
+// channel's own `[[channel.egress]]` does not declare, before anything is
+// written. Without that check enrollment is an SSRF primitive.
 
-/// Scripted setup adapter: records the scope + payload each operation was
-/// handed and answers with a fixed status, so the tests pin that the service
-/// passes the caller's identity and the channel-opaque payload through
-/// verbatim — the two inputs generic code must never reinterpret.
+struct EnrollmentResolver {
+    requires_enrollment: Option<bool>,
+    declared_hosts: Option<Vec<String>>,
+}
+
+impl ChannelDeliveryResolver for EnrollmentResolver {
+    fn resolve_channel_delivery(
+        &self,
+        _extension_id: &str,
+    ) -> Option<ironclaw_product_contracts::delivery::ResolvedChannelDelivery> {
+        None
+    }
+
+    fn requires_enrollment(&self, _extension_id: &str) -> Option<bool> {
+        self.requires_enrollment
+    }
+
+    fn declared_egress_hosts(&self, _extension_id: &str) -> Option<Vec<String>> {
+        self.declared_hosts.clone()
+    }
+}
+
 #[derive(Default)]
-struct ScriptedSetupAdapter {
-    status_detail: String,
-    calls: Mutex<Vec<(String, String, String)>>,
+struct RecordingRegistrations {
+    enrolled: Mutex<Vec<String>>,
 }
 
-impl ScriptedSetupAdapter {
-    fn with_detail(detail: &str) -> Self {
-        Self {
-            status_detail: detail.to_string(),
-            calls: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn calls(&self) -> Vec<(String, String, String)> {
-        self.calls.lock().expect("calls lock").clone()
-    }
-
-    fn record(
+#[async_trait::async_trait]
+impl ironclaw_product_contracts::delivery::DeliveryRegistrationService for RecordingRegistrations {
+    async fn list(
         &self,
-        operation: &str,
-        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
-        payload: &str,
-    ) {
-        self.calls.lock().expect("calls lock").push((
-            operation.to_string(),
-            scope.user_id.as_str().to_string(),
-            payload.to_string(),
-        ));
-    }
-}
-
-#[async_trait]
-impl ChannelAdapter for ScriptedSetupAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-        Ok(InboundOutcome::Ignore)
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+    ) -> Result<
+        Vec<ironclaw_extension_contracts::channel_adapter::DeliveryRegistration>,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        Ok(Vec::new())
     }
 
-    async fn deliver(
+    async fn enroll(
         &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-
-    async fn notification_setup_status(
-        &self,
-        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
-        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
-    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
-    {
-        self.record("status", scope, "");
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        request: ironclaw_product_contracts::delivery::DeliveryRegistrationRequest,
+    ) -> Result<
+        ironclaw_extension_contracts::channel_adapter::DeliveryRegistration,
+        ironclaw_product_contracts::delivery::DeliveryRegistrationError,
+    > {
+        self.enrolled
+            .lock()
+            .expect("enrolled lock")
+            .push(request.endpoint.clone());
         Ok(
-            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
-                enabled: false,
-                detail: self.status_detail.clone(),
+            ironclaw_extension_contracts::channel_adapter::DeliveryRegistration {
+                registration_id: "reg-1".to_string(),
+                endpoint: request.endpoint,
+                document: request.document,
+                created_at: "2026-08-11T00:00:00Z".to_string(),
             },
         )
     }
 
-    async fn enable_notifications(
+    async fn remove(
         &self,
-        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
-        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
-        payload: &str,
-    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
-    {
-        self.record("enable", scope, payload);
-        Ok(
-            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
-                enabled: true,
-                detail: self.status_detail.clone(),
-            },
-        )
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _endpoint: &str,
+    ) -> Result<bool, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        Ok(true)
     }
 
-    async fn disable_notifications(
+    async fn prune(
         &self,
-        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
-        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
-        payload: &str,
-    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
-    {
-        self.record("disable", scope, payload);
-        Ok(
-            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
-                enabled: false,
-                detail: self.status_detail.clone(),
-            },
-        )
+        _scope: &ironclaw_product_contracts::delivery::DeliveryRegistrationScope,
+        _registration_ids: &[String],
+    ) -> Result<usize, ironclaw_product_contracts::delivery::DeliveryRegistrationError> {
+        Ok(0)
     }
-}
-
-/// Resolver double for the setup service: knows one extension with a declared
-/// setup requirement; every other id is unknown (`None` from both port
-/// methods, the fail-closed arm).
-struct SetupResolver {
-    extension_id: String,
-    requires_setup: bool,
-    adapter: Arc<ScriptedSetupAdapter>,
-}
-
-impl ChannelDeliveryResolver for SetupResolver {
-    fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
-        if extension_id != self.extension_id {
-            return None;
-        }
-        Some(ResolvedChannelDelivery {
-            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
-            installation_id: AdapterInstallationId::new("inst-setup").expect("valid installation"),
-            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
-            egress: Arc::new(CoordinatorDenyAllEgress),
-            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Message,
-        })
-    }
-
-    fn requires_enrollment(&self, extension_id: &str) -> Option<bool> {
-        (extension_id == self.extension_id).then_some(self.requires_setup)
-    }
-}
-
-fn setup_service(
-    requires_setup: bool,
-    detail: &str,
-) -> (
-    ironclaw_assistant::AdapterChannelNotificationSetupService,
-    Arc<ScriptedSetupAdapter>,
-) {
-    let adapter = Arc::new(ScriptedSetupAdapter::with_detail(detail));
-    let service =
-        ironclaw_assistant::AdapterChannelNotificationSetupService::new(Arc::new(SetupResolver {
-            extension_id: "browser-channel".to_string(),
-            requires_setup,
-            adapter: Arc::clone(&adapter),
-        }));
-    (service, adapter)
 }
 
 fn setup_caller() -> ironclaw_product_contracts::surface::ProductSurfaceCaller {
     ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
-        ironclaw_host_api::ids::TenantId::new("tenant-setup").expect("tenant id"),
-        ironclaw_host_api::ids::UserId::new("user-setup").expect("user id"),
+        ironclaw_host_api::ids::TenantId::new("tenant1").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("user1").expect("user"),
         None,
         None,
     )
 }
 
+fn enrollment_service(
+    declared_hosts: Option<Vec<String>>,
+    registrations: Arc<RecordingRegistrations>,
+) -> ironclaw_assistant::RegistrationChannelNotificationSetupService {
+    ironclaw_assistant::RegistrationChannelNotificationSetupService::new(
+        Arc::new(EnrollmentResolver {
+            requires_enrollment: Some(true),
+            declared_hosts,
+        }),
+        registrations,
+        Arc::new(ironclaw_assistant::NoDeliveryClientBootstrap),
+    )
+}
+
+fn enrollment_payload(endpoint: &str) -> serde_json::Value {
+    serde_json::json!({ "endpoint": endpoint, "keys": { "p256dh": "a", "auth": "b" } })
+}
+
+/// THE security-critical check, at the surface that performs it: an endpoint
+/// the channel does not declare must be refused BEFORE storage. Every hostile
+/// shape here would otherwise make the host POST wherever the submitter named.
 #[tokio::test]
-async fn setup_surface_fails_closed_as_not_found_for_an_unknown_extension() {
+async fn enrollment_refuses_an_undeclared_endpoint_before_storage() {
     use ironclaw_assistant::ChannelNotificationSetupService as _;
-    let (service, adapter) = setup_service(true, "{}");
 
-    let status_error = service
-        .status(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
-                extension_id: "no-such-channel".to_string(),
-            },
-        )
-        .await
-        .expect_err("an unknown extension must not produce a fabricated status");
-    assert_eq!(status_error.status_code, 404);
+    let registrations = Arc::new(RecordingRegistrations::default());
+    let service = enrollment_service(
+        Some(vec!["push.declared.example".to_string()]),
+        Arc::clone(&registrations),
+    );
 
-    let enable_error = service
-        .enable(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
-                extension_id: "no-such-channel".to_string(),
-                payload: serde_json::json!({}),
-            },
-        )
-        .await
-        .expect_err("an unknown extension must not reach any adapter");
-    assert_eq!(enable_error.status_code, 404);
+    for hostile in [
+        "https://evil.example/send/x",
+        "http://push.declared.example/send/x",
+        "https://push.declared.example@evil.example/send/x",
+        "https://push.declared.example.evil.example/send/x",
+    ] {
+        let error = service
+            .enable(
+                setup_caller(),
+                ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                    extension_id: "vendorx".to_string(),
+                    payload: enrollment_payload(hostile),
+                },
+            )
+            .await
+            .expect_err("an undeclared endpoint must be refused");
+        assert_eq!(
+            error.kind,
+            ironclaw_product_contracts::surface::ProductSurfaceErrorKind::Validation,
+            "{hostile}"
+        );
+    }
+
     assert!(
-        adapter.calls().is_empty(),
-        "no adapter operation may run for an unknown extension"
+        registrations.enrolled.lock().expect("lock").is_empty(),
+        "nothing may be written for a refused endpoint"
     );
 }
 
 #[tokio::test]
-async fn setup_surface_reports_a_no_setup_channel_enabled_and_rejects_mutations() {
+async fn enrollment_stores_a_declared_endpoint_with_its_opaque_document() {
     use ironclaw_assistant::ChannelNotificationSetupService as _;
-    let (service, adapter) = setup_service(false, "{}");
 
-    let status = service
-        .status(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
-                extension_id: "browser-channel".to_string(),
-            },
-        )
-        .await
-        .expect("a channel without setup is deliverable as-is");
-    assert!(!status.requires_setup);
-    assert!(status.enabled, "no per-user setup means always deliverable");
-
-    let error = service
-        .enable(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
-                extension_id: "browser-channel".to_string(),
-                payload: serde_json::json!({}),
-            },
-        )
-        .await
-        .expect_err("enable on a channel without setup is a caller error");
-    assert_eq!(error.status_code, 400);
-    assert!(
-        adapter.calls().is_empty(),
-        "a no-setup channel must never have its adapter's setup operations invoked"
+    let registrations = Arc::new(RecordingRegistrations::default());
+    let service = enrollment_service(
+        Some(vec!["push.declared.example".to_string()]),
+        Arc::clone(&registrations),
     );
-}
-
-#[tokio::test]
-async fn setup_surface_passes_scope_and_opaque_payload_through_verbatim() {
-    use ironclaw_assistant::ChannelNotificationSetupService as _;
-    let (service, adapter) = setup_service(true, r#"{"subscription_count":1}"#);
-
-    let payload = serde_json::json!({"endpoint": "https://push.example/x", "keys": {"a": "b"}});
-    let response = service
+    service
         .enable(
             setup_caller(),
             ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
-                extension_id: "browser-channel".to_string(),
-                payload: payload.clone(),
+                extension_id: "vendorx".to_string(),
+                payload: enrollment_payload("https://push.declared.example/send/ok"),
             },
         )
         .await
-        .expect("enable dispatches to the adapter");
-    assert_eq!(response.extension_id, "browser-channel");
-    assert!(response.requires_setup);
-    assert!(response.enabled);
-    assert_eq!(response.detail["subscription_count"], 1);
-
-    let calls = adapter.calls();
-    assert_eq!(calls.len(), 1);
-    let (operation, scope_user, seen_payload) = &calls[0];
-    assert_eq!(operation, "enable");
+        .expect("a declared endpoint enrolls");
     assert_eq!(
-        scope_user, "user-setup",
-        "the setup scope must carry the AUTHENTICATED caller, never a body-supplied identity"
+        *registrations.enrolled.lock().expect("lock"),
+        vec!["https://push.declared.example/send/ok".to_string()]
     );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(seen_payload).expect("payload is JSON"),
-        payload,
-        "the channel-opaque payload must reach the adapter uninterpreted"
-    );
-
-    let disable = service
-        .disable(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
-                extension_id: "browser-channel".to_string(),
-                payload: serde_json::json!({"endpoint": "https://push.example/x"}),
-            },
-        )
-        .await
-        .expect("disable dispatches to the adapter");
-    assert!(!disable.enabled);
-    assert_eq!(adapter.calls().len(), 2);
 }
 
+/// A channel the deployment does not know must not become an oracle for which
+/// channels exist, and one with no declared egress can enroll nothing.
 #[tokio::test]
-async fn setup_surface_bounds_the_payload_before_any_adapter_work() {
+async fn unknown_and_egressless_channels_fail_closed() {
     use ironclaw_assistant::ChannelNotificationSetupService as _;
-    let (service, adapter) = setup_service(true, "{}");
 
-    let oversized = "x".repeat(
-        ironclaw_extension_contracts::channel_adapter::MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES,
-    );
+    let service = enrollment_service(None, Arc::new(RecordingRegistrations::default()));
     let error = service
         .enable(
             setup_caller(),
             ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
-                extension_id: "browser-channel".to_string(),
-                payload: serde_json::json!({ "blob": oversized }),
+                extension_id: "vendorx".to_string(),
+                payload: enrollment_payload("https://push.declared.example/send/x"),
             },
         )
         .await
-        .expect_err("an oversized payload must be rejected");
-    assert_eq!(error.status_code, 400);
-    assert!(
-        adapter.calls().is_empty(),
-        "the bound must hold BEFORE the adapter runs, not after"
+        .expect_err("a channel with no declared egress cannot be enrolled");
+    assert_eq!(
+        error.kind,
+        ironclaw_product_contracts::surface::ProductSurfaceErrorKind::NotFound
     );
-}
-
-#[tokio::test]
-async fn setup_surface_refuses_to_project_an_unbounded_or_non_json_detail() {
-    use ironclaw_assistant::ChannelNotificationSetupService as _;
-
-    let oversized_detail = format!(
-        r#"{{"blob":"{}"}}"#,
-        "x".repeat(
-            ironclaw_extension_contracts::channel_adapter::MAX_NOTIFICATION_SETUP_DETAIL_BYTES
-        )
-    );
-    let (service, _adapter) = setup_service(true, &oversized_detail);
-    let error = service
-        .status(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
-                extension_id: "browser-channel".to_string(),
-            },
-        )
-        .await
-        .expect_err("an over-bound detail document must not reach the wire");
-    assert_eq!(error.status_code, 500);
-
-    let (service, _adapter) = setup_service(true, "this is not json");
-    let error = service
-        .status(
-            setup_caller(),
-            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
-                extension_id: "browser-channel".to_string(),
-            },
-        )
-        .await
-        .expect_err("a non-JSON detail document must not reach the wire");
-    assert_eq!(error.status_code, 500);
 }

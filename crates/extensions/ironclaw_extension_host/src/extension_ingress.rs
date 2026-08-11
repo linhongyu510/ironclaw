@@ -999,7 +999,7 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::ChannelIngress;
     use ironclaw_extension_contracts::channel_adapter::{
         ChannelAttachmentRef, ProductTriggerReason,
     };
@@ -1484,22 +1484,16 @@ mod tests {
     }
 
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelConversationContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-        VerifiedInbound,
+        ChannelConversationContext, ChannelError, InboundOutcome, VerifiedInbound,
     };
 
     #[async_trait]
-    impl ChannelAdapter for ScriptedContextAdapter {
-        fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-            Ok(InboundOutcome::Ignore)
-        }
-
-        async fn deliver(
+    impl ChannelIngress for ScriptedContextAdapter {
+        async fn receive(
             &self,
-            _envelope: OutboundEnvelope,
-            _egress: &dyn RestrictedEgress,
-        ) -> Result<DeliveryReport, ChannelError> {
-            Ok(DeliveryReport { parts: Vec::new() })
+            _request: VerifiedInbound<'_>,
+        ) -> Result<InboundOutcome, ChannelError> {
+            Ok(InboundOutcome::Ignore)
         }
 
         async fn fetch_conversation_context(

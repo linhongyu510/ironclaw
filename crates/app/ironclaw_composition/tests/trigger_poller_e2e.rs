@@ -598,7 +598,13 @@ async fn build_runtime_with_slack_delivery(
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),

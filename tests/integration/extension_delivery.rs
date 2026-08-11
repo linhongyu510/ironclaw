@@ -59,7 +59,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_assistant::{RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings};
 use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{InboundOutcome, VerifiedInbound};
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
@@ -395,7 +394,7 @@ fn delivery_run_services(
 #[allow(clippy::too_many_arguments)]
 async fn preresolve_vendor_turn_scope(
     binding_service: &Arc<dyn ProductBindingResolver>,
-    adapter: &dyn ChannelAdapter,
+    adapter: &dyn ironclaw_extension_contracts::channel_adapter::ChannelIngress,
     adapter_id: &str,
     installation_id: &str,
     non_secret_config: &[(String, String)],
@@ -410,7 +409,7 @@ async fn preresolve_vendor_turn_scope(
     can_reply_in_threads: bool,
 ) -> (TurnScope, ironclaw_host_api::ids::UserId) {
     let outcome = adapter
-        .inbound(VerifiedInbound {
+        .receive(VerifiedInbound {
             extension_id: adapter_id,
             installation_id,
             config: non_secret_config,
@@ -418,6 +417,7 @@ async fn preresolve_vendor_turn_scope(
             headers: &[],
             can_reply_in_threads,
         })
+        .await
         .expect("the vendor body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
         panic!("the vendor body must normalize to messages");

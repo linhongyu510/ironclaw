@@ -204,8 +204,8 @@ impl FetchingChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for FetchingChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for FetchingChannelAdapter {
+    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         unimplemented!("not used by attachment workflow tests")
     }
 
@@ -229,14 +229,6 @@ impl ChannelAdapter for FetchingChannelAdapter {
                     retryable: false,
                 })
             })
-    }
-
-    async fn deliver(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        unimplemented!("not used by attachment workflow tests")
     }
 }
 

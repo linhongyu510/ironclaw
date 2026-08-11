@@ -17,10 +17,12 @@ use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelError, DeliveryReport, ImmediateResponse, InboundBatchFragment,
-    InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+    ChannelAttachmentRef, ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome,
+    ProductTriggerReason, VerifiedInbound,
+};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelIngress, ChannelSurfaces, NormalizedInboundMessage,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -139,8 +141,8 @@ struct ScriptedChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for ScriptedChannelAdapter {
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for ScriptedChannelAdapter {
+    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         self.inbound_calls.fetch_add(1, Ordering::SeqCst);
         self.seen.lock().expect("seen lock").push((
             request.headers.to_vec(),
@@ -222,14 +224,6 @@ impl ChannelAdapter for ScriptedChannelAdapter {
                 }
             }
         }
-    }
-
-    async fn deliver(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        Err(ChannelError::Unsupported)
     }
 }
 
@@ -360,7 +354,8 @@ impl ExtensionLoader for FixedLoader {
             ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
                 Ok(ExtensionBindings {
                     tools: None,
-                    channel: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>),
+                    channel: ChannelSurfaces::default()
+                        .with_ingress(Arc::clone(&self.adapter) as Arc<dyn ChannelIngress>),
                 })
             }
         }
@@ -1430,8 +1425,8 @@ struct GenerationChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for GenerationChannelAdapter {
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for GenerationChannelAdapter {
+    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         if let Some(entered) = &self.entered {
             entered.send(()).map_err(|error| ChannelError::Parse {
                 reason: error.to_string(),
@@ -1493,18 +1488,10 @@ impl ChannelAdapter for GenerationChannelAdapter {
             bytes: vec![self.generation.as_bytes()[0]],
         })
     }
-
-    async fn deliver(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
 }
 
 struct QueueLoader {
-    adapters: std::sync::Mutex<std::collections::VecDeque<Arc<dyn ChannelAdapter>>>,
+    adapters: std::sync::Mutex<std::collections::VecDeque<Arc<dyn ChannelIngress>>>,
 }
 
 #[async_trait]
@@ -1513,7 +1500,7 @@ impl ExtensionLoader for QueueLoader {
         &self,
         _ctx: &LoadContext,
     ) -> Result<LoadedExtension, ironclaw_extension_host::BindError> {
-        struct Entry(Arc<dyn ChannelAdapter>);
+        struct Entry(Arc<dyn ChannelIngress>);
         impl ExtensionEntrypoint for Entry {
             fn bind(
                 &self,
@@ -1521,7 +1508,8 @@ impl ExtensionLoader for QueueLoader {
             ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
                 Ok(ExtensionBindings {
                     tools: None,
-                    channel: Some(Arc::clone(&self.0)),
+                    channel: ChannelSurfaces::default()
+                        .with_ingress(Arc::clone(&self.0) as Arc<dyn ChannelIngress>),
                 })
             }
         }
@@ -1661,13 +1649,13 @@ methods = ["post"]
 async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upgrade() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let old_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+    let old_adapter: Arc<dyn ChannelIngress> = Arc::new(GenerationChannelAdapter {
         generation: "old",
         vendor_host: "old.api.acme.example",
         entered: Some(entered_tx),
         release: std::sync::Mutex::new(Some(release_rx)),
     });
-    let new_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+    let new_adapter: Arc<dyn ChannelIngress> = Arc::new(GenerationChannelAdapter {
         generation: "new",
         vendor_host: "new.api.acme.example",
         entered: None,

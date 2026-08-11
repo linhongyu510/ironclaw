@@ -11,7 +11,7 @@
 //!   [`resolve_user_notification_targets`] and fans the notification out.
 //!
 //! Callers own WHEN and WHAT; the coordinator and the channel's
-//! [`ChannelAdapter::deliver_notification`](ironclaw_extension_contracts::channel_adapter::ChannelAdapter::deliver_notification)
+//! [`ChannelAdapter::deliver_notification`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver_notification)
 //! own HOW. No caller names a channel — the extension id always comes from a
 //! resolved catalog entry, never from a call-site literal. The routine
 //! driver (`triggered.rs`) is one caller among any number.

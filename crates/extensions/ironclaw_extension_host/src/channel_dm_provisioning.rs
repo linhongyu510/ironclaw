@@ -221,10 +221,9 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{ChannelDelivery, ChannelSurfaces};
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, TargetCandidate,
-        VerifiedInbound,
+        ChannelError, DeliveryReport, OutboundEnvelope, TargetCandidate,
     };
     use ironclaw_extension_contracts::external::ExternalConversationRef;
     use ironclaw_extension_contracts::tool_adapter::{
@@ -286,11 +285,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChannelAdapter for RecordingAdapter {
-        fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
-            unreachable!("DM provisioning tests never parse inbound requests")
-        }
-
+    impl ChannelDelivery for RecordingAdapter {
         async fn deliver(
             &self,
             _envelope: OutboundEnvelope,
@@ -328,7 +323,8 @@ mod tests {
                 extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
                 installation_id: AdapterInstallationId::new("vendorx-install-1")
                     .expect("valid installation id"),
-                adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+                surfaces: ChannelSurfaces::default()
+                    .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
                 egress: Arc::new(NoopEgress),
                 reply_transport: Some(
                     ironclaw_extension_contracts::channel::ReplyTransport::Message,
@@ -351,7 +347,8 @@ mod tests {
                 extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
                 installation_id: AdapterInstallationId::new("vendorx-install-1")
                     .expect("valid installation id"),
-                adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+                surfaces: ChannelSurfaces::default()
+                    .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
                 egress: Arc::new(NoopEgress),
                 reply_transport: Some(
                     ironclaw_extension_contracts::channel::ReplyTransport::Message,

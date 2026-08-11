@@ -2400,9 +2400,10 @@ fn web_app_build_extras(
             extension_id: ExtensionId::from_trusted(
                 ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
             ),
-            adapter: Arc::new(ironclaw_web_app_extension::WebAppChannelAdapter::new(
-                slot.clone(),
-            )),
+            surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_delivery(Arc::new(
+                    ironclaw_web_app_extension::WebAppChannelAdapter::new(),
+                )),
             preference_target_codec: Some(Arc::new(
                 ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
             )),

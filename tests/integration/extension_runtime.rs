@@ -58,10 +58,17 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     };
 
     run_channel_adapter_conformance(ChannelAdapterConformance {
-        adapter: Arc::new(reborn_support::harness::profiles::extension::AcmeFixtureChannelAdapter),
+        surfaces: {
+            let adapter =
+                Arc::new(reborn_support::harness::profiles::extension::AcmeFixtureChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         extension_id: "acme-messenger".to_string(),
         installation_id: "acme-install-1".to_string(),
-        message_inbound: ConformanceInbound {
+        message_inbound: Some(ConformanceInbound {
             body: json!({
                 "type": "message",
                 "event_id": "Ev-acme-conformance",
@@ -72,7 +79,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             .to_string()
             .into_bytes(),
             headers: Vec::new(),
-        },
+        }),
         challenge_inbound: Some(ConformanceInbound {
             body: json!({"type": "challenge", "challenge": "acme-conformance-token"})
                 .to_string()

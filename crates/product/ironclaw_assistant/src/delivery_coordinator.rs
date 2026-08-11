@@ -6,7 +6,7 @@
 //! retry, crash recovery — identical for every channel, owned here,
 //! once) and **vendor mechanics** (rendering, splitting, API selection,
 //! error mapping — owned by each extension's
-//! [`ChannelAdapter::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelAdapter)).
+//! [`ChannelAdapter::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery)).
 //!
 //! Rules this module owns:
 //! - Every user-visible channel output is a semantic [`DeliveryIntent`];

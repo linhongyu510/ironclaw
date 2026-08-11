@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::TimeZone;
 use ironclaw_extension_contracts::channel_adapter::{
-    DeliveryReport, InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+    InboundOutcome, ProductTriggerReason, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ProductAttachmentDescriptor, ProductAttachmentKind,

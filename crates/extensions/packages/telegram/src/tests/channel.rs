@@ -1,44 +1,6 @@
-use std::sync::Mutex;
-
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
-use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
-
-struct RecordingEgress {
-    requests: Mutex<Vec<RestrictedEgressRequest>>,
-    status: u16,
-}
-
-impl RecordingEgress {
-    fn ok() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            status: 200,
-        }
-    }
-
-    fn failing() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            status: 500,
-        }
-    }
-}
-
-#[async_trait]
-impl RestrictedEgress for RecordingEgress {
-    async fn send(
-        &self,
-        request: RestrictedEgressRequest,
-    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-        self.requests.lock().expect("requests lock").push(request);
-        Ok(RestrictedEgressResponse {
-            status: self.status,
-            body: b"{\"ok\":true}".to_vec(),
-        })
-    }
-}
 
 fn bot_username_config() -> (String, String) {
     (

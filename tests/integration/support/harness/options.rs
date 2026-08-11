@@ -345,9 +345,10 @@ impl HostRuntimeHarnessOptions {
                 extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
                     ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
                 ),
-                adapter: std::sync::Arc::new(
-                    ironclaw_web_app_extension::WebAppChannelAdapter::new(slot.clone()),
-                ),
+                surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                    .with_delivery(std::sync::Arc::new(
+                        ironclaw_web_app_extension::WebAppChannelAdapter::new(),
+                    )),
                 preference_target_codec: Some(std::sync::Arc::new(
                     ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
                 )),

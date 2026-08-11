@@ -9,7 +9,7 @@
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
 //! concrete extensions implement the [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`] and
-//! [`ironclaw_extension_contracts::channel_adapter::ChannelAdapter`] traits and are supplied by the binary.
+//! [`ironclaw_extension_contracts::channel_adapter::ChannelDelivery`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 

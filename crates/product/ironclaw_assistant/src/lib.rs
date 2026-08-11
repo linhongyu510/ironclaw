@@ -219,8 +219,8 @@ pub use lifecycle::{
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
-    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoReplyContext,
-    NoticeDeliveryRequest,
+    DeliveryCoordinator, DeliveryIntent, DeliveryOrigin, DeliveryRetryPolicy,
+    NoDeliveryRegistrations, NoReplyContext, NoticeDeliveryRequest, OutboundRoute, ReplyKind,
 };
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over

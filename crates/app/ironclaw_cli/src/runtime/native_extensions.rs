@@ -241,8 +241,11 @@ mod tests {
             }))
             .expect("Telegram fixture serializes");
             let outcome = telegram
-                .adapter
-                .inbound(VerifiedInbound {
+                .surfaces
+                .ingress
+                .as_ref()
+                .expect("the telegram binding declares a webhook ingress half")
+                .receive(VerifiedInbound {
                     extension_id: telegram.extension_id.as_str(),
                     installation_id: "install_test",
                     config: &config,
@@ -250,6 +253,7 @@ mod tests {
                     headers: &[],
                     can_reply_in_threads: false,
                 })
+                .await
                 .expect("shipping Telegram adapter normalizes the private command");
             let InboundOutcome::Messages(mut messages) = outcome else {
                 panic!("private Telegram command must produce a message");
@@ -261,7 +265,11 @@ mod tests {
                     extension_id: telegram.extension_id.as_str().to_string(),
                     installation_id: "install_test".to_string(),
                     message,
-                    channel_adapter: Arc::clone(&telegram.adapter),
+                    channel_adapter: telegram
+                        .surfaces
+                        .ingress
+                        .clone()
+                        .expect("the telegram binding declares a webhook ingress half"),
                     channel_egress: None,
                 })
                 .await

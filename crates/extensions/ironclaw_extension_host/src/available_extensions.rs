@@ -2161,7 +2161,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             .as_ref()
             .expect("slack declares [channel.presentation]");
         assert!(
-            presentation.supports_markdown,
+            presentation.presentation.supports_markdown,
             "slack declares supports_markdown = true"
         );
         assert_eq!(
@@ -2170,7 +2170,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             "slack's [channel.reply] max_message_chars reaches the output facts"
         );
         assert_eq!(
-            presentation.command_prefix.as_deref(),
+            presentation.presentation.command_prefix.as_deref(),
             Some("/ironclaw "),
             "slack declares a command_prefix so channel help renders /ironclaw-namespaced"
         );

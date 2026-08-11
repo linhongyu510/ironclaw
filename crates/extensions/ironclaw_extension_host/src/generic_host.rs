@@ -329,7 +329,6 @@ impl ExtensionLoader for CompositionExtensionLoader {
             .resolved
             .to_internal(source)
             .map_err(|error| load_error(format!("resolved contract rebuild failed: {error}")))?;
-        let declares_channel = ctx.resolved.channel.is_some();
         // Pure capability count, mirroring `check_binding`'s own
         // declared-tools test (entrypoint.rs) — the two must stay in
         // lockstep or activation fails the binding-rule check before

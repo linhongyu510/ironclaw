@@ -1,9 +1,8 @@
 //! TEST-1: the Telegram channel adapter runs the exported channel-adapter
 //! conformance suite against a scripted Bot API.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, ChannelIngress, InboundOutcome, OutboundEnvelope, OutboundPart, OutboundTarget,
@@ -14,31 +13,12 @@ use ironclaw_extension_contracts::test_support::conformance::{
     ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
 };
 use ironclaw_extension_contracts::tool_adapter::{
-    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_telegram_extension::GroupTriggerPolicy;
 use ironclaw_telegram_extension::{
     TELEGRAM_BOT_USERNAME_CONFIG, TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
 };
-
-#[derive(Default)]
-struct RecordingEgress {
-    requests: Mutex<Vec<RestrictedEgressRequest>>,
-}
-
-#[async_trait]
-impl RestrictedEgress for RecordingEgress {
-    async fn send(
-        &self,
-        request: RestrictedEgressRequest,
-    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-        self.requests.lock().expect("requests lock").push(request);
-        Ok(RestrictedEgressResponse {
-            status: 200,
-            body: br#"{"ok":true,"result":true}"#.to_vec(),
-        })
-    }
-}
 
 fn private_message_body() -> &'static [u8] {
     br#"{
