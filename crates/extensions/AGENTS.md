@@ -120,7 +120,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
 | `slack/` | `slack` | 8 tools + channel | `slack` | wasm (tools) + first-party adapter | crate `ironclaw_slack_extension` + `wasm/` |
 | `telegram/` | `telegram` | channel only (no tools, no auth recipe — deployment credentials via `[admin_configuration]`) | — | first_party | crate `ironclaw_telegram_extension` |
-| `web-push/` | `web-push` | channel only (outbound-only browser push; no ingress, no pairing — VAPID key material auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_push_extension` |
+| `web-app/` | `web-app` | channel only (outbound-only browser push; no ingress, no pairing — VAPID key material auto-seeded under `[admin_configuration]`) | — | first_party | crate `ironclaw_web_app_extension` |
 | `web-access/` | `web-access` | 2 tools | — | first_party | data-only (executor: `extension_support::web_access`) |
 
 Data-only packages ship through the `PACKAGES` inventory in

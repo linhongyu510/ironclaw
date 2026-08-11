@@ -117,17 +117,20 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// inventory was the twelve extension packages plus the fixtures, and it still
 /// is.
 ///
-/// `web-push` joined 2026-08-08 with the browser-notification channel: the id
-/// is the IETF protocol name (RFC 8030/8291/8292), not a vendor, and the
-/// package is first-party deployment infrastructure for the product's own web
-/// surface. Its protocol mechanics live in the `ironclaw_web_push` domain
-/// crate the same way the provider-neutral memory contract lives in
-/// `ironclaw_memory`, so composition wiring, the product wire DTOs, and the
-/// domain crate legitimately name it. Its manifest's egress hosts (the push
-/// services browsers mint endpoints on) are likewise protocol infrastructure,
-/// not vendor vocabulary — and generic code does not hardcode them anyway:
-/// the enrollment allowlist is read from the resolved manifest at composition.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-push"];
+/// `web-app` joined 2026-08-08 as the browser-notification channel (then
+/// named `web-push`; renamed by the unified-channel-model train 2026-08-10 —
+/// the retired spelling is pinned at zero in generic code by
+/// `reborn_web_push_vocabulary_retired.rs`): the id names the product's own
+/// web surface, not a vendor, and the package is first-party deployment
+/// infrastructure. Its Web Push protocol mechanics (RFC 8030/8291/8292) live
+/// in the `ironclaw_web_app` domain crate the same way the provider-neutral
+/// memory contract lives in `ironclaw_memory`, so composition wiring, the
+/// product wire DTOs, and the domain crate legitimately name it. Its
+/// manifest's egress hosts (the push services browsers mint endpoints on)
+/// are likewise protocol infrastructure, not vendor vocabulary — and generic
+/// code does not hardcode them anyway: the enrollment allowlist is read from
+/// the resolved manifest at composition.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-app"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.

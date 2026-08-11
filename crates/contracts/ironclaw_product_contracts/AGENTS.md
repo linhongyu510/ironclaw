@@ -18,7 +18,7 @@ policy engine, or workflow.
 Today that is **thirty-four** shipped modules (plus the dev-only
 `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`;
 `src/lib.rs` is the source of truth for the list). ✎ *Re-measured 2026-08-10
-by the unified-channel-model train: `web_push` was replaced by
+by the unified-channel-model train: `web_app` was replaced by
 `notification_setup`, and `session_ingress` joined — counted on `src/lib.rs`,
 thirty-four `pub mod` lines minus the gated `test_support`.* ✎ *Corrected 2026-08-05:
 this read "twenty-six", which was already wrong before `project_service` was

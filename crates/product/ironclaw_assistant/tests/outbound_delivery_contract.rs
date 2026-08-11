@@ -2376,7 +2376,7 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
 /// notification even though its `DeliveryIntent` is conversation-shaped. The
 /// streaming gate keys on the route, not the intent — skipping this send
 /// would silently drop blocked-fire pushes for a streaming channel, the exact
-/// break `blocked_fire_pushes_web_push_notice_to_enrolled_browser` caught.
+/// break `blocked_fire_pushes_web_app_notice_to_enrolled_browser` caught.
 #[tokio::test]
 async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
     let scope = scope();

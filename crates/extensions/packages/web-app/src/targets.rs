@@ -12,50 +12,50 @@ use ironclaw_outbound::{
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
 };
-use ironclaw_web_push::{WEB_PUSH_CHANNEL_NAME, WEB_PUSH_TARGET_ID, encode_web_push_target_ref};
+use ironclaw_web_app::{WEB_APP_CHANNEL_NAME, WEB_APP_TARGET_ID, encode_web_app_target_ref};
 
 /// Stateless: the entry is constant per owner (enrollment counts surface
-/// through the web-push status view, not the catalog row).
-pub struct WebPushOutboundTargetProvider;
+/// through the web-app status view, not the catalog row).
+pub struct WebAppOutboundTargetProvider;
 
-impl WebPushOutboundTargetProvider {
+impl WebAppOutboundTargetProvider {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }
 }
 
-fn web_push_entry(
+fn web_app_entry(
     scope: &OutboundDeliveryTargetScope,
 ) -> Result<OutboundDeliveryTargetEntry, OutboundError> {
-    let target_id = OutboundDeliveryTargetId::new(WEB_PUSH_TARGET_ID).map_err(|error| {
+    let target_id = OutboundDeliveryTargetId::new(WEB_APP_TARGET_ID).map_err(|error| {
         tracing::debug!(
-            target: "ironclaw::web_push",
+            target: "ironclaw::web_app",
             error = %error,
-            "web-push target id rejected"
+            "web-app target id rejected"
         );
         OutboundError::Backend
     })?;
     let summary = OutboundDeliveryTargetSummary::new(
         target_id,
-        WEB_PUSH_CHANNEL_NAME,
+        WEB_APP_CHANNEL_NAME,
         "Web app",
         Some("Browser push notifications to your enrolled devices".to_string()),
     )
     .map_err(|error| {
         tracing::debug!(
-            target: "ironclaw::web_push",
+            target: "ironclaw::web_app",
             error = %error,
-            "web-push target summary rejected"
+            "web-app target summary rejected"
         );
         OutboundError::Backend
     })?;
     let destination =
-        encode_web_push_target_ref(&scope.tenant_id, &scope.user_id).map_err(|error| {
+        encode_web_app_target_ref(&scope.tenant_id, &scope.user_id).map_err(|error| {
             tracing::debug!(
-                target: "ironclaw::web_push",
+                target: "ironclaw::web_app",
                 error = %error,
-                "web-push destination encoding failed"
+                "web-app destination encoding failed"
             );
             OutboundError::Backend
         })?;
@@ -79,24 +79,24 @@ fn web_push_entry(
 }
 
 #[async_trait]
-impl OutboundDeliveryTargetProvider for WebPushOutboundTargetProvider {
+impl OutboundDeliveryTargetProvider for WebAppOutboundTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
         scope: &OutboundDeliveryTargetScope,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
-        Ok(vec![web_push_entry(scope)?])
+        Ok(vec![web_app_entry(scope)?])
     }
 }
 
 /// Registry key composition registers the provider under — the extension id,
 /// so the provider key and the manifest identity cannot drift.
-pub const WEB_PUSH_TARGET_PROVIDER_KEY: &str = ironclaw_web_push::WEB_PUSH_EXTENSION_ID;
+pub const WEB_APP_TARGET_PROVIDER_KEY: &str = ironclaw_web_app::WEB_APP_EXTENSION_ID;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::{TenantId, UserId};
-    use ironclaw_web_push::decode_web_push_target_ref;
+    use ironclaw_web_app::decode_web_app_target_ref;
 
     fn scope() -> OutboundDeliveryTargetScope {
         OutboundDeliveryTargetScope::new(
@@ -107,15 +107,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_entry_is_owner_scoped_and_decodes_back_to_the_owner() {
-        let provider = WebPushOutboundTargetProvider::new();
+        let provider = WebAppOutboundTargetProvider::new();
         let entries = provider
             .list_outbound_delivery_targets(&scope())
             .await
             .expect("list");
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
-        assert_eq!(entry.summary.target_id.as_str(), WEB_PUSH_TARGET_ID);
-        assert_eq!(entry.summary.channel.as_str(), WEB_PUSH_CHANNEL_NAME);
+        assert_eq!(entry.summary.target_id.as_str(), WEB_APP_TARGET_ID);
+        assert_eq!(entry.summary.channel.as_str(), WEB_APP_CHANNEL_NAME);
         assert!(
             !entry.capabilities.final_replies,
             "the web app is a notification target, not a final-reply/model-delivery target"
@@ -125,7 +125,7 @@ mod tests {
         assert!(entry.capabilities.auth_prompts);
         assert!(!entry.capabilities.progress);
         let (tenant, user) =
-            decode_web_push_target_ref(entry.destination.as_str()).expect("decodes");
+            decode_web_app_target_ref(entry.destination.as_str()).expect("decodes");
         assert_eq!(tenant.to_string(), "tenant1");
         assert_eq!(user.to_string(), "user1");
         assert!(entry.owner.matches_scope(&scope()));
@@ -133,8 +133,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_as_a_notification_target_but_not_a_final_reply_target() {
-        let provider = WebPushOutboundTargetProvider::new();
-        let id = OutboundDeliveryTargetId::new(WEB_PUSH_TARGET_ID).expect("id");
+        let provider = WebAppOutboundTargetProvider::new();
+        let id = OutboundDeliveryTargetId::new(WEB_APP_TARGET_ID).expect("id");
         // Notification path (blocked-automation notices) resolves it.
         let notification = provider
             .resolve_notification_target(&scope(), &id)

@@ -341,8 +341,8 @@ pub(super) async fn build_backend_production(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
-        web_push_runtime_slot,
-        web_push_vapid_subject,
+        web_app_runtime_slot,
+        web_app_vapid_subject,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -477,7 +477,7 @@ pub(super) async fn build_backend_production(
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     // Extension-owned catalog providers arrive opaquely on the channel
-    // bindings (e.g. web-push's constant per-user entry); register each under
+    // bindings (e.g. web-app's constant per-user entry); register each under
     // its extension id so composition never names a concrete extension.
     for binding in &channel_extension_bindings {
         if let Some(provider) = &binding.outbound_target_provider {
@@ -1017,9 +1017,9 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    assemble_web_push(
-        web_push_runtime_slot.as_ref(),
-        web_push_vapid_subject.as_deref(),
+    assemble_web_app(
+        web_app_runtime_slot.as_ref(),
+        web_app_vapid_subject.as_deref(),
         &stores.filesystem,
         &secret_store,
         &channel_egress_scope,
@@ -1389,12 +1389,12 @@ pub(super) async fn build_backend_production(
     })
 }
 
-/// Install the web-push runtime (subscription store) into the binary's slot
+/// Install the web-app runtime (subscription store) into the binary's slot
 /// and ensure the deployment VAPID credential exists. Installs the complete
 /// runtime into the slot; a no-op when the binary supplied no slot
-/// (compositions without the web-push channel).
-async fn assemble_web_push<S>(
-    slot: Option<&ironclaw_web_push::WebPushRuntimeSlot>,
+/// (compositions without the web-app channel).
+async fn assemble_web_app<S>(
+    slot: Option<&ironclaw_web_app::WebAppRuntimeSlot>,
     vapid_subject: Option<&str>,
     filesystem: &Arc<CompositeRootFilesystem>,
     secret_store: &Arc<S>,
@@ -1412,7 +1412,7 @@ where
     // the list empty, so enrollment fails closed rather than admitting
     // endpoints delivery could never reach.
     let allowed_push_hosts: Vec<String> = deployment_channels
-        .extension(ironclaw_web_push::WEB_PUSH_EXTENSION_ID)
+        .extension(ironclaw_web_app::WEB_APP_EXTENSION_ID)
         .and_then(|binding| {
             binding.resolved.channel.as_ref().map(|channel| {
                 channel
@@ -1425,18 +1425,18 @@ where
         .unwrap_or_default();
     if allowed_push_hosts.is_empty() {
         tracing::debug!(
-            target: "ironclaw::web_push",
-            "web-push deployment binding is missing or declares no egress hosts; browser \
+            target: "ironclaw::web_app",
+            "web-app deployment binding is missing or declares no egress hosts; browser \
              enrollment will fail closed"
         );
     }
-    let subscriptions: Arc<dyn ironclaw_web_push::WebPushSubscriptionStore> =
-        Arc::new(ironclaw_web_push::FilesystemWebPushSubscriptionStore::new(
+    let subscriptions: Arc<dyn ironclaw_web_app::WebAppSubscriptionStore> =
+        Arc::new(ironclaw_web_app::FilesystemWebAppSubscriptionStore::new(
             crate::wrap_scoped(Arc::clone(filesystem)),
         ));
 
     let vapid_handle = ironclaw_host_api::ids::SecretHandle::new(
-        ironclaw_web_push::WEB_PUSH_VAPID_CREDENTIAL_HANDLE,
+        ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("web push VAPID handle is invalid: {error}"),
@@ -1463,7 +1463,7 @@ where
             .map(str::to_string)
             .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string());
         let generated =
-            ironclaw_web_push::generate_vapid_key_material(&subject).map_err(|error| {
+            ironclaw_web_app::generate_vapid_key_material(&subject).map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!("web push VAPID key generation failed: {error}"),
                 }
@@ -1502,7 +1502,7 @@ where
             // material carries the private key, so the cause must not ride the
             // returned error's message.
             tracing::warn!(
-                target: "ironclaw::web_push",
+                target: "ironclaw::web_app",
                 error = %error,
                 "stored web push VAPID credential material failed to parse"
             );
@@ -1521,7 +1521,7 @@ where
     // delivery and the generic notification-setup operations (§7b). Installed
     // after the canonical key read-back so the adapter always advertises the
     // key the deployment actually signs with.
-    slot.install(Arc::new(ironclaw_web_push::WebPushRuntime {
+    slot.install(Arc::new(ironclaw_web_app::WebAppRuntime {
         subscriptions,
         vapid_public_key,
         allowed_push_hosts,

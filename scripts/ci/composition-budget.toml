@@ -155,13 +155,13 @@ observed_date = "2026-08-07"
 # refactor with #7214's sandbox profile and binding assembly.
 # History: 40747 -> 40811 (#7157 acting-user scope helper), then two features
 # merged on top on 2026-08-08/09, each service-graph assembly only:
-#  - web-push channel assembly (`assemble_web_push`: subscription-store
+#  - web-app channel assembly (`assemble_web_app`: subscription-store
 #    construction, runtime-slot install, VAPID seeding + read-back, manifest
 #    push-host extraction, binding-borne outbound-target-provider registration).
 #  - skills stack top layer (#7171): skill-bundle staging, host-reachability
 #    root map, process-alias host-workdir wiring.
-# Re-measured on the MERGED tree (web-push + skills) with
-# `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-push
+# Re-measured on the MERGED tree (web-app + skills) with
+# `bash scripts/ci/check-composition-budget.sh` -> 41509 (base 40811 + web-app
 # assembly + #7171 skills assembly; the deltas are additive on the merged tree).
 loc_ceiling = 41509
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate

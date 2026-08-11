@@ -402,6 +402,11 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    // The web-app channel's enrollment store. The alias keeps its pre-rename
+    // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
+    // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would
+    // orphan every persisted browser enrollment. Pinned as sanctioned
+    // residue by the web-push-vocabulary retirement gate.
     "/web-push",
     "/run-state",
     "/checkpoint-state",

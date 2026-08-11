@@ -6,7 +6,7 @@
 # material is generated and seeded by the host at boot (never typed by an
 # operator).
 schema_version = "reborn.extension_manifest.v3"
-id = "web-push"
+id = "web-app"
 name = "Web UI"
 version = "0.1.0"
 description = "Web Push notifications to the web UI's enrolled browsers"
@@ -14,7 +14,7 @@ trust = "first_party_requested"
 
 [runtime]
 kind = "first_party"
-service = "web-push.extension/v1"
+service = "web-app.extension/v1"
 
 # The VAPID key material handle. A channel egress `credential_handle` MUST be
 # declared here (manifest invariant), so the field is present — but it is
@@ -29,7 +29,7 @@ service = "web-push.extension/v1"
 # previous `applicationServerKey` would need to re-enroll after the change
 # takes effect on restart.
 [admin_configuration]
-group_id = "extension.web-push"
+group_id = "extension.web-app"
 display_name = "Web push deployment configuration"
 description = "Auto-generated VAPID application-server key material for browser push (host-managed; not operator-supplied)."
 fields = [
@@ -65,7 +65,7 @@ method = "post"
 kind = "authenticated_session"
 
 # Exact push-service hosts, in lockstep with
-# `ironclaw_web_push::SUPPORTED_PUSH_SERVICE_HOSTS` (pinned by
+# `ironclaw_web_app::SUPPORTED_PUSH_SERVICE_HOSTS` (pinned by
 # `tests/manifest_lockstep.rs`). Endpoint paths are opaque per-subscription
 # capability tokens, so the path constraint is the whole-host prefix; the
 # host-level allowlist plus subscribe-time endpoint validation are the

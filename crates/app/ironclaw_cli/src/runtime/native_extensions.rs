@@ -21,10 +21,10 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
 }
 
 /// The binary-assembled channel extension set: the deployment bindings plus
-/// the web-push runtime slot composition later fills with storage.
+/// the web-app runtime slot composition later fills with storage.
 pub(crate) struct BundledChannelExtensions {
     pub(crate) bindings: Vec<ChannelExtensionBinding>,
-    pub(crate) web_push_runtime: ironclaw_web_push::WebPushRuntimeSlot,
+    pub(crate) web_app_runtime: ironclaw_web_app::WebAppRuntimeSlot,
 }
 
 /// Deployment channel-adapter bindings. These are independent of native tool
@@ -32,7 +32,7 @@ pub(crate) struct BundledChannelExtensions {
 /// installation exists, so every deployment channel adapter is linked here.
 /// Composition never names a concrete extension crate.
 pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
-    let web_push_runtime = ironclaw_web_push::WebPushRuntimeSlot::new();
+    let web_app_runtime = ironclaw_web_app::WebAppRuntimeSlot::new();
     let bindings = vec![
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
@@ -49,21 +49,21 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
             outbound_target_provider: None,
         },
         ChannelExtensionBinding {
-            extension_id: ExtensionId::from_trusted("web-push".to_string()),
-            adapter: Arc::new(ironclaw_web_push_extension::WebPushChannelAdapter::new(
-                web_push_runtime.clone(),
+            extension_id: ExtensionId::from_trusted("web-app".to_string()),
+            adapter: Arc::new(ironclaw_web_app_extension::WebAppChannelAdapter::new(
+                web_app_runtime.clone(),
             )),
             preference_target_codec: Some(Arc::new(
-                ironclaw_web_push_extension::WebPushPreferenceTargetCodec,
+                ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
             )),
             outbound_target_provider: Some(Arc::new(
-                ironclaw_web_push_extension::WebPushOutboundTargetProvider::new(),
+                ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
             )),
         },
     ];
     BundledChannelExtensions {
         bindings,
-        web_push_runtime,
+        web_app_runtime,
     }
 }
 

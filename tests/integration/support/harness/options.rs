@@ -89,13 +89,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings: Vec<ironclaw_composition::ChannelExtensionBinding>,
-    /// The web-push channel's late-bound runtime slot, mirrored onto the
-    /// composition input (`RebornHostBindings::with_web_push_runtime_slot`)
+    /// The web-app channel's late-bound runtime slot, mirrored onto the
+    /// composition input (`RebornHostBindings::with_web_app_runtime_slot`)
     /// the way the binary's serve assembly passes it.
-    pub(crate) web_push_runtime_slot: Option<ironclaw_web_push::WebPushRuntimeSlot>,
+    pub(crate) web_app_runtime_slot: Option<ironclaw_web_app::WebAppRuntimeSlot>,
     /// Extra first-party manifest bundles appended AFTER the
     /// `extension_support` inventory — the harness mirror of the bundles the
-    /// BINARY adds in `ironclaw_cli::first_party::bundles` (web-push ships
+    /// BINARY adds in `ironclaw_cli::first_party::bundles` (web-app ships
     /// from the binary's table, not the shared inventory).
     pub(crate) extra_first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     /// Typed handle for the recording network egress when the profile wants
@@ -171,7 +171,7 @@ impl HostRuntimeHarnessOptions {
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            web_push_runtime_slot: None,
+            web_app_runtime_slot: None,
             extra_first_party_bundles: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
@@ -330,46 +330,46 @@ impl HostRuntimeHarnessOptions {
         self
     }
 
-    /// Wire the complete web-push channel the way the binary does: the
+    /// Wire the complete web-app channel the way the binary does: the
     /// deployment binding (adapter + codec + catalog target provider) around
     /// one late-bound runtime slot, the slot handed to composition so
-    /// `assemble_web_push` installs storage + seeds the VAPID credential, and
+    /// `assemble_web_app` installs storage + seeds the VAPID credential, and
     /// the package manifest bundled so the deployment-channel registry
     /// resolves the channel's egress declarations.
-    pub(crate) fn with_web_push_channel_extension(
+    pub(crate) fn with_web_app_channel_extension(
         mut self,
-        slot: ironclaw_web_push::WebPushRuntimeSlot,
+        slot: ironclaw_web_app::WebAppRuntimeSlot,
     ) -> Self {
         self.channel_extension_bindings
             .push(ironclaw_composition::ChannelExtensionBinding {
                 extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
-                    ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
+                    ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
                 ),
                 adapter: std::sync::Arc::new(
-                    ironclaw_web_push_extension::WebPushChannelAdapter::new(slot.clone()),
+                    ironclaw_web_app_extension::WebAppChannelAdapter::new(slot.clone()),
                 ),
                 preference_target_codec: Some(std::sync::Arc::new(
-                    ironclaw_web_push_extension::WebPushPreferenceTargetCodec,
+                    ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
                 )),
                 outbound_target_provider: Some(std::sync::Arc::new(
-                    ironclaw_web_push_extension::WebPushOutboundTargetProvider::new(),
+                    ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
                 )),
             });
         self.extra_first_party_bundles
             .push(ironclaw_extension_host::FirstPartyPackageBundle {
-                id: ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
+                id: ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
                 display_name: "Browser notifications".to_string(),
-                manifest_toml: ironclaw_web_push_extension::MANIFEST.to_string(),
+                manifest_toml: ironclaw_web_app_extension::MANIFEST.to_string(),
                 assets: vec![ironclaw_extension_host::FirstPartyPackageAsset {
                     path: "manifest.toml".to_string(),
-                    bytes: ironclaw_web_push_extension::MANIFEST.as_bytes().to_vec(),
+                    bytes: ironclaw_web_app_extension::MANIFEST.as_bytes().to_vec(),
                 }],
                 onboarding: None,
                 oauth_setup: None,
                 trust_effects: None,
                 search_aliases: Vec::new(),
             });
-        self.web_push_runtime_slot = Some(slot);
+        self.web_app_runtime_slot = Some(slot);
         self
     }
 

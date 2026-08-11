@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ironclaw_host_api::http::VapidCredentialMaterialV1;
 
-use crate::error::WebPushError;
+use crate::error::WebAppError;
 
 /// Freshly generated VAPID material: the JSON blob to store as the channel
 /// credential, plus the (non-secret) public key the browser needs as
@@ -26,7 +26,7 @@ use crate::error::WebPushError;
 #[derive(Clone)]
 pub struct GeneratedVapidKeyMaterial {
     /// Serialized [`VapidCredentialMaterialV1`] — store as the channel
-    /// credential under the web-push VAPID handle. Contains the private key.
+    /// credential under the web-app VAPID handle. Contains the private key.
     pub material_json: String,
     /// Base64url (unpadded) uncompressed P-256 public key (65 bytes).
     pub public_key_b64url: String,
@@ -49,20 +49,20 @@ impl std::fmt::Debug for GeneratedVapidKeyMaterial {
 /// identifying the operator to push services.
 pub fn generate_vapid_key_material(
     subject: &str,
-) -> Result<GeneratedVapidKeyMaterial, WebPushError> {
+) -> Result<GeneratedVapidKeyMaterial, WebAppError> {
     validate_vapid_subject(subject)?;
     let rng = aws_rand::SystemRandom::new();
     let document =
         signature::EcdsaKeyPair::generate_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
-            .map_err(|_| WebPushError::crypto("VAPID keypair generation failed"))?;
+            .map_err(|_| WebAppError::crypto("VAPID keypair generation failed"))?;
     let key_pair = signature::EcdsaKeyPair::from_pkcs8(
         &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
         document.as_ref(),
     )
-    .map_err(|_| WebPushError::crypto("generated VAPID keypair failed to parse"))?;
+    .map_err(|_| WebAppError::crypto("generated VAPID keypair failed to parse"))?;
     let public_key = key_pair.public_key().as_ref().to_vec();
     if public_key.len() != 65 || public_key[0] != 0x04 {
-        return Err(WebPushError::crypto(
+        return Err(WebAppError::crypto(
             "VAPID public key is not an uncompressed P-256 point",
         ));
     }
@@ -73,7 +73,7 @@ pub fn generate_vapid_key_material(
         subject: subject.to_string(),
     };
     let material_json = serde_json::to_string(&material)
-        .map_err(|error| WebPushError::crypto(format!("VAPID material serialization: {error}")))?;
+        .map_err(|error| WebAppError::crypto(format!("VAPID material serialization: {error}")))?;
     Ok(GeneratedVapidKeyMaterial {
         material_json,
         public_key_b64url,
@@ -84,13 +84,13 @@ pub fn generate_vapid_key_material(
 /// `mailto:` or `https:`. Parsed with `url` (a crate dependency already) so a
 /// malformed URI is rejected at generation rather than surfacing later as a
 /// push-service rejection on every delivery.
-pub fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
+pub fn validate_vapid_subject(subject: &str) -> Result<(), WebAppError> {
     if subject.len() > 256 || subject.chars().any(char::is_control) {
-        return Err(WebPushError::InvalidScope {
+        return Err(WebAppError::InvalidScope {
             reason: "VAPID subject must be a short control-free URI".to_string(),
         });
     }
-    let parsed = url::Url::parse(subject).map_err(|_| WebPushError::InvalidScope {
+    let parsed = url::Url::parse(subject).map_err(|_| WebAppError::InvalidScope {
         reason: "VAPID subject must be a valid mailto: or https: URI".to_string(),
     })?;
     let valid = match parsed.scheme() {
@@ -99,7 +99,7 @@ pub fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
         _ => false,
     };
     if !valid {
-        return Err(WebPushError::InvalidScope {
+        return Err(WebAppError::InvalidScope {
             reason: "VAPID subject must be a mailto: address or https: URL".to_string(),
         });
     }

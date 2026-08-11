@@ -125,7 +125,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// observed value move with this record so the increase is explicit.
 /// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
 /// delivery refactor with #7214's sandbox profile and binding assembly.
-/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// Re-measured on the MERGED tree (web-app channel assembly + #7171 skills
 /// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
 /// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
 /// this ratchet fails when the two disagree.

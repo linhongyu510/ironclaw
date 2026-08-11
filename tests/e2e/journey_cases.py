@@ -452,17 +452,17 @@ PRODUCT_JOURNEY_CASES = (
     ),
     ProductJourneyCase(
         # A blocked scheduled fire fans its gate-prompt notice to the
-        # creator's enrolled browser through the web-push channel: one
+        # creator's enrolled browser through the web-app channel: one
         # unthreaded push POST to the endpoint capability URL, host-injected
         # VAPID authorization, RFC 8291 body. Web push has no provider world
         # (the endpoint is on the manifest's declared push host, answered by
         # the harness's recording network substrate), so `NONE`.
-        case_id="scheduled_trigger_gate_notice_reaches_web_push_browser",
+        case_id="scheduled_trigger_gate_notice_reaches_web_app_browser",
         provider_worlds=(ProviderWorld.NONE,),
         mutable_provider_worlds=(),
         ingress=JourneyIngress.SCHEDULED_TRIGGER,
         execution=JourneyExecution.REBORN_INTEGRATION,
-        delivery_target=JourneyDeliveryTarget.WEB_PUSH,
+        delivery_target=JourneyDeliveryTarget.WEB_APP,
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
@@ -471,7 +471,7 @@ PRODUCT_JOURNEY_CASES = (
         ),
         evidence=CargoEvidence(
             source="tests/integration/delivery_user_journeys.rs",
-            test="blocked_fire_pushes_web_push_notice_to_enrolled_browser",
+            test="blocked_fire_pushes_web_app_notice_to_enrolled_browser",
             target="reborn_integration_delivery_user_journeys",
         ),
         delivery_addresses=(
@@ -479,7 +479,7 @@ PRODUCT_JOURNEY_CASES = (
                 conversation_id="https://fcm.googleapis.com/fcm/send/live-subscription-token",
                 thread_anchor=None,
                 exact_count=1,
-                assertion="assert_web_push_delivery_evidence",
+                assertion="assert_web_app_delivery_evidence",
             ),
         ),
     ),

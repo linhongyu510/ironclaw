@@ -1,5 +1,5 @@
 [package]
-name = "ironclaw_web_push_extension"
+name = "ironclaw_web_app_extension"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -18,7 +18,7 @@ ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api" }
 # workspace lives in our own database), so this package reaches its domain
 # crate the same way the memory provider packages reach theirs.
 ironclaw_outbound = { path = "../../../domains/ironclaw_outbound" }
-ironclaw_web_push = { path = "../../../domains/ironclaw_web_push" }
+ironclaw_web_app = { path = "../../../domains/ironclaw_web_app" }
 # Enrollment payloads (§7b): the adapter parses the browser's opaque
 # PushSubscription document and emits the status detail document.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

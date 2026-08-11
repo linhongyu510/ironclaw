@@ -11,7 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
-use crate::error::WebPushError;
+use crate::error::WebAppError;
 
 /// Longest accepted endpoint URL. Real push-service endpoints run ~150-300
 /// bytes; 1 KiB leaves headroom without accepting unbounded input.
@@ -32,43 +32,43 @@ const AUTH_SECRET_LEN: usize = 16;
 pub struct PushEndpoint(String);
 
 impl PushEndpoint {
-    pub fn new(raw: impl Into<String>) -> Result<Self, WebPushError> {
+    pub fn new(raw: impl Into<String>) -> Result<Self, WebAppError> {
         let raw = raw.into();
         Self::validate(&raw)?;
         Ok(Self(raw))
     }
 
-    fn validate(raw: &str) -> Result<(), WebPushError> {
+    fn validate(raw: &str) -> Result<(), WebAppError> {
         if raw.len() > MAX_ENDPOINT_BYTES {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: format!("endpoint exceeds {MAX_ENDPOINT_BYTES} bytes"),
             });
         }
-        let parsed = url::Url::parse(raw).map_err(|_| WebPushError::InvalidSubscription {
+        let parsed = url::Url::parse(raw).map_err(|_| WebAppError::InvalidSubscription {
             reason: "endpoint is not a valid URL".to_string(),
         })?;
         if parsed.scheme() != "https" {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "endpoint must use https".to_string(),
             });
         }
         if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "endpoint must not carry userinfo".to_string(),
             });
         }
         if parsed.fragment().is_some() {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "endpoint must not carry a fragment".to_string(),
             });
         }
         if parsed.port().is_some() {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "endpoint must use the default https port".to_string(),
             });
         }
         if parsed.host_str().is_none() {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "endpoint has no host".to_string(),
             });
         }
@@ -77,20 +77,20 @@ impl PushEndpoint {
 
     /// Enrollment-time gate: the endpoint's push-service host must be one of
     /// the deployment-declared hosts (the `[[channel.egress]]` entries of the
-    /// web-push manifest, resolved at composition — one source of truth, the
+    /// web-app manifest, resolved at composition — one source of truth, the
     /// same list restricted egress enforces at send time). Shape validation
     /// happens at construction so stored records rehydrate without the list;
     /// this check runs only where a new enrollment is accepted.
     pub fn validate_against_push_services(
         &self,
         allowed_hosts: &[String],
-    ) -> Result<(), WebPushError> {
+    ) -> Result<(), WebAppError> {
         let host = self.host()?;
         if !allowed_hosts
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(&host))
         {
-            return Err(WebPushError::UnsupportedPushService { host });
+            return Err(WebAppError::UnsupportedPushService { host });
         }
         Ok(())
     }
@@ -100,14 +100,14 @@ impl PushEndpoint {
     }
 
     /// Lowercased push service host (validated at construction).
-    pub fn host(&self) -> Result<String, WebPushError> {
-        let parsed = url::Url::parse(&self.0).map_err(|_| WebPushError::InvalidSubscription {
+    pub fn host(&self) -> Result<String, WebAppError> {
+        let parsed = url::Url::parse(&self.0).map_err(|_| WebAppError::InvalidSubscription {
             reason: "endpoint is not a valid URL".to_string(),
         })?;
         parsed
             .host_str()
             .map(str::to_ascii_lowercase)
-            .ok_or_else(|| WebPushError::InvalidSubscription {
+            .ok_or_else(|| WebAppError::InvalidSubscription {
                 reason: "endpoint has no host".to_string(),
             })
     }
@@ -129,8 +129,8 @@ impl PushEndpoint {
     }
 
     /// Origin-form path + query for the restricted egress request.
-    pub fn path_and_query(&self) -> Result<String, WebPushError> {
-        let parsed = url::Url::parse(&self.0).map_err(|_| WebPushError::InvalidSubscription {
+    pub fn path_and_query(&self) -> Result<String, WebAppError> {
+        let parsed = url::Url::parse(&self.0).map_err(|_| WebAppError::InvalidSubscription {
             reason: "endpoint is not a valid URL".to_string(),
         })?;
         let mut path = parsed.path().to_string();
@@ -143,7 +143,7 @@ impl PushEndpoint {
 }
 
 impl TryFrom<String> for PushEndpoint {
-    type Error = WebPushError;
+    type Error = WebAppError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
@@ -167,45 +167,45 @@ struct UncheckedPushSubscriptionKeys {
 }
 
 impl PushSubscriptionKeys {
-    pub fn new(p256dh: impl Into<String>, auth: impl Into<String>) -> Result<Self, WebPushError> {
+    pub fn new(p256dh: impl Into<String>, auth: impl Into<String>) -> Result<Self, WebAppError> {
         let p256dh = p256dh.into();
         let auth = auth.into();
         let p256dh_bytes = decode_b64url_field("p256dh", &p256dh)?;
         if p256dh_bytes.len() != P256_UNCOMPRESSED_POINT_LEN || p256dh_bytes[0] != 0x04 {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "p256dh must decode to a 65-byte uncompressed P-256 point".to_string(),
             });
         }
         let auth_bytes = decode_b64url_field("auth", &auth)?;
         if auth_bytes.len() != AUTH_SECRET_LEN {
-            return Err(WebPushError::InvalidSubscription {
+            return Err(WebAppError::InvalidSubscription {
                 reason: "auth must decode to 16 bytes".to_string(),
             });
         }
         Ok(Self { p256dh, auth })
     }
 
-    pub fn p256dh_bytes(&self) -> Result<Vec<u8>, WebPushError> {
+    pub fn p256dh_bytes(&self) -> Result<Vec<u8>, WebAppError> {
         decode_b64url_field("p256dh", &self.p256dh)
     }
 
-    pub fn auth_bytes(&self) -> Result<Vec<u8>, WebPushError> {
+    pub fn auth_bytes(&self) -> Result<Vec<u8>, WebAppError> {
         decode_b64url_field("auth", &self.auth)
     }
 }
 
 impl TryFrom<UncheckedPushSubscriptionKeys> for PushSubscriptionKeys {
-    type Error = WebPushError;
+    type Error = WebAppError;
 
     fn try_from(value: UncheckedPushSubscriptionKeys) -> Result<Self, Self::Error> {
         Self::new(value.p256dh, value.auth)
     }
 }
 
-fn decode_b64url_field(field: &str, value: &str) -> Result<Vec<u8>, WebPushError> {
+fn decode_b64url_field(field: &str, value: &str) -> Result<Vec<u8>, WebAppError> {
     URL_SAFE_NO_PAD
         .decode(value.trim_end_matches('='))
-        .map_err(|_| WebPushError::InvalidSubscription {
+        .map_err(|_| WebAppError::InvalidSubscription {
             reason: format!("{field} is not valid base64url"),
         })
 }
@@ -286,12 +286,12 @@ mod tests {
             .expect("shape validation alone admits any https host");
         assert!(matches!(
             foreign.validate_against_push_services(&allowed),
-            Err(WebPushError::UnsupportedPushService { host }) if host == "evil.example.com"
+            Err(WebAppError::UnsupportedPushService { host }) if host == "evil.example.com"
         ));
         assert!(
             matches!(
                 enrolled.validate_against_push_services(&[]),
-                Err(WebPushError::UnsupportedPushService { .. })
+                Err(WebAppError::UnsupportedPushService { .. })
             ),
             "an empty declared set fails closed"
         );

@@ -1,7 +1,8 @@
 //! Generic notification-setup product surface (§7b of the unified channel
 //! model): status/enable/disable by `extension_id`, dispatched to the
 //! channel's own adapter. This is the surface that replaced the web app's
-//! bespoke `/web-push/*` enrollment routes — generic code here knows
+//! bespoke, now-retired per-channel enrollment routes — generic code
+//! here knows
 //! nothing about push endpoints, subscriptions, or VAPID; it resolves the
 //! adapter, forwards the channel-opaque payload, and projects the sanitized
 //! status back onto the wire.

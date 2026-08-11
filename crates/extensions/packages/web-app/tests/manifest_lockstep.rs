@@ -3,7 +3,7 @@
 //! so their structure — https-only hosts, the VAPID credential handle, the
 //! `vapid_authorization` injection — must not drift.
 
-const MANIFEST: &str = ironclaw_web_push_extension::MANIFEST;
+const MANIFEST: &str = ironclaw_web_app_extension::MANIFEST;
 
 #[test]
 fn every_egress_entry_is_a_vapid_injected_https_push_host() {
@@ -31,7 +31,7 @@ fn every_egress_entry_is_a_vapid_injected_https_push_host() {
         );
         assert_eq!(
             entry.get("credential_handle").and_then(toml::Value::as_str),
-            Some(ironclaw_web_push::WEB_PUSH_VAPID_CREDENTIAL_HANDLE),
+            Some(ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE),
             "every egress entry injects the VAPID credential"
         );
         let injection = entry
@@ -63,7 +63,7 @@ fn manifest_identity_matches_the_grammar_constants() {
     let parsed: toml::Value = toml::from_str(MANIFEST).expect("manifest parses as TOML");
     assert_eq!(
         parsed.get("id").and_then(toml::Value::as_str),
-        Some(ironclaw_web_push::WEB_PUSH_EXTENSION_ID)
+        Some(ironclaw_web_app::WEB_APP_EXTENSION_ID)
     );
     let channel = parsed.get("channel").expect("channel surface declared");
     assert_eq!(

@@ -52,7 +52,7 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
 // retains about 1.2 KB of explicit headroom without weakening the feature.
 // Two changes then landed on the merged tree, each adding a little to /chat:
-//  - Web Push notifications added ~13 `automations.notificationChannels.webPush.*`
+//  - Web Push notifications added ~13 `automations.notificationChannels.devicePush.*`
 //    keys + a reworded `noSelectionHelper` to the eager `en.ts` fallback pack.
 //    Eager code was kept OUT of /chat: `registerServiceWorker` is in the
 //    dependency-free `lib/register-sw.ts`, and the enrollment UI rides the

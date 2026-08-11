@@ -297,7 +297,7 @@ pub fn channel_only_manifest() -> ResolvedExtensionManifest {
     resolve(CHANNEL_MANIFEST)
 }
 
-/// An outbound-only channel manifest (no ingress section) — the web-push
+/// An outbound-only channel manifest (no ingress section) — the web-app
 /// deployment shape: nothing to mount, everything to deliver.
 pub fn outbound_only_channel_manifest() -> ResolvedExtensionManifest {
     resolve(OUTBOUND_ONLY_CHANNEL_MANIFEST)

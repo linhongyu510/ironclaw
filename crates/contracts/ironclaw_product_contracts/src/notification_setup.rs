@@ -3,7 +3,8 @@
 //! parameterized by `extension_id` and dispatched to the channel's adapter.
 //!
 //! This surface replaces the per-channel enrollment routes the web app used
-//! to carry (`/web-push/*`): generic code never mentions a channel name, a
+//! to carry (the retired per-channel enrollment route family): generic
+//! code never mentions a channel name, a
 //! push endpoint, or a VAPID key — the enable/disable payloads and the
 //! status detail are channel-opaque documents only the channel's own client
 //! interprets. Declared here (not in the product crate) per the

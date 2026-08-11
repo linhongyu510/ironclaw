@@ -3481,8 +3481,8 @@ dependencies = [
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
  "ironclaw_trace_commons",
- "ironclaw_web_push",
- "ironclaw_web_push_extension",
+ "ironclaw_web_app",
+ "ironclaw_web_app_extension",
  "ironclaw_webui",
  "libc",
  "rand 0.10.2",
@@ -3596,7 +3596,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
- "ironclaw_web_push",
+ "ironclaw_web_app",
  "libsql",
  "secrecy",
  "serde",
@@ -3796,7 +3796,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
- "ironclaw_web_push",
+ "ironclaw_web_app",
  "ironclaw_webui",
  "libc",
  "libsql",
@@ -4365,8 +4365,8 @@ dependencies = [
  "ironclaw_turn_runner",
  "ironclaw_turns",
  "ironclaw_wasm",
- "ironclaw_web_push",
- "ironclaw_web_push_extension",
+ "ironclaw_web_app",
+ "ironclaw_web_app_extension",
  "ironclaw_webui",
  "libsql",
  "pretty_assertions",
@@ -5151,7 +5151,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_web_push"
+name = "ironclaw_web_app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -5170,7 +5170,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_web_push_extension"
+name = "ironclaw_web_app_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -5178,7 +5178,7 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
  "ironclaw_outbound",
- "ironclaw_web_push",
+ "ironclaw_web_app",
  "serde",
  "serde_json",
  "tokio",

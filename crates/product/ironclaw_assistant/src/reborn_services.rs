@@ -4240,6 +4240,7 @@ where
                     Arc::clone(&self.lifecycle_service),
                     self.extension_credentials.clone(),
                     Arc::clone(&self.channel_connection_service),
+                    self.session_channels.clone(),
                     caller,
                 )
                 .await?;
@@ -4247,9 +4248,12 @@ where
             }
             id if id == EXTENSION_REGISTRY_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
-                let response =
-                    extensions::list_extension_registry(self.lifecycle_service.as_ref(), caller)
-                        .await?;
+                let response = extensions::list_extension_registry(
+                    self.lifecycle_service.as_ref(),
+                    self.session_channels.as_deref(),
+                    caller,
+                )
+                .await?;
                 views::view_page(response)
             }
             id if id == EXTENSION_SETUP_VIEW.id => {

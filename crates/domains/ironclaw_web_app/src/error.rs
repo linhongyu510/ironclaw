@@ -1,11 +1,11 @@
-//! Typed web-push domain failures. Reasons are sanitized summaries — no
+//! Typed web-app domain failures. Reasons are sanitized summaries — no
 //! endpoint URLs, key material, or backend error internals cross this
 //! boundary (push endpoints are capability URLs and are treated as
 //! sensitive).
 
 /// Web-push domain errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum WebPushError {
+pub enum WebAppError {
     /// A subscription payload from the browser failed validation.
     #[error("push subscription is invalid: {reason}")]
     InvalidSubscription { reason: String },
@@ -23,7 +23,7 @@ pub enum WebPushError {
     /// The subscription store rejected or failed the operation. Carries a
     /// fixed sanitized category only — backend diagnostics never enter the
     /// message. The originating cause is logged server-side at the store
-    /// boundary (see [`WebPushError::store`]) before it is dropped.
+    /// boundary (see [`WebAppError::store`]) before it is dropped.
     #[error("web push subscription store failure")]
     Store,
     /// The per-user subscription cap would be exceeded.
@@ -40,14 +40,14 @@ pub enum WebPushError {
     RuntimeAlreadyInstalled,
 }
 
-impl WebPushError {
-    /// Map a store/backend cause to the sanitized [`WebPushError::Store`]
+impl WebAppError {
+    /// Map a store/backend cause to the sanitized [`WebAppError::Store`]
     /// category, logging the bound source server-side first so the diagnostic
     /// is retained without ever entering the error's `Display` (the
     /// redaction contract this module's header states).
     pub fn store(source: impl std::fmt::Display) -> Self {
         tracing::debug!(
-            target: "ironclaw::web_push",
+            target: "ironclaw::web_app",
             error = %source,
             "web push subscription store operation failed"
         );

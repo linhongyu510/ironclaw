@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::crypto;
-use crate::error::WebPushError;
+use crate::error::WebAppError;
 use crate::subscription::PushSubscriptionRecord;
 
 /// Default TTL for notification pushes: one day. Long enough to survive an
@@ -50,7 +50,7 @@ impl PushUrgency {
 
 /// What the service worker receives after the browser decrypts the push.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebPushNotificationPayload {
+pub struct WebAppNotificationPayload {
     pub title: String,
     pub body: String,
     /// App-relative deep link the notification opens (e.g. `/automations`).
@@ -60,7 +60,7 @@ pub struct WebPushNotificationPayload {
     pub tag: Option<String>,
 }
 
-impl WebPushNotificationPayload {
+impl WebAppNotificationPayload {
     /// Build a payload with every field forced into the notification grammar:
     /// title/body sanitized and char-capped, `url` coerced to an app-relative
     /// path (the service worker opens it), `tag` sanitized, and finally the
@@ -112,11 +112,11 @@ impl WebPushNotificationPayload {
             .unwrap_or(usize::MAX)
     }
 
-    pub fn to_json_bytes(&self) -> Result<Vec<u8>, WebPushError> {
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, WebAppError> {
         let bytes = serde_json::to_vec(self)
-            .map_err(|error| WebPushError::crypto(format!("payload serialization: {error}")))?;
+            .map_err(|error| WebAppError::crypto(format!("payload serialization: {error}")))?;
         if bytes.len() > MAX_PAYLOAD_JSON_BYTES {
-            return Err(WebPushError::PayloadTooLarge {
+            return Err(WebAppError::PayloadTooLarge {
                 bytes: bytes.len(),
                 limit: MAX_PAYLOAD_JSON_BYTES,
             });
@@ -170,7 +170,7 @@ fn truncate_chars(raw: &str, max_chars: usize) -> String {
 
 /// A fully planned push request, minus the host-injected VAPID header.
 #[derive(Debug, Clone)]
-pub struct WebPushRequestPlan {
+pub struct WebAppRequestPlan {
     /// Push service host (already allowlist-validated at enrollment).
     pub host: String,
     /// Origin-form path + query of the subscription endpoint.
@@ -184,15 +184,15 @@ pub struct WebPushRequestPlan {
 /// Encrypt `payload` for `subscription` and plan the POST.
 pub fn build_push_request(
     subscription: &PushSubscriptionRecord,
-    payload: &WebPushNotificationPayload,
+    payload: &WebAppNotificationPayload,
     ttl_seconds: u32,
     urgency: PushUrgency,
-) -> Result<WebPushRequestPlan, WebPushError> {
+) -> Result<WebAppRequestPlan, WebAppError> {
     let plaintext = payload.to_json_bytes()?;
     let ua_public = subscription.keys.p256dh_bytes()?;
     let auth = subscription.keys.auth_bytes()?;
     let body = crypto::encrypt_payload(&ua_public, &auth, &plaintext)?;
-    Ok(WebPushRequestPlan {
+    Ok(WebAppRequestPlan {
         host: subscription.endpoint.host()?,
         path_and_query: subscription.endpoint.path_and_query()?,
         headers: vec![
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn payload_truncates_and_strips_controls() {
-        let payload = WebPushNotificationPayload::new(
+        let payload = WebAppNotificationPayload::new(
             "t\u{0007}itle".to_string(),
             "b".repeat(5_000),
             "/automations",
@@ -249,7 +249,7 @@ mod tests {
         // 1,500 four-byte emoji clear the character cap but serialize to ~6 KB
         // of escaped JSON; char-only truncation would let this blow the push
         // budget and fail every send. The byte-aware fit must bring it under.
-        let payload = WebPushNotificationPayload::new(
+        let payload = WebAppNotificationPayload::new(
             "IronClaw",
             "🍉".repeat(MAX_BODY_CHARS),
             "/automations",
@@ -273,22 +273,18 @@ mod tests {
             "javascript:alert(1)",
             "/ok\nnewline",
         ] {
-            let payload = WebPushNotificationPayload::new("t", "b", url, None);
+            let payload = WebAppNotificationPayload::new("t", "b", url, None);
             assert_eq!(payload.url, "/", "{url:?} must collapse to root");
         }
-        let ok = WebPushNotificationPayload::new("t", "b", "/automations?x=1", None);
+        let ok = WebAppNotificationPayload::new("t", "b", "/automations?x=1", None);
         assert_eq!(ok.url, "/automations?x=1");
     }
 
     #[test]
     fn plan_carries_protocol_headers_and_origin_form_path() {
         let subscription = sample_subscription();
-        let payload = WebPushNotificationPayload::new(
-            "IronClaw",
-            "Automation finished",
-            "/automations",
-            None,
-        );
+        let payload =
+            WebAppNotificationPayload::new("IronClaw", "Automation finished", "/automations", None);
         let plan = build_push_request(
             &subscription,
             &payload,

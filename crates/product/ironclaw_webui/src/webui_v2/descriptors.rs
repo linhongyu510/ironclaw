@@ -1241,7 +1241,7 @@ fn notification_setup_enable_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE,
         mutation_policy(
-            // The largest setup payload today is a web-push subscription: a
+            // The largest setup payload today is a web-app subscription: a
             // ~1 KiB endpoint URL plus two short base64url keys; 8 KiB leaves
             // defensive headroom for any channel's opaque payload.
             body_limit_kib(8),

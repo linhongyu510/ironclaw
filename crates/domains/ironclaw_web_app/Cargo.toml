@@ -1,5 +1,5 @@
 [package]
-name = "ironclaw_web_push"
+name = "ironclaw_web_app"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true

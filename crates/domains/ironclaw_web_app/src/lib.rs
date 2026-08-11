@@ -3,7 +3,7 @@
 //! the web app's browser-notification channel.
 //!
 //! Boundaries (family rules apply):
-//! - **No transport.** This crate plans requests (`WebPushRequestPlan`) and
+//! - **No transport.** This crate plans requests (`WebAppRequestPlan`) and
 //!   never sends them; the channel adapter drives restricted egress and the
 //!   host injects the `Authorization: vapid` header at the egress credential
 //!   boundary.
@@ -23,19 +23,18 @@ pub mod subscription;
 pub mod vapid;
 
 pub use crypto::{MAX_ENCRYPTED_BODY_BYTES, MAX_PLAINTEXT_BYTES, encrypt_payload};
-pub use error::WebPushError;
+pub use error::WebAppError;
 pub use grammar::{
-    WEB_PUSH_CHANNEL_NAME, WEB_PUSH_EXTENSION_ID, WEB_PUSH_TARGET_ID,
-    WEB_PUSH_VAPID_CREDENTIAL_HANDLE, decode_web_push_target_ref, encode_web_push_target_ref,
-    is_web_push_target_ref,
+    WEB_APP_CHANNEL_NAME, WEB_APP_EXTENSION_ID, WEB_APP_TARGET_ID, WEB_APP_VAPID_CREDENTIAL_HANDLE,
+    decode_web_app_target_ref, encode_web_app_target_ref, is_web_app_target_ref,
 };
 pub use message::{
-    DEFAULT_TTL_SECONDS, PushUrgency, WebPushNotificationPayload, WebPushRequestPlan,
+    DEFAULT_TTL_SECONDS, PushUrgency, WebAppNotificationPayload, WebAppRequestPlan,
     build_push_request,
 };
-pub use runtime::{WebPushRuntime, WebPushRuntimeSlot};
+pub use runtime::{WebAppRuntime, WebAppRuntimeSlot};
 pub use store::{
-    FilesystemWebPushSubscriptionStore, PushSubscriptionUpsertOutcome, WebPushSubscriptionStore,
+    FilesystemWebAppSubscriptionStore, PushSubscriptionUpsertOutcome, WebAppSubscriptionStore,
 };
 pub use subscription::{
     MAX_SUBSCRIPTIONS_PER_USER, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord,

@@ -13,13 +13,15 @@ use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::resource::ResourceScope;
 use serde::{Deserialize, Serialize};
 
-use crate::error::WebPushError;
+use crate::error::WebAppError;
 use crate::subscription::{MAX_SUBSCRIPTIONS_PER_USER, PushEndpoint, PushSubscriptionRecord};
 
 /// One document per (tenant, user): the scoped-filesystem mount view already
 /// prefixes `/tenants/<tenant>/users/<user>`, so the alias-relative path is
 /// constant. Composition grants the `/web-push` alias in the per-user mount
-/// view.
+/// view — both the alias and this path keep the pre-rename spelling because
+/// the alias resolves to a physical per-user subpath, and moving it would
+/// orphan every persisted browser enrollment.
 const SUBSCRIPTIONS_DOCUMENT: &str = "/web-push/subscriptions.json";
 const DOCUMENT_SCHEMA_VERSION: u32 = 1;
 
@@ -33,26 +35,26 @@ pub enum PushSubscriptionUpsertOutcome {
 
 /// Typed store contract for push subscriptions.
 #[async_trait]
-pub trait WebPushSubscriptionStore: Send + Sync {
+pub trait WebAppSubscriptionStore: Send + Sync {
     /// Insert or refresh (by endpoint) one browser enrollment.
     async fn upsert_subscription(
         &self,
         scope: &ResourceScope,
         record: PushSubscriptionRecord,
-    ) -> Result<PushSubscriptionUpsertOutcome, WebPushError>;
+    ) -> Result<PushSubscriptionUpsertOutcome, WebAppError>;
 
     /// Remove one enrollment by endpoint. Returns whether it existed.
     async fn remove_subscription(
         &self,
         scope: &ResourceScope,
         endpoint: &PushEndpoint,
-    ) -> Result<bool, WebPushError>;
+    ) -> Result<bool, WebAppError>;
 
     /// All current enrollments for the scope's user, newest first.
     async fn list_subscriptions(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<PushSubscriptionRecord>, WebPushError>;
+    ) -> Result<Vec<PushSubscriptionRecord>, WebAppError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,11 +78,11 @@ impl SubscriptionDocument {
     /// Defense in depth beyond path scoping: a document whose recorded owner
     /// disagrees with the requesting scope is corrupt or misrouted; refuse
     /// rather than serve another user's enrollment set.
-    fn validate_owner(&self, scope: &ResourceScope) -> Result<(), WebPushError> {
+    fn validate_owner(&self, scope: &ResourceScope) -> Result<(), WebAppError> {
         if self.tenant_id != scope.tenant_id.to_string()
             || self.user_id != scope.user_id.to_string()
         {
-            return Err(WebPushError::InvalidScope {
+            return Err(WebAppError::InvalidScope {
                 reason: "stored subscription document does not belong to the requested scope"
                     .to_string(),
             });
@@ -90,14 +92,14 @@ impl SubscriptionDocument {
 }
 
 /// Filesystem-plane implementation over a [`ScopedFilesystem`].
-pub struct FilesystemWebPushSubscriptionStore<F>
+pub struct FilesystemWebAppSubscriptionStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemWebPushSubscriptionStore<F>
+impl<F> FilesystemWebAppSubscriptionStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -106,33 +108,33 @@ where
     }
 }
 
-fn document_path() -> Result<ScopedPath, WebPushError> {
+fn document_path() -> Result<ScopedPath, WebAppError> {
     ScopedPath::new(SUBSCRIPTIONS_DOCUMENT)
-        .map_err(|error| WebPushError::store(format!("subscription path rejected: {error}")))
+        .map_err(|error| WebAppError::store(format!("subscription path rejected: {error}")))
 }
 
-fn decode_document(bytes: &[u8]) -> Result<SubscriptionDocument, WebPushError> {
+fn decode_document(bytes: &[u8]) -> Result<SubscriptionDocument, WebAppError> {
     serde_json::from_slice(bytes).map_err(|error| {
-        WebPushError::store(format!("subscription document decode failed: {error}"))
+        WebAppError::store(format!("subscription document decode failed: {error}"))
     })
 }
 
-fn encode_document(document: &SubscriptionDocument) -> Result<Entry, WebPushError> {
+fn encode_document(document: &SubscriptionDocument) -> Result<Entry, WebAppError> {
     let bytes = serde_json::to_vec(document).map_err(|error| {
-        WebPushError::store(format!("subscription document encode failed: {error}"))
+        WebAppError::store(format!("subscription document encode failed: {error}"))
     })?;
     Ok(Entry::bytes(bytes).with_content_type(ContentType::json()))
 }
 
-fn map_cas_error(error: CasUpdateError<WebPushError>) -> WebPushError {
+fn map_cas_error(error: CasUpdateError<WebAppError>) -> WebAppError {
     match error {
         CasUpdateError::Apply(inner) => inner,
-        other => WebPushError::store(format!("subscription document update failed: {other}")),
+        other => WebAppError::store(format!("subscription document update failed: {other}")),
     }
 }
 
 #[async_trait]
-impl<F> WebPushSubscriptionStore for FilesystemWebPushSubscriptionStore<F>
+impl<F> WebAppSubscriptionStore for FilesystemWebAppSubscriptionStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -140,7 +142,7 @@ where
         &self,
         scope: &ResourceScope,
         record: PushSubscriptionRecord,
-    ) -> Result<PushSubscriptionUpsertOutcome, WebPushError> {
+    ) -> Result<PushSubscriptionUpsertOutcome, WebAppError> {
         let path = document_path()?;
         cas_update(
             self.filesystem.as_ref(),
@@ -175,7 +177,7 @@ where
                         ));
                     }
                     if document.subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_USER {
-                        return Err(WebPushError::SubscriptionLimitReached {
+                        return Err(WebAppError::SubscriptionLimitReached {
                             limit: MAX_SUBSCRIPTIONS_PER_USER,
                         });
                     }
@@ -196,7 +198,7 @@ where
         &self,
         scope: &ResourceScope,
         endpoint: &PushEndpoint,
-    ) -> Result<bool, WebPushError> {
+    ) -> Result<bool, WebAppError> {
         let path = document_path()?;
         cas_update(
             self.filesystem.as_ref(),
@@ -230,13 +232,13 @@ where
     async fn list_subscriptions(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<PushSubscriptionRecord>, WebPushError> {
+    ) -> Result<Vec<PushSubscriptionRecord>, WebAppError> {
         let path = document_path()?;
         let entry = self
             .filesystem
             .get(scope, &path)
             .await
-            .map_err(WebPushError::store)?;
+            .map_err(WebAppError::store)?;
         let Some(entry) = entry else {
             return Ok(Vec::new());
         };
@@ -267,16 +269,16 @@ mod tests {
         }
     }
 
-    fn store() -> FilesystemWebPushSubscriptionStore<InMemoryBackend> {
-        FilesystemWebPushSubscriptionStore::new(Arc::new(ScopedFilesystem::new(
+    fn store() -> FilesystemWebAppSubscriptionStore<InMemoryBackend> {
+        FilesystemWebAppSubscriptionStore::new(Arc::new(ScopedFilesystem::new(
             Arc::new(InMemoryBackend::new()),
             |scope: &ResourceScope| {
                 use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
                 use ironclaw_host_api::path::{MountAlias, VirtualPath};
                 MountView::new(vec![MountGrant::new(
-                    MountAlias::new("/web-push")?,
+                    MountAlias::new("/web-app")?,
                     VirtualPath::new(format!(
-                        "/tenants/{}/users/{}/web-push",
+                        "/tenants/{}/users/{}/web-app",
                         scope.tenant_id, scope.user_id
                     ))?,
                     MountPermissions::read_write_list_delete(),
@@ -387,7 +389,7 @@ mod tests {
             .await;
         assert!(matches!(
             over_cap,
-            Err(WebPushError::SubscriptionLimitReached { .. })
+            Err(WebAppError::SubscriptionLimitReached { .. })
         ));
     }
 

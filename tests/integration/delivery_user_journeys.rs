@@ -1921,14 +1921,14 @@ async fn empty_notification_set_keeps_blocked_fire_in_app_only() {
 
 // ── Web-push notice journeys (browser channel) ─────────────────────────────
 
-/// Push endpoints on the web-push manifest's declared FCM host. The reserved
+/// Push endpoints on the web-app manifest's declared FCM host. The reserved
 /// `gone-subscription-token` suffix mirrors
-/// `harness/profiles/extension.rs::WEB_PUSH_GONE_ENDPOINT_TOKEN`: the
+/// `harness/profiles/extension.rs::WEB_APP_GONE_ENDPOINT_TOKEN`: the
 /// profile's vendor router answers it `410 Gone` (every other push POST gets
 /// `201 Created`).
-const WEB_PUSH_LIVE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
-const WEB_PUSH_GONE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/gone-subscription-token";
-const WEB_PUSH_TARGET_ID: &str = "web-push";
+const WEB_APP_LIVE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
+const WEB_APP_GONE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/gone-subscription-token";
+const WEB_APP_TARGET_ID: &str = "web-app";
 
 /// Exact-destination + unthreaded delivery evidence for the journey coverage
 /// gate (`tests/e2e/scenarios/test_journey_coverage.py`
@@ -1936,8 +1936,8 @@ const WEB_PUSH_TARGET_ID: &str = "web-push";
 /// endpoint capability URL, not a threaded conversation — the endpoint IS the
 /// destination and there is no thread anchor. The gate greps this helper for
 /// `expected_conversation_id`/`expected_thread_anchor` gating the count.
-fn assert_web_push_delivery_evidence(posts: &[ironclaw_network::NetworkHttpRequest]) {
-    // Literal (not the `WEB_PUSH_LIVE_ENDPOINT` const) because the journey
+fn assert_web_app_delivery_evidence(posts: &[ironclaw_network::NetworkHttpRequest]) {
+    // Literal (not the `WEB_APP_LIVE_ENDPOINT` const) because the journey
     // coverage gate greps this body for the exact destination string.
     let expected_conversation_id = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
     let expected_thread_anchor: Option<&str> = None;
@@ -1960,10 +1960,10 @@ fn assert_web_push_delivery_evidence(posts: &[ironclaw_network::NetworkHttpReque
 }
 
 /// Enroll one browser for the harness creator through the REAL WebUI route
-/// (`POST /api/webchat/v2/channels/web-push/notifications/enable`, the
+/// (`POST /api/webchat/v2/channels/web-app/notifications/enable`, the
 /// generic notification-setup surface) over the composed runtime's
 /// production product surface — the same path the browser panel drives.
-async fn enroll_web_push_browser(
+async fn enroll_web_app_browser(
     harness: &RebornIntegrationHarness,
     services: &RebornRuntime,
     endpoint: &str,
@@ -1980,12 +1980,12 @@ async fn enroll_web_push_browser(
         harness.binding.agent_id.clone(),
         harness.binding.project_id.clone(),
     );
-    let point = ironclaw_web_push::generate_vapid_key_material("mailto:browser@example.com")
+    let point = ironclaw_web_app::generate_vapid_key_material("mailto:browser@example.com")
         .expect("generate a valid P-256 point")
         .public_key_b64url;
     let (status, body) = reborn_support::webui_mount::post_json(
         reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
-        "/api/webchat/v2/channels/web-push/notifications/enable",
+        "/api/webchat/v2/channels/web-app/notifications/enable",
         json!({
             "payload": {
                 "endpoint": endpoint,
@@ -2007,10 +2007,10 @@ async fn enroll_web_push_browser(
     assert_eq!(body["detail"]["outcome"], "enrolled", "{body}");
 }
 
-/// The web-push notifier: [`background_run_notifier`]'s services with the
-/// browser channel's codec beside Slack's, so the creator's `web-push`
+/// The web-app notifier: [`background_run_notifier`]'s services with the
+/// browser channel's codec beside Slack's, so the creator's `web-app`
 /// notification target decodes.
-fn web_push_background_run_notifier(
+fn web_app_background_run_notifier(
     harness: &RebornIntegrationHarness,
     services: &RebornRuntime,
 ) -> ironclaw_assistant::TriggeredRunDeliveryDriver {
@@ -2028,7 +2028,7 @@ fn web_push_background_run_notifier(
         Arc::new(vec![
             Arc::new(ironclaw_slack_extension::SlackPreferenceTargetCodec)
                 as Arc<dyn PreferenceTargetCodec>,
-            Arc::new(ironclaw_web_push_extension::WebPushPreferenceTargetCodec)
+            Arc::new(ironclaw_web_app_extension::WebAppPreferenceTargetCodec)
                 as Arc<dyn PreferenceTargetCodec>,
         ]) as Arc<dyn ActivePreferenceTargetCodecs>,
         slack_agent(),
@@ -2061,7 +2061,7 @@ async fn wait_for_push_posts(
 
 /// The browser subscriptions currently enrolled for the harness creator,
 /// read back through the SAME production status route the panel uses.
-async fn web_push_subscription_count(
+async fn web_app_subscription_count(
     harness: &RebornIntegrationHarness,
     services: &RebornRuntime,
 ) -> u64 {
@@ -2076,7 +2076,7 @@ async fn web_push_subscription_count(
     );
     let (status, body) = reborn_support::webui_mount::get_json(
         reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
-        "/api/webchat/v2/channels/web-push/notifications",
+        "/api/webchat/v2/channels/web-app/notifications",
     )
     .await;
     assert_eq!(
@@ -2095,19 +2095,19 @@ async fn web_push_subscription_count(
 /// headers, one POST to the exact enrolled endpoint — while the run parks on
 /// its gate and the notice lands in the durable attempt ledger.
 #[tokio::test(flavor = "multi_thread")]
-async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
-    let group = RebornIntegrationGroup::extension_delivery_with_web_push()
+async fn blocked_fire_pushes_web_app_notice_to_enrolled_browser() {
+    let group = RebornIntegrationGroup::extension_delivery_with_web_app()
         .await
-        .expect("delivery-with-web-push group builds");
+        .expect("delivery-with-web-app group builds");
     let services = reborn_services(&group);
     let harness = group
-        .thread("conv-web-push-notice")
+        .thread("conv-web-app-notice")
         .build()
         .await
-        .expect("web-push notice thread builds");
+        .expect("web-app notice thread builds");
 
-    enroll_web_push_browser(&harness, services, WEB_PUSH_LIVE_ENDPOINT).await;
-    seed_notification_channel(&harness, services, WEB_PUSH_TARGET_ID).await;
+    enroll_web_app_browser(&harness, services, WEB_APP_LIVE_ENDPOINT).await;
+    seed_notification_channel(&harness, services, WEB_APP_TARGET_ID).await;
     gate_the_write(&group, &harness).await;
 
     let submission = harness
@@ -2116,7 +2116,7 @@ async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
             [
                 RebornScriptedReply::tool_call(
                     "builtin.write_file",
-                    json!({"path": "/workspace/web-push-report.txt", "content": "nightly deploy report"}),
+                    json!({"path": "/workspace/web-app-report.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
             ],
@@ -2124,7 +2124,7 @@ async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
         .await
         .expect("gated fire submits");
 
-    let notifier = web_push_background_run_notifier(&harness, services);
+    let notifier = web_app_background_run_notifier(&harness, services);
     notifier
         .on_trigger_submitted(notifier_request(&harness, &submission, GATED_FIRE_PROMPT))
         .await;
@@ -2143,10 +2143,10 @@ async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
 
     // Wire seam: exactly one push POST to the enrolled endpoint, carrying the
     // host-injected VAPID authorization and the RFC 8188/8291 framing.
-    let posts = wait_for_push_posts(&harness, WEB_PUSH_LIVE_ENDPOINT, 1).await;
+    let posts = wait_for_push_posts(&harness, WEB_APP_LIVE_ENDPOINT, 1).await;
     // Exact-destination + unthreaded evidence for the journey coverage gate
     // (`tests/e2e/scenarios/test_journey_coverage.py`).
-    assert_web_push_delivery_evidence(&posts);
+    assert_web_app_delivery_evidence(&posts);
     assert_eq!(posts.len(), 1, "one enrolled browser, one push POST");
     let post = &posts[0];
     let header = |name: &str| {
@@ -2243,19 +2243,19 @@ async fn blocked_fire_pushes_web_push_notice_to_enrolled_browser() {
 /// the caller's enrollment set so future sends stop trying.
 #[tokio::test(flavor = "multi_thread")]
 async fn gone_push_subscription_is_pruned_after_notice_attempt() {
-    let group = RebornIntegrationGroup::extension_delivery_with_web_push()
+    let group = RebornIntegrationGroup::extension_delivery_with_web_app()
         .await
-        .expect("delivery-with-web-push group builds");
+        .expect("delivery-with-web-app group builds");
     let services = reborn_services(&group);
     let harness = group
-        .thread("conv-web-push-prune")
+        .thread("conv-web-app-prune")
         .build()
         .await
-        .expect("web-push prune thread builds");
+        .expect("web-app prune thread builds");
 
-    enroll_web_push_browser(&harness, services, WEB_PUSH_GONE_ENDPOINT).await;
-    assert_eq!(web_push_subscription_count(&harness, services).await, 1);
-    seed_notification_channel(&harness, services, WEB_PUSH_TARGET_ID).await;
+    enroll_web_app_browser(&harness, services, WEB_APP_GONE_ENDPOINT).await;
+    assert_eq!(web_app_subscription_count(&harness, services).await, 1);
+    seed_notification_channel(&harness, services, WEB_APP_TARGET_ID).await;
     gate_the_write(&group, &harness).await;
 
     let submission = harness
@@ -2264,7 +2264,7 @@ async fn gone_push_subscription_is_pruned_after_notice_attempt() {
             [
                 RebornScriptedReply::tool_call(
                     "builtin.write_file",
-                    json!({"path": "/workspace/web-push-prune.txt", "content": "nightly deploy report"}),
+                    json!({"path": "/workspace/web-app-prune.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
             ],
@@ -2272,7 +2272,7 @@ async fn gone_push_subscription_is_pruned_after_notice_attempt() {
         .await
         .expect("gated fire submits");
 
-    let notifier = web_push_background_run_notifier(&harness, services);
+    let notifier = web_app_background_run_notifier(&harness, services);
     notifier
         .on_trigger_submitted(notifier_request(&harness, &submission, GATED_FIRE_PROMPT))
         .await;
@@ -2287,11 +2287,11 @@ async fn gone_push_subscription_is_pruned_after_notice_attempt() {
         .expect("the gated fire parks on a real approval gate");
 
     // The dead endpoint was attempted once, answered 410, and pruned.
-    let posts = wait_for_push_posts(&harness, WEB_PUSH_GONE_ENDPOINT, 1).await;
+    let posts = wait_for_push_posts(&harness, WEB_APP_GONE_ENDPOINT, 1).await;
     assert_eq!(posts.len(), 1, "the dead subscription is attempted once");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if web_push_subscription_count(&harness, services).await == 0 {
+        if web_app_subscription_count(&harness, services).await == 0 {
             break;
         }
         assert!(

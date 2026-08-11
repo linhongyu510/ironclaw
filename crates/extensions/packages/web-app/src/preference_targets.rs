@@ -1,6 +1,6 @@
-//! The web-push reply-target binding codec.
+//! The web-app reply-target binding codec.
 //!
-//! Every web-push target is a personal direct-message surface by
+//! Every web-app target is a personal direct-message surface by
 //! construction: the binding names exactly one user's own enrolled browsers,
 //! so OAuth/auth prompts are admissible on it. Shared-conversation encoding
 //! deliberately fails closed — the channel has no shared conversations.
@@ -10,26 +10,26 @@ use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
-use ironclaw_web_push::{decode_web_push_target_ref, encode_web_push_target_ref};
+use ironclaw_web_app::{decode_web_app_target_ref, encode_web_app_target_ref};
 
-pub struct WebPushPreferenceTargetCodec;
+pub struct WebAppPreferenceTargetCodec;
 
-impl PreferenceTargetCodec for WebPushPreferenceTargetCodec {
+impl PreferenceTargetCodec for WebAppPreferenceTargetCodec {
     fn conversation_for_target(
         &self,
         target: &ReplyTargetBindingRef,
     ) -> Option<ExternalConversationRef> {
         // Validate the grammar before echoing it as a conversation id.
-        decode_web_push_target_ref(target.as_str())?;
+        decode_web_app_target_ref(target.as_str())?;
         ExternalConversationRef::new(None, target.as_str(), None, None).ok()
     }
 
     fn is_personal_direct_message(&self, target: &ReplyTargetBindingRef) -> bool {
-        decode_web_push_target_ref(target.as_str()).is_some()
+        decode_web_app_target_ref(target.as_str()).is_some()
     }
 
     fn direct_message_actor_for_target(&self, target: &ReplyTargetBindingRef) -> Option<String> {
-        decode_web_push_target_ref(target.as_str()).map(|(_, user_id)| user_id.to_string())
+        decode_web_app_target_ref(target.as_str()).map(|(_, user_id)| user_id.to_string())
     }
 
     fn encode_shared_conversation_target(
@@ -48,11 +48,11 @@ impl PreferenceTargetCodec for WebPushPreferenceTargetCodec {
         // The conversation id carries the full grammar; re-encode only when
         // it decodes and names the proven actor.
         let (tenant_id, user_id) =
-            decode_web_push_target_ref(request.conversation.conversation_id())?;
+            decode_web_app_target_ref(request.conversation.conversation_id())?;
         if user_id.to_string() != external_actor_id {
             return None;
         }
-        encode_web_push_target_ref(&tenant_id, &user_id).ok()
+        encode_web_app_target_ref(&tenant_id, &user_id).ok()
     }
 }
 
@@ -62,7 +62,7 @@ mod tests {
     use ironclaw_host_api::ids::{TenantId, UserId};
 
     fn reference() -> ReplyTargetBindingRef {
-        encode_web_push_target_ref(
+        encode_web_app_target_ref(
             &TenantId::new("tenant1").expect("tenant"),
             &UserId::new("user1").expect("user"),
         )
@@ -70,8 +70,8 @@ mod tests {
     }
 
     #[test]
-    fn web_push_targets_are_personal_direct_messages() {
-        let codec = WebPushPreferenceTargetCodec;
+    fn web_app_targets_are_personal_direct_messages() {
+        let codec = WebAppPreferenceTargetCodec;
         let reference = reference();
         assert!(codec.is_personal_direct_message(&reference));
         assert_eq!(
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn foreign_refs_are_refused() {
-        let codec = WebPushPreferenceTargetCodec;
+        let codec = WebAppPreferenceTargetCodec;
         let foreign = ReplyTargetBindingRef::new("slack/v1/team/chan").expect("ref");
         assert!(!codec.is_personal_direct_message(&foreign));
         assert!(codec.conversation_for_target(&foreign).is_none());

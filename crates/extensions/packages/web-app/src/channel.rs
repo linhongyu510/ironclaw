@@ -14,10 +14,10 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ids::{InvocationId, SecretHandle};
 use ironclaw_host_api::resource::ResourceScope;
-use ironclaw_web_push::{
+use ironclaw_web_app::{
     DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord,
-    PushSubscriptionUpsertOutcome, PushUrgency, WEB_PUSH_VAPID_CREDENTIAL_HANDLE, WebPushError,
-    WebPushNotificationPayload, WebPushRuntimeSlot, build_push_request, decode_web_push_target_ref,
+    PushSubscriptionUpsertOutcome, PushUrgency, WEB_APP_VAPID_CREDENTIAL_HANDLE, WebAppError,
+    WebAppNotificationPayload, WebAppRuntimeSlot, build_push_request, decode_web_app_target_ref,
 };
 
 /// Deep link a notification opens; the service worker resolves it against
@@ -35,18 +35,18 @@ struct FanOutTally {
     unauthorized: Option<String>,
 }
 
-pub struct WebPushChannelAdapter {
-    runtime: WebPushRuntimeSlot,
+pub struct WebAppChannelAdapter {
+    runtime: WebAppRuntimeSlot,
 }
 
-impl WebPushChannelAdapter {
-    pub fn new(runtime: WebPushRuntimeSlot) -> Self {
+impl WebAppChannelAdapter {
+    pub fn new(runtime: WebAppRuntimeSlot) -> Self {
         Self { runtime }
     }
 }
 
 #[async_trait]
-impl ChannelAdapter for WebPushChannelAdapter {
+impl ChannelAdapter for WebAppChannelAdapter {
     /// The web app's inbound entrypoint is the authenticated session (the
     /// generic session-inbound route), whose wire shape is host-owned and
     /// whose actor authority is the authenticated caller — by the trust
@@ -146,9 +146,9 @@ impl ChannelAdapter for WebPushChannelAdapter {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         let conversation_id = envelope.target.conversation.conversation_id();
-        let Some((tenant_id, user_id)) = decode_web_push_target_ref(conversation_id) else {
+        let Some((tenant_id, user_id)) = decode_web_app_target_ref(conversation_id) else {
             return Err(ChannelError::Render {
-                reason: "delivery target is not a web-push conversation".to_string(),
+                reason: "delivery target is not a web-app conversation".to_string(),
             });
         };
         let runtime = self
@@ -224,7 +224,7 @@ impl ChannelAdapter for WebPushChannelAdapter {
                 reason: "no browsers are enrolled for web push".to_string(),
             }
         } else {
-            let payload = WebPushNotificationPayload::new(
+            let payload = WebAppNotificationPayload::new(
                 NOTIFICATION_TITLE,
                 lines.join("\n\n"),
                 NOTIFICATION_URL,
@@ -250,18 +250,18 @@ impl ChannelAdapter for WebPushChannelAdapter {
     }
 }
 
-impl WebPushChannelAdapter {
+impl WebAppChannelAdapter {
     async fn fan_out(
         &self,
-        runtime: &ironclaw_web_push::WebPushRuntime,
+        runtime: &ironclaw_web_app::WebAppRuntime,
         scope: &ResourceScope,
         subscriptions: &[PushSubscriptionRecord],
-        payload: &WebPushNotificationPayload,
+        payload: &WebAppNotificationPayload,
         urgency: PushUrgency,
         egress: &dyn RestrictedEgress,
     ) -> Result<FanOutTally, ChannelError> {
         let credential_handle =
-            SecretHandle::new(WEB_PUSH_VAPID_CREDENTIAL_HANDLE).map_err(|_| {
+            SecretHandle::new(WEB_APP_VAPID_CREDENTIAL_HANDLE).map_err(|_| {
                 ChannelError::Configuration {
                     reason: "VAPID credential handle is invalid".to_string(),
                 }
@@ -301,7 +301,7 @@ impl WebPushChannelAdapter {
                             .await
                         {
                             tracing::debug!(
-                                target: "ironclaw::web_push",
+                                target: "ironclaw::web_app",
                                 error = %error,
                                 "failed to prune an expired push subscription"
                             );
@@ -398,7 +398,7 @@ struct UnenrollmentPayload {
 }
 
 /// The enrollment storage scope. Byte-identical to the scope the retired
-/// `/web-push/*` product service derived from the authenticated caller, so
+/// `/web-app/*` product service derived from the authenticated caller, so
 /// existing per-user subscription documents keep resolving.
 fn enrollment_scope(scope: &NotificationSetupScope) -> ResourceScope {
     ResourceScope {
@@ -413,7 +413,7 @@ fn enrollment_scope(scope: &NotificationSetupScope) -> ResourceScope {
 }
 
 async fn setup_status(
-    runtime: &ironclaw_web_push::WebPushRuntime,
+    runtime: &ironclaw_web_app::WebAppRuntime,
     scope: &NotificationSetupScope,
 ) -> Result<NotificationSetupStatus, ChannelError> {
     let resource_scope = enrollment_scope(scope);
@@ -476,18 +476,18 @@ fn amend_detail(
 /// Caller-correctable input problems (endpoint shape, unsupported push
 /// service, key material, per-user limit) surface as parse errors; anything
 /// else is channel configuration trouble. Endpoint URLs never enter reasons.
-fn setup_input_error(error: WebPushError) -> ChannelError {
+fn setup_input_error(error: WebAppError) -> ChannelError {
     match &error {
-        WebPushError::InvalidSubscription { .. }
-        | WebPushError::UnsupportedPushService { .. }
-        | WebPushError::SubscriptionLimitReached { .. } => ChannelError::Parse {
+        WebAppError::InvalidSubscription { .. }
+        | WebAppError::UnsupportedPushService { .. }
+        | WebAppError::SubscriptionLimitReached { .. } => ChannelError::Parse {
             reason: error.to_string(),
         },
         _ => setup_error(error),
     }
 }
 
-fn setup_error(error: WebPushError) -> ChannelError {
+fn setup_error(error: WebAppError) -> ChannelError {
     ChannelError::Configuration {
         reason: error.to_string(),
     }

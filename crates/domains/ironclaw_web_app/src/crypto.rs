@@ -13,7 +13,7 @@
 
 use aws_lc_rs::{aead, agreement, hkdf, rand as aws_rand};
 
-use crate::error::WebPushError;
+use crate::error::WebAppError;
 
 /// RFC 8188 record size we declare in the header. Push services cap the
 /// whole body at 4096 bytes, so a single 4096-byte record always suffices.
@@ -33,7 +33,7 @@ const PAD_DELIMITER_BYTES: usize = 1;
 pub const MAX_PLAINTEXT_BYTES: usize =
     MAX_ENCRYPTED_BODY_BYTES - HEADER_BYTES - TAG_BYTES - PAD_DELIMITER_BYTES;
 
-const KEY_INFO_PREFIX: &[u8] = b"WebPush: info\0";
+const KEY_INFO_PREFIX: &[u8] = b"WebApp: info\0";
 const CEK_INFO: &[u8] = b"Content-Encoding: aes128gcm\0";
 const NONCE_INFO: &[u8] = b"Content-Encoding: nonce\0";
 
@@ -52,13 +52,13 @@ pub fn encrypt_payload(
     ua_public: &[u8],
     auth_secret: &[u8],
     plaintext: &[u8],
-) -> Result<Vec<u8>, WebPushError> {
+) -> Result<Vec<u8>, WebAppError> {
     let rng = aws_rand::SystemRandom::new();
     let mut salt = [0u8; 16];
     aws_rand::SecureRandom::fill(&rng, &mut salt)
-        .map_err(|_| WebPushError::crypto("salt generation failed"))?;
+        .map_err(|_| WebAppError::crypto("salt generation failed"))?;
     let as_private = agreement::PrivateKey::generate(&agreement::ECDH_P256)
-        .map_err(|_| WebPushError::crypto("ephemeral key generation failed"))?;
+        .map_err(|_| WebAppError::crypto("ephemeral key generation failed"))?;
     encrypt_with_materials(&as_private, salt, ua_public, auth_secret, plaintext)
 }
 
@@ -70,30 +70,30 @@ pub(crate) fn encrypt_with_materials(
     ua_public: &[u8],
     auth_secret: &[u8],
     plaintext: &[u8],
-) -> Result<Vec<u8>, WebPushError> {
+) -> Result<Vec<u8>, WebAppError> {
     if plaintext.len() > MAX_PLAINTEXT_BYTES {
-        return Err(WebPushError::PayloadTooLarge {
+        return Err(WebAppError::PayloadTooLarge {
             bytes: plaintext.len(),
             limit: MAX_PLAINTEXT_BYTES,
         });
     }
     if ua_public.len() != 65 || ua_public[0] != 0x04 {
-        return Err(WebPushError::InvalidSubscription {
+        return Err(WebAppError::InvalidSubscription {
             reason: "p256dh must be a 65-byte uncompressed P-256 point".to_string(),
         });
     }
     if auth_secret.len() != 16 {
-        return Err(WebPushError::InvalidSubscription {
+        return Err(WebAppError::InvalidSubscription {
             reason: "auth must be 16 bytes".to_string(),
         });
     }
 
     let as_public = as_private
         .compute_public_key()
-        .map_err(|_| WebPushError::crypto("ephemeral public key derivation failed"))?;
+        .map_err(|_| WebAppError::crypto("ephemeral public key derivation failed"))?;
     let as_public_bytes = as_public.as_ref();
     if as_public_bytes.len() != 65 {
-        return Err(WebPushError::crypto(
+        return Err(WebAppError::crypto(
             "ephemeral public key is not an uncompressed P-256 point",
         ));
     }
@@ -102,7 +102,7 @@ pub(crate) fn encrypt_with_materials(
     let ecdh_secret = agreement::agree(
         as_private,
         peer,
-        WebPushError::crypto("ECDH agreement failed"),
+        WebAppError::crypto("ECDH agreement failed"),
         |secret| Ok(secret.to_vec()),
     )?;
 
@@ -115,14 +115,14 @@ pub(crate) fn encrypt_with_materials(
     record.push(0x02);
 
     let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &cek)
-        .map_err(|_| WebPushError::crypto("content-encryption key rejected"))?;
+        .map_err(|_| WebAppError::crypto("content-encryption key rejected"))?;
     let key = aead::LessSafeKey::new(unbound);
     key.seal_in_place_append_tag(
         aead::Nonce::assume_unique_for_key(nonce),
         aead::Aad::empty(),
         &mut record,
     )
-    .map_err(|_| WebPushError::crypto("payload sealing failed"))?;
+    .map_err(|_| WebAppError::crypto("payload sealing failed"))?;
 
     let mut body = Vec::with_capacity(HEADER_BYTES + record.len());
     body.extend_from_slice(&salt);
@@ -140,8 +140,8 @@ fn derive_cek_and_nonce(
     ua_public: &[u8],
     as_public: &[u8],
     salt: &[u8; 16],
-) -> Result<([u8; 16], [u8; 12]), WebPushError> {
-    // IKM = HKDF(salt=auth_secret, ikm=ecdh_secret, info="WebPush: info\0" || ua_public || as_public, 32)
+) -> Result<([u8; 16], [u8; 12]), WebAppError> {
+    // IKM = HKDF(salt=auth_secret, ikm=ecdh_secret, info="WebApp: info\0" || ua_public || as_public, 32)
     let mut ikm = [0u8; 32];
     hkdf_expand(
         auth_secret,
@@ -158,18 +158,13 @@ fn derive_cek_and_nonce(
     Ok((cek, nonce))
 }
 
-fn hkdf_expand(
-    salt: &[u8],
-    ikm: &[u8],
-    info: &[&[u8]],
-    out: &mut [u8],
-) -> Result<(), WebPushError> {
+fn hkdf_expand(salt: &[u8], ikm: &[u8], info: &[&[u8]], out: &mut [u8]) -> Result<(), WebAppError> {
     let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, salt).extract(ikm);
     let okm = prk
         .expand(info, HkdfOutputLen(out.len()))
-        .map_err(|_| WebPushError::crypto("HKDF expand failed"))?;
+        .map_err(|_| WebAppError::crypto("HKDF expand failed"))?;
     okm.fill(out)
-        .map_err(|_| WebPushError::crypto("HKDF fill failed"))?;
+        .map_err(|_| WebAppError::crypto("HKDF fill failed"))?;
     Ok(())
 }
 
@@ -246,7 +241,7 @@ mod tests {
         let ecdh_secret = agreement::agree(
             &as_private,
             peer,
-            WebPushError::crypto("agree failed"),
+            WebAppError::crypto("agree failed"),
             |secret| Ok(secret.to_vec()),
         )
         .expect("ECDH agreement");
@@ -309,7 +304,7 @@ mod tests {
         let ecdh_secret = agreement::agree(
             &ua_private,
             peer,
-            WebPushError::crypto("agree failed"),
+            WebAppError::crypto("agree failed"),
             |secret| Ok(secret.to_vec()),
         )
         .expect("receiver ECDH");
@@ -351,7 +346,7 @@ mod tests {
         let oversized = vec![0u8; MAX_PLAINTEXT_BYTES + 1];
         assert!(matches!(
             encrypt_payload(&vector.ua_public, &vector.auth, &oversized),
-            Err(WebPushError::PayloadTooLarge { .. })
+            Err(WebAppError::PayloadTooLarge { .. })
         ));
     }
 

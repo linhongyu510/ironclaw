@@ -797,7 +797,7 @@ reply always lands in the conversation it belongs to, automatically, and
 rides neither tool — never sealed, redirected, or suppressed by a lane-2 call.
 There is no `web_app` pseudo-target: the WebUI already owns lane 1 for its own
 runs, so an empty notification-channel set simply means "no external
-notification; the app is the surface." (✎ 2026-08-08: the `web-push` catalog
+notification; the app is the surface." (✎ 2026-08-08: the `web-app` catalog
 target — browser push notifications to the user's enrolled devices — is a
 *real* external destination with genuine push-service egress, not a revival
 of that pseudo-target; selecting it delivers OS notifications even while the
