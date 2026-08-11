@@ -279,7 +279,9 @@ enum ReadOutcome {
 fn read_outcome_for_write(outcome: ReadOutcome) -> (SuggestionsDoc, CasExpectation) {
     match outcome {
         ReadOutcome::Current(doc, version) => (doc, CasExpectation::Version(version)),
-        ReadOutcome::Incompatible(version) => (SuggestionsDoc::empty(), CasExpectation::Version(version)),
+        ReadOutcome::Incompatible(version) => {
+            (SuggestionsDoc::empty(), CasExpectation::Version(version))
+        }
         ReadOutcome::Absent => (SuggestionsDoc::empty(), CasExpectation::Absent),
     }
 }

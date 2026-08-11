@@ -443,7 +443,10 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::PlannedDriver(error) => write!(formatter, "planned driver failed: {error}"),
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
             Self::SurfacePolicyShapes(error) => {
-                write!(formatter, "surface policy shapes resolution failed: {error}")
+                write!(
+                    formatter,
+                    "surface policy shapes resolution failed: {error}"
+                )
             }
             Self::SubagentCompletion(error) => {
                 write!(formatter, "subagent completion wiring failed: {error}")
@@ -1764,8 +1767,7 @@ mod tests {
         let resolved = resolver
             .resolve_run_profile(
                 RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
-                    RunProfileRequest::new(RunProfileId::suggestion_generation().as_str())
-                        .unwrap(),
+                    RunProfileRequest::new(RunProfileId::suggestion_generation().as_str()).unwrap(),
                 ),
             )
             .await

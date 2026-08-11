@@ -447,47 +447,46 @@ impl RebornSuggestionsProductService {
         let owner = scope.product_owner(&actor);
         let product_context = ironclaw_turns::product_context::resolve_web_ui(owner);
         let request_id = binding_ref;
-        let response =
-            self.turn_coordinator
-                .submit_turn(SubmitTurnRequest {
-                    requested_model: None,
-                    scope,
-                    actor,
-                    accepted_message_ref: AcceptedMessageRef::new(request_id.clone()).map_err(
-                        |e| TurnError::InvalidRequest {
-                            reason: format!("invalid accepted message ref: {e}"),
-                        },
-                    )?,
-                    source_binding_ref: SourceBindingRef::new(request_id.clone()).map_err(
-                        |e| TurnError::InvalidRequest {
-                            reason: format!("invalid source binding ref: {e}"),
-                        },
-                    )?,
-                    reply_target_binding_ref: ReplyTargetBindingRef::new(request_id.clone())
+        let response = self
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                requested_model: None,
+                scope,
+                actor,
+                accepted_message_ref: AcceptedMessageRef::new(request_id.clone()).map_err(|e| {
+                    TurnError::InvalidRequest {
+                        reason: format!("invalid accepted message ref: {e}"),
+                    }
+                })?,
+                source_binding_ref: SourceBindingRef::new(request_id.clone()).map_err(|e| {
+                    TurnError::InvalidRequest {
+                        reason: format!("invalid source binding ref: {e}"),
+                    }
+                })?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new(request_id.clone()).map_err(
+                    |e| TurnError::InvalidRequest {
+                        reason: format!("invalid reply target binding ref: {e}"),
+                    },
+                )?,
+                requested_run_profile: Some(
+                    RunProfileRequest::new(RunProfileId::suggestion_generation().as_str())
                         .map_err(|e| TurnError::InvalidRequest {
-                            reason: format!("invalid reply target binding ref: {e}"),
+                            reason: format!("invalid suggestion-generation run profile id: {e}"),
                         })?,
-                    requested_run_profile: Some(
-                        RunProfileRequest::new(RunProfileId::suggestion_generation().as_str())
-                            .map_err(|e| TurnError::InvalidRequest {
-                                reason: format!(
-                                    "invalid suggestion-generation run profile id: {e}"
-                                ),
-                            })?,
-                    ),
-                    idempotency_key: IdempotencyKey::new(request_id).map_err(|e| {
-                        TurnError::InvalidRequest {
-                            reason: format!("invalid idempotency key: {e}"),
-                        }
-                    })?,
-                    received_at: chrono::Utc::now(),
-                    requested_run_id: Some(run_id),
-                    parent_run_id: None,
-                    subagent_depth: 0,
-                    spawn_tree_root_run_id: None,
-                    product_context: Some(product_context),
-                })
-                .await?;
+                ),
+                idempotency_key: IdempotencyKey::new(request_id).map_err(|e| {
+                    TurnError::InvalidRequest {
+                        reason: format!("invalid idempotency key: {e}"),
+                    }
+                })?,
+                received_at: chrono::Utc::now(),
+                requested_run_id: Some(run_id),
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: Some(product_context),
+            })
+            .await?;
 
         let SubmitTurnResponse::Accepted {
             turn_id: accepted_turn_id,

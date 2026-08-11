@@ -183,7 +183,11 @@ fn card_length_issues(cards: &[SuggestionCard]) -> Vec<DispatchInputIssue> {
         };
         check("title", &card.title, MAX_TITLE_LEN);
         check("description", &card.description, MAX_DESCRIPTION_LEN);
-        check("suggested_prompt", &card.suggested_prompt, MAX_SUGGESTED_PROMPT_LEN);
+        check(
+            "suggested_prompt",
+            &card.suggested_prompt,
+            MAX_SUGGESTED_PROMPT_LEN,
+        );
         check("category", &card.category, MAX_CATEGORY_LEN);
         if let Some(extension_id) = &card.extension_id {
             check("extension_id", extension_id, MAX_EXTENSION_ID_LEN);
