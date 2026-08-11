@@ -14,7 +14,8 @@
     "headers",
     "rows",
     "sampled_row_count",
-    "sampled_column_count"
+    "sampled_column_count",
+    "truncation"
   ],
   "properties": {
     "spreadsheet_id": { "type": "string" },
@@ -36,6 +37,24 @@
       }
     },
     "sampled_row_count": { "type": "integer", "minimum": 0 },
-    "sampled_column_count": { "type": "integer", "minimum": 0 }
+    "sampled_column_count": { "type": "integer", "minimum": 0 },
+    "truncation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows_omitted",
+        "columns_omitted",
+        "cells_truncated",
+        "metadata_fields_truncated",
+        "aggregate_limit_reached"
+      ],
+      "properties": {
+        "rows_omitted": { "type": "integer", "minimum": 0 },
+        "columns_omitted": { "type": "integer", "minimum": 0 },
+        "cells_truncated": { "type": "integer", "minimum": 0 },
+        "metadata_fields_truncated": { "type": "integer", "minimum": 0 },
+        "aggregate_limit_reached": { "type": "boolean" }
+      }
+    }
   }
 }

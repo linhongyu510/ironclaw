@@ -321,7 +321,8 @@ fn extract_outline_from_elements(
                 let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !title.is_empty() {
                     if out.len() < MAX_OUTLINE_ITEMS {
-                        let (title, title_truncated) = truncate_chars(&title, MAX_OUTLINE_TITLE_CHARS);
+                        let (title, title_truncated) =
+                            truncate_chars(&title, MAX_OUTLINE_TITLE_CHARS);
                         truncated |= title_truncated;
                         out.push(DocumentOutlineItem {
                             title,
@@ -341,7 +342,8 @@ fn extract_outline_from_elements(
                     if let Some(cells) = row["tableCells"].as_array() {
                         for cell in cells {
                             if let Some(cell_content) = cell["content"].as_array() {
-                                truncated |= extract_outline_from_elements(cell_content, offset, out);
+                                truncated |=
+                                    extract_outline_from_elements(cell_content, offset, out);
                             }
                         }
                     }

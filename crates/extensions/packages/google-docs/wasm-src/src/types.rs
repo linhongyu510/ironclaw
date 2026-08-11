@@ -259,7 +259,7 @@ pub struct DocumentOutlineItem {
 }
 
 /// Supported Google Docs outline styles.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum DocumentOutlineStyle {
     #[serde(rename = "TITLE")]
     Title,
@@ -291,6 +291,32 @@ impl DocumentOutlineStyle {
             "HEADING_5" => Some(Self::Heading5),
             "HEADING_6" => Some(Self::Heading6),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DocumentOutlineStyle;
+
+    #[test]
+    fn document_outline_style_round_trips_all_wire_names() {
+        for wire_name in [
+            "TITLE",
+            "SUBTITLE",
+            "HEADING_1",
+            "HEADING_2",
+            "HEADING_3",
+            "HEADING_4",
+            "HEADING_5",
+            "HEADING_6",
+        ] {
+            let style: DocumentOutlineStyle = serde_json::from_value(wire_name.into())
+                .unwrap_or_else(|error| panic!("deserialize {wire_name}: {error}"));
+            let serialized = serde_json::to_value(style)
+                .unwrap_or_else(|error| panic!("serialize {wire_name}: {error}"));
+
+            assert_eq!(serialized, wire_name);
         }
     }
 }

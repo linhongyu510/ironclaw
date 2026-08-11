@@ -39,7 +39,10 @@
 mod api;
 mod types;
 
-use types::{CompactDriveCorpus, GoogleDriveAction, ToolContext};
+use types::{
+    CompactDriveCorpus, GoogleDriveAction, ToolContext, MAX_COMPACT_DRIVE_ID_CHARS,
+    MAX_COMPACT_ORDER_BY_CHARS, MAX_COMPACT_PAGE_TOKEN_CHARS, MAX_COMPACT_QUERY_CHARS,
+};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
@@ -301,14 +304,53 @@ fn validate_compact_list_scope(
     Ok(())
 }
 
+fn validate_optional_length(
+    field: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), String> {
+    if value.is_some_and(|value| value.chars().count() > max_chars) {
+        return Err(format!(
+            "{field} exceeds maximum length of {max_chars} characters"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_action(action: &GoogleDriveAction) -> Result<(), String> {
     match action {
         GoogleDriveAction::FindFilesCompact {
-            corpora, drive_id, ..
+            query,
+            order_by,
+            corpora,
+            drive_id,
+            page_token,
+            ..
+        } => {
+            validate_optional_length("query", query.as_deref(), MAX_COMPACT_QUERY_CHARS)?;
+            validate_optional_length("order_by", order_by.as_deref(), MAX_COMPACT_ORDER_BY_CHARS)?;
+            validate_optional_length("drive_id", drive_id.as_deref(), MAX_COMPACT_DRIVE_ID_CHARS)?;
+            validate_optional_length(
+                "page_token",
+                page_token.as_deref(),
+                MAX_COMPACT_PAGE_TOKEN_CHARS,
+            )?;
+            validate_compact_list_scope(*corpora, drive_id.as_deref())
         }
-        | GoogleDriveAction::RecentFiles {
-            corpora, drive_id, ..
-        } => validate_compact_list_scope(*corpora, drive_id.as_deref()),
+        GoogleDriveAction::RecentFiles {
+            corpora,
+            drive_id,
+            page_token,
+            ..
+        } => {
+            validate_optional_length("drive_id", drive_id.as_deref(), MAX_COMPACT_DRIVE_ID_CHARS)?;
+            validate_optional_length(
+                "page_token",
+                page_token.as_deref(),
+                MAX_COMPACT_PAGE_TOKEN_CHARS,
+            )?;
+            validate_compact_list_scope(*corpora, drive_id.as_deref())
+        }
         _ => Ok(()),
     }
 }
@@ -316,6 +358,33 @@ fn validate_action(action: &GoogleDriveAction) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_capabilities_reject_oversized_url_parameters_before_egress() {
+        for (capability_id, field, max_chars) in [
+            ("google-drive.find_files_compact", "query", 2048),
+            ("google-drive.find_files_compact", "order_by", 256),
+            ("google-drive.find_files_compact", "drive_id", 1024),
+            ("google-drive.find_files_compact", "page_token", 2048),
+            ("google-drive.recent_files", "drive_id", 1024),
+            ("google-drive.recent_files", "page_token", 2048),
+        ] {
+            let context = serde_json::json!({"capability_id": capability_id}).to_string();
+            let params = serde_json::json!({field: "x".repeat(max_chars + 1)}).to_string();
+            api::take_test_api_calls();
+
+            let error = execute_inner(&params, Some(&context)).unwrap_err();
+
+            assert_eq!(
+                error,
+                format!("{field} exceeds maximum length of {max_chars} characters")
+            );
+            assert!(
+                api::take_test_api_calls().is_empty(),
+                "{capability_id}.{field} must fail before credentialed egress"
+            );
+        }
+    }
 
     #[test]
     fn compact_capabilities_reject_invalid_corpora_before_egress() {
@@ -345,13 +414,16 @@ mod tests {
 
     #[test]
     fn compact_list_scope_allows_personal_corpus_without_drive_id() {
-        assert_eq!(validate_compact_list_scope(CompactDriveCorpus::User, None), Ok(()));
+        assert_eq!(
+            validate_compact_list_scope(CompactDriveCorpus::User, None),
+            Ok(())
+        );
     }
 
     #[test]
     fn compact_corpus_preserves_historical_all_drives_wire_value() {
-        let params = params_with_action(r#"{"corpora":"allDrives"}"#, "find_files_compact")
-            .unwrap();
+        let params =
+            params_with_action(r#"{"corpora":"allDrives"}"#, "find_files_compact").unwrap();
         let action: GoogleDriveAction = serde_json::from_value(params).unwrap();
 
         assert!(matches!(

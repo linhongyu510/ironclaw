@@ -315,6 +315,9 @@ vendor = "google"
 scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"]
 audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
+# Keep Calendar activation on Calendar scopes; the native executor requests
+# this combined scope set incrementally when daily_brief is invoked.
+required = false
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }

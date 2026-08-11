@@ -14,6 +14,7 @@
     "calendars",
     "events",
     "eventCount",
+    "eventsTruncated",
     "partialFailures",
     "calendarDiscoveryTruncated"
   ],
@@ -76,6 +77,10 @@
     "eventCount": {
       "type": "integer",
       "minimum": 0
+    },
+    "eventsTruncated": {
+      "type": "boolean",
+      "description": "True when the selected calendars returned more events than the compact agenda limit."
     },
     "partialFailures": {
       "type": "array",

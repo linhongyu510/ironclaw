@@ -779,15 +779,7 @@ mod tests {
     fn explicit_query_is_preserved_for_compact_search() {
         stub_api_response(Ok(r#"{"files": []}"#.to_string()));
 
-        find_files_compact(
-            Some("name contains 'report'"),
-            10,
-            None,
-            "user",
-            None,
-            None,
-        )
-        .unwrap();
+        find_files_compact(Some("name contains 'report'"), 10, None, "user", None, None).unwrap();
 
         let calls = take_test_api_calls();
         assert_eq!(calls.len(), 1);

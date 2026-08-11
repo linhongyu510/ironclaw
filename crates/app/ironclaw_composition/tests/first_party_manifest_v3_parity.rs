@@ -20,9 +20,34 @@ use ironclaw_extension_registry::{
     MANIFEST_SCHEMA_VERSION_V3, ManifestSource, default_host_api_contract_registry,
 };
 use ironclaw_host_api::{
-    capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
+    capability::{
+        PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+    },
     host_port::default_host_port_catalog,
 };
+
+#[test]
+fn google_docs_body_readers_require_approval() {
+    for manifest in [
+        parse(&v2_fixture("google-docs")),
+        parse(&live_asset("google-docs")),
+    ] {
+        for capability_id in ["google-docs.read_excerpt", "google-docs.read_content"] {
+            let capability = manifest
+                .manifest()
+                .capabilities
+                .iter()
+                .find(|capability| capability.id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("missing {capability_id}"));
+
+            assert_eq!(
+                capability.default_permission,
+                PermissionMode::Ask,
+                "{capability_id} reads document body content and must require approval"
+            );
+        }
+    }
+}
 
 fn parse(toml: &str) -> ExtensionManifestRecord {
     ExtensionManifestRecord::from_toml(

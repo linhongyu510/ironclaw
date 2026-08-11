@@ -3,6 +3,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_COMPACT_QUERY_CHARS: usize = 2048;
+pub(crate) const MAX_COMPACT_ORDER_BY_CHARS: usize = 256;
+pub(crate) const MAX_COMPACT_DRIVE_ID_CHARS: usize = 1024;
+pub(crate) const MAX_COMPACT_PAGE_TOKEN_CHARS: usize = 2048;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolContext {
     pub(crate) capability_id: String,
@@ -48,12 +53,14 @@ pub enum GoogleDriveAction {
     FindFilesCompact {
         /// Drive search query (same syntax as Drive search).
         #[serde(default)]
+        #[schemars(length(max = 2048))]
         query: Option<String>,
         /// Maximum number of compact results (default: 10, max: 100).
         #[serde(default = "default_compact_page_size")]
         page_size: u32,
         /// Sort order (defaults to "modifiedTime desc").
         #[serde(default)]
+        #[schemars(length(max = 256))]
         order_by: Option<String>,
         /// Search corpus: "user" (personal, default), "drive" (specific shared drive),
         /// "domain" (org-wide), "allDrives" (everything accessible).
@@ -61,9 +68,11 @@ pub enum GoogleDriveAction {
         corpora: CompactDriveCorpus,
         /// Shared drive ID (required when corpora is "drive").
         #[serde(default)]
+        #[schemars(length(max = 1024))]
         drive_id: Option<String>,
         /// Page token for pagination.
         #[serde(default)]
+        #[schemars(length(max = 2048))]
         page_token: Option<String>,
     },
 
@@ -78,9 +87,11 @@ pub enum GoogleDriveAction {
         corpora: CompactDriveCorpus,
         /// Shared drive ID (required when corpora is "drive").
         #[serde(default)]
+        #[schemars(length(max = 1024))]
         drive_id: Option<String>,
         /// Page token for pagination.
         #[serde(default)]
+        #[schemars(length(max = 2048))]
         page_token: Option<String>,
     },
 
@@ -490,5 +501,42 @@ mod tests {
             ["action"],
             "list_files should require only the discriminator"
         );
+    }
+
+    #[test]
+    fn schema_bounds_compact_url_parameters() {
+        let schema = serde_json::to_value(schemars::schema_for!(GoogleDriveAction)).unwrap();
+        let branches = schema["oneOf"]
+            .as_array()
+            .expect("tagged action schema must use oneOf");
+
+        for (action, expected_bounds) in [
+            (
+                "find_files_compact",
+                &[
+                    ("query", 2048_u64),
+                    ("order_by", 256),
+                    ("drive_id", 1024),
+                    ("page_token", 2048),
+                ][..],
+            ),
+            (
+                "recent_files",
+                &[("drive_id", 1024_u64), ("page_token", 2048)][..],
+            ),
+        ] {
+            let branch = branches
+                .iter()
+                .find(|branch| branch["properties"]["action"]["const"] == action)
+                .unwrap_or_else(|| panic!("missing {action} schema branch"));
+
+            for (field, expected_max) in expected_bounds {
+                assert_eq!(
+                    branch["properties"][field]["maxLength"].as_u64(),
+                    Some(*expected_max),
+                    "{action}.{field} must have a generated maxLength"
+                );
+            }
+        }
     }
 }

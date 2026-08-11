@@ -1496,8 +1496,7 @@ jobs:
       - name: Compare compact Google benchmark arms
         if: >-
           ${{ github.event_name == 'workflow_dispatch' &&
-          ((inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all') == 'all' ||
-          contains(inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', 'benchmark_google_')) }}
+          contains(inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', 'benchmark_google_') }}
         shell: bash
         run: |
           python3 scripts/reborn_webui_v2_live_qa/compare_compact_google_benchmark.py \
@@ -1508,8 +1507,7 @@ jobs:
       - name: Upload compact Google benchmark report
         if: >-
           ${{ github.event_name == 'workflow_dispatch' &&
-          ((inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all') == 'all' ||
-          contains(inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', 'benchmark_google_')) }}
+          contains(inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', 'benchmark_google_') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: compact-google-benchmark-report

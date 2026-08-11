@@ -1,5 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use ironclaw_host_api::{
     action::NetworkMethod, dispatch::RuntimeDispatchErrorKind, http::RuntimeHttpEgressResponse,
@@ -9,14 +10,16 @@ use serde_json::{Value, json};
 use crate::gsuite::credential::GoogleCredential;
 
 use super::{
-    CALENDAR_API_BASE, CapabilityExecutionOutcome, GsuiteDispatchError, GsuiteDispatchRequest,
-    add_network_usage, calendar_events_collection_url, encode_percent, execute_runtime_http,
-    input_error, is_google_auth_expired_response, optional_bool, optional_query_value,
-    optional_str, optional_string_array, push_optional_query, response_body_json, runtime_request,
+    CapabilityExecutionOutcome, GsuiteDispatchError, GsuiteDispatchRequest, add_network_usage,
+    calendar_discovery::{
+        CalendarDiscoveryRun, CalendarIdResolution, MAX_CALENDARS, resolve_calendar_ids,
+    },
+    calendar_events_collection_url, execute_runtime_http, input_error,
+    is_google_auth_expired_response, optional_bool, optional_query_value, optional_str,
+    optional_string_array, push_optional_query, response_body_json, runtime_request,
 };
 
 const DEFAULT_MAX_RESULTS: &str = "25";
-const MAX_CALENDARS: usize = 50;
 const SAFE_GOOGLE_ERROR_REASONS: &[&str] = &[
     "ABORTED",
     "ALREADY_EXISTS",
@@ -130,25 +133,30 @@ pub(super) async fn execute(
         ));
     }
 
-    let (calendar_ids, calendars, calendar_discovery_truncated) =
-        match resolve_calendar_ids(&mut run, &input).await? {
-            CalendarIdResolution::Ready {
-                calendar_ids,
-                calendars,
-                truncated,
-            } => (calendar_ids, calendars, truncated),
-            CalendarIdResolution::AuthExpired => {
-                return Ok(CapabilityExecutionOutcome::AuthExpired {
-                    network_egress_bytes: run.network_egress_bytes(),
-                });
-            }
-            CalendarIdResolution::DiscoveryFailed { response } => {
-                return Ok(CapabilityExecutionOutcome::Response {
-                    response,
-                    network_egress_bytes: run.network_egress_bytes(),
-                });
-            }
-        };
+    let (calendar_ids, calendars, calendar_discovery_truncated) = match resolve_calendar_ids(
+        &mut run,
+        input.include_all_calendars,
+        input.target_calendar_ids(),
+    )
+    .await?
+    {
+        CalendarIdResolution::Ready {
+            calendar_ids,
+            calendars,
+            truncated,
+        } => (calendar_ids, calendars, truncated),
+        CalendarIdResolution::AuthExpired => {
+            return Ok(CapabilityExecutionOutcome::AuthExpired {
+                network_egress_bytes: run.network_egress_bytes(),
+            });
+        }
+        CalendarIdResolution::DiscoveryFailed { response } => {
+            return Ok(CapabilityExecutionOutcome::Response {
+                response,
+                network_egress_bytes: run.network_egress_bytes(),
+            });
+        }
+    };
 
     let mut items = Vec::new();
     let mut next_page_tokens = serde_json::Map::new();
@@ -246,76 +254,18 @@ impl<'a, 'request> CalendarListEventsRun<'a, 'request> {
     }
 }
 
-enum CalendarIdResolution {
-    Ready {
-        calendar_ids: Vec<String>,
-        calendars: Vec<Value>,
-        truncated: bool,
-    },
-    AuthExpired,
-    DiscoveryFailed {
-        response: ironclaw_host_api::http::RuntimeHttpEgressResponse,
-    },
-}
-
-async fn resolve_calendar_ids(
-    run: &mut CalendarListEventsRun<'_, '_>,
-    input: &CalendarEventsQuery,
-) -> Result<CalendarIdResolution, GsuiteDispatchError> {
-    if !input.include_all_calendars {
-        return Ok(CalendarIdResolution::Ready {
-            calendar_ids: input.target_calendar_ids(),
-            calendars: Vec::new(),
-            truncated: false,
-        });
+#[async_trait]
+impl CalendarDiscoveryRun for CalendarListEventsRun<'_, '_> {
+    async fn get_calendar_discovery(
+        &mut self,
+        url: String,
+    ) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
+        self.get(url).await
     }
 
-    let mut calendars = Vec::new();
-    let mut calendar_ids = Vec::new();
-    let mut truncated = false;
-    let mut page_token = None;
-    loop {
-        let response = run
-            .get(list_calendars_page_url(page_token.as_deref()))
-            .await?;
-        if is_google_auth_expired_response(&response) {
-            return Ok(CalendarIdResolution::AuthExpired);
-        }
-        if response.status != 200 {
-            return Ok(CalendarIdResolution::DiscoveryFailed { response });
-        }
-        let body = response_body_json(&response)
-            .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
-        if let Some(items) = body.get("items").and_then(Value::as_array) {
-            for calendar in items {
-                if calendar_ids.len() >= MAX_CALENDARS {
-                    truncated = true;
-                    break;
-                }
-                let Some(id) = calendar.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                calendar_ids.push(id.to_string());
-                calendars.push(calendar.clone());
-            }
-        }
-        page_token = body
-            .get("nextPageToken")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-        if page_token.is_none() || calendar_ids.len() >= MAX_CALENDARS {
-            if page_token.is_some() && calendar_ids.len() >= MAX_CALENDARS {
-                truncated = true;
-            }
-            break;
-        }
+    fn network_egress_bytes(&self) -> u64 {
+        self.network_egress_bytes()
     }
-
-    Ok(CalendarIdResolution::Ready {
-        calendar_ids,
-        calendars,
-        truncated,
-    })
 }
 
 fn list_events_url(
@@ -356,15 +306,6 @@ fn list_events_query(
     );
     push_optional_query(&mut query, "q", input.query.as_deref());
     Ok(query)
-}
-
-fn list_calendars_page_url(page_token: Option<&str>) -> String {
-    let mut url = format!("{CALENDAR_API_BASE}/users/me/calendarList?maxResults=250");
-    if let Some(page_token) = page_token {
-        url.push_str("&pageToken=");
-        url.push_str(&encode_percent(page_token));
-    }
-    url
 }
 
 fn optional_page_tokens(input: &Value) -> Result<HashMap<String, String>, GsuiteDispatchError> {

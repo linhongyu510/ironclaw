@@ -11,6 +11,9 @@ const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
 const MAX_PREVIEW_ROWS: usize = 100;
 const MAX_PREVIEW_COLUMNS: usize = 30;
+const MAX_PREVIEW_CELL_BYTES: usize = 4 * 1024;
+const MAX_PREVIEW_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_PREVIEW_METADATA_BYTES: usize = 4 * 1024;
 
 /// Make a Google Sheets API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -221,7 +224,9 @@ pub fn preview(
         .map(|name| select_sheet(&metadata, Some(&name)))
         .transpose()?
         .unwrap_or(selected_sheet);
-    let mut rows = values.values;
+    let source_row_lengths = values.values.iter().map(Vec::len).collect::<Vec<_>>();
+    let had_header_row = !has_explicit_range && !values.values.is_empty();
+    let (mut rows, truncation) = bound_preview_values(values.values, max_rows, max_columns);
     let headers: Vec<String> = if has_explicit_range {
         Vec::new()
     } else {
@@ -242,7 +247,7 @@ pub fn preview(
         .unwrap_or(0);
     let sampled_row_count = rows.len();
 
-    Ok(SheetPreviewResult {
+    let mut result = SheetPreviewResult {
         spreadsheet_id: metadata.spreadsheet_id,
         title: metadata.title,
         url: metadata.url,
@@ -254,7 +259,19 @@ pub fn preview(
         rows,
         sampled_row_count,
         sampled_column_count,
-    })
+        truncation,
+    };
+    bound_preview_metadata(&mut result);
+    enforce_preview_output_limit(&mut result, &source_row_lengths, had_header_row)?;
+    result.sampled_row_count = result.rows.len();
+    result.sampled_column_count = result
+        .rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(result.headers.len()))
+        .max()
+        .unwrap_or(0);
+    Ok(result)
 }
 
 fn select_sheet(
@@ -290,7 +307,10 @@ fn range_sheet_name(range: &str) -> Option<String> {
     if sheet.is_empty() {
         return None;
     }
-    if let Some(quoted) = sheet.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+    if let Some(quoted) = sheet
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
         return Some(quoted.replace("''", "'"));
     }
     Some(sheet.to_string())
@@ -319,13 +339,13 @@ fn parse_cell_ref(reference: &str) -> Option<CellRef> {
     if !letters.bytes().all(|byte| byte.is_ascii_alphabetic()) {
         return None;
     }
-    let mut col = 0usize;
+    let mut one_based_col = 0usize;
     for byte in letters.bytes() {
-        col = col
-            .checked_mul(26)
-            .and_then(|value| value.checked_add(usize::from(byte.to_ascii_uppercase() - b'A' + 1)))
-            .and_then(|value| value.checked_sub(1))?;
+        one_based_col = one_based_col.checked_mul(26).and_then(|value| {
+            value.checked_add(usize::from(byte.to_ascii_uppercase() - b'A' + 1))
+        })?;
     }
+    let col = one_based_col.checked_sub(1)?;
     let row = digits.parse::<usize>().ok()?.checked_sub(1)?;
     Some(CellRef { col, row })
 }
@@ -347,14 +367,13 @@ fn bound_explicit_preview_range(
         Some((start, end)) => (start, Some(end)),
         None => (cells, None),
     };
-    let start = parse_cell_ref(start_ref)
-        .ok_or_else(|| format!("unbounded preview range: {range}"))?;
+    let start =
+        parse_cell_ref(start_ref).ok_or_else(|| format!("unbounded preview range: {range}"))?;
     let Some(end_ref) = end_ref else {
         // A single-cell reference is already bounded.
         return Ok(range.to_string());
     };
-    let end = parse_cell_ref(end_ref)
-        .ok_or_else(|| format!("unbounded preview range: {range}"))?;
+    let end = parse_cell_ref(end_ref).ok_or_else(|| format!("unbounded preview range: {range}"))?;
     let max_end_col = start.col.saturating_add(max_columns.saturating_sub(1));
     let max_end_row = start.row.saturating_add(max_rows.saturating_sub(1));
     let end_col = end.col.min(max_end_col);
@@ -362,7 +381,9 @@ fn bound_explicit_preview_range(
     if end.col == end_col && end.row == end_row {
         return Ok(range.to_string());
     }
-    let prefix = sheet_prefix.map(|prefix| format!("{prefix}!")).unwrap_or_default();
+    let prefix = sheet_prefix
+        .map(|prefix| format!("{prefix}!"))
+        .unwrap_or_default();
     Ok(format!(
         "{prefix}{}{}:{}{}",
         column_name(start.col + 1),
@@ -379,13 +400,13 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn stub_api_responses(responses: Vec<Result<String, String>>) {
+pub(crate) fn stub_api_responses(responses: Vec<Result<String, String>>) {
     TEST_API_RESPONSES.with(|queue| *queue.borrow_mut() = responses.into());
     TEST_API_CALLS.with(|calls| calls.borrow_mut().clear());
 }
 
 #[cfg(test)]
-fn take_test_api_calls() -> Vec<(String, String)> {
+pub(crate) fn take_test_api_calls() -> Vec<(String, String)> {
     TEST_API_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
 }
 
@@ -397,6 +418,137 @@ fn column_name(mut one_based_column: usize) -> String {
         one_based_column = (one_based_column - 1) / 26;
     }
     name
+}
+
+fn bound_preview_values(
+    values: Vec<Vec<serde_json::Value>>,
+    max_rows: usize,
+    max_columns: usize,
+) -> (Vec<Vec<serde_json::Value>>, SheetPreviewTruncation) {
+    let mut truncation = SheetPreviewTruncation::default();
+    let mut bounded_rows = Vec::with_capacity(values.len().min(max_rows));
+
+    for row in values.into_iter().take(max_rows) {
+        let mut bounded_row = Vec::with_capacity(row.len().min(max_columns));
+        for mut cell in row.into_iter().take(max_columns) {
+            if let serde_json::Value::String(text) = &mut cell {
+                if truncate_utf8_bytes(text, MAX_PREVIEW_CELL_BYTES) {
+                    truncation.cells_truncated += 1;
+                }
+            }
+            bounded_row.push(cell);
+        }
+        bounded_rows.push(bounded_row);
+    }
+
+    (bounded_rows, truncation)
+}
+
+fn bound_preview_metadata(result: &mut SheetPreviewResult) {
+    for value in [
+        &mut result.spreadsheet_id,
+        &mut result.title,
+        &mut result.url,
+        &mut result.sheet_name,
+        &mut result.range,
+    ] {
+        if truncate_utf8_bytes(value, MAX_PREVIEW_METADATA_BYTES) {
+            result.truncation.metadata_fields_truncated += 1;
+        }
+    }
+}
+
+fn enforce_preview_output_limit(
+    result: &mut SheetPreviewResult,
+    source_row_lengths: &[usize],
+    had_header_row: bool,
+) -> Result<(), String> {
+    loop {
+        refresh_preview_omission_counts(result, source_row_lengths, had_header_row);
+        let serialized_len = serde_json::to_vec(result)
+            .map_err(|error| format!("failed to serialize bounded sheet preview: {error}"))?
+            .len();
+        if serialized_len <= MAX_PREVIEW_OUTPUT_BYTES {
+            return Ok(());
+        }
+
+        result.truncation.aggregate_limit_reached = true;
+        if !remove_preview_tail_bytes(result, serialized_len - MAX_PREVIEW_OUTPUT_BYTES)? {
+            return Err("sheet preview metadata exceeds output limit".to_string());
+        }
+    }
+}
+
+fn remove_preview_tail_bytes(
+    result: &mut SheetPreviewResult,
+    target_bytes: usize,
+) -> Result<bool, String> {
+    let mut removed_bytes = 0usize;
+    while removed_bytes < target_bytes {
+        if let Some(last_row) = result.rows.last_mut() {
+            if let Some(cell) = last_row.pop() {
+                removed_bytes = removed_bytes.saturating_add(
+                    serde_json::to_vec(&cell)
+                        .map_err(|error| format!("failed to size sheet preview cell: {error}"))?
+                        .len()
+                        .saturating_add(1),
+                );
+            }
+            if last_row.is_empty() {
+                result.rows.pop();
+                removed_bytes = removed_bytes.saturating_add(1);
+            }
+        } else if let Some(header) = result.headers.pop() {
+            removed_bytes = removed_bytes.saturating_add(
+                serde_json::to_vec(&header)
+                    .map_err(|error| format!("failed to size sheet preview header: {error}"))?
+                    .len()
+                    .saturating_add(1),
+            );
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn refresh_preview_omission_counts(
+    result: &mut SheetPreviewResult,
+    source_row_lengths: &[usize],
+    had_header_row: bool,
+) {
+    let header_is_represented = had_header_row
+        && (!result.truncation.aggregate_limit_reached
+            || !result.headers.is_empty()
+            || source_row_lengths.first() == Some(&0));
+    let represented_lengths = if header_is_represented {
+        std::iter::once(result.headers.len())
+            .chain(result.rows.iter().map(Vec::len))
+            .collect::<Vec<_>>()
+    } else {
+        result.rows.iter().map(Vec::len).collect::<Vec<_>>()
+    };
+    result.truncation.rows_omitted = source_row_lengths
+        .len()
+        .saturating_sub(represented_lengths.len());
+    result.truncation.columns_omitted = source_row_lengths
+        .iter()
+        .zip(represented_lengths)
+        .map(|(source, represented)| source.saturating_sub(represented))
+        .max()
+        .unwrap_or(0);
+}
+
+fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    true
 }
 
 fn cell_to_string(value: &serde_json::Value) -> String {
@@ -797,7 +949,10 @@ mod tests {
             calls[1].1
         );
         assert_eq!(result.range, "Data!A1:B2");
-        assert_eq!(result.sampled_row_count, 3);
+        assert_eq!(result.sampled_row_count, 2);
+        assert_eq!(result.sampled_column_count, 2);
+        assert_eq!(result.truncation.rows_omitted, 1);
+        assert_eq!(result.truncation.columns_omitted, 1);
     }
 
     #[test]
@@ -843,5 +998,106 @@ mod tests {
         let result = preview("sheet-1", None, Some("Data!B2"), 10, 10).unwrap();
 
         assert_eq!(result.range, "Data!B2");
+    }
+
+    #[test]
+    fn multi_letter_a1_columns_are_parsed_and_clamped_correctly() {
+        for (reference, expected_col) in [("AA1", 26), ("AZ1", 51), ("BA1", 52)] {
+            assert_eq!(parse_cell_ref(reference).unwrap().col, expected_col);
+        }
+
+        assert_eq!(
+            bound_explicit_preview_range("Data!AA1:ZZ1000", 2, 2),
+            Ok("Data!AA1:AB2".to_string())
+        );
+    }
+
+    #[test]
+    fn preview_bounds_provider_rows_columns_and_cell_text() {
+        let long_cell = "x".repeat(MAX_PREVIEW_CELL_BYTES + 10);
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(serde_json::json!({
+                "range": "Data!A1:C3",
+                "values": [
+                    [long_cell, "extra", "omitted"],
+                    ["second", "extra", "omitted"],
+                    ["omitted-row"]
+                ]
+            })
+            .to_string()),
+        ]);
+
+        let result = preview("sheet-1", None, Some("Data!A1:C3"), 2, 2).unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.rows.iter().all(|row| row.len() <= 2));
+        assert_eq!(
+            result.rows[0][0].as_str().unwrap().len(),
+            MAX_PREVIEW_CELL_BYTES
+        );
+        assert_eq!(result.truncation.rows_omitted, 1);
+        assert_eq!(result.truncation.columns_omitted, 1);
+        assert_eq!(result.truncation.cells_truncated, 1);
+        assert!(!result.truncation.aggregate_limit_reached);
+    }
+
+    #[test]
+    fn preview_reports_when_aggregate_output_limit_is_reached() {
+        let cells = (0..MAX_PREVIEW_ROWS)
+            .map(|_| {
+                (0..MAX_PREVIEW_COLUMNS)
+                    .map(|_| serde_json::Value::String("x".repeat(MAX_PREVIEW_CELL_BYTES)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        stub_api_responses(vec![
+            Ok(metadata_response()),
+            Ok(serde_json::json!({"range": "Data!A1:AD100", "values": cells}).to_string()),
+        ]);
+
+        let result = preview("sheet-1", None, Some("Data!A1:AD100"), 100, 30).unwrap();
+
+        assert!(result.truncation.aggregate_limit_reached);
+        assert_eq!(
+            result.truncation.rows_omitted,
+            MAX_PREVIEW_ROWS - result.rows.len()
+        );
+        let expected_columns_omitted = result
+            .rows
+            .last()
+            .map_or(MAX_PREVIEW_COLUMNS, |row| MAX_PREVIEW_COLUMNS - row.len());
+        assert_eq!(result.truncation.columns_omitted, expected_columns_omitted);
+        assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_PREVIEW_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn preview_bounds_provider_controlled_metadata_in_final_output() {
+        let oversized = "x".repeat(MAX_PREVIEW_METADATA_BYTES + 10);
+        stub_api_responses(vec![
+            Ok(serde_json::json!({
+                "spreadsheetId": oversized,
+                "properties": {"title": oversized},
+                "spreadsheetUrl": oversized,
+                "sheets": [{
+                    "properties": {
+                        "sheetId": 0,
+                        "title": oversized,
+                        "gridProperties": {"rowCount": 1, "columnCount": 1}
+                    }
+                }]
+            })
+            .to_string()),
+            Ok(values_response("A1")),
+        ]);
+
+        let result = preview("sheet-1", None, Some("A1"), 1, 1).unwrap();
+
+        assert_eq!(result.truncation.metadata_fields_truncated, 4);
+        assert!(result.spreadsheet_id.len() <= MAX_PREVIEW_METADATA_BYTES);
+        assert!(result.title.len() <= MAX_PREVIEW_METADATA_BYTES);
+        assert!(result.url.len() <= MAX_PREVIEW_METADATA_BYTES);
+        assert!(result.sheet_name.len() <= MAX_PREVIEW_METADATA_BYTES);
+        assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_PREVIEW_OUTPUT_BYTES);
     }
 }

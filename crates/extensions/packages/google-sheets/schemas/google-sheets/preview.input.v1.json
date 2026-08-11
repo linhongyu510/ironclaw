@@ -9,16 +9,19 @@
     "spreadsheet_id": {
       "type": "string",
       "minLength": 1,
+      "maxLength": 256,
       "description": "Google Sheets spreadsheet ID, same as Drive file ID."
     },
     "sheet_name": {
       "type": ["string", "null"],
       "minLength": 1,
+      "maxLength": 256,
       "description": "Optional sheet tab name. Defaults to the first sheet."
     },
     "range": {
       "type": ["string", "null"],
       "minLength": 1,
+      "maxLength": 1024,
       "description": "Optional A1 notation range (single cell or start:end). When omitted, reads from A1 using max_rows/max_columns. Explicit ranges are clamped to max_rows/max_columns and unbounded forms (whole columns/rows) are rejected."
     },
     "max_rows": {

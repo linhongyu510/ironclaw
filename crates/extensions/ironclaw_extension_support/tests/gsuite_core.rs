@@ -39,6 +39,14 @@ use ironclaw_host_api::{
 use serde_json::json;
 use support::*;
 
+fn assert_matches_schema(value: &serde_json::Value, schema: &str) {
+    let schema: serde_json::Value = serde_json::from_str(schema).expect("schema parses");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    if let Err(error) = validator.validate(value) {
+        panic!("response does not match output schema: {error}");
+    }
+}
+
 #[test]
 fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
     let packages = gsuite_package_specs();
@@ -532,6 +540,128 @@ async fn calendar_list_events_sanitizes_partial_failure_body() {
     let rendered = serde_json::to_string(&output).expect("output serializes");
     assert!(!rendered.contains("private backend detail"));
     assert!(!rendered.contains("proxy leaked details"));
+}
+
+#[tokio::test]
+async fn calendar_agenda_reports_cross_calendar_event_truncation() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "items": [{
+                "id": "event-1",
+                "summary": "First",
+                "start": { "dateTime": "2026-05-21T08:00:00Z" },
+                "end": { "dateTime": "2026-05-21T09:00:00Z" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "items": [{
+                "id": "event-2",
+                "summary": "Second",
+                "start": { "dateTime": "2026-05-21T10:00:00Z" },
+                "end": { "dateTime": "2026-05-21T11:00:00Z" }
+            }]
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_AGENDA_CAPABILITY_ID,
+        json!({
+            "calendar_ids": ["primary", "team@example.com"],
+            "max_results": 1
+        }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(output["body"]["eventCount"], 1);
+    assert_eq!(output["body"]["eventsTruncated"], true);
+    assert_matches_schema(
+        &output["body"],
+        include_str!(
+            "../../packages/google-calendar/schemas/google-calendar/agenda.output.v1.json"
+        ),
+    );
+}
+
+#[tokio::test]
+async fn compact_gsuite_synthesized_outputs_match_their_declared_schemas() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
+        ],
+    )
+    .await;
+
+    let gmail_egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(429, json!({"error":{"status":"RESOURCE_EXHAUSTED"}})),
+    ]));
+    let gmail = dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID,
+        json!({}),
+        gmail_egress,
+    )
+    .await;
+    assert_matches_schema(
+        &gmail["body"],
+        include_str!("../../packages/gmail/schemas/gmail/fetch_message_summaries.output.v1.json"),
+    );
+
+    let daily_egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(403, json!({"error":{"status":"PERMISSION_DENIED"}})),
+        RecordingEgress::json_status(429, json!({"error":{"status":"RESOURCE_EXHAUSTED"}})),
+    ]));
+    let daily = dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({}),
+        daily_egress,
+    )
+    .await;
+    assert_matches_schema(
+        &daily["body"],
+        include_str!(
+            "../../packages/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+        ),
+    );
+
+    let meeting_egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "items": [{
+                "id": "meeting-1",
+                "summary": "Review",
+                "description": "Notes: https://docs.google.com/document/d/doc-123/edit",
+                "start": { "dateTime": "2026-05-21T08:00:00Z" },
+                "end": { "dateTime": "2026-05-21T09:00:00Z" }
+            }]
+        })),
+    ]));
+    let meeting = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_MEETING_PREP_CAPABILITY_ID,
+        json!({}),
+        meeting_egress,
+    )
+    .await;
+    assert_eq!(meeting["body"]["linkedResources"][0]["id"], "doc-123");
+    assert_matches_schema(
+        &meeting["body"],
+        include_str!(
+            "../../packages/google-calendar/schemas/google-calendar/meeting_prep.output.v1.json"
+        ),
+    );
 }
 
 #[tokio::test]
@@ -1800,6 +1930,32 @@ async fn gsuite_handler_fails_before_egress_when_missing_scopes() {
         Some(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes })
             if missing_scopes.as_slice() == [provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE)]
     ));
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn daily_brief_requests_gmail_scope_only_when_invoked() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({}),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    let Some(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes }) = error.reason()
+    else {
+        panic!("daily brief must report missing Google scopes, got {error:?}");
+    };
+    assert!(missing_scopes.contains(&provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)));
     assert!(egress.requests().is_empty());
 }
 

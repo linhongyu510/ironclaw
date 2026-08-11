@@ -42,12 +42,15 @@ pub enum GoogleSheetsAction {
     /// Preview a bounded range with headers and sample rows.
     Preview {
         /// The spreadsheet ID.
+        #[schemars(length(min = 1, max = 256))]
         spreadsheet_id: String,
         /// Optional sheet tab name. Defaults to the first sheet.
         #[serde(default)]
+        #[schemars(length(min = 1, max = 256))]
         sheet_name: Option<String>,
         /// Optional A1 notation range. When omitted, reads from A1 using max rows/columns.
         #[serde(default)]
+        #[schemars(length(min = 1, max = 1024))]
         range: Option<String>,
         /// Maximum rows to preview (default: 20, max: 100).
         #[serde(default = "default_preview_rows")]
@@ -237,6 +240,17 @@ pub struct SheetPreviewResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub sampled_row_count: usize,
     pub sampled_column_count: usize,
+    pub truncation: SheetPreviewTruncation,
+}
+
+/// Defensive truncation applied to provider-returned preview data.
+#[derive(Debug, Default, Serialize)]
+pub struct SheetPreviewTruncation {
+    pub rows_omitted: usize,
+    pub columns_omitted: usize,
+    pub cells_truncated: usize,
+    pub metadata_fields_truncated: usize,
+    pub aggregate_limit_reached: bool,
 }
 
 /// Result from batch_read_values.

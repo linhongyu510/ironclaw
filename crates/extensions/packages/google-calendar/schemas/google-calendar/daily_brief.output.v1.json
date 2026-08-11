@@ -24,7 +24,7 @@
     "agenda": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["eventCount", "events", "calendarIds", "calendars"],
+      "required": ["eventCount", "events", "calendarIds", "calendars", "calendarDiscoveryTruncated", "eventsTruncated"],
       "properties": {
         "eventCount": { "type": ["integer", "null"], "minimum": 0 },
         "events": {
@@ -38,7 +38,9 @@
         "calendars": {
           "type": "array",
           "items": { "$ref": "#/definitions/calendar" }
-        }
+        },
+        "calendarDiscoveryTruncated": { "type": "boolean" },
+        "eventsTruncated": { "type": "boolean" }
       }
     },
     "emailAttention": { "$ref": "#/definitions/gmailSummaries" },
@@ -147,7 +149,6 @@
         "to",
         "subject",
         "date",
-        "snippet",
         "bodyPreview",
         "labelIds",
         "isUnread"
@@ -159,8 +160,7 @@
         "to": { "type": "string" },
         "subject": { "type": "string" },
         "date": { "type": "string" },
-        "snippet": { "type": "string" },
-        "bodyPreview": { "type": "string" },
+        "bodyPreview": { "type": "string", "maxLength": 4000 },
         "labelIds": {
           "type": "array",
           "items": { "type": "string" }

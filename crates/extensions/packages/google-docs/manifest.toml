@@ -62,7 +62,7 @@ origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden",
 id = "google-docs.read_excerpt"
 description = "Read a bounded Google Docs excerpt with optional heading outline."
 effects = ["network", "use_secret"]
-default_permission = "allow"
+default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-docs/read_excerpt.input.v1.json"
 output_schema_ref = "schemas/google-docs/read_excerpt.output.v1.json"

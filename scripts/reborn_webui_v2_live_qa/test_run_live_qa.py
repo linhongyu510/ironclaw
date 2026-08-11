@@ -8308,6 +8308,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             2,
             "benchmark comparison and upload must use the shard case fallback",
         )
+        benchmark_steps = workflow[
+            workflow.index("- name: Compare compact Google benchmark arms") :
+            workflow.index("- name: Generate and post Slack report")
+        ]
+        self.assertNotIn(
+            "== 'all'",
+            benchmark_steps,
+            "the default all-cases run has no benchmark shards to compare",
+        )
         self.assertIn("- prepare-reborn-webui-v2-live-qa", match.group("body"))
         self.assertIn(
             "- preflight-reborn-webui-v2-google-oauth",

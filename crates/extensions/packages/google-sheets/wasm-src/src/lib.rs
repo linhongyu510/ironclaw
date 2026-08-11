@@ -92,6 +92,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let params = params_with_action(params, action_name)?;
     let action: GoogleSheetsAction =
         serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    validate_action(&action)?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -272,6 +273,85 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, S
         serde_json::Value::String(action.to_string()),
     );
     Ok(params)
+}
+
+fn validate_bounded_string(name: &str, value: &str, max_chars: usize) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!("{name} exceeds maximum length of {max_chars}"));
+    }
+    Ok(())
+}
+
+fn validate_action(action: &GoogleSheetsAction) -> Result<(), String> {
+    if let GoogleSheetsAction::Preview {
+        spreadsheet_id,
+        sheet_name,
+        range,
+        ..
+    } = action
+    {
+        validate_bounded_string("spreadsheet_id", spreadsheet_id, 256)?;
+        if let Some(sheet_name) = sheet_name {
+            validate_bounded_string("sheet_name", sheet_name, 256)?;
+        }
+        if let Some(range) = range {
+            validate_bounded_string("range", range, 1024)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_rejects_oversized_strings_before_egress() {
+        let cases = [
+            serde_json::json!({"spreadsheet_id": "s".repeat(257)}),
+            serde_json::json!({
+                "spreadsheet_id": "sheet-1",
+                "sheet_name": "n".repeat(257),
+            }),
+            serde_json::json!({
+                "spreadsheet_id": "sheet-1",
+                "range": "r".repeat(1025),
+            }),
+        ];
+
+        for params in cases {
+            api::stub_api_responses(Vec::new());
+            let error = execute_inner(
+                &params.to_string(),
+                Some(r#"{"capability_id":"google-sheets.preview"}"#),
+            )
+            .unwrap_err();
+
+            assert!(error.contains("exceeds maximum length"), "{error}");
+            assert!(
+                api::take_test_api_calls().is_empty(),
+                "invalid preview input must not reach Google Sheets"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_preview_schema_advertises_string_limits() {
+        let schema = serde_json::to_value(schemars::schema_for!(GoogleSheetsAction)).unwrap();
+        let variants = schema["oneOf"].as_array().unwrap();
+        let preview = variants
+            .iter()
+            .find(|variant| variant["properties"]["action"]["const"] == "preview")
+            .unwrap();
+        let properties = &preview["properties"];
+
+        assert_eq!(properties["spreadsheet_id"]["maxLength"], 256);
+        assert_eq!(properties["sheet_name"]["maxLength"], 256);
+        assert_eq!(properties["range"]["maxLength"], 1024);
+    }
 }
 
 export!(GoogleSheetsTool);

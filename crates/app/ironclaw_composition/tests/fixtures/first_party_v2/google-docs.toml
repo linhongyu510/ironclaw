@@ -36,7 +36,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/documents.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/documents.readonly"], audience = { scheme = "https", host_pattern = "docs.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "allow"
+default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-docs/read_excerpt.input.v1.json"
 output_schema_ref = "schemas/google-docs/read_excerpt.output.v1.json"

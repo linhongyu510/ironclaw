@@ -44,6 +44,7 @@ use crate::latency::{
     trace_tool_error, trace_tool_ok,
 };
 
+mod calendar_discovery;
 mod calendar_list_events;
 mod context_tools;
 
@@ -758,6 +759,8 @@ async fn execute_add_attendees(
         .cloned()
         .unwrap_or_default();
     let attendees = merge_attendees(existing, input.attendees);
+    // This GET/PATCH sequence depends on FirstParty remaining enabled in
+    // host-runtime's `runtime_reuses_staged_credentials` policy.
     let mut patch = runtime_request(
         request,
         access_secret,

@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, sync::Arc};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use futures_util::{StreamExt as _, stream};
 use ironclaw_host_api::{
@@ -13,11 +14,14 @@ use serde_json::{Value, json};
 use crate::gsuite::credential::GoogleCredential;
 
 use super::{
-    CALENDAR_API_BASE, CapabilityExecutionOutcome, GMAIL_API_BASE, GsuiteDispatchError,
-    GsuiteDispatchRequest, add_network_usage, calendar_events_collection_url, encode_percent,
-    encode_segment, execute_runtime_http, input_error, is_google_auth_expired_response,
-    optional_bool, optional_query_value, optional_str, optional_string_array, push_optional_query,
-    response_body_json, runtime_request,
+    CapabilityExecutionOutcome, GMAIL_API_BASE, GsuiteDispatchError, GsuiteDispatchRequest,
+    add_network_usage,
+    calendar_discovery::{
+        CalendarDiscoveryRun, CalendarIdResolution, MAX_CALENDARS, resolve_calendar_ids,
+    },
+    calendar_events_collection_url, encode_percent, encode_segment, execute_runtime_http,
+    input_error, is_google_auth_expired_response, optional_bool, optional_query_value,
+    optional_str, optional_string_array, push_optional_query, response_body_json, runtime_request,
 };
 
 const DEFAULT_GMAIL_SUMMARY_LIMIT: u32 = 10;
@@ -28,7 +32,6 @@ const DEFAULT_DAILY_BRIEF_EMAIL_LIMIT: u32 = 5;
 const MAX_DAILY_BRIEF_EMAIL_LIMIT: u32 = 20;
 const DEFAULT_PREVIEW_CHARS: usize = 500;
 const MAX_PREVIEW_CHARS: usize = 4_000;
-const MAX_CALENDARS: usize = 50;
 const MAX_CONTEXT_TOOL_FANOUT_CONCURRENCY: usize = 8;
 const DEFAULT_DAILY_BRIEF_EMAIL_QUERY: &str = "is:unread newer_than:7d";
 
@@ -110,6 +113,18 @@ impl CalendarAgendaInput {
                 .unwrap_or(DEFAULT_PREVIEW_CHARS)
                 .clamp(0, MAX_PREVIEW_CHARS),
         })
+    }
+
+    fn target_calendar_ids(&self) -> Vec<String> {
+        if self.calendar_ids.is_empty() {
+            vec![
+                self.calendar_id
+                    .clone()
+                    .unwrap_or_else(|| "primary".to_string()),
+            ]
+        } else {
+            self.calendar_ids.clone()
+        }
     }
 }
 
@@ -269,6 +284,8 @@ pub(super) async fn execute_calendar_daily_brief(
             "events": agenda.get("events").cloned().unwrap_or_else(|| json!([])),
             "calendarIds": agenda.get("calendarIds").cloned().unwrap_or_else(|| json!([])),
             "calendars": agenda.get("calendars").cloned().unwrap_or_else(|| json!([])),
+            "calendarDiscoveryTruncated": agenda.get("calendarDiscoveryTruncated").cloned().unwrap_or(Value::Bool(false)),
+            "eventsTruncated": agenda.get("eventsTruncated").cloned().unwrap_or(Value::Bool(false)),
         },
         "emailAttention": email_attention,
         "partialFailures": partial_failures,
@@ -344,6 +361,20 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
             .network_egress_bytes
             .saturating_add(response.request_bytes);
         self.redaction_applied |= response.redaction_applied;
+    }
+}
+
+#[async_trait]
+impl CalendarDiscoveryRun for GoogleApiRun<'_, '_> {
+    async fn get_calendar_discovery(
+        &mut self,
+        url: String,
+    ) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
+        self.get(url).await
+    }
+
+    fn network_egress_bytes(&self) -> u64 {
+        self.network_egress_bytes()
     }
 }
 
@@ -459,29 +490,39 @@ async fn fetch_agenda(
     include_link_source: bool,
 ) -> Result<Value, GsuiteDispatchError> {
     let (time_min, time_max, date_label) = agenda_bounds(input)?;
-    let (calendar_ids, calendars, calendar_failure, calendar_discovery_truncated) =
-        resolve_calendar_ids(run, input).await?;
-    if let Some(response) = calendar_failure {
-        if is_google_auth_expired_response(&response) {
-            return Ok(auth_expired_marker());
+    let (calendar_ids, calendars, calendar_discovery_truncated) = match resolve_calendar_ids(
+        run,
+        input.include_all_calendars,
+        input.target_calendar_ids(),
+    )
+    .await?
+    {
+        CalendarIdResolution::Ready {
+            calendar_ids,
+            calendars,
+            truncated,
+        } => (calendar_ids, calendars, truncated),
+        CalendarIdResolution::AuthExpired => return Ok(auth_expired_marker()),
+        CalendarIdResolution::DiscoveryFailed { response } => {
+            let body = response_body_json(&response)
+                .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
+            return Ok(json!({
+                "kind": "ironclaw#calendarAgenda",
+                "date": date_label,
+                "window": input.window.as_str(),
+                "timeZone": format_fixed_offset(input.time_zone),
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "calendarIds": [],
+                "calendars": [],
+                "calendarDiscoveryTruncated": false,
+                "events": [],
+                "eventCount": 0,
+                "eventsTruncated": false,
+                "partialFailures": [partial_failure("calendar_discovery", response.status, &body)],
+            }));
         }
-        let body = response_body_json(&response)
-            .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
-        return Ok(json!({
-            "kind": "ironclaw#calendarAgenda",
-            "date": date_label,
-            "window": input.window.as_str(),
-            "timeZone": format_fixed_offset(input.time_zone),
-            "timeMin": time_min,
-            "timeMax": time_max,
-            "calendarIds": [],
-            "calendars": [],
-            "calendarDiscoveryTruncated": false,
-            "events": [],
-            "eventCount": 0,
-            "partialFailures": [partial_failure("calendar_discovery", response.status, &body)],
-        }));
-    }
+    };
 
     let mut events = Vec::new();
     let mut partial_failures = Vec::new();
@@ -546,6 +587,7 @@ async fn fetch_agenda(
         return Err(add_network_usage(error, run.network_egress_bytes()));
     }
     events.sort_by(compare_event_start);
+    let events_truncated = events.len() > input.max_results as usize;
     events.truncate(input.max_results as usize);
     Ok(json!({
         "kind": "ironclaw#calendarAgenda",
@@ -559,71 +601,9 @@ async fn fetch_agenda(
         "calendarDiscoveryTruncated": calendar_discovery_truncated,
         "events": events,
         "eventCount": events.len(),
+        "eventsTruncated": events_truncated,
         "partialFailures": partial_failures,
     }))
-}
-
-async fn resolve_calendar_ids(
-    run: &mut GoogleApiRun<'_, '_>,
-    input: &CalendarAgendaInput,
-) -> Result<
-    (
-        Vec<String>,
-        Vec<Value>,
-        Option<RuntimeHttpEgressResponse>,
-        bool,
-    ),
-    GsuiteDispatchError,
-> {
-    if !input.include_all_calendars {
-        if !input.calendar_ids.is_empty() {
-            return Ok((input.calendar_ids.clone(), Vec::new(), None, false));
-        }
-        return Ok((
-            vec![
-                input
-                    .calendar_id
-                    .clone()
-                    .unwrap_or_else(|| "primary".to_string()),
-            ],
-            Vec::new(),
-            None,
-            false,
-        ));
-    }
-
-    let response = run
-        .get(format!(
-            "{CALENDAR_API_BASE}/users/me/calendarList?maxResults=250"
-        ))
-        .await?;
-    if is_google_auth_expired_response(&response) || response.status != 200 {
-        return Ok((Vec::new(), Vec::new(), Some(response), false));
-    }
-    let body = response_body_json(&response)
-        .map_err(|error| add_network_usage(error, run.network_egress_bytes()))?;
-    let mut calendar_ids = Vec::new();
-    let mut calendars = Vec::new();
-    if let Some(items) = body.get("items").and_then(Value::as_array) {
-        // The agenda is a compact view: calendars beyond MAX_CALENDARS are
-        // dropped, and a nextPageToken means even the 250-item discovery page
-        // was incomplete. Report the truncation instead of letting the model
-        // read a partial agenda as complete.
-        let truncated = items.len() > MAX_CALENDARS || body.get("nextPageToken").is_some();
-        for calendar in items.iter().take(MAX_CALENDARS) {
-            let Some(id) = calendar.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            calendar_ids.push(id.to_string());
-            calendars.push(json!({
-                "id": id,
-                "summary": calendar.get("summary").and_then(Value::as_str).unwrap_or(""),
-                "primary": calendar.get("primary").and_then(Value::as_bool).unwrap_or(false),
-            }));
-        }
-        return Ok((calendar_ids, calendars, None, truncated));
-    }
-    Ok((calendar_ids, calendars, None, false))
 }
 
 fn gmail_summary_list_url(input: &GmailFetchMessageSummariesInput) -> String {
@@ -687,7 +667,6 @@ fn compact_gmail_message(message: &Value, body_preview_chars: usize) -> Value {
         "to": gmail_header(message, "To"),
         "subject": gmail_header(message, "Subject"),
         "date": gmail_header(message, "Date"),
-        "snippet": snippet,
         "bodyPreview": truncate_chars(snippet, body_preview_chars),
         "labelIds": labels,
         "isUnread": labels.iter().any(|label| label.as_str() == Some("UNREAD")),
@@ -1201,6 +1180,22 @@ mod tests {
         });
 
         assert!(CalendarDailyBriefInput::parse(&input).is_err());
+    }
+
+    #[test]
+    fn compact_gmail_message_emits_only_the_bounded_preview() {
+        let message = json!({
+            "id": "message-1",
+            "threadId": "thread-1",
+            "snippet": "0123456789",
+            "labelIds": [],
+            "payload": { "headers": [] },
+        });
+
+        let summary = compact_gmail_message(&message, 4);
+
+        assert_eq!(summary["bodyPreview"], "0123");
+        assert!(summary.get("snippet").is_none());
     }
 
     #[test]
