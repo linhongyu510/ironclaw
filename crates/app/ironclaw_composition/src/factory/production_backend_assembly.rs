@@ -322,6 +322,7 @@ pub(super) async fn build_backend_production(
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
+    omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
@@ -354,8 +355,6 @@ pub(super) async fn build_backend_production(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
-        #[cfg(any(test, feature = "test-support"))]
-        omp_coding_tools_for_test,
     } = context;
     let deployment_is_local_single_user = matches!(
         production_wiring.runtime_policy.deployment,
@@ -1557,6 +1556,7 @@ async fn finish_production_backend(
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
+    omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let resource_governor = filesystem_resource_governor(&filesystem);
     let stores = ProductionStoreBundle::new(
@@ -1566,7 +1566,14 @@ async fn finish_production_backend(
         event_store_config,
     )
     .await?;
-    build_backend_production(context, stores, trigger_repository, leader_lock).await
+    build_backend_production(
+        context,
+        stores,
+        trigger_repository,
+        leader_lock,
+        omp_coding_tools_for_test,
+    )
+    .await
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1576,6 +1583,7 @@ pub(super) async fn build_libsql_production(
     path_or_url: String,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
+    omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
@@ -1606,6 +1614,7 @@ pub(super) async fn build_libsql_production(
         secret_master_key,
         event_store_config,
         ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
+        omp_coding_tools_for_test,
     )
     .await
 }
@@ -1615,6 +1624,7 @@ pub(super) async fn build_postgres_production(
     pool: deadpool_postgres::Pool,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
+    omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
@@ -1658,6 +1668,7 @@ pub(super) async fn build_postgres_production(
             pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
         },
         ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
+        omp_coding_tools_for_test,
     )
     .await
 }

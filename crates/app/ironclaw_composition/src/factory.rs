@@ -225,6 +225,8 @@ pub(crate) use production_backend_assembly::{
 pub(crate) use production_backend_assembly::{
     production_skill_management_mount_view, production_system_extensions_lifecycle_mount_view,
 };
+#[cfg(any(test, feature = "test-support"))]
+use production_build_assembly::build_production_shaped_with_omp_for_test;
 use production_build_assembly::{
     FilesystemProductionHostRuntimeServices, RebornProductionBuildContext, build_production_shaped,
     planned_run_profile_resolver,
@@ -523,6 +525,20 @@ where
 pub(crate) async fn build_runtime_substrate(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_runtime_substrate_inner(input, false).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn build_runtime_substrate_with_omp_for_test(
+    input: RebornHostBindings,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_runtime_substrate_inner(input, true).await
+}
+
+async fn build_runtime_substrate_inner(
+    input: RebornHostBindings,
+    omp_coding_tools_for_test: bool,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
     tracing::debug!(
         profile = %input.profile(),
         owner_id = %input.owner_id(),
@@ -540,6 +556,12 @@ pub(crate) async fn build_runtime_substrate(
             ),
         }),
         crate::deployment::RuntimeSubstrate::ProductionShaped => {
+            #[cfg(any(test, feature = "test-support"))]
+            if omp_coding_tools_for_test {
+                return build_production_shaped_with_omp_for_test(input).await;
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            let _ = omp_coding_tools_for_test;
             build_production_shaped(input).await
         }
     }

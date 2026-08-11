@@ -2975,6 +2975,20 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 pub(crate) async fn build_runtime_with_resource_governor(
     input: RebornRuntimeInput,
 ) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
+    build_runtime_with_resource_governor_inner(input, false).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn build_runtime_with_resource_governor_and_omp_for_test(
+    input: RebornRuntimeInput,
+) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
+    build_runtime_with_resource_governor_inner(input, true).await
+}
+
+async fn build_runtime_with_resource_governor_inner(
+    input: RebornRuntimeInput,
+    omp_coding_tools_for_test: bool,
+) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     let RebornRuntimeInput {
         services: services_input,
         llm,
@@ -3085,7 +3099,17 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
-    let mut services = build_runtime_substrate(services_input).await?;
+    #[cfg(any(test, feature = "test-support"))]
+    let mut services = if omp_coding_tools_for_test {
+        crate::factory::build_runtime_substrate_with_omp_for_test(services_input).await?
+    } else {
+        build_runtime_substrate(services_input).await?
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let mut services = {
+        let _ = omp_coding_tools_for_test;
+        build_runtime_substrate(services_input).await?
+    };
     // The stored key no longer feeds the model gateway here (see the
     // post-construction reload below); the NEAR AI MCP bootstrap check is a
     // separate consumer that inspects `llm.config.nearai.api_key` directly,

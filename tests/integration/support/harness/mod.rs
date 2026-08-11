@@ -834,12 +834,6 @@ impl HostRuntimeCapabilityHarness {
         if let Some(slot) = web_push_runtime_slot {
             input = input.with_web_push_runtime_slot(slot);
         }
-        if omp_coding_tools {
-            // Issue #7392 slice 3 registration seam: swap the composed
-            // runtime's built-in package + handlers for the omp-extended
-            // variants (exact read/write/edit/glob/grep model surface).
-            input = input.with_omp_coding_tools_for_test();
-        }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
@@ -887,11 +881,17 @@ impl HostRuntimeCapabilityHarness {
                     reply_target_binding_id: service_label.to_string(),
                 });
         }
-        let (services, resource_governor) =
+        let (services, resource_governor) = if omp_coding_tools {
+            ironclaw_composition::test_support::build_runtime_with_resource_governor_and_omp_for_test(
+                runtime_input,
+            )
+            .await?
+        } else {
             ironclaw_composition::test_support::build_runtime_with_resource_governor_for_test(
                 runtime_input,
             )
-            .await?;
+            .await?
+        };
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }

@@ -4,6 +4,20 @@ use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_production_shaped_inner(input, false).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn build_production_shaped_with_omp_for_test(
+    input: RebornHostBindings,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_production_shaped_inner(input, true).await
+}
+
+async fn build_production_shaped_inner(
+    input: RebornHostBindings,
+    omp_coding_tools_for_test: bool,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornHostBindings {
         deployment,
         storage,
@@ -23,8 +37,6 @@ pub(super) async fn build_production_shaped(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
-        #[cfg(any(test, feature = "test-support"))]
-        omp_coding_tools_for_test,
         memory_binding_policy,
         memory_provider_connection,
         ..
@@ -100,8 +112,6 @@ pub(super) async fn build_production_shaped(
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
-        #[cfg(any(test, feature = "test-support"))]
-        omp_coding_tools_for_test,
     };
     match storage {
         RebornStorageInput::Disabled => Err(RebornBuildError::InvalidConfig {
@@ -137,6 +147,7 @@ pub(super) async fn build_production_shaped(
                     runtime_policy_for_local_process,
                     postgres_resource_governor_singleton: None,
                 },
+                omp_coding_tools_for_test,
             )
             .await
         }
@@ -173,6 +184,7 @@ pub(super) async fn build_production_shaped(
                         process_local_resource_governor_singleton,
                     ),
                 },
+                omp_coding_tools_for_test,
             )
             .await
         }
@@ -200,6 +212,7 @@ pub(super) async fn build_production_shaped(
                 database_path_or_url,
                 secret_master_key,
                 process_local_resource_governor_singleton,
+                omp_coding_tools_for_test,
             )
             .await
         }
@@ -225,6 +238,7 @@ pub(super) async fn build_production_shaped(
                 pool,
                 secret_master_key,
                 process_local_resource_governor_singleton,
+                omp_coding_tools_for_test,
             )
             .await
         }
@@ -252,6 +266,7 @@ struct LocalStorageProductionInput {
 async fn build_local_storage_production_shaped(
     mut context: RebornProductionBuildContext,
     input: LocalStorageProductionInput,
+    omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let LocalStorageProductionInput {
         root,
@@ -340,6 +355,7 @@ async fn build_local_storage_production_shaped(
             Some(pool) => ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool),
             None => ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
         },
+        omp_coding_tools_for_test,
     )
     .await
 }
@@ -390,11 +406,6 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) trust_fixture_extensions_for_test: bool,
-    /// Issue #7392 slice 3 seam: select the omp-extended built-in package +
-    /// handlers. Test-support only; default `false` keeps the stock surface
-    /// byte-identical.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) omp_coding_tools_for_test: bool,
 }
 
 fn production_wiring(

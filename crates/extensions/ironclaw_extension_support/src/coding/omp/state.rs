@@ -83,14 +83,6 @@ impl Default for OmpSnapshotRegistry {
 }
 
 impl OmpSnapshotRegistry {
-    #[cfg(test)]
-    fn with_capacity(max_entries: usize) -> Self {
-        Self {
-            state: Mutex::new(SnapshotState::default()),
-            max_entries,
-        }
-    }
-
     fn lock_state(&self) -> MutexGuard<'_, SnapshotState> {
         self.state
             .lock()
@@ -125,17 +117,6 @@ impl OmpSnapshotRegistry {
                 fingerprint,
             },
         );
-    }
-
-    /// Look up the recorded tag for (scope, path) — `None` when the path
-    /// was never read (or was evicted) in this scope+run.
-    #[allow(dead_code)]
-    pub(crate) fn recorded(&self, scope: &OmpScopeKey, virtual_path: &str) -> Option<String> {
-        let state = self.lock_state();
-        state
-            .entries
-            .get(&(scope.clone(), virtual_path.to_string()))
-            .map(|entry| entry.tag.clone())
     }
 
     /// Whether a tag was ever recorded for this path in this scope+run —
@@ -201,13 +182,25 @@ mod tests {
         OmpScopeKey::from_scope(&scope, run)
     }
 
+    fn recorded(
+        registry: &OmpSnapshotRegistry,
+        scope: &OmpScopeKey,
+        virtual_path: &str,
+    ) -> Option<String> {
+        registry
+            .lock_state()
+            .entries
+            .get(&(scope.clone(), virtual_path.to_string()))
+            .map(|entry| entry.tag.clone())
+    }
+
     #[test]
     fn record_and_lookup_round_trip() {
         let registry = OmpSnapshotRegistry::default();
         let scope = scope(None);
         registry.record(&scope, "/projects/workspace/foo.ts", "1A2B", [1; 32]);
         assert_eq!(
-            registry.recorded(&scope, "/projects/workspace/foo.ts"),
+            recorded(&registry, &scope, "/projects/workspace/foo.ts"),
             Some("1A2B".to_string())
         );
         assert!(registry.tag_recognized(&scope, "/projects/workspace/foo.ts", "1A2B"));
@@ -217,11 +210,7 @@ mod tests {
             tenant_id: "other".to_string(),
             ..scope.clone()
         };
-        assert!(
-            registry
-                .recorded(&other, "/projects/workspace/foo.ts")
-                .is_none()
-        );
+        assert!(recorded(&registry, &other, "/projects/workspace/foo.ts").is_none());
     }
 
     #[test]
@@ -230,11 +219,7 @@ mod tests {
         let run_a = scope(Some(RunId::new()));
         let run_b = scope(Some(RunId::new()));
         registry.record(&run_a, "/projects/workspace/foo.ts", "1A2B", [1; 32]);
-        assert!(
-            registry
-                .recorded(&run_b, "/projects/workspace/foo.ts")
-                .is_none()
-        );
+        assert!(recorded(&registry, &run_b, "/projects/workspace/foo.ts").is_none());
         assert!(!registry.tag_recognized(&run_b, "/projects/workspace/foo.ts", "1A2B"));
     }
 
@@ -245,21 +230,30 @@ mod tests {
         let path = "/projects/workspace/foo.ts";
         registry.record(&scope, path, "1A2B", [1; 32]);
         registry.record(&scope, path, "3C4D", [2; 32]);
-        assert_eq!(registry.recorded(&scope, path), Some("3C4D".to_string()));
+        assert_eq!(recorded(&registry, &scope, path), Some("3C4D".to_string()));
         assert!(registry.tag_recognized(&scope, path, "3C4D"));
         assert!(!registry.tag_recognized(&scope, path, "1A2B"));
     }
 
     #[test]
     fn bounded_registry_evicts_oldest() {
-        let registry = OmpSnapshotRegistry::with_capacity(2);
+        let registry = OmpSnapshotRegistry {
+            state: Mutex::new(SnapshotState::default()),
+            max_entries: 2,
+        };
         let scope = scope(None);
         registry.record(&scope, "/p/a", "AAAA", [1; 32]);
         registry.record(&scope, "/p/b", "BBBB", [2; 32]);
         registry.record(&scope, "/p/c", "CCCC", [3; 32]);
-        assert!(registry.recorded(&scope, "/p/a").is_none());
-        assert_eq!(registry.recorded(&scope, "/p/b"), Some("BBBB".to_string()));
-        assert_eq!(registry.recorded(&scope, "/p/c"), Some("CCCC".to_string()));
+        assert!(recorded(&registry, &scope, "/p/a").is_none());
+        assert_eq!(
+            recorded(&registry, &scope, "/p/b"),
+            Some("BBBB".to_string())
+        );
+        assert_eq!(
+            recorded(&registry, &scope, "/p/c"),
+            Some("CCCC".to_string())
+        );
     }
 
     #[test]
@@ -268,8 +262,11 @@ mod tests {
         let scope = scope(None);
         registry.record(&scope, "/p/a", "AAAA", [1; 32]);
         registry.invalidate(&scope, "/p/a");
-        assert!(registry.recorded(&scope, "/p/a").is_none());
+        assert!(recorded(&registry, &scope, "/p/a").is_none());
         registry.record(&scope, "/p/a", "BBBB", [2; 32]);
-        assert_eq!(registry.recorded(&scope, "/p/a"), Some("BBBB".to_string()));
+        assert_eq!(
+            recorded(&registry, &scope, "/p/a"),
+            Some("BBBB".to_string())
+        );
     }
 }

@@ -781,11 +781,7 @@ async fn read_text(
 #[derive(Debug, Clone)]
 struct ConflictBlock {
     start_line: u64,
-    #[allow(dead_code)]
-    separator_line: u64,
     end_line: u64,
-    #[allow(dead_code)]
-    base_line: Option<u64>,
     ours_label: Option<String>,
     base_label: Option<String>,
     theirs_label: Option<String>,
@@ -822,7 +818,6 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
     struct Partial {
         start_line: u64,
         ours_label: Option<String>,
-        base_line: Option<u64>,
         base_label: Option<String>,
         base_lines: Option<Vec<String>>,
         separator_line: Option<u64>,
@@ -841,7 +836,6 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
             partial = Some(Partial {
                 start_line: ln,
                 ours_label: if label.is_empty() { None } else { Some(label) },
-                base_line: None,
                 base_label: None,
                 base_lines: None,
                 separator_line: None,
@@ -862,7 +856,6 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
                 continue;
             }
             let p = partial.as_mut().expect("checked");
-            p.base_line = Some(ln);
             p.base_label = if label.is_empty() { None } else { Some(label) };
             p.base_lines = Some(Vec::new());
             phase = Phase::Base;
@@ -885,14 +878,12 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
         if let Some(label) = match_marker(line, THEIRS_PREFIX) {
             if phase == Phase::Theirs {
                 let p = partial.as_ref().expect("checked");
-                if let (Some(separator_line), Some(_theirs_lines)) =
+                if let (Some(_separator_line), Some(_theirs_lines)) =
                     (p.separator_line, &p.theirs_lines)
                 {
                     blocks.push(ConflictBlock {
                         start_line: p.start_line,
-                        separator_line,
                         end_line: ln,
-                        base_line: p.base_line,
                         ours_label: p.ours_label.clone(),
                         base_label: p.base_label.clone(),
                         theirs_label: if label.is_empty() { None } else { Some(label) },
@@ -1573,7 +1564,6 @@ mod tests {
         let blocks = scan_conflict_lines(text, 1);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].start_line, 2);
-        assert_eq!(blocks[0].separator_line, 4);
         assert_eq!(blocks[0].end_line, 6);
         assert_eq!(blocks[0].ours_label.as_deref(), Some("HEAD"));
         assert_eq!(blocks[0].theirs_label.as_deref(), Some("branch"));

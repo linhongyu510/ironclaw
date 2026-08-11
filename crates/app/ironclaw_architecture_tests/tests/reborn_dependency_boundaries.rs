@@ -677,7 +677,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
-        ("ironclaw_host_api", 18_994),
+        // 18_994 -> 19_003 (#7491): `CapabilityDescriptor.provider_tool_name`
+        // carries the already-validated provider spelling as a typed DTO field;
+        // alias resolution and execution remain in ironclaw_loop_host.
+        ("ironclaw_host_api", 19_003),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
