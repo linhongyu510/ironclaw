@@ -92,6 +92,44 @@ pub trait ChannelAdapter: Send + Sync {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
 
+    /// Per-user notification-setup status (§7b of the unified channel
+    /// model): whether notification delivery is enabled for this user on this
+    /// channel, plus channel-opaque detail the channel's own client renders.
+    /// Generic code never interprets `detail`. Channels whose manifest
+    /// declares `notifications_require_setup = false` keep the default.
+    async fn notification_setup_status(
+        &self,
+        _context: &ChannelContext<'_>,
+        _scope: &NotificationSetupScope,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
+    /// Perform this channel's per-user notification enrollment with a
+    /// channel-defined, host-opaque payload (§7b). The payload is untrusted
+    /// input: the adapter validates and bounds it before any storage.
+    /// Returns the fresh post-enrollment status (read-back evidence).
+    async fn enable_notifications(
+        &self,
+        _context: &ChannelContext<'_>,
+        _scope: &NotificationSetupScope,
+        _payload: &str,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
+    /// Tear down this channel's per-user notification enrollment (§7b), with
+    /// a channel-defined payload selecting what to tear down. Returns the
+    /// fresh post-teardown status (read-back evidence).
+    async fn disable_notifications(
+        &self,
+        _context: &ChannelContext<'_>,
+        _scope: &NotificationSetupScope,
+        _payload: &str,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
     /// The channel-specific *notification* send (§7a of the unified channel
     /// model): a blocked-automation notice, gate/auth prompt fanned out to a
     /// notification channel, or any other out-of-band notice — gated on the
@@ -130,6 +168,31 @@ pub struct ChannelContext<'a> {
     /// Non-secret operator config values keyed by field handle.
     pub config: &'a [(String, String)],
 }
+
+/// The authenticated user one notification-setup operation acts for. Comes
+/// from the trusted caller at the product boundary, never from the payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationSetupScope {
+    pub tenant_id: ironclaw_host_api::ids::TenantId,
+    pub user_id: ironclaw_host_api::ids::UserId,
+}
+
+/// One channel's per-user notification-setup state (§7b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationSetupStatus {
+    /// Whether notification delivery is enabled for this user on this
+    /// channel right now.
+    pub enabled: bool,
+    /// Channel-opaque JSON detail for the channel's own client (e.g. the
+    /// web app's enrolled-browser digests and its enrollment public key).
+    /// Bounded; generic code passes it through without interpretation.
+    pub detail: String,
+}
+
+/// Bound on the opaque `detail` document a setup status may carry.
+pub const MAX_NOTIFICATION_SETUP_DETAIL_BYTES: usize = 16 * 1024;
+/// Bound on the opaque payload one enable/disable operation may carry.
+pub const MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES: usize = 16 * 1024;
 
 /// One host-verified inbound request. Signing secrets are never in scope —
 /// the host executed the verification recipe before calling `inbound`.

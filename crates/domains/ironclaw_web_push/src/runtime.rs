@@ -11,9 +11,17 @@ use std::sync::{Arc, RwLock};
 use crate::error::WebPushError;
 use crate::store::WebPushSubscriptionStore;
 
-/// Everything the delivery adapter needs at send time.
+/// Everything the channel adapter needs at send and enrollment time.
 pub struct WebPushRuntime {
     pub subscriptions: Arc<dyn WebPushSubscriptionStore>,
+    /// The advertised RFC 8292 application-server public key (URL-safe
+    /// base64). Public by definition — the signing half stays host-seeded in
+    /// the secret store and never reaches the adapter.
+    pub vapid_public_key: String,
+    /// Push-service hosts enrollments may target — the manifest's
+    /// `[[channel.egress]]` host list, the same allowlist restricted egress
+    /// enforces at send time.
+    pub allowed_push_hosts: Vec<String>,
 }
 
 /// Cloneable installer/consumer handle around the runtime.
@@ -101,6 +109,8 @@ mod tests {
 
         let runtime = Arc::new(WebPushRuntime {
             subscriptions: Arc::new(NullStore),
+            vapid_public_key: "test-public-key".to_string(),
+            allowed_push_hosts: vec!["push.example".to_string()],
         });
         slot.install(Arc::clone(&runtime)).expect("first install");
         assert!(slot.is_installed());

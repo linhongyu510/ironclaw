@@ -4,19 +4,23 @@ import { createHash } from "node:crypto";
 import { afterEach, test, vi } from "vitest";
 
 vi.mock("./api", () => ({
-  subscribeWebPush: vi.fn(async () => ({ outcome: "enrolled" })),
-  unsubscribeWebPush: vi.fn(async () => ({ removed: true })),
+  enableNotificationSetup: vi.fn(async () => ({ enabled: true })),
+  disableNotificationSetup: vi.fn(async () => ({ enabled: false })),
+  getSessionChannelExtensionId: vi.fn(() => "session-channel"),
 }));
 
-import { subscribeWebPush, unsubscribeWebPush } from "./api";
+import {
+  disableNotificationSetup,
+  enableNotificationSetup,
+} from "./api";
 import {
   endpointDigestHex,
   enrollThisBrowser,
-  getWebPushBrowserState,
+  getDevicePushState,
   registerServiceWorker,
   unenrollThisBrowser,
   urlBase64ToUint8Array,
-} from "./web-push";
+} from "./device-push";
 
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -135,57 +139,57 @@ test("registerServiceWorker registers /sw.js and swallows failures", async () =>
   assert.equal(await registerServiceWorker(), null, "no serviceWorker support is a no-op");
 });
 
-test("getWebPushBrowserState distinguishes unsupported, denied, not-enrolled, and enrolled", async () => {
+test("getDevicePushState distinguishes unsupported, denied, not-enrolled, and enrolled", async () => {
   setGlobal("navigator", {});
   setGlobal("window", {});
-  assert.deepEqual(await getWebPushBrowserState(), { state: "unsupported" });
+  assert.deepEqual(await getDevicePushState(), { state: "unsupported" });
 
   browserEnvironment({ permission: "denied" });
-  assert.deepEqual(await getWebPushBrowserState(), { state: "permission-denied" });
+  assert.deepEqual(await getDevicePushState(), { state: "permission-denied" });
 
   browserEnvironment({ permission: "granted", subscription: null });
-  assert.deepEqual(await getWebPushBrowserState(), { state: "not-enrolled" });
+  assert.deepEqual(await getDevicePushState(), { state: "not-enrolled" });
 
   browserEnvironment({
     permission: "granted",
     subscription: fakeSubscription("https://fcm.googleapis.com/fcm/send/abc"),
   });
-  assert.deepEqual(await getWebPushBrowserState(), {
+  assert.deepEqual(await getDevicePushState(), {
     state: "enrolled",
     endpoint: "https://fcm.googleapis.com/fcm/send/abc",
     accountMatch: null,
   });
 });
 
-test("getWebPushBrowserState resolves promptly as unsupported when no registration exists", async () => {
+test("getDevicePushState resolves promptly as unsupported when no registration exists", async () => {
   // A failed boot registration leaves getRegistration() → undefined;
   // `serviceWorker.ready` would hang forever here, which is the regression
   // this pins (CodeRabbit stability finding on PR #7398).
   browserEnvironment({ permission: "granted", hasRegistration: false });
-  assert.deepEqual(await getWebPushBrowserState(), { state: "unsupported" });
+  assert.deepEqual(await getDevicePushState(), { state: "unsupported" });
 });
 
-test("getWebPushBrowserState correlates the subscription with the account's endpoint digests", async () => {
+test("getDevicePushState correlates the subscription with the account's endpoint digests", async () => {
   const endpoint = "https://fcm.googleapis.com/fcm/send/mine";
   browserEnvironment({ permission: "granted", subscription: fakeSubscription(endpoint) });
 
-  const matched = await getWebPushBrowserState({
+  const matched = await getDevicePushState({
     accountEndpointDigests: [sha256Hex(endpoint)],
   });
   assert.deepEqual(matched, { state: "enrolled", endpoint, accountMatch: true });
 
-  const matchedCaseInsensitive = await getWebPushBrowserState({
+  const matchedCaseInsensitive = await getDevicePushState({
     accountEndpointDigests: [sha256Hex(endpoint).toUpperCase()],
   });
   assert.equal(matchedCaseInsensitive.accountMatch, true);
 
   // Another account's browser subscription: digests exist, none match.
-  const foreign = await getWebPushBrowserState({
+  const foreign = await getDevicePushState({
     accountEndpointDigests: [sha256Hex("https://fcm.googleapis.com/fcm/send/other")],
   });
   assert.deepEqual(foreign, { state: "enrolled", endpoint, accountMatch: false });
 
-  const emptyAccount = await getWebPushBrowserState({ accountEndpointDigests: [] });
+  const emptyAccount = await getDevicePushState({ accountEndpointDigests: [] });
   assert.equal(emptyAccount.accountMatch, false, "an empty digest list is a definite non-match");
 });
 
@@ -206,11 +210,14 @@ test("enrollThisBrowser subscribes with the VAPID key and registers with the bac
   assert.equal(subscribeCalls.length, 1);
   assert.equal(subscribeCalls[0].userVisibleOnly, true);
   assert.deepEqual(Array.from(subscribeCalls[0].applicationServerKey), [1, 0, 1]);
-  assert.equal(subscribeWebPush.mock.calls.length, 1);
-  assert.deepEqual(subscribeWebPush.mock.calls[0][0], {
-    endpoint: "https://fcm.googleapis.com/fcm/send/new",
-    keys: { p256dh: "pk", auth: "as" },
-    userAgent: "TestBrowser/1.0",
+  assert.equal(enableNotificationSetup.mock.calls.length, 1);
+  assert.deepEqual(enableNotificationSetup.mock.calls[0][0], {
+    extensionId: "session-channel",
+    payload: {
+      endpoint: "https://fcm.googleapis.com/fcm/send/new",
+      keys: { p256dh: "pk", auth: "as" },
+      user_agent: "TestBrowser/1.0",
+    },
   });
 });
 
@@ -221,7 +228,7 @@ test("enrollThisBrowser rolls back a freshly created subscription when the backe
     subscription: null,
     subscribeResult: created,
   });
-  subscribeWebPush.mockRejectedValueOnce(new Error("backend rejected"));
+  enableNotificationSetup.mockRejectedValueOnce(new Error("backend rejected"));
 
   await assert.rejects(enrollThisBrowser({ vapidPublicKey: "AQAB" }), /backend rejected/);
   assert.equal(
@@ -236,7 +243,7 @@ test("enrollThisBrowser never unsubscribes a pre-existing subscription on backen
   // browser profile; rolling it back would sever that account's enrollment.
   const existing = fakeSubscription("https://fcm.googleapis.com/fcm/send/other-account");
   browserEnvironment({ permission: "granted", subscription: existing });
-  subscribeWebPush.mockRejectedValueOnce(new Error("backend rejected"));
+  enableNotificationSetup.mockRejectedValueOnce(new Error("backend rejected"));
 
   await assert.rejects(enrollThisBrowser({ vapidPublicKey: "AQAB" }), /backend rejected/);
   assert.equal(existing.unsubscribe.mock.calls.length, 0);
@@ -247,21 +254,22 @@ test("enrollThisBrowser reports a denied permission without subscribing", async 
   const state = await enrollThisBrowser({ vapidPublicKey: "AQAB" });
   assert.deepEqual(state, { state: "permission-denied" });
   assert.equal(subscribeCalls.length, 0);
-  assert.equal(subscribeWebPush.mock.calls.length, 0);
+  assert.equal(enableNotificationSetup.mock.calls.length, 0);
   await assert.rejects(enrollThisBrowser({}), /vapidPublicKey is required/);
 });
 
 test("unenrollThisBrowser unsubscribes locally even when the backend removal fails", async () => {
   const subscription = fakeSubscription("https://fcm.googleapis.com/fcm/send/old");
   browserEnvironment({ permission: "granted", subscription });
-  unsubscribeWebPush.mockRejectedValueOnce(new Error("backend offline"));
+  disableNotificationSetup.mockRejectedValueOnce(new Error("backend offline"));
 
   const state = await unenrollThisBrowser();
 
   assert.deepEqual(state, { state: "not-enrolled" });
   assert.equal(subscription.unsubscribe.mock.calls.length, 1);
-  assert.equal(unsubscribeWebPush.mock.calls.length, 1);
-  assert.deepEqual(unsubscribeWebPush.mock.calls[0][0], {
-    endpoint: "https://fcm.googleapis.com/fcm/send/old",
+  assert.equal(disableNotificationSetup.mock.calls.length, 1);
+  assert.deepEqual(disableNotificationSetup.mock.calls[0][0], {
+    extensionId: "session-channel",
+    payload: { endpoint: "https://fcm.googleapis.com/fcm/send/old" },
   });
 });

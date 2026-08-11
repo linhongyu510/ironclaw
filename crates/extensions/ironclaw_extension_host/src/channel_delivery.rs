@@ -151,6 +151,23 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
         })
     }
 
+    fn notifications_require_setup(&self, extension_id: &str) -> Option<bool> {
+        if let Some(extension) = self.deployment_channels.extension(extension_id) {
+            return extension
+                .resolved
+                .channel
+                .as_ref()
+                .map(|channel| channel.notifications_require_setup);
+        }
+        let snapshot = self.watch.current();
+        let extension = snapshot.extension(extension_id)?;
+        extension
+            .resolved
+            .channel
+            .as_ref()
+            .map(|channel| channel.notifications_require_setup)
+    }
+
     fn channel_reply_mode(
         &self,
         extension_id: &str,

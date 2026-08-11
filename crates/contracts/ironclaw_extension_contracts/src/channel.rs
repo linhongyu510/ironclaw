@@ -124,6 +124,13 @@ pub struct ChannelDescriptor {
     /// (e.g. a browser-push channel, notification-only for final replies).
     #[serde(default)]
     pub notifications: bool,
+    /// Whether notification delivery needs per-user enrollment before it can
+    /// deliver (§7b): the generic setup surface consults the adapter's
+    /// status/enable/disable operations for such channels. A connected
+    /// conversation channel (Slack/Telegram DM) is deliverable as-is and
+    /// keeps the default.
+    #[serde(default)]
+    pub notifications_require_setup: bool,
     /// Required: how external conversations bind (checklist MAN-10).
     pub conversation_model: ConversationModel,
     /// Exact product command tokens exposed by this channel, without a leading

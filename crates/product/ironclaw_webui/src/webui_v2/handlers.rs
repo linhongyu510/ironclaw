@@ -87,6 +87,10 @@ use ironclaw_product_contracts::inbound_requests::{
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
+use ironclaw_product_contracts::notification_setup::{
+    NOTIFICATION_SETUP_DISABLE_COMMAND, NOTIFICATION_SETUP_ENABLE_COMMAND,
+    NOTIFICATION_SETUP_STATUS_VIEW,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
@@ -115,13 +119,9 @@ use ironclaw_product_contracts::product_wire::{
     SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
-    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
-    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+    RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
-use ironclaw_product_contracts::web_push::{
-    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND, WEB_PUSH_UNSUBSCRIBE_COMMAND,
-};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
@@ -2275,53 +2275,73 @@ pub async fn set_notification_channels(
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/web-push/status`
+/// `GET /api/webchat/v2/channels/{extension_id}/notifications`
 ///
-/// The deployment's VAPID public key (`applicationServerKey`) plus the
-/// caller's enrolled browsers — redacted to push-service hosts; endpoint
-/// capability URLs never leave the backend.
-pub async fn web_push_status(
+/// One channel's per-user notification-setup state: whether the channel
+/// requires enrollment, whether the caller is enrolled, and a
+/// channel-opaque `detail` document only that channel's client interprets
+/// (for web push: the VAPID `applicationServerKey` plus enrolled browsers
+/// redacted to push-service hosts).
+pub async fn notification_setup_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<RebornWebPushStatusResponse>, WebUiV2HttpError> {
+    Path(extension_id): Path<String>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
-        WEB_PUSH_STATUS_VIEW.descriptor(),
-        serde_json::json!({}),
+        NOTIFICATION_SETUP_STATUS_VIEW.descriptor(),
+        serde_json::json!({ "extension_id": extension_id }),
         None,
     )
     .await?;
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/web-push/subscriptions`
+/// `POST /api/webchat/v2/channels/{extension_id}/notifications/enable`
 ///
-/// Enroll (or refresh) the caller's current browser for web push. Body:
-/// [`RebornWebPushSubscribeRequest`]; the endpoint is validated against the
-/// supported push-service allowlist before persistence.
-pub async fn web_push_subscribe(
+/// Perform the channel's per-user notification enrollment. The body is a
+/// channel-opaque `payload` the channel's adapter validates (for web push:
+/// the browser's push subscription, checked against the push-service
+/// allowlist before persistence). The path names the channel; a body
+/// `extension_id` is overridden.
+pub async fn notification_setup_enable(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Json(body): Json<RebornWebPushSubscribeRequest>,
-) -> Result<Json<RebornWebPushSubscribeResponse>, WebUiV2HttpError> {
-    let response =
-        invoke_product_command(state.services(), caller, WEB_PUSH_SUBSCRIBE_COMMAND, body).await?;
+    Path(extension_id): Path<String>,
+    Json(mut body): Json<RebornNotificationSetupMutationRequest>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
+    body.extension_id = extension_id;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATION_SETUP_ENABLE_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/web-push/subscriptions/remove`
+/// `POST /api/webchat/v2/channels/{extension_id}/notifications/disable`
 ///
-/// Remove one of the caller's browser enrollments by endpoint. POST (not
-/// DELETE) because the endpoint is a long capability URL carried in the body.
-pub async fn web_push_unsubscribe(
+/// Tear down the channel's per-user notification enrollment. POST (not
+/// DELETE) because the payload selecting what to tear down (for web push: a
+/// long push-endpoint capability URL) rides the body. The path names the
+/// channel; a body `extension_id` is overridden.
+pub async fn notification_setup_disable(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Json(body): Json<RebornWebPushUnsubscribeRequest>,
-) -> Result<Json<RebornWebPushUnsubscribeResponse>, WebUiV2HttpError> {
-    let response =
-        invoke_product_command(state.services(), caller, WEB_PUSH_UNSUBSCRIBE_COMMAND, body)
-            .await?;
+    Path(extension_id): Path<String>,
+    Json(mut body): Json<RebornNotificationSetupMutationRequest>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
+    body.extension_id = extension_id;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATION_SETUP_DISABLE_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 

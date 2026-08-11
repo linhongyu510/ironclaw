@@ -133,6 +133,7 @@ mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
+mod notification_setup;
 mod operator_command_views;
 mod operator_config_views;
 mod outbound_delivery_capability_surface;
@@ -147,7 +148,6 @@ mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
-mod web_push;
 
 use crate::conversation_binding::SessionLaneRejectingBindingResolver;
 use crate::inbound_turn::{DefaultInboundTurnService, SessionSkillActivationPorts};
@@ -217,10 +217,11 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornNotificationChannel, RebornNotificationChannelsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornNotificationChannel, RebornNotificationChannelsResponse,
+    RebornNotificationSetupMutationRequest, RebornNotificationSetupRequest,
+    RebornNotificationSetupStatusResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -241,9 +242,7 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
-    RebornWebPushStatusResponse, RebornWebPushSubscribeOutcome, RebornWebPushSubscribeRequest,
-    RebornWebPushSubscribeResponse, RebornWebPushSubscriptionInfo, RebornWebPushUnsubscribeRequest,
-    RebornWebPushUnsubscribeResponse, SettingsToolPermissionState,
+    SettingsToolPermissionState,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -251,6 +250,10 @@ use ironclaw_product_contracts::project_service::{ProjectService, ProjectService
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
+pub use notification_setup::{
+    AdapterChannelNotificationSetupService, ChannelNotificationSetupService,
+    UnsupportedChannelNotificationSetupService,
+};
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
 };
@@ -300,14 +303,13 @@ pub use types::{
     RebornVendorAuthAccounts,
 };
 pub use views::UnavailableRebornViewProvider;
-pub use web_push::{
-    RebornWebPushProductService, UnsupportedWebPushProductService, WebPushProductService,
-};
-// The web-push descriptors live in `ironclaw_product_contracts::web_push`
-// (transport/product boundary: transports consume the boundary crate). One
-// import path, no re-export (§11.2.4).
-use ironclaw_product_contracts::web_push::{
-    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND_ID, WEB_PUSH_UNSUBSCRIBE_COMMAND_ID,
+// The notification-setup descriptors live in
+// `ironclaw_product_contracts::notification_setup` (transport/product
+// boundary: transports consume the boundary crate). One import path, no
+// re-export (§11.2.4).
+use ironclaw_product_contracts::notification_setup::{
+    NOTIFICATION_SETUP_DISABLE_COMMAND_ID, NOTIFICATION_SETUP_ENABLE_COMMAND_ID,
+    NOTIFICATION_SETUP_STATUS_VIEW,
 };
 
 type SkillActivationRecorder =
@@ -2238,7 +2240,7 @@ pub struct RebornServices<
     channel_connection_service: Arc<dyn ChannelConnectionService>,
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
-    web_push_service: Arc<dyn WebPushProductService>,
+    notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     session_channels:
         Option<Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>>,
@@ -2325,7 +2327,7 @@ where
             outbound_preferences_service: Arc::new(
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
-            web_push_service: Arc::new(UnsupportedWebPushProductService),
+            notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
@@ -2514,11 +2516,11 @@ where
         self
     }
 
-    pub fn with_web_push_product_service(
+    pub fn with_notification_setup_service(
         mut self,
-        web_push_service: Arc<dyn WebPushProductService>,
+        notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     ) -> Self {
-        self.web_push_service = web_push_service;
+        self.notification_setup_service = notification_setup_service;
         self
     }
 
@@ -4068,9 +4070,17 @@ where
                 let response = self.build_notification_channels_view(caller).await?;
                 views::view_page(response)
             }
-            id if id == WEB_PUSH_STATUS_VIEW.id => {
-                views::parse_empty_view_params(query.params)?;
-                let response = self.web_push_service.status(caller).await?;
+            id if id == NOTIFICATION_SETUP_STATUS_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                let response = self
+                    .notification_setup_service
+                    .status(caller, request)
+                    .await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {

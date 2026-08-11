@@ -1,18 +1,27 @@
 // @ts-nocheck
-// Browser-side Web Push enrollment for the web-push notification channel.
+// Browser-side push enrollment for the deployment's session channel — the
+// channel this SPA itself fronts, learned from `GET /session` (never a
+// hardcoded channel name).
 //
 // The service worker (`public/sw.js`) displays pushes; this module owns
 // registration and the per-browser subscription lifecycle against the
-// `/api/webchat/v2/web-push/*` routes. All entry points are defensive:
-// missing browser APIs degrade to an "unsupported" state and never throw
-// into app boot or the settings panel.
+// generic notification-setup surface
+// (`/api/webchat/v2/channels/{extension_id}/notifications/*`). The
+// enable/disable payloads and the status `detail` are that channel's own
+// opaque documents — this module is the client half that interprets them.
+// All entry points are defensive: missing browser APIs degrade to an
+// "unsupported" state and never throw into app boot or the settings panel.
 
-import { subscribeWebPush, unsubscribeWebPush } from "./api";
+import {
+  disableNotificationSetup,
+  enableNotificationSetup,
+  getSessionChannelExtensionId,
+} from "./api";
 
 // `registerServiceWorker` lives in the dependency-free `./register-sw` module
 // so app boot (`main.tsx`) does not pull this enrollment lib — and its api +
 // WebCrypto imports — into the initial `/chat` bundle. Re-exported here so the
-// automations-page hook keeps one import site for the web-push surface.
+// automations-page hook keeps one import site for the device-push surface.
 export { registerServiceWorker } from "./register-sw";
 
 function pushSupported() {
@@ -45,7 +54,7 @@ async function pushRegistration() {
 }
 
 /** Lowercase hex SHA-256 of the endpoint URL string — the correlation key
- * the backend exposes as `endpoint_digest` on `GET /web-push/status`, so the
+ * the channel's setup-status `detail` exposes as `endpoint_digest`, so the
  * browser can tell whether ITS subscription belongs to the signed-in account
  * without the backend ever echoing full endpoint capability URLs. Returns
  * null when WebCrypto is unavailable (push itself requires a secure context,
@@ -74,7 +83,7 @@ export async function endpointDigestHex(endpoint) {
  *
  * `accountMatch` correlates the browser-global subscription with the
  * SIGNED-IN account's enrollment set (`accountEndpointDigests`, the
- * `endpoint_digest` values from `GET /web-push/status`):
+ * `endpoint_digest` values from the setup-status `detail`):
  *   true  — this account holds a record for this browser's subscription;
  *   false — a subscription exists but belongs to no record of this account
  *           (typically another account enrolled in this browser profile);
@@ -83,7 +92,7 @@ export async function endpointDigestHex(endpoint) {
  * Callers must only offer a local unsubscribe when `accountMatch === true`;
  * anything else risks severing another account's enrollment.
  */
-export async function getWebPushBrowserState({ accountEndpointDigests = null } = {}) {
+export async function getDevicePushState({ accountEndpointDigests = null } = {}) {
   if (!pushSupported()) return { state: "unsupported" };
   if (Notification.permission === "denied") return { state: "permission-denied" };
   try {
@@ -163,10 +172,13 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
     createdSubscription = true;
   }
   try {
-    await subscribeWebPush({
-      endpoint: subscription.endpoint,
-      keys: subscriptionKeys(subscription),
-      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+    await enableNotificationSetup({
+      extensionId: getSessionChannelExtensionId(),
+      payload: {
+        endpoint: subscription.endpoint,
+        keys: subscriptionKeys(subscription),
+        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      },
     });
   } catch (error) {
     // Evidence rule: the browser must never report "enrolled" without a
@@ -176,7 +188,7 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
       try {
         await subscription.unsubscribe();
       } catch (rollbackError) {
-        console.warn("web push enrollment rollback failed", rollbackError);
+        console.warn("device push enrollment rollback failed", rollbackError);
       }
     }
     throw error;
@@ -188,7 +200,7 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
  * Returns the resulting browser state.
  *
  * Only call this when the subscription is verified to belong to the current
- * account (`accountMatch === true` from [`getWebPushBrowserState`]): the
+ * account (`accountMatch === true` from [`getDevicePushState`]): the
  * push subscription is browser-global, so unsubscribing it on behalf of the
  * wrong account would silently break the owning account's notifications. */
 export async function unenrollThisBrowser() {
@@ -202,9 +214,12 @@ export async function unenrollThisBrowser() {
   // Backend removal is best-effort: the dead subscription is also pruned
   // server-side on the next 404/410 push response.
   try {
-    await unsubscribeWebPush({ endpoint });
+    await disableNotificationSetup({
+      extensionId: getSessionChannelExtensionId(),
+      payload: { endpoint },
+    });
   } catch (error) {
-    console.warn("web push backend unsubscribe failed", error);
+    console.warn("device push backend unsubscribe failed", error);
   }
   return { state: "not-enrolled" };
 }

@@ -423,7 +423,15 @@ impl DeliveryCoordinator {
         ) && !matches!(request.intent, DeliveryIntent::FinalReply);
         self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
             .await;
-        if self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id) {
+        // The streaming gate applies only to CONVERSATION traffic: a send
+        // routed to a notification target (`as_notification`, above) must
+        // flow regardless of the channel's reply mode — a gate prompt pushed
+        // to an enrolled browser is a notification even though its intent is
+        // conversation-shaped, and the projection stream cannot reach a user
+        // who is not watching the app.
+        if !as_notification
+            && self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id)
+        {
             tracing::debug!(
                 target: "ironclaw::reborn::delivery",
                 intent = request.intent.as_str(),

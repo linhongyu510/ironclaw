@@ -61,6 +61,13 @@ pub trait ChannelDeliveryResolver: Send + Sync {
     fn channel_reply_mode(&self, _extension_id: &str) -> Option<ChannelReplyMode> {
         None
     }
+
+    /// Whether the channel's manifest declares per-user notification setup
+    /// (§7b), when the extension is known. `None` = unknown extension —
+    /// the setup surface fails closed as not-found on it.
+    fn notifications_require_setup(&self, _extension_id: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// Read half of the host-side `reply_context` storage (ING-11): the opaque

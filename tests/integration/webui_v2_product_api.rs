@@ -2434,7 +2434,7 @@ fn browser_subscription_body(endpoint: &str) -> Value {
 }
 
 #[tokio::test]
-async fn web_push_enrollment_and_notification_channel_round_trip_through_production_facade() {
+async fn browser_channel_notification_setup_round_trip_through_production_facade() {
     use base64::Engine as _;
 
     let root = tempdir().expect("runtime storage tempdir");
@@ -2483,20 +2483,26 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     let router = || mount_webui_v2_router(Arc::clone(&webui), caller.clone());
     const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/test-token-1";
 
-    // Status before any enrollment: a well-formed advertised VAPID key
-    // (seeded by composition on first boot), zero browsers.
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    // Status before any enrollment, through the GENERIC per-channel
+    // notification-setup surface: the channel declares it requires setup, is
+    // not yet enabled, and its channel-opaque detail advertises a well-formed
+    // VAPID key (seeded by composition on first boot) with zero browsers.
+    let (status, body) =
+        get_json(router(), "/api/webchat/v2/channels/web-push/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    let vapid_public_key = body["vapid_public_key"]
+    assert_eq!(body["extension_id"], "web-push", "{body}");
+    assert_eq!(body["requires_setup"], true, "{body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    let vapid_public_key = body["detail"]["vapid_public_key"]
         .as_str()
-        .expect("status carries the vapid key")
+        .expect("status detail carries the vapid key")
         .to_string();
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&vapid_public_key)
         .expect("vapid key is base64url");
     assert_eq!(decoded.len(), 65, "uncompressed P-256 point");
     assert_eq!(decoded[0], 0x04, "uncompressed point marker");
-    assert_eq!(body["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["subscription_count"], 0, "{body}");
 
     // The catalog offers the browser channel beside the vendor channels.
     let (status, body) = get_json(router(), "/api/webchat/v2/outbound/targets").await;
@@ -2536,37 +2542,41 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
         "web-push must be hidden from the installed extensions list: {body}"
     );
 
-    // Enroll → enrolled; identical repeat → refreshed.
-    let subscription = browser_subscription_body(ENDPOINT);
+    // Enroll → enrolled; identical repeat → refreshed. The wire body wraps
+    // the channel-opaque payload; the outcome comes back in the opaque detail.
+    let subscription = serde_json::json!({ "payload": browser_subscription_body(ENDPOINT) });
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
+        "/api/webchat/v2/channels/web-push/notifications/enable",
         subscription.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "subscribe response: {body}");
-    assert_eq!(body["outcome"], "enrolled", "{body}");
+    assert_eq!(status, StatusCode::OK, "enable response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["outcome"], "enrolled", "{body}");
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
+        "/api/webchat/v2/channels/web-push/notifications/enable",
         subscription,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "re-subscribe response: {body}");
-    assert_eq!(body["outcome"], "refreshed", "{body}");
+    assert_eq!(status, StatusCode::OK, "re-enable response: {body}");
+    assert_eq!(body["detail"]["outcome"], "refreshed", "{body}");
 
     // Status redacts the endpoint capability URL to its push-service host.
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    let (status, body) =
+        get_json(router(), "/api/webchat/v2/channels/web-push/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    assert_eq!(body["subscription_count"], 1, "{body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["subscription_count"], 1, "{body}");
     assert_eq!(
-        body["subscriptions"][0]["endpoint_host"], "fcm.googleapis.com",
+        body["detail"]["subscriptions"][0]["endpoint_host"], "fcm.googleapis.com",
         "{body}"
     );
     // The endpoint is redacted to its host, but a 64-char hex digest is
     // published so the browser can correlate its own subscription with this
     // account without the URL ever leaving the backend.
-    let digest = body["subscriptions"][0]["endpoint_digest"]
+    let digest = body["detail"]["subscriptions"][0]["endpoint_digest"]
         .as_str()
         .expect("endpoint_digest present");
     assert_eq!(digest.len(), 64, "SHA-256 hex digest: {body}");
@@ -2584,8 +2594,8 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     // An endpoint on a host the manifest never declared fails closed.
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions",
-        browser_subscription_body("https://evil.example.com/x"),
+        "/api/webchat/v2/channels/web-push/notifications/enable",
+        serde_json::json!({ "payload": browser_subscription_body("https://evil.example.com/x") }),
     )
     .await;
     assert_eq!(
@@ -2611,15 +2621,31 @@ async fn web_push_enrollment_and_notification_channel_round_trip_through_product
     // Unenroll; the browser disappears from the caller's status.
     let (status, body) = post_json(
         router(),
-        "/api/webchat/v2/web-push/subscriptions/remove",
-        serde_json::json!({"endpoint": ENDPOINT}),
+        "/api/webchat/v2/channels/web-push/notifications/disable",
+        serde_json::json!({ "payload": { "endpoint": ENDPOINT } }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "remove response: {body}");
-    assert_eq!(body["removed"], true, "{body}");
-    let (status, body) = get_json(router(), "/api/webchat/v2/web-push/status").await;
+    assert_eq!(status, StatusCode::OK, "disable response: {body}");
+    assert_eq!(body["detail"]["removed"], true, "{body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    let (status, body) =
+        get_json(router(), "/api/webchat/v2/channels/web-push/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    assert_eq!(body["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["subscription_count"], 0, "{body}");
+
+    // The generic surface fails closed on a channel that is not active in
+    // this deployment: unknown extension ids are a 404, never an empty
+    // fabricated status.
+    let (status, body) = get_json(
+        router(),
+        "/api/webchat/v2/channels/no-such-channel/notifications",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown channel must fail closed: {body}"
+    );
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");

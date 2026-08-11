@@ -4,8 +4,9 @@
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, VerifiedInbound,
+    ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome,
+    MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES, NotificationSetupScope, NotificationSetupStatus,
+    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
@@ -14,7 +15,8 @@ use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ids::{InvocationId, SecretHandle};
 use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_web_push::{
-    DEFAULT_TTL_SECONDS, PushSubscriptionRecord, PushUrgency, WEB_PUSH_VAPID_CREDENTIAL_HANDLE,
+    DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord,
+    PushSubscriptionUpsertOutcome, PushUrgency, WEB_PUSH_VAPID_CREDENTIAL_HANDLE, WebPushError,
     WebPushNotificationPayload, WebPushRuntimeSlot, build_push_request, decode_web_push_target_ref,
 };
 
@@ -57,6 +59,85 @@ impl ChannelAdapter for WebPushChannelAdapter {
     /// half carries only notification-class sends (browser push).
     fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)
+    }
+
+    async fn notification_setup_status(
+        &self,
+        _context: &ChannelContext<'_>,
+        scope: &NotificationSetupScope,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        let runtime = self.runtime.get().map_err(setup_error)?;
+        setup_status(&runtime, scope).await
+    }
+
+    async fn enable_notifications(
+        &self,
+        _context: &ChannelContext<'_>,
+        scope: &NotificationSetupScope,
+        payload: &str,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        let runtime = self.runtime.get().map_err(setup_error)?;
+        if payload.len() > MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES {
+            return Err(ChannelError::Parse {
+                reason: "enrollment payload exceeds the setup payload bound".to_string(),
+            });
+        }
+        // The payload is the browser's PushSubscription: untrusted input,
+        // validated and bounded before any storage — endpoint shape, the
+        // push-service host allowlist, and the key material lengths.
+        let request: EnrollmentPayload =
+            serde_json::from_str(payload).map_err(|_| ChannelError::Parse {
+                reason: "enrollment payload is not a valid subscription document".to_string(),
+            })?;
+        let endpoint = PushEndpoint::new(request.endpoint).map_err(setup_input_error)?;
+        endpoint
+            .validate_against_push_services(&runtime.allowed_push_hosts)
+            .map_err(setup_input_error)?;
+        let keys = PushSubscriptionKeys::new(request.keys.p256dh, request.keys.auth)
+            .map_err(setup_input_error)?;
+        let record = PushSubscriptionRecord::new(
+            endpoint,
+            keys,
+            request.user_agent,
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+        let resource_scope = enrollment_scope(scope);
+        let outcome = runtime
+            .subscriptions
+            .upsert_subscription(&resource_scope, record)
+            .await
+            .map_err(setup_error)?;
+        let mut status = setup_status(&runtime, scope).await?;
+        status.detail = with_enrollment_outcome(status.detail, outcome)?;
+        Ok(status)
+    }
+
+    async fn disable_notifications(
+        &self,
+        _context: &ChannelContext<'_>,
+        scope: &NotificationSetupScope,
+        payload: &str,
+    ) -> Result<NotificationSetupStatus, ChannelError> {
+        let runtime = self.runtime.get().map_err(setup_error)?;
+        if payload.len() > MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES {
+            return Err(ChannelError::Parse {
+                reason: "unenrollment payload exceeds the setup payload bound".to_string(),
+            });
+        }
+        let request: UnenrollmentPayload =
+            serde_json::from_str(payload).map_err(|_| ChannelError::Parse {
+                reason: "unenrollment payload is not a valid document".to_string(),
+            })?;
+        let endpoint = PushEndpoint::new(request.endpoint).map_err(setup_input_error)?;
+        let resource_scope = enrollment_scope(scope);
+        let removed = runtime
+            .subscriptions
+            .remove_subscription(&resource_scope, &endpoint)
+            .await
+            .map_err(setup_error)?;
+        let mut status = setup_status(&runtime, scope).await?;
+        status.detail = with_removal_outcome(status.detail, removed)?;
+        Ok(status)
     }
 
     async fn deliver(
@@ -293,5 +374,121 @@ fn fold_tally(tally: FanOutTally) -> PartDeliveryOutcome {
     }
     PartDeliveryOutcome::Permanent {
         reason: "no push delivery was attempted".to_string(),
+    }
+}
+
+/// The browser's enrollment document (a `PushSubscription` projection).
+#[derive(serde::Deserialize)]
+struct EnrollmentPayload {
+    endpoint: String,
+    keys: EnrollmentKeys,
+    #[serde(default)]
+    user_agent: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct EnrollmentKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(serde::Deserialize)]
+struct UnenrollmentPayload {
+    endpoint: String,
+}
+
+/// The enrollment storage scope. Byte-identical to the scope the retired
+/// `/web-push/*` product service derived from the authenticated caller, so
+/// existing per-user subscription documents keep resolving.
+fn enrollment_scope(scope: &NotificationSetupScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+async fn setup_status(
+    runtime: &ironclaw_web_push::WebPushRuntime,
+    scope: &NotificationSetupScope,
+) -> Result<NotificationSetupStatus, ChannelError> {
+    let resource_scope = enrollment_scope(scope);
+    let subscriptions = runtime
+        .subscriptions
+        .list_subscriptions(&resource_scope)
+        .await
+        .map_err(setup_error)?;
+    let mut enrolled = Vec::with_capacity(subscriptions.len());
+    for record in &subscriptions {
+        enrolled.push(serde_json::json!({
+            "subscription_id": record.subscription_id,
+            "endpoint_host": record.endpoint.host().map_err(setup_error)?,
+            "endpoint_digest": record.endpoint.digest(),
+            "user_agent": record.user_agent,
+            "created_at": record.created_at,
+        }));
+    }
+    let detail = serde_json::json!({
+        "vapid_public_key": runtime.vapid_public_key,
+        "subscription_count": subscriptions.len(),
+        "subscriptions": enrolled,
+    });
+    Ok(NotificationSetupStatus {
+        enabled: !subscriptions.is_empty(),
+        detail: detail.to_string(),
+    })
+}
+
+fn with_enrollment_outcome(
+    detail: String,
+    outcome: PushSubscriptionUpsertOutcome,
+) -> Result<String, ChannelError> {
+    amend_detail(detail, |value| {
+        value["outcome"] = serde_json::json!(match outcome {
+            PushSubscriptionUpsertOutcome::Enrolled => "enrolled",
+            PushSubscriptionUpsertOutcome::Refreshed => "refreshed",
+        });
+    })
+}
+
+fn with_removal_outcome(detail: String, removed: bool) -> Result<String, ChannelError> {
+    amend_detail(detail, |value| {
+        value["removed"] = serde_json::json!(removed);
+    })
+}
+
+fn amend_detail(
+    detail: String,
+    amend: impl FnOnce(&mut serde_json::Value),
+) -> Result<String, ChannelError> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&detail).map_err(|_| ChannelError::Render {
+            reason: "setup detail document is not valid JSON".to_string(),
+        })?;
+    amend(&mut value);
+    Ok(value.to_string())
+}
+
+/// Caller-correctable input problems (endpoint shape, unsupported push
+/// service, key material, per-user limit) surface as parse errors; anything
+/// else is channel configuration trouble. Endpoint URLs never enter reasons.
+fn setup_input_error(error: WebPushError) -> ChannelError {
+    match &error {
+        WebPushError::InvalidSubscription { .. }
+        | WebPushError::UnsupportedPushService { .. }
+        | WebPushError::SubscriptionLimitReached { .. } => ChannelError::Parse {
+            reason: error.to_string(),
+        },
+        _ => setup_error(error),
+    }
+}
+
+fn setup_error(error: WebPushError) -> ChannelError {
+    ChannelError::Configuration {
+        reason: error.to_string(),
     }
 }

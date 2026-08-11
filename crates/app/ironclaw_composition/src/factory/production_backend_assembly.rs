@@ -1017,7 +1017,7 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    let web_push = assemble_web_push(
+    assemble_web_push(
         web_push_runtime_slot.as_ref(),
         web_push_vapid_subject.as_deref(),
         &stores.filesystem,
@@ -1379,7 +1379,6 @@ pub(super) async fn build_backend_production(
         standalone_wasm_runtime_credential_provider_captured,
         credential_refresh_worker,
         channel_extension_bindings,
-        web_push,
         deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
@@ -1391,8 +1390,8 @@ pub(super) async fn build_backend_production(
 }
 
 /// Install the web-push runtime (subscription store) into the binary's slot
-/// and ensure the deployment VAPID credential exists, returning the handles
-/// the product surface consumes. `None` when the binary supplied no slot
+/// and ensure the deployment VAPID credential exists. Installs the complete
+/// runtime into the slot; a no-op when the binary supplied no slot
 /// (compositions without the web-push channel).
 async fn assemble_web_push<S>(
     slot: Option<&ironclaw_web_push::WebPushRuntimeSlot>,
@@ -1401,12 +1400,12 @@ async fn assemble_web_push<S>(
     secret_store: &Arc<S>,
     channel_egress_scope: &ironclaw_host_api::resource::ResourceScope,
     deployment_channels: &Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
-) -> Result<Option<crate::factory::WebPushComposition>, RebornBuildError>
+) -> Result<(), RebornBuildError>
 where
     S: ironclaw_secrets::SecretStorePort + ?Sized,
 {
     let Some(slot) = slot else {
-        return Ok(None);
+        return Ok(());
     };
     // One source of truth for admissible push-service hosts: the channel's
     // own manifest egress declarations. An absent deployment binding leaves
@@ -1435,12 +1434,6 @@ where
         Arc::new(ironclaw_web_push::FilesystemWebPushSubscriptionStore::new(
             crate::wrap_scoped(Arc::clone(filesystem)),
         ));
-    slot.install(Arc::new(ironclaw_web_push::WebPushRuntime {
-        subscriptions: Arc::clone(&subscriptions),
-    }))
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("web push runtime slot could not be installed: {error}"),
-    })?;
 
     let vapid_handle = ironclaw_host_api::ids::SecretHandle::new(
         ironclaw_web_push::WEB_PUSH_VAPID_CREDENTIAL_HANDLE,
@@ -1523,11 +1516,20 @@ where
             reason: format!("stored web push VAPID credential material is invalid: {error}"),
         })?;
     let vapid_public_key = parsed.public_key_b64url;
-    Ok(Some(crate::factory::WebPushComposition {
+    // Install the complete runtime — store, advertised public key, and the
+    // enrollment host allowlist — so the channel adapter can serve both
+    // delivery and the generic notification-setup operations (§7b). Installed
+    // after the canonical key read-back so the adapter always advertises the
+    // key the deployment actually signs with.
+    slot.install(Arc::new(ironclaw_web_push::WebPushRuntime {
         subscriptions,
         vapid_public_key,
         allowed_push_hosts,
     }))
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("web push runtime slot could not be installed: {error}"),
+    })?;
+    Ok(())
 }
 
 async fn finish_production_backend(

@@ -5174,10 +5174,12 @@ name = "ironclaw_web_push_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
  "ironclaw_outbound",
  "ironclaw_web_push",
+ "serde",
  "serde_json",
  "tokio",
  "toml 0.9.12+spec-1.1.0",

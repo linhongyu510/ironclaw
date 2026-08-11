@@ -50,6 +50,7 @@ pub mod inspector;
 pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
+pub mod notification_setup;
 pub mod operator_llm;
 pub mod operator_secrets;
 pub mod operator_service;
@@ -66,7 +67,6 @@ pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod views;
-pub mod web_push;
 pub mod workspace_views;
 
 // There is deliberately no flat prelude and no cross-module re-export here.

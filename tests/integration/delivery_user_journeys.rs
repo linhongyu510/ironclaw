@@ -1960,9 +1960,9 @@ fn assert_web_push_delivery_evidence(posts: &[ironclaw_network::NetworkHttpReque
 }
 
 /// Enroll one browser for the harness creator through the REAL WebUI route
-/// (`POST /api/webchat/v2/web-push/subscriptions`) over the composed
-/// runtime's production product surface — the same path the browser panel
-/// drives.
+/// (`POST /api/webchat/v2/channels/web-push/notifications/enable`, the
+/// generic notification-setup surface) over the composed runtime's
+/// production product surface — the same path the browser panel drives.
 async fn enroll_web_push_browser(
     harness: &RebornIntegrationHarness,
     services: &RebornRuntime,
@@ -1985,14 +1985,16 @@ async fn enroll_web_push_browser(
         .public_key_b64url;
     let (status, body) = reborn_support::webui_mount::post_json(
         reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
-        "/api/webchat/v2/web-push/subscriptions",
+        "/api/webchat/v2/channels/web-push/notifications/enable",
         json!({
-            "endpoint": endpoint,
-            "keys": {
-                "p256dh": point,
-                "auth": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 16]),
+            "payload": {
+                "endpoint": endpoint,
+                "keys": {
+                    "p256dh": point,
+                    "auth": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 16]),
+                },
+                "user_agent": "JourneyBrowser/1.0",
             },
-            "user_agent": "JourneyBrowser/1.0",
         }),
     )
     .await;
@@ -2001,7 +2003,8 @@ async fn enroll_web_push_browser(
         axum::http::StatusCode::OK,
         "enroll response: {body}"
     );
-    assert_eq!(body["outcome"], "enrolled", "{body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["outcome"], "enrolled", "{body}");
 }
 
 /// The web-push notifier: [`background_run_notifier`]'s services with the
@@ -2073,7 +2076,7 @@ async fn web_push_subscription_count(
     );
     let (status, body) = reborn_support::webui_mount::get_json(
         reborn_support::webui_mount::mount_webui_v2_router(webui, caller),
-        "/api/webchat/v2/web-push/status",
+        "/api/webchat/v2/channels/web-push/notifications",
     )
     .await;
     assert_eq!(
@@ -2081,9 +2084,9 @@ async fn web_push_subscription_count(
         axum::http::StatusCode::OK,
         "status response: {body}"
     );
-    body["subscription_count"]
+    body["detail"]["subscription_count"]
         .as_u64()
-        .expect("status carries subscription_count")
+        .expect("status detail carries subscription_count")
 }
 
 /// A blocked routine fire's gate notice reaches an enrolled browser as a

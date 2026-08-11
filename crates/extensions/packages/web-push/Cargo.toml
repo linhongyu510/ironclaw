@@ -19,9 +19,13 @@ ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api" }
 # crate the same way the memory provider packages reach theirs.
 ironclaw_outbound = { path = "../../../domains/ironclaw_outbound" }
 ironclaw_web_push = { path = "../../../domains/ironclaw_web_push" }
+# Enrollment payloads (§7b): the adapter parses the browser's opaque
+# PushSubscription document and emits the status detail document.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 toml = "0.9"

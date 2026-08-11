@@ -2371,6 +2371,65 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
     assert_eq!(adapter.deliver_calls(), 1);
 }
 
+/// Regression pin (unified-channel-model §5/§7a): a gate prompt whose ROUTE
+/// is a notification target (`RunNotification` + non-live-source origin) is a
+/// notification even though its `DeliveryIntent` is conversation-shaped. The
+/// streaming gate keys on the route, not the intent — skipping this send
+/// would silently drop blocked-fire pushes for a streaming channel, the exact
+/// break `blocked_fire_pushes_web_push_notice_to_enrolled_browser` caught.
+#[tokio::test]
+async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-300")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_notification(scope.clone(), "vendorx", &thread_scope);
+    // Conversation-shaped intent, notification-shaped route: the gate prompt
+    // for a background fire, pushed to the creator's notification channel.
+    request.intent = DeliveryIntent::GatePrompt;
+    let outcome = coordinator
+        .deliver(&policy, &resolver, &NO_PROJECT_FILESYSTEM, request)
+        .await
+        .expect("notification-routed gate prompt drives");
+
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "a notification-routed gate prompt must flow to a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.notification_sends(),
+        1,
+        "the notification route must ride the adapter's notification send"
+    );
+}
+
 // ─── §7a adapter dispatch: notifications ride deliver_notification ─────────
 
 fn coordinated_notification<'a>(
@@ -2472,4 +2531,334 @@ async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
         0,
         "a conversation reply must ride the ordinary delivery, not the notification send"
     );
+}
+
+// ── §7b: the generic notification-setup dispatch over the same resolver ──────
+
+/// Scripted setup adapter: records the scope + payload each operation was
+/// handed and answers with a fixed status, so the tests pin that the service
+/// passes the caller's identity and the channel-opaque payload through
+/// verbatim — the two inputs generic code must never reinterpret.
+#[derive(Default)]
+struct ScriptedSetupAdapter {
+    status_detail: String,
+    calls: Mutex<Vec<(String, String, String)>>,
+}
+
+impl ScriptedSetupAdapter {
+    fn with_detail(detail: &str) -> Self {
+        Self {
+            status_detail: detail.to_string(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<(String, String, String)> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+
+    fn record(
+        &self,
+        operation: &str,
+        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
+        payload: &str,
+    ) {
+        self.calls.lock().expect("calls lock").push((
+            operation.to_string(),
+            scope.user_id.as_str().to_string(),
+            payload.to_string(),
+        ));
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for ScriptedSetupAdapter {
+    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+        Ok(InboundOutcome::Ignore)
+    }
+
+    async fn deliver(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
+    async fn notification_setup_status(
+        &self,
+        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
+        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
+    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
+    {
+        self.record("status", scope, "");
+        Ok(
+            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
+                enabled: false,
+                detail: self.status_detail.clone(),
+            },
+        )
+    }
+
+    async fn enable_notifications(
+        &self,
+        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
+        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
+        payload: &str,
+    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
+    {
+        self.record("enable", scope, payload);
+        Ok(
+            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
+                enabled: true,
+                detail: self.status_detail.clone(),
+            },
+        )
+    }
+
+    async fn disable_notifications(
+        &self,
+        _context: &ironclaw_extension_contracts::channel_adapter::ChannelContext<'_>,
+        scope: &ironclaw_extension_contracts::channel_adapter::NotificationSetupScope,
+        payload: &str,
+    ) -> Result<ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus, ChannelError>
+    {
+        self.record("disable", scope, payload);
+        Ok(
+            ironclaw_extension_contracts::channel_adapter::NotificationSetupStatus {
+                enabled: false,
+                detail: self.status_detail.clone(),
+            },
+        )
+    }
+}
+
+/// Resolver double for the setup service: knows one extension with a declared
+/// setup requirement; every other id is unknown (`None` from both port
+/// methods, the fail-closed arm).
+struct SetupResolver {
+    extension_id: String,
+    requires_setup: bool,
+    adapter: Arc<ScriptedSetupAdapter>,
+}
+
+impl ChannelDeliveryResolver for SetupResolver {
+    fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        if extension_id != self.extension_id {
+            return None;
+        }
+        Some(ResolvedChannelDelivery {
+            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+            installation_id: AdapterInstallationId::new("inst-setup").expect("valid installation"),
+            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            egress: Arc::new(CoordinatorDenyAllEgress),
+            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Batched,
+        })
+    }
+
+    fn notifications_require_setup(&self, extension_id: &str) -> Option<bool> {
+        (extension_id == self.extension_id).then_some(self.requires_setup)
+    }
+}
+
+fn setup_service(
+    requires_setup: bool,
+    detail: &str,
+) -> (
+    ironclaw_assistant::AdapterChannelNotificationSetupService,
+    Arc<ScriptedSetupAdapter>,
+) {
+    let adapter = Arc::new(ScriptedSetupAdapter::with_detail(detail));
+    let service =
+        ironclaw_assistant::AdapterChannelNotificationSetupService::new(Arc::new(SetupResolver {
+            extension_id: "browser-channel".to_string(),
+            requires_setup,
+            adapter: Arc::clone(&adapter),
+        }));
+    (service, adapter)
+}
+
+fn setup_caller() -> ironclaw_product_contracts::surface::ProductSurfaceCaller {
+    ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-setup").expect("tenant id"),
+        ironclaw_host_api::ids::UserId::new("user-setup").expect("user id"),
+        None,
+        None,
+    )
+}
+
+#[tokio::test]
+async fn setup_surface_fails_closed_as_not_found_for_an_unknown_extension() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+    let (service, adapter) = setup_service(true, "{}");
+
+    let status_error = service
+        .status(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
+                extension_id: "no-such-channel".to_string(),
+            },
+        )
+        .await
+        .expect_err("an unknown extension must not produce a fabricated status");
+    assert_eq!(status_error.status_code, 404);
+
+    let enable_error = service
+        .enable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "no-such-channel".to_string(),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect_err("an unknown extension must not reach any adapter");
+    assert_eq!(enable_error.status_code, 404);
+    assert!(
+        adapter.calls().is_empty(),
+        "no adapter operation may run for an unknown extension"
+    );
+}
+
+#[tokio::test]
+async fn setup_surface_reports_a_no_setup_channel_enabled_and_rejects_mutations() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+    let (service, adapter) = setup_service(false, "{}");
+
+    let status = service
+        .status(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
+                extension_id: "browser-channel".to_string(),
+            },
+        )
+        .await
+        .expect("a channel without setup is deliverable as-is");
+    assert!(!status.requires_setup);
+    assert!(status.enabled, "no per-user setup means always deliverable");
+
+    let error = service
+        .enable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "browser-channel".to_string(),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect_err("enable on a channel without setup is a caller error");
+    assert_eq!(error.status_code, 400);
+    assert!(
+        adapter.calls().is_empty(),
+        "a no-setup channel must never have its adapter's setup operations invoked"
+    );
+}
+
+#[tokio::test]
+async fn setup_surface_passes_scope_and_opaque_payload_through_verbatim() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+    let (service, adapter) = setup_service(true, r#"{"subscription_count":1}"#);
+
+    let payload = serde_json::json!({"endpoint": "https://push.example/x", "keys": {"a": "b"}});
+    let response = service
+        .enable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "browser-channel".to_string(),
+                payload: payload.clone(),
+            },
+        )
+        .await
+        .expect("enable dispatches to the adapter");
+    assert_eq!(response.extension_id, "browser-channel");
+    assert!(response.requires_setup);
+    assert!(response.enabled);
+    assert_eq!(response.detail["subscription_count"], 1);
+
+    let calls = adapter.calls();
+    assert_eq!(calls.len(), 1);
+    let (operation, scope_user, seen_payload) = &calls[0];
+    assert_eq!(operation, "enable");
+    assert_eq!(
+        scope_user, "user-setup",
+        "the setup scope must carry the AUTHENTICATED caller, never a body-supplied identity"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(seen_payload).expect("payload is JSON"),
+        payload,
+        "the channel-opaque payload must reach the adapter uninterpreted"
+    );
+
+    let disable = service
+        .disable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "browser-channel".to_string(),
+                payload: serde_json::json!({"endpoint": "https://push.example/x"}),
+            },
+        )
+        .await
+        .expect("disable dispatches to the adapter");
+    assert!(!disable.enabled);
+    assert_eq!(adapter.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn setup_surface_bounds_the_payload_before_any_adapter_work() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+    let (service, adapter) = setup_service(true, "{}");
+
+    let oversized = "x".repeat(
+        ironclaw_extension_contracts::channel_adapter::MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES,
+    );
+    let error = service
+        .enable(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
+                extension_id: "browser-channel".to_string(),
+                payload: serde_json::json!({ "blob": oversized }),
+            },
+        )
+        .await
+        .expect_err("an oversized payload must be rejected");
+    assert_eq!(error.status_code, 400);
+    assert!(
+        adapter.calls().is_empty(),
+        "the bound must hold BEFORE the adapter runs, not after"
+    );
+}
+
+#[tokio::test]
+async fn setup_surface_refuses_to_project_an_unbounded_or_non_json_detail() {
+    use ironclaw_assistant::ChannelNotificationSetupService as _;
+
+    let oversized_detail = format!(
+        r#"{{"blob":"{}"}}"#,
+        "x".repeat(
+            ironclaw_extension_contracts::channel_adapter::MAX_NOTIFICATION_SETUP_DETAIL_BYTES
+        )
+    );
+    let (service, _adapter) = setup_service(true, &oversized_detail);
+    let error = service
+        .status(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
+                extension_id: "browser-channel".to_string(),
+            },
+        )
+        .await
+        .expect_err("an over-bound detail document must not reach the wire");
+    assert_eq!(error.status_code, 500);
+
+    let (service, _adapter) = setup_service(true, "this is not json");
+    let error = service
+        .status(
+            setup_caller(),
+            ironclaw_product_contracts::product_wire::RebornNotificationSetupRequest {
+                extension_id: "browser-channel".to_string(),
+            },
+        )
+        .await
+        .expect_err("a non-JSON detail document must not reach the wire");
+    assert_eq!(error.status_code, 500);
 }

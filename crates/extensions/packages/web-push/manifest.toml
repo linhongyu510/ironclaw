@@ -20,7 +20,8 @@ service = "web-push.extension/v1"
 # declared here (manifest invariant), so the field is present — but it is
 # `required = false` and NOT operator-supplied: composition generates the
 # keypair at boot and seeds it into the scoped secret store, which is where the
-# `vapid_authorization` egress injection and `/web-push/status` both read it
+# `vapid_authorization` egress injection and the notification-setup status
+# detail both read it
 # from (one canonical value, so the advertised `applicationServerKey` matches
 # the signing key). Do not hand-edit it: overwriting the material through
 # operator config rotates the signing key, and until a coherent
@@ -43,6 +44,10 @@ display_name = "Web UI"
 inbound = true
 outbound = true
 notifications = true
+# Browser push cannot deliver until this user enrolled at least one browser —
+# the generic notification-setup surface (status/enable/disable by extension
+# id) drives that enrollment through this channel's adapter.
+notifications_require_setup = true
 conversation_model = "isolated"
 # Replies stream to the browser over the durable projection pipeline
 # (SSE/WebSocket) — the existing WebChat event stream IS this channel's reply
