@@ -41,19 +41,27 @@ fields = [
 [channel]
 id = "notifications"
 display_name = "Web UI"
-inbound = true
-outbound = true
-notifications = true
-# Browser push cannot deliver until this user enrolled at least one browser —
-# the generic notification-setup surface (status/enable/disable by extension
-# id) drives that enrollment through this channel's adapter.
-notifications_require_setup = true
 conversation_model = "isolated"
-# Replies stream to the browser over the durable projection pipeline
-# (SSE/WebSocket) — the existing WebChat event stream IS this channel's reply
-# sink. The batched delivery coordinator never carries this channel's
-# conversation replies; only notification-class sends (browser push) do.
-reply_mode = "streaming"
+
+# The reply axis: answering the run's input, source-routed. Replies stream to
+# the browser over the durable projection pipeline (SSE/WebSocket) — the
+# existing WebChat event stream IS this channel's reply sink. `stream` means
+# the HOST publishes and this channel's adapter is never called for a reply,
+# which is why the package implements no reply half at all. That absence is
+# meaningful, not an omission.
+#
+# max_message_chars is deliberately undeclared: a stream reply never batches
+# or splits.
+[channel.reply]
+transport = "stream"
+
+# The delivery axis: reaching the user out of band, target-resolved. This is
+# ORTHOGONAL to the reply above, not an alternative — one run can stream its
+# answer into an open tab AND fire a push because the user is not looking.
+# Push cannot deliver until the user has enrolled at least one browser.
+[channel.delivery]
+transport = "push"
+requires_enrollment = true
 
 # The authenticated-session entrypoint: no webhook mount, no route_suffix —
 # a browser request can never reach the webhook namespace. Trust is the host
@@ -103,9 +111,6 @@ request_body_limit_bytes = 8192
 response_body_limit_bytes = 65536
 injection = { type = "vapid_authorization" }
 
-# max_message_chars is deliberately undeclared: a streaming reply sink never
-# batches or splits, so the channel is unlimited. (Push notification payloads
-# have their own transport bound, enforced by the adapter.)
 [channel.presentation]
 supports_markdown = false
 supports_threads = false

@@ -361,7 +361,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
 struct StaticChannelResolver {
     adapter: Arc<ScriptedChannelAdapter>,
     unavailable: bool,
-    reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode,
+    reply_transport: ironclaw_extension_contracts::channel::ReplyTransport,
 }
 
 impl ChannelDeliveryResolver for StaticChannelResolver {
@@ -374,18 +374,18 @@ impl ChannelDeliveryResolver for StaticChannelResolver {
             installation_id: AdapterInstallationId::new("inst-1").expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            reply_mode: self.reply_mode,
+            reply_transport: Some(self.reply_transport),
         })
     }
 
-    fn channel_reply_mode(
+    fn channel_reply_transport(
         &self,
         _extension_id: &str,
-    ) -> Option<ironclaw_extension_contracts::channel::ChannelReplyMode> {
+    ) -> Option<ironclaw_extension_contracts::channel::ReplyTransport> {
         if self.unavailable {
             return None;
         }
-        Some(self.reply_mode)
+        Some(self.reply_transport)
     }
 }
 
@@ -439,7 +439,7 @@ impl ChannelDeliveryResolver for OrderedChannelResolver {
                 .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         })
     }
 }
@@ -654,7 +654,7 @@ fn coordinator_over_recording_reply_lookups(
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::clone(&reply_context) as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1683,7 +1683,7 @@ async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         reply_context as Arc<dyn DeliveryReplyContextSource>,
         DeliveryRetryPolicy {
@@ -1801,7 +1801,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -1884,7 +1884,7 @@ async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
@@ -2197,7 +2197,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         }),
         Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
@@ -2385,7 +2385,7 @@ async fn streaming_channel_conversation_reply_skips_batched_delivery() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
@@ -2438,7 +2438,7 @@ async fn streaming_channel_still_receives_notification_class_deliveries() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
@@ -2491,7 +2491,7 @@ async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: false,
-            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
         }),
         Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
             as Arc<dyn DeliveryReplyContextSource>,
@@ -2744,11 +2744,11 @@ impl ChannelDeliveryResolver for SetupResolver {
             installation_id: AdapterInstallationId::new("inst-setup").expect("valid installation"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(CoordinatorDenyAllEgress),
-            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Batched,
+            reply_transport: ironclaw_extension_contracts::channel::ReplyTransport::Message,
         })
     }
 
-    fn notifications_require_setup(&self, extension_id: &str) -> Option<bool> {
+    fn requires_enrollment(&self, extension_id: &str) -> Option<bool> {
         (extension_id == self.extension_id).then_some(self.requires_setup)
     }
 }

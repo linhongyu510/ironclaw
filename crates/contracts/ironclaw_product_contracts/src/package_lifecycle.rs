@@ -11,7 +11,7 @@ use serde_json::Value;
 use ironclaw_host_api::error::HostApiError;
 
 use ironclaw_extension_contracts::{
-    channel::ChannelPresentation,
+    channel::ChannelOutputFacts,
     hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest},
     lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId},
     state::{InstallationState, LifecyclePublicState},
@@ -342,8 +342,11 @@ pub struct LifecycleExtensionSummary {
     pub channel_directions: Option<LifecycleChannelDirections>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_connection: Option<ChannelConnectionRequirement>,
+    /// How the model should format output for this channel: the declared
+    /// `[channel.presentation]` facts plus the `[channel.reply]` split bound,
+    /// assembled once by the channel descriptor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_presentation: Option<ChannelPresentation>,
+    pub channel_presentation: Option<ChannelOutputFacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,

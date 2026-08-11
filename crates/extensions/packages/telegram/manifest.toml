@@ -33,13 +33,20 @@ fields = [
 [channel]
 id = "messages"
 display_name = "Telegram messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
-# Replies are collected and sent as channel messages through the delivery
-# coordinator (the batched reply sink).
-reply_mode = "batched"
 commands = ["model", "status", "new", "stop", "interrupt"]
+
+# For a conversational vendor the two axes happen to share one mechanism — a
+# message in the chat — which is exactly why the reply/delivery distinction
+# stayed invisible until a streaming channel existed. They are still declared
+# separately: `message` here is a coincidence of transport, not one concept.
+[channel.reply]
+transport = "message"
+# Telegram's sendMessage hard limit; the reply sink splits to fit.
+max_message_chars = 4096
+
+[channel.delivery]
+transport = "message"
 
 [channel.connection]
 provider = "telegram"
@@ -125,4 +132,5 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 supports_markdown = false
 supports_threads = true
 can_reply_in_threads = false
-max_message_chars = 4096
+# max_message_chars moved to [channel.reply] — it is a property of the reply
+# transport, not of presentation.

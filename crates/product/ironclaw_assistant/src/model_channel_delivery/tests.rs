@@ -321,7 +321,7 @@ impl ChannelDeliveryResolver for StaticResolver {
             .expect("installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
-            reply_mode: Default::default(),
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
         })
     }
 }

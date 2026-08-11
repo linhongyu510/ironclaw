@@ -89,7 +89,7 @@ impl AdapterChannelNotificationSetupService {
     /// not be an oracle for which channels exist.
     fn requires_setup(&self, extension_id: &str) -> Result<bool, ProductSurfaceError> {
         self.resolver
-            .notifications_require_setup(extension_id)
+            .requires_enrollment(extension_id)
             .ok_or_else(ProductSurfaceError::not_found)
     }
 

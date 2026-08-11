@@ -325,7 +325,9 @@ mod tests {
                     .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
-                reply_mode: Default::default(),
+                reply_transport: Some(
+                    ironclaw_extension_contracts::channel::ReplyTransport::Message,
+                ),
             })
         }
     }
@@ -346,7 +348,9 @@ mod tests {
                     .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
-                reply_mode: Default::default(),
+                reply_transport: Some(
+                    ironclaw_extension_contracts::channel::ReplyTransport::Message,
+                ),
             })
         }
     }

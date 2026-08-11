@@ -648,7 +648,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `IngressVerificationRecipe::AuthenticatedSession` trust class
         // (recipe.rs), the `route_suffix` -> Option change with its
         // trust-class<->mount validation and paired errors (channel.rs), the
-        // `ChannelReplyMode` declaration, and the §7b notification-setup
+        // `ReplyTransport` declaration, and the §7b notification-setup
         // adapter surface (`deliver_notification` default + the three setup
         // methods, `NotificationSetupScope`/`Status`, payload/detail byte
         // bounds). Declarations and shape validation only; dispatch lives in

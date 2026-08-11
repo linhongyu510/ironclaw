@@ -55,7 +55,7 @@ impl ChannelAdapter for WebAppChannelAdapter {
     /// adapter's webhook-shaped `inbound` stays unsupported: no webhook mount
     /// exists for this channel and a vendor-style parse would have nothing to
     /// parse. Replies stream over the durable projection pipeline (the
-    /// channel declares `reply_mode = "streaming"`); this adapter's delivery
+    /// channel declares `[channel.reply] transport = "stream"`); its delivery
     /// half carries only notification-class sends (browser push).
     fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)

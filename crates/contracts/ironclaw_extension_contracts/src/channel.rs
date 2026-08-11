@@ -251,6 +251,16 @@ impl ChannelDescriptor {
             .and_then(|reply| reply.max_message_chars)
     }
 
+    /// The one derived projection every output carrier threads. Built here so
+    /// the presentation facts and the reply bound are assembled in exactly one
+    /// place rather than re-declared per layer.
+    pub fn output_facts(&self) -> ChannelOutputFacts {
+        ChannelOutputFacts {
+            presentation: self.presentation.clone(),
+            max_message_chars: self.max_message_chars(),
+        }
+    }
+
     /// Structural validation beyond field-level deserialization.
     pub fn validate(&self) -> Result<(), ChannelDescriptorError> {
         if self.id.trim().is_empty() {
@@ -656,6 +666,28 @@ pub struct ChannelPresentation {
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
+}
+
+/// Everything prompt construction needs to format output for one channel:
+/// the declared `[channel.presentation]` facts plus the `[channel.reply]`
+/// split bound they are rendered with.
+///
+/// **Derived, never deserialized from a manifest.** Each field keeps exactly
+/// one manifest home — `max_message_chars` belongs to the reply transport and
+/// is meaningless for `stream`, which is why it is not a presentation field —
+/// and this is the single projection the host builds once
+/// ([`ChannelDescriptor::output_facts`]) and every carrier threads. Carrying
+/// the two as separate fields through the host cache, the lifecycle summary,
+/// and the loop's channel summary would re-declare the bound at three layers
+/// with nothing keeping them in agreement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelOutputFacts {
+    #[serde(flatten)]
+    pub presentation: ChannelPresentation,
+    /// `None` is unlimited: either no declared bound, or a `stream` reply,
+    /// which never splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_message_chars: Option<u32>,
 }
 
 /// Structural channel-descriptor failures (path context added by the

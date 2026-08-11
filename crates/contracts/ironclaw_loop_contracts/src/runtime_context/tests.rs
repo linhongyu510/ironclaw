@@ -294,24 +294,28 @@ fn renders_channel_presentation_hint() {
                     name: "Acme".to_string(),
                     authenticated: true,
                     active: true,
-                    presentation: Some(ChannelPresentation {
-                        supports_markdown: false,
-                        supports_threads: false,
-                        can_reply_in_threads: false,
+                    presentation: Some(ChannelOutputFacts {
+                        presentation: ChannelPresentation {
+                            supports_markdown: false,
+                            supports_threads: false,
+                            can_reply_in_threads: false,
+                            command_prefix: None,
+                        },
                         max_message_chars: Some(4000),
-                        command_prefix: None,
                     }),
                 },
                 ConnectedChannelSummary {
                     name: "Rich".to_string(),
                     authenticated: true,
                     active: true,
-                    presentation: Some(ChannelPresentation {
-                        supports_markdown: true,
-                        supports_threads: true,
-                        can_reply_in_threads: false,
+                    presentation: Some(ChannelOutputFacts {
+                        presentation: ChannelPresentation {
+                            supports_markdown: true,
+                            supports_threads: true,
+                            can_reply_in_threads: false,
+                            command_prefix: None,
+                        },
                         max_message_chars: None,
-                        command_prefix: None,
                     }),
                 },
             ]),
@@ -1041,10 +1045,12 @@ fn worst_case_runtime_context_stays_within_the_prompt_surface_cap() {
             name: format!("{i:02}-{}", "c".repeat(61)),
             authenticated: true,
             active: true,
-            presentation: Some(ChannelPresentation {
-                supports_markdown: false,
+            presentation: Some(ChannelOutputFacts {
+                presentation: ChannelPresentation {
+                    supports_markdown: false,
+                    ..Default::default()
+                },
                 max_message_chars: Some(4000),
-                ..Default::default()
             }),
         })
         .collect();

@@ -99,18 +99,17 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             // be indistinguishable from a copy-paste of the line above.
             let (extension_id, installation_id) =
                 delivery_identity(&extension.extension_id, &extension.extension_id)?;
-            let reply_mode = extension
+            let reply_transport = extension
                 .resolved
                 .channel
                 .as_ref()
-                .map(|channel| channel.reply_mode)
-                .unwrap_or_default();
+                .and_then(|channel| channel.reply_transport());
             return Some(ResolvedChannelDelivery {
                 extension_id,
                 installation_id,
                 adapter: Arc::clone(&extension.adapter),
                 egress,
-                reply_mode,
+                reply_transport,
             });
         }
         let snapshot = self.watch.current();
@@ -136,22 +135,21 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
         ));
         let (extension_id, installation_id) =
             delivery_identity(&extension.extension_id, &extension.installation_id)?;
-        let reply_mode = extension
+        let reply_transport = extension
             .resolved
             .channel
             .as_ref()
-            .map(|channel| channel.reply_mode)
-            .unwrap_or_default();
+            .and_then(|channel| channel.reply_transport());
         Some(ResolvedChannelDelivery {
             extension_id,
             installation_id,
             adapter,
             egress,
-            reply_mode,
+            reply_transport,
         })
     }
 
-    fn notifications_require_setup(&self, extension_id: &str) -> Option<bool> {
+    fn requires_enrollment(&self, extension_id: &str) -> Option<bool> {
         if let Some(extension) = self.deployment_channels.extension(extension_id) {
             return extension
                 .resolved

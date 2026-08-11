@@ -708,8 +708,8 @@ impl DeliveryCoordinator {
         extension_id: &str,
     ) -> bool {
         intent.is_conversation_reply()
-            && self.resolver.channel_reply_mode(extension_id)
-                == Some(ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming)
+            && self.resolver.channel_reply_transport(extension_id)
+                == Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream)
     }
 
     async fn resolve_channel_context(

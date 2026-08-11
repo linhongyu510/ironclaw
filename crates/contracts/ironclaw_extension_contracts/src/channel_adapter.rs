@@ -110,7 +110,7 @@ pub trait ChannelAdapter: Send + Sync {
     /// model): whether notification delivery is enabled for this user on this
     /// channel, plus channel-opaque detail the channel's own client renders.
     /// Generic code never interprets `detail`. Channels whose manifest
-    /// declares `notifications_require_setup = false` keep the default.
+    /// declaring no `[channel.delivery] requires_enrollment` keep the default.
     async fn notification_setup_status(
         &self,
         _context: &ChannelContext<'_>,

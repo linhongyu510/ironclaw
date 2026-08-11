@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use ironclaw_extension_contracts::channel::ChannelPresentation;
+use ironclaw_extension_contracts::channel::{ChannelOutputFacts, ChannelPresentation};
 
 use ironclaw_host_api::turn::{ProductTurnContext, TurnOriginKind};
 
@@ -42,11 +42,12 @@ pub struct ConnectedChannelSummary {
     pub name: String,
     pub authenticated: bool,
     pub active: bool,
-    /// The channel's declared presentation facts (`[channel.presentation]`:
-    /// markdown support, message length cap). `None` when the channel does not
-    /// declare presentation. Rendered as a compact per-channel hint so the
-    /// model formats replies within the channel's constraints (OUT-11).
-    pub presentation: Option<ChannelPresentation>,
+    /// How the model should format output for this channel: the declared
+    /// `[channel.presentation]` facts plus the `[channel.reply]` split bound.
+    /// `None` when the channel declares neither. Rendered as a compact
+    /// per-channel hint so the model formats replies within the channel's
+    /// constraints (OUT-11).
+    pub presentation: Option<ChannelOutputFacts>,
 }
 
 /// Notification-channel configuration state for this user at loop start:
@@ -234,7 +235,12 @@ impl LoopRuntimeContext {
                         let presentation = channel
                             .presentation
                             .as_ref()
-                            .map(|p| format!(", {}", render_presentation_hint(p)))
+                            .map(|p| {
+                                format!(
+                                    ", {}",
+                                    render_presentation_hint(p, channel.max_message_chars)
+                                )
+                            })
                             .unwrap_or_default();
                         let entry = format!(
                             "{} ({auth}, {active}{presentation})",
@@ -385,13 +391,13 @@ fn render_first_party_chat_origin_line(ctx: &ProductTurnContext) -> String {
 /// Rendered inside the connected-channels line so the model formats replies to
 /// fit the channel it is answering on (OUT-11). The values are host-declared
 /// manifest data (a bool and a bounded int), so no sanitization is needed.
-fn render_presentation_hint(presentation: &ChannelPresentation) -> String {
-    let format = if presentation.supports_markdown {
+fn render_presentation_hint(facts: &ChannelOutputFacts) -> String {
+    let format = if facts.presentation.supports_markdown {
         "markdown"
     } else {
         "plain text only"
     };
-    match presentation.max_message_chars {
+    match facts.max_message_chars {
         Some(max) => format!("{format}, \u{2264}{max} chars/message"),
         None => format.to_string(),
     }
